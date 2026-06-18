@@ -1,11 +1,14 @@
 ---
-title: "Read path over Core A (slide + image search)"
+title: Read path over Core A (slide + image search)
 id: read-path-over-core-a
 date: 2026-06-18
 type: backlog
-status: proposed
+status: done
 priority: high
 tags: [search, core-a, fts]
+refs:
+  resolved_by: [archive-read-path-search]
+updated: 2026-06-19
 ---
 
 # Read path over Core A (slide + image search)

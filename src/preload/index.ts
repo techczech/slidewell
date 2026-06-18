@@ -20,10 +20,35 @@ export type ImageNode = {
   thumbUrl: string
 }
 
+// Search result shapes (the main process resolves render/image paths to swarchive:// URLs).
+export type SlideResult = {
+  kind: 'slide' | 'ocr-render' | 'ocr-image'
+  title: string
+  snippet: string
+  deck: string
+  slideOrder: number | null
+  usedInDecks: number
+  reference: string // `[use: ppt:<id>#<order>]`
+  thumbUrl: string | null
+}
+export type ImageResult = {
+  sha256: string
+  deck: string
+  format: string
+  snippet: string
+  usedInDecks: number
+  reference: string // `r2://ppt-archive-media/media/<sha>.<ext>`
+  thumbUrl: string | null
+}
+
 const api = {
   archive: {
     // Is the Core A (ppt-archive) extraction store present? Search degrades to FTS-only when not.
-    available: (): Promise<boolean> => ipcRenderer.invoke('archive:available')
+    available: (): Promise<boolean> => ipcRenderer.invoke('archive:available'),
+    // Slide text + OCR search (FTS5) over the archive; [] when the archive is absent.
+    searchSlides: (query: string): Promise<SlideResult[]> => ipcRenderer.invoke('archive:search-slides', query),
+    // Extracted-image search by OCR text (media.db).
+    searchImages: (query: string): Promise<ImageResult[]> => ipcRenderer.invoke('archive:search-images', query)
   },
   settings: {
     getPaths: (): Promise<{

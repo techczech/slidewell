@@ -5,7 +5,9 @@ import type { SwApi } from '../../preload'
 export function installMock(): void {
   const mock: SwApi = {
     archive: {
-      available: async () => false
+      available: async () => false,
+      searchSlides: async () => [],
+      searchImages: async () => []
     },
     settings: {
       getPaths: async () => ({
