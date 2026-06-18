@@ -6,8 +6,11 @@ export function installMock(): void {
   const mock: SwApi = {
     archive: {
       available: async () => false,
-      searchSlides: async () => [],
-      searchImages: async () => []
+      search: async () => [],
+      categories: async () => [],
+      slideStructure: async () => null,
+      copyImage: async () => false,
+      reveal: async () => false
     },
     settings: {
       getPaths: async () => ({

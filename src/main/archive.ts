@@ -12,7 +12,17 @@
  */
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { loadDeckMeta, type DeckMetaIndex } from './deckmeta'
+import {
+  parseQuery,
+  combinedDateFilter,
+  resolveOwnershipFilter,
+  applyFilters,
+  clusterHits,
+  type OwnershipFilter,
+  type Era
+} from './searchlib'
 
 const MATCH_OPEN = '\u{E000}'
 const MATCH_CLOSE = '\u{E001}'
@@ -135,6 +145,8 @@ export type SlideHit = {
   kind: 'slide' | 'ocr-render' | 'ocr-image'
   title: string
   snippet: string
+  text: string
+  rank: number
   deck: string
   slideOrder: number | null
   usedInDecks: number
@@ -172,13 +184,18 @@ interface OcrRow {
   snippet: string | null
 }
 
-/** Search slides (slide FTS + OCR FTS merged), content-only by default. */
-export async function searchSlides(root: string, rawQuery: string, limit = 60): Promise<SlideHit[]> {
+/** Search slides (slide FTS + OCR FTS merged). contentOnly hides purely-structural slides. */
+export async function searchSlides(root: string, rawQuery: string, limit = 60, contentOnly = true): Promise<SlideHit[]> {
   const q = safeFtsQuery(rawQuery)
   if (!q) return []
   const binary = sqlite3Binary()
   const db = slidesDb(root)
 
+  const roleClause = contentOnly
+    ? `AND EXISTS (SELECT 1 FROM slide_locations l2
+                  WHERE l2.content_hash = s.content_hash
+                    AND (l2.role = 'content' OR l2.role IS NULL))`
+    : ''
   const slideSql = `
     SELECT s.content_hash, s.title, s.text_content, fts.rank AS rank,
            snippet(slides_fts, -1, ?, ?, ?, 12) AS snippet,
@@ -191,9 +208,7 @@ export async function searchSlides(root: string, rawQuery: string, limit = 60): 
     FROM slides s
     JOIN slides_fts fts ON s.rowid = fts.rowid
     WHERE slides_fts MATCH ?
-      AND EXISTS (SELECT 1 FROM slide_locations l2
-                  WHERE l2.content_hash = s.content_hash
-                    AND (l2.role = 'content' OR l2.role IS NULL))
+      ${roleClause}
     ORDER BY fts.rank LIMIT ?`
   const slideRows = await query<SlideRow>({
     binary,
@@ -202,10 +217,11 @@ export async function searchSlides(root: string, rawQuery: string, limit = 60): 
     params: [MATCH_OPEN, MATCH_CLOSE, '…', q, limit]
   })
 
-  const hits: Array<SlideHit & { rank: number }> = slideRows.map((r) => ({
+  const hits: SlideHit[] = slideRows.map((r) => ({
     kind: 'slide',
     title: r.title || '(untitled slide)',
     snippet: plainSnippet(r.snippet || r.text_content || ''),
+    text: r.text_content || '',
     deck: r.best_pid || '',
     slideOrder: r.best_order,
     usedInDecks: Number(r.used_in_decks) || 1,
@@ -231,6 +247,7 @@ export async function searchSlides(root: string, rawQuery: string, limit = 60): 
         `[OCR ${r.kind}] ${r.presentation_id ?? ''}` +
         (r.slide_order !== null && r.slide_order !== undefined ? ` slide ${r.slide_order + 1}` : ''),
       snippet: plainSnippet(r.snippet || r.text_content || ''),
+      text: r.text_content || '',
       deck: r.presentation_id || '',
       slideOrder: r.slide_order ?? null,
       usedInDecks: 1,
@@ -241,7 +258,7 @@ export async function searchSlides(root: string, rawQuery: string, limit = 60): 
   }
 
   hits.sort((a, b) => a.rank - b.rank)
-  return hits.slice(0, limit).map(({ rank: _rank, ...h }) => h)
+  return hits.slice(0, limit)
 }
 
 interface ImageRow {
@@ -303,4 +320,90 @@ export async function searchImages(root: string, rawQuery: string, limit = 60): 
     })
   }
   return hits
+}
+
+// ---------- high-level search: parse tokens → FTS → filter by deck meta → enrich → cluster ----------
+export interface EnrichedHit {
+  kind: SlideHit['kind']
+  title: string
+  snippet: string
+  text: string
+  rank: number
+  deck: string
+  deckTitle: string
+  filename: string
+  category: string
+  date: string | null
+  slideOrder: number | null
+  usedInDecks: number
+  reference: string
+  renderAbsPath: string | null
+}
+export interface EnrichedCluster {
+  representative: EnrichedHit
+  members: EnrichedHit[]
+  size: number
+  deckCount: number
+}
+export interface SearchFilters {
+  owner: OwnershipFilter
+  era: Era
+  category: string
+  role: 'content' | 'all'
+  cluster: boolean
+}
+
+export async function searchArchive(
+  root: string,
+  cacheDir: string,
+  rawQuery: string,
+  filters: SearchFilters
+): Promise<EnrichedCluster[]> {
+  const parsed = parseQuery(rawQuery)
+  const dateFilter = combinedDateFilter(parsed, filters.era)
+  const ownerFilter = resolveOwnershipFilter(parsed.owner, filters.owner)
+  const categorySubs = [...(filters.category ? [filters.category.toLowerCase()] : []), ...parsed.categorySubstrings]
+  // owner/role narrow results but never justify a no-text broad search (don't dump the archive);
+  // a date/deck/category filter does (mirrors the Raycast rule).
+  const hasFilter = !!dateFilter || parsed.deckSubstrings.length > 0 || categorySubs.length > 0
+  const ftsText = parsed.text.trim()
+  // Allow a tokens/filters-only query (e.g. "deck:roundup year:2024") with no free text.
+  if (ftsText.length < 2 && !hasFilter) return []
+
+  const raw = await searchSlides(root, ftsText.length >= 2 ? ftsText : 'the', 120, filters.role === 'content')
+  const index: DeckMetaIndex = loadDeckMeta(root, cacheDir)
+  const filtered = applyFilters(raw, index, dateFilter, parsed.deckSubstrings, ownerFilter, categorySubs).slice(0, 60)
+
+  const enriched: EnrichedHit[] = filtered.map((h) => {
+    const m = index[h.deck]
+    return {
+      ...h,
+      deckTitle: m?.title || h.deck,
+      filename: m?.filename || '',
+      category: m?.category || '',
+      date: m?.date ?? null
+    }
+  })
+
+  if (!filters.cluster) {
+    return enriched.map((h) => ({ representative: h, members: [h], size: 1, deckCount: h.deck ? 1 : 0 }))
+  }
+  return clusterHits(enriched)
+}
+
+/** The structured content of one slide (its presentation.json node), pretty-printed — for "copy structure". */
+export function slideStructure(root: string, deck: string, slideOrder: number | null): string | null {
+  if (!deck) return null
+  const pj = join(root, 'extracted', deck, 'presentation.json')
+  let doc: { sections?: Array<{ slides?: unknown[] }> }
+  try {
+    doc = JSON.parse(readFileSync(pj, 'utf8'))
+  } catch {
+    return null
+  }
+  const slides: unknown[] = []
+  for (const section of doc.sections ?? []) for (const sl of section.slides ?? []) slides.push(sl)
+  if (slides.length === 0) return null
+  const node = slides[slideOrder ?? 0] ?? slides[0]
+  return JSON.stringify(node, null, 2)
 }
