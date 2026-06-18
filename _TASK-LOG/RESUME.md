@@ -4,7 +4,7 @@
 
 ## State
 
-Fresh scaffold. Electron + React + TS (electron-vite), mirrored from `talk-weaver`. App shell builds + launches: titlebar, search bar, provenance scope (All/Archive/Well), archive-connected status pill. No real search/import/well yet. Direction layer in `presentation-system` (ADR-0026, CONTEXT.md, ROADMAP P7).
+Electron + React + TS (electron-vite), mirrored from `talk-weaver`. **Search works**: type a query → results grid of real slides from the Core A archive (render thumbnail + title + snippet + deck + used-in-decks + copy-ref). Verified via `npm run test:smoke` ("dyslexia" → 60 hits, 55/60 thumbnails render). No import or well yet. Direction layer in `presentation-system` (ADR-0026, CONTEXT.md, ROADMAP P7).
 
 ## Decided (2026-06-18 grill — presentation-system)
 
@@ -14,9 +14,10 @@ Fresh scaffold. Electron + React + TS (electron-vite), mirrored from `talk-weave
 - ADR-0026: `{#id}`-only in Outline; lineage/drift/versioning external, lightweight, git-referenced, full+partial hashing. Files named `{slug}--{hash}.ext`.
 - Shared-disk boundary: both apps read DBs; SlideWell owns writes + heavy work.
 
-## Build order (next)
+## Build order
 
-1. **Read path over Core A** — point main at `ppt-archive/registry/*.db`; wire `archive:search-slides` (FTS5) + `archive:search-images` (FTS, upgrade from Raycast's LIKE) → render results grid + Quick Look / Copy Reference (port from `raycast-slide-search/src/lib`).
+1. ~~**Read path over Core A**~~ — **DONE** (change `archive-read-path-search`): `src/main/archive.ts` (ported sqlite3 shell-out query layer), `archive:search-slides`/`search-images` IPC, swarchive:// render thumbnails, results grid. Smoke test gates it.
+   - Follow-ups: image-search FTS upgrade (still LIKE on media.db); per-OCR role filter (skipped for speed); presentation_id→folder map for renders (works today because pid == folder name, but make it robust); Quick Look / open-in-Finder actions; clustering of near-identical hits (port `cluster.ts`).
 2. **Import** — single PPTX / folder → invoke Core A `unified_extractor` from main (child process); progress UI; extract-in-place, hash-reference originals.
 3. **The well** — `provenance=added` Image Nodes: paste/drag/drop/screenshot capture → auto-enrich (OCR + AI description/tags + embedding via Core A) → `{slug}--{hash}` files + sidecar.
 4. **Tracking index** — lightweight git-referenced slide index (full + partial/SimHash) for lineage/drift/versioning (ADR-0026).

@@ -149,3 +149,111 @@ body {
   margin-left: 0.4rem;
   font-size: inherit;
 }
+
+/* --- results --- */
+.results-head {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 1rem;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1rem;
+}
+.card {
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.thumb-wrap {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #ece5d6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.thumb.placeholder::after {
+  content: 'no render';
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.ocr-tag {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #fff;
+  background: var(--accent);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.meta {
+  padding: 0.6rem 0.7rem 0.55rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.card-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.snippet {
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.card-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.15rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.card-foot .deck {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.badge {
+  background: #eef1f6;
+  color: var(--oxford);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+.copyref {
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--oxford);
+  border-radius: 5px;
+  padding: 2px 7px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.copyref:hover {
+  background: #fff;
+}
