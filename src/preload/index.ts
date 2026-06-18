@@ -20,35 +20,56 @@ export type ImageNode = {
   thumbUrl: string
 }
 
-// Search result shapes (the main process resolves render/image paths to swarchive:// URLs).
+// Search result shapes (the main process resolves render paths to swarchive:// URLs).
 export type SlideResult = {
   kind: 'slide' | 'ocr-render' | 'ocr-image'
   title: string
   snippet: string
+  text: string
+  rank: number
   deck: string
+  deckTitle: string
+  filename: string
+  category: string
+  date: string | null
   slideOrder: number | null
   usedInDecks: number
   reference: string // `[use: ppt:<id>#<order>]`
   thumbUrl: string | null
 }
-export type ImageResult = {
-  sha256: string
-  deck: string
-  format: string
-  snippet: string
-  usedInDecks: number
-  reference: string // `r2://ppt-archive-media/media/<sha>.<ext>`
-  thumbUrl: string | null
+export type SlideClusterResult = {
+  representative: SlideResult
+  members: SlideResult[]
+  size: number
+  deckCount: number
 }
+export type SearchFilters = {
+  owner: 'mine' | 'all' | 'others' | 'unknown'
+  era: string // 'all' | 'recent' | 'mid' | 'early' | a year like '2024'
+  category: string // '' = all categories
+  role: 'content' | 'all'
+  cluster: boolean
+}
+export type CategoryCount = { category: string; count: number }
 
 const api = {
   archive: {
-    // Is the Core A (ppt-archive) extraction store present? Search degrades to FTS-only when not.
+    // Is the Core A (ppt-archive) extraction store present?
     available: (): Promise<boolean> => ipcRenderer.invoke('archive:available'),
-    // Slide text + OCR search (FTS5) over the archive; [] when the archive is absent.
-    searchSlides: (query: string): Promise<SlideResult[]> => ipcRenderer.invoke('archive:search-slides', query),
-    // Extracted-image search by OCR text (media.db).
-    searchImages: (query: string): Promise<ImageResult[]> => ipcRenderer.invoke('archive:search-images', query)
+    // Slide + OCR search with filters; returns clusters (size-1 clusters when clustering is off).
+    search: (query: string, filters: SearchFilters): Promise<SlideClusterResult[]> =>
+      ipcRenderer.invoke('archive:search', query, filters),
+    // Distinct deck categories (with counts) for the Category filter.
+    categories: (): Promise<CategoryCount[]> => ipcRenderer.invoke('archive:categories'),
+    // The structured content (presentation.json node) of one slide — for "Copy structure".
+    slideStructure: (deck: string, slideOrder: number | null): Promise<string | null> =>
+      ipcRenderer.invoke('archive:slide-structure', deck, slideOrder),
+    // Copy a slide's render image to the clipboard (WebP decoded to PNG so it pastes everywhere).
+    copyImage: (deck: string, slideOrder: number | null): Promise<boolean> =>
+      ipcRenderer.invoke('clipboard:copy-image', deck, slideOrder),
+    // Reveal a slide's render in Finder ("open containing deck").
+    reveal: (deck: string, slideOrder: number | null): Promise<boolean> =>
+      ipcRenderer.invoke('shell:reveal', deck, slideOrder)
   },
   settings: {
     getPaths: (): Promise<{

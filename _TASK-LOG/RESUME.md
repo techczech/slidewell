@@ -16,8 +16,9 @@ Electron + React + TS (electron-vite), mirrored from `talk-weaver`. **Search wor
 
 ## Build order
 
-1. ~~**Read path over Core A**~~ — **DONE** (change `archive-read-path-search`): `src/main/archive.ts` (ported sqlite3 shell-out query layer), `archive:search-slides`/`search-images` IPC, swarchive:// render thumbnails, results grid. Smoke test gates it.
-   - Follow-ups: image-search FTS upgrade (still LIKE on media.db); per-OCR role filter (skipped for speed); presentation_id→folder map for renders (works today because pid == folder name, but make it robust); Quick Look / open-in-Finder actions; clustering of near-identical hits (port `cluster.ts`).
+1. ~~**Read path over Core A**~~ — **DONE** (`archive-read-path-search`): ported sqlite3 shell-out query layer, swarchive:// render thumbnails, results grid.
+1b. ~~**Full search surface**~~ — **DONE** (`search-filters-actions-clustering`): separate filter bar (Owner/Date/Category/Slides + Group toggle), power tokens, near-identical clustering + expand, per-result action menu (open full size, copy image/text/structure/reference, reveal, details), lightbox. Ported deckmeta + searchlib (tokens/filter/cluster) faithfully.
+   - Remaining follow-ups: image-search FTS upgrade (still LIKE on media.db); per-OCR role filter (skipped for speed); presentation_id→folder map for renders (works today as pid==folder name, make robust); native macOS Quick Look (currently in-app lightbox); keyboard shortcuts for actions.
 2. **Import** — single PPTX / folder → invoke Core A `unified_extractor` from main (child process); progress UI; extract-in-place, hash-reference originals.
 3. **The well** — `provenance=added` Image Nodes: paste/drag/drop/screenshot capture → auto-enrich (OCR + AI description/tags + embedding via Core A) → `{slug}--{hash}` files + sidecar.
 4. **Tracking index** — lightweight git-referenced slide index (full + partial/SimHash) for lineage/drift/versioning (ADR-0026).

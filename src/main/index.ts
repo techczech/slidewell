@@ -1,10 +1,12 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage } from 'electron'
+import sharp from 'sharp'
 import { join } from 'path'
 import { homedir } from 'os'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { pathToFileURL } from 'url'
 import { resolve as resolvePath, sep as pathSep } from 'path'
-import { searchSlides, searchImages } from './archive'
+import { searchArchive, slideStructure, renderPath, type SearchFilters, type EnrichedHit } from './archive'
+import { loadDeckMeta, categoryList } from './deckmeta'
 
 // Custom schemes must be registered as privileged BEFORE app ready so the renderer treats them
 // as standard secure schemes (CSP img-src matching, no mixed-content blocking). SlideWell mirrors
@@ -126,24 +128,70 @@ app.whenReady().then(() => {
   ipcMain.handle('shell:open-external', (_e, url: string) => shell.openExternal(url).then(() => true))
 
   // Read-only search over Core A. Returns [] when the archive isn't present (UI degrades gracefully).
-  // renderAbsPath/fileAbsPath are converted to renderable swarchive:// URLs here; the renderer never sees raw paths.
-  ipcMain.handle('archive:search-slides', async (_e, q: string) => {
-    if (!archiveAvailable() || !q?.trim()) return []
+  // renderAbsPath is converted to a renderable swarchive:// URL here; the renderer never sees raw paths.
+  const cacheDir = (): string => app.getPath('userData')
+  const toWire = (h: EnrichedHit): Record<string, unknown> => {
+    const { renderAbsPath, ...rest } = h
+    return { ...rest, thumbUrl: swThumb(renderAbsPath) }
+  }
+
+  ipcMain.handle('archive:search', async (_e, query: string, filters: SearchFilters) => {
+    if (!archiveAvailable()) return []
     try {
-      const hits = await searchSlides(archiveRoot(), q)
-      return hits.map(({ renderAbsPath, ...h }) => ({ ...h, thumbUrl: swThumb(renderAbsPath) }))
+      const clusters = await searchArchive(archiveRoot(), cacheDir(), query ?? '', filters)
+      return clusters.map((c) => ({
+        representative: toWire(c.representative),
+        members: c.members.map(toWire),
+        size: c.size,
+        deckCount: c.deckCount
+      }))
     } catch {
       return []
     }
   })
-  ipcMain.handle('archive:search-images', async (_e, q: string) => {
-    if (!archiveAvailable() || !q?.trim()) return []
+
+  // Distinct deck categories (with counts) for the Category filter dropdown.
+  ipcMain.handle('archive:categories', () => {
+    if (!archiveAvailable()) return []
     try {
-      const hits = await searchImages(archiveRoot(), q)
-      return hits.map(({ fileAbsPath, ...h }) => ({ ...h, thumbUrl: swThumb(fileAbsPath) }))
+      return categoryList(loadDeckMeta(archiveRoot(), cacheDir()))
     } catch {
       return []
     }
+  })
+
+  // The structured content (presentation.json node) of one slide — for "Copy structure".
+  ipcMain.handle('archive:slide-structure', (_e, deck: string, slideOrder: number | null) => {
+    if (!archiveAvailable()) return null
+    try {
+      return slideStructure(archiveRoot(), deck, slideOrder)
+    } catch {
+      return null
+    }
+  })
+
+  // Copy a slide's render image to the clipboard (decode WebP→PNG via sharp so it pastes everywhere).
+  ipcMain.handle('clipboard:copy-image', async (_e, deck: string, slideOrder: number | null) => {
+    const abs = renderPath(archiveRoot(), deck, slideOrder)
+    if (!abs) return false
+    try {
+      const img = abs.toLowerCase().endsWith('.webp')
+        ? nativeImage.createFromBuffer(await sharp(abs).png().toBuffer())
+        : nativeImage.createFromPath(abs)
+      if (img.isEmpty()) return false
+      clipboard.writeImage(img)
+      return true
+    } catch {
+      return false
+    }
+  })
+
+  // Reveal a slide's render in Finder ("Open containing deck").
+  ipcMain.handle('shell:reveal', (_e, deck: string, slideOrder: number | null) => {
+    const abs = renderPath(archiveRoot(), deck, slideOrder)
+    if (!abs) return false
+    shell.showItemInFolder(abs)
+    return true
   })
 
   createWindow()
