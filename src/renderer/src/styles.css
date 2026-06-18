@@ -1,0 +1,151 @@
+:root {
+  /* Shared ecosystem palette (matches TalkWeaver): warm paper + Oxford blue. */
+  --paper: #f7f3ea;
+  --ink: #1c1a16;
+  --oxford: #0b3a6b;
+  --accent: #9f1239;
+  --muted: #6b6356;
+  --line: #e2dacb;
+  --card: #fffdf8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.titlebar {
+  -webkit-app-region: drag;
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+  padding: 0.6rem 1rem 0.6rem 5rem; /* leave room for macOS traffic lights */
+  border-bottom: 1px solid var(--line);
+}
+
+.wordmark {
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+  color: var(--oxford);
+}
+.wordmark .well {
+  color: var(--accent);
+}
+.tagline {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.searchbar {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.9rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.search-input {
+  flex: 1;
+  font-size: 1rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+}
+.search-input:focus {
+  outline: 2px solid var(--oxford);
+  outline-offset: 0;
+}
+
+.scope {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.scope-tab {
+  border: 0;
+  background: var(--card);
+  color: var(--muted);
+  padding: 0.5rem 0.85rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.scope-tab.active {
+  background: var(--oxford);
+  color: #fff;
+}
+
+.results {
+  flex: 1;
+  overflow: auto;
+  padding: 1.5rem;
+}
+.empty {
+  max-width: 32rem;
+  margin: 4rem auto;
+  text-align: center;
+}
+.empty-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 0 0 0.4rem;
+}
+.empty-sub {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.4rem 1rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.statusbar .ok {
+  color: #166534;
+}
+.statusbar .warn {
+  color: var(--accent);
+}
+.statusbar .path {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+  opacity: 0.7;
+}
+.link {
+  border: 0;
+  background: none;
+  color: var(--oxford);
+  text-decoration: underline;
+  cursor: pointer;
+  margin-left: 0.4rem;
+  font-size: inherit;
+}
