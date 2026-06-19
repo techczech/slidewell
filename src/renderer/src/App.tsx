@@ -85,7 +85,13 @@ export default function App(): JSX.Element {
   )
   const copyImage = useCallback(
     async (h: SlideResult) => {
-      setToast((await window.sw.archive.copyImage(h.deck, h.slideOrder)) ? 'Copied image' : 'No image to copy')
+      setToast((await window.sw.archive.copyImage(h.deck, h.slideOrder)) ? 'Copied WebP (for TalkWeaver)' : 'No image to copy')
+    },
+    [setToast]
+  )
+  const copyImagePng = useCallback(
+    async (h: SlideResult) => {
+      setToast((await window.sw.archive.copyImagePng(h.deck, h.slideOrder)) ? 'Copied PNG' : 'No image to copy')
     },
     [setToast]
   )
@@ -216,6 +222,7 @@ export default function App(): JSX.Element {
             setMenu(null)
             if (action === 'fullsize') openLightbox([h], 0)
             else if (action === 'copy-image') void copyImage(h)
+            else if (action === 'copy-image-png') void copyImagePng(h)
             else if (action === 'copy-text') void copyText(h.text, 'slide text')
             else if (action === 'copy-structure') void copyStructure(h)
             else if (action === 'copy-ref') void copyText(h.reference, 'reference')
@@ -340,7 +347,7 @@ function Card({
   )
 }
 
-type ActionId = 'fullsize' | 'copy-image' | 'copy-text' | 'copy-structure' | 'copy-ref' | 'reveal' | 'expand' | 'details'
+type ActionId = 'fullsize' | 'copy-image' | 'copy-image-png' | 'copy-text' | 'copy-structure' | 'copy-ref' | 'reveal' | 'expand' | 'details'
 
 function ContextMenu({
   cluster,
@@ -357,7 +364,8 @@ function ContextMenu({
 }): JSX.Element {
   const items: { id: ActionId; label: string }[] = [
     { id: 'fullsize', label: 'Open full size' },
-    { id: 'copy-image', label: 'Copy image' },
+    { id: 'copy-image', label: 'Copy image (WebP → TalkWeaver)' },
+    { id: 'copy-image-png', label: 'Copy as PNG' },
     { id: 'copy-text', label: 'Copy text' },
     { id: 'copy-structure', label: 'Copy structure (JSON)' },
     { id: 'copy-ref', label: 'Copy reference' },

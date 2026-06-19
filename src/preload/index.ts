@@ -64,9 +64,12 @@ const api = {
     // The structured content (presentation.json node) of one slide — for "Copy structure".
     slideStructure: (deck: string, slideOrder: number | null): Promise<string | null> =>
       ipcRenderer.invoke('archive:slide-structure', deck, slideOrder),
-    // Copy a slide's render image to the clipboard (WebP decoded to PNG so it pastes everywhere).
+    // Copy the render's WebP file to the clipboard (TalkWeaver keeps it as-is, no PNG round-trip).
     copyImage: (deck: string, slideOrder: number | null): Promise<boolean> =>
       ipcRenderer.invoke('clipboard:copy-image', deck, slideOrder),
+    // Copy as a PNG raster bitmap (for Keynote / Slack / web).
+    copyImagePng: (deck: string, slideOrder: number | null): Promise<boolean> =>
+      ipcRenderer.invoke('clipboard:copy-image-png', deck, slideOrder),
     // Reveal a slide's render in Finder ("open containing deck").
     reveal: (deck: string, slideOrder: number | null): Promise<boolean> =>
       ipcRenderer.invoke('shell:reveal', deck, slideOrder)

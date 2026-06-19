@@ -4,6 +4,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { pathToFileURL } from 'url'
+import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { searchArchive, slideStructure, renderPath, type SearchFilters, type EnrichedHit } from './archive'
 import { loadDeckMeta, categoryList } from './deckmeta'
@@ -170,8 +171,19 @@ app.whenReady().then(() => {
     }
   })
 
-  // Copy a slide's render image to the clipboard (decode WebP→PNG via sharp so it pastes everywhere).
+  // Copy the render's WebP FILE to the clipboard — TalkWeaver's paste reads an image/webp file
+  // item and keeps it as-is (no PNG round-trip). macOS file pasteboard via osascript.
+  const copyFileToClipboard = (abs: string): Promise<boolean> =>
+    new Promise((resolve) =>
+      execFile('osascript', ['-e', `set the clipboard to POSIX file ${JSON.stringify(abs)}`], (err) => resolve(!err))
+    )
   ipcMain.handle('clipboard:copy-image', async (_e, deck: string, slideOrder: number | null) => {
+    const abs = renderPath(archiveRoot(), deck, slideOrder)
+    if (!abs) return false
+    return copyFileToClipboard(abs)
+  })
+  // Copy as a PNG raster bitmap (for Keynote / Slack / web that want a pasted image, not a webp file).
+  ipcMain.handle('clipboard:copy-image-png', async (_e, deck: string, slideOrder: number | null) => {
     const abs = renderPath(archiveRoot(), deck, slideOrder)
     if (!abs) return false
     try {
