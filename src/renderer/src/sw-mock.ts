@@ -10,6 +10,7 @@ export function installMock(): void {
       categories: async () => [],
       slideStructure: async () => null,
       copyImage: async () => false,
+      copyImagePng: async () => false,
       reveal: async () => false
     },
     settings: {
