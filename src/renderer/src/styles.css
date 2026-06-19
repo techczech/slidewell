@@ -150,6 +150,23 @@ body {
   font-size: inherit;
 }
 
+/* deck "see in context" banner */
+.context-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  background: #eef3f9;
+  border: 1px solid #cfdcec;
+  border-radius: 8px;
+  padding: 0.5rem 0.8rem;
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+  color: var(--ink);
+}
+.context-banner .link {
+  margin-left: auto;
+}
+
 /* --- results --- */
 .results-head {
   font-size: 0.85rem;

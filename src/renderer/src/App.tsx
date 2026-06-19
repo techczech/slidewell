@@ -28,7 +28,9 @@ export default function App(): JSX.Element {
   const [lightbox, setLightbox] = useState<{ list: SlideResult[]; index: number } | null>(null)
   const [expanded, setExpanded] = useState<SlideClusterResult | null>(null)
   const [details, setDetails] = useState<SlideResult | null>(null)
-  const [deckView, setDeckView] = useState<{ title: string; slides: SlideResult[] } | null>(null)
+  // "See in context": when set, the main grid shows this whole presentation in slide order,
+  // every slide fully usable (not a read-only popup). Cleared by typing or changing a filter.
+  const [deckFilter, setDeckFilter] = useState<{ pid: string; title: string } | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const reqId = useRef(0)
@@ -40,7 +42,11 @@ export default function App(): JSX.Element {
     toastTimer.current = setTimeout(() => setToastMsg(null), 1400)
   }, [])
 
-  const patch = (p: Partial<SearchFilters>): void => setFilters((f) => ({ ...f, ...p }))
+  // Changing any filter exits deck-context (you're back to searching/browsing the whole archive).
+  const patch = (p: Partial<SearchFilters>): void => {
+    setDeckFilter(null)
+    setFilters((f) => ({ ...f, ...p }))
+  }
 
   useEffect(() => {
     void (async () => {
@@ -59,12 +65,17 @@ export default function App(): JSX.Element {
   useEffect(() => {
     const id = ++reqId.current
     setLoading(true)
-    void window.sw.archive.search(debounced, filters).then((res) => {
+    const run = deckFilter
+      ? window.sw.archive
+          .deckSlides(deckFilter.pid)
+          .then((slides) => slides.map((s) => ({ representative: s, members: [s], size: 1, deckCount: 1 })))
+      : window.sw.archive.search(debounced, filters)
+    void run.then((res) => {
       if (id !== reqId.current) return
       setClusters(res)
       setLoading(false)
     })
-  }, [debounced, filters, refreshKey])
+  }, [debounced, filters, refreshKey, deckFilter])
 
   const reps = useMemo(() => clusters.map((c) => c.representative), [clusters])
 
@@ -140,7 +151,10 @@ export default function App(): JSX.Element {
           className="search-input"
           placeholder="Search slide text &amp; OCR…  (try: year:2024 deck:roundup owner:all)"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            setDeckFilter(null)
+            setQuery(e.target.value)
+          }}
           autoFocus
         />
       </div>
@@ -202,12 +216,21 @@ export default function App(): JSX.Element {
           )
         ) : (
           <>
-            <div className="results-head">
-              {debounced
-                ? `${clusters.length} result${clusters.length === 1 ? '' : 's'} for “${debounced}”`
-                : `${clusters.length} slide${clusters.length === 1 ? '' : 's'} — newest first`}
-              {filters.cluster ? ' · grouped' : ''}
-            </div>
+            {deckFilter ? (
+              <div className="context-banner">
+                <span>
+                  In context: <b>{deckFilter.title}</b> — {clusters.length} slide{clusters.length === 1 ? '' : 's'} in order. Use any of them.
+                </span>
+                <button className="link" onClick={() => setDeckFilter(null)}>✕ exit context</button>
+              </div>
+            ) : (
+              <div className="results-head">
+                {debounced
+                  ? `${clusters.length} result${clusters.length === 1 ? '' : 's'} for “${debounced}”`
+                  : `${clusters.length} slide${clusters.length === 1 ? '' : 's'} — newest first`}
+                {filters.cluster ? ' · grouped' : ''}
+              </div>
+            )}
             <div className="grid">
               {clusters.map((c, i) => (
                 <Card
@@ -255,11 +278,7 @@ export default function App(): JSX.Element {
             else if (action === 'reveal') void reveal(h)
             else if (action === 'expand') setExpanded(menu.cluster)
             else if (action === 'details') setDetails(h)
-            else if (action === 'context')
-              void window.sw.archive.deckSlides(h.deck).then((slides) => {
-                if (slides.length) setDeckView({ title: h.deckTitle || h.deck, slides })
-                else setToast('No deck context found')
-              })
+            else if (action === 'context') setDeckFilter({ pid: h.deck, title: h.deckTitle || h.deck })
           }}
         />
       )}
@@ -293,15 +312,6 @@ export default function App(): JSX.Element {
           onCopyText={() => void copyText(details.text, 'slide text')}
           onCopyRef={() => void copyText(details.reference, 'reference')}
           onCopyStructure={() => void copyStructure(details)}
-        />
-      )}
-
-      {deckView && (
-        <DeckModal
-          title={deckView.title}
-          slides={deckView.slides}
-          onClose={() => setDeckView(null)}
-          onOpen={(idx) => setLightbox({ list: deckView.slides, index: idx })}
         />
       )}
 
@@ -350,42 +360,6 @@ function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => v
           {lines.join('\n') || 'Extraction + OCR run via Core A (ppt-archive); progress streams here. Re-running is safe — done decks are skipped.'}
         </pre>
         {running && <div className="results-head">running in the background — you can keep searching</div>}
-      </div>
-    </div>
-  )
-}
-
-function DeckModal({
-  title,
-  slides,
-  onClose,
-  onOpen
-}: {
-  title: string
-  slides: SlideResult[]
-  onClose: () => void
-  onOpen: (index: number) => void
-}): JSX.Element {
-  return (
-    <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <b>{title}</b> — {slides.length} slide{slides.length === 1 ? '' : 's'} in order
-          <button className="copyref" onClick={onClose}>close ✕</button>
-        </div>
-        <div className="grid">
-          {slides.map((m, i) => (
-            <div className="card" key={`${m.deck}-${m.slideOrder}-${i}`}>
-              <div className="thumb-wrap" onClick={() => onOpen(i)} title="Open full size">
-                {m.thumbUrl ? <img className="thumb" src={m.thumbUrl} alt="" loading="lazy" /> : <div className="thumb placeholder" />}
-                <span className="slide-num">{m.slideOrder !== null ? m.slideOrder + 1 : i + 1}</span>
-              </div>
-              <div className="meta">
-                <div className="card-title" title={m.title}>{m.title}</div>
-              </div>
-            </div>
-          ))}
-        </div>
       </div>
     </div>
   )

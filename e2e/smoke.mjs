@@ -31,6 +31,7 @@ try {
   let lightboxOpened = false
   let filterReran = false
   let importPanelOk = false
+  let contextFilterOk = false
 
   if (archiveConnected) {
     // default browse populates with no query (newest first)
@@ -70,14 +71,22 @@ try {
     await win.waitForSelector('.modal.import', { timeout: 4000 })
     importPanelOk = (await win.locator('.modal.import .primary-btn').count()) === 2 && (await win.locator('.import-log').count()) === 1
     await win.locator('.modal.import .copyref').click()
+
+    // "See in context" now filters the grid to the whole deck (banner + cards), not a popup
+    await win.locator('main .card .more').first().click()
+    await win.waitForSelector('.ctx-menu', { timeout: 4000 })
+    await win.locator('.ctx-menu .ctx-item', { hasText: 'See in context' }).click()
+    await win.waitForTimeout(1000)
+    contextFilterOk = (await win.locator('.context-banner').count()) === 1 && (await win.locator('main .grid .card').count()) > 0
+    if (contextFilterOk) await win.locator('.context-banner .link').click()
   }
 
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
-    (filterSelects === 3 && hasSearchableCategory && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk)
+    (filterSelects === 3 && hasSearchableCategory && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableCategory, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, pass })
+  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableCategory, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, pass })
   await app.close()
   process.exit(pass ? 0 : 2)
 } catch (e) {
