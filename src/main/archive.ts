@@ -273,25 +273,37 @@ interface ImageRow {
 /** Search extracted images by OCR text (media.db ocr_assets, kind='image'). */
 export async function searchImages(root: string, rawQuery: string, limit = 60): Promise<ImageHit[]> {
   const binary = sqlite3Binary()
-  const tokens = rawQuery
-    .trim()
-    .split(/\s+/)
-    .map((t) => t.replace(/[%_]/g, (m) => `\\${m}`))
-    .filter(Boolean)
-  if (tokens.length === 0) return []
-  const whereLikes = tokens.map(() => `o.text LIKE ? ESCAPE '\\'`).join(' AND ')
-  const params: Array<string | number> = tokens.map((t) => `%${t}%`)
-  params.push(limit)
-
-  const rows = await query<ImageRow>({
-    binary,
-    dbPath: mediaDb(root),
-    sql: `SELECT o.asset_key, o.presentation_id, o.rel_path, o.text, o.line_count AS rank
-          FROM ocr_assets o
-          WHERE o.kind = 'image' AND o.text IS NOT NULL AND ${whereLikes}
-          ORDER BY length(o.text) DESC LIMIT ?`,
-    params
-  })
+  const q = rawQuery.trim()
+  let rows: ImageRow[]
+  if (q.length >= 2) {
+    const tokens = q
+      .split(/\s+/)
+      .map((t) => t.replace(/[%_]/g, (m) => `\\${m}`))
+      .filter(Boolean)
+    const whereLikes = tokens.map(() => `o.text LIKE ? ESCAPE '\\'`).join(' AND ')
+    const params: Array<string | number> = tokens.map((t) => `%${t}%`)
+    params.push(limit)
+    rows = await query<ImageRow>({
+      binary,
+      dbPath: mediaDb(root),
+      sql: `SELECT o.asset_key, o.presentation_id, o.rel_path, o.text, o.line_count AS rank
+            FROM ocr_assets o
+            WHERE o.kind = 'image' AND o.text IS NOT NULL AND ${whereLikes}
+            ORDER BY length(o.text) DESC LIMIT ?`,
+      params
+    })
+  } else {
+    // browse: most text-rich images first (a stand-in for relevance until embeddings land)
+    rows = await query<ImageRow>({
+      binary,
+      dbPath: mediaDb(root),
+      sql: `SELECT o.asset_key, o.presentation_id, o.rel_path, o.text, o.line_count AS rank
+            FROM ocr_assets o
+            WHERE o.kind = 'image' AND o.text IS NOT NULL
+            ORDER BY length(o.text) DESC LIMIT ?`,
+      params: [limit]
+    })
+  }
 
   const hits: ImageHit[] = []
   for (const r of rows) {
@@ -353,6 +365,7 @@ export interface SearchFilters {
   role: 'content' | 'all'
   cluster: boolean
   scope: 'all' | 'archive' | 'well'
+  type: 'slides' | 'images'
 }
 
 export async function searchArchive(

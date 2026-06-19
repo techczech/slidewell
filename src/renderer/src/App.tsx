@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount } from '../../preload'
 
-const DEFAULT_FILTERS: SearchFilters = { owner: 'mine', era: 'all', category: '', role: 'content', cluster: true, scope: 'all' }
+const DEFAULT_FILTERS: SearchFilters = { owner: 'mine', era: 'all', category: '', role: 'content', cluster: true, scope: 'all', type: 'slides' }
 
 const ERA_OPTIONS: { value: string; label: string }[] = [
   { value: 'all', label: 'All dates' },
@@ -172,6 +172,22 @@ export default function App(): JSX.Element {
                 onClick={() => patch({ scope: s })}
               >
                 {s === 'all' ? 'All' : s === 'archive' ? 'Archive' : 'Well'}
+              </button>
+            ))}
+          </div>
+        </label>
+        <label className="filter">
+          <span className="filter-label">Type</span>
+          <div className="scope" role="tablist" aria-label="Content type">
+            {(['slides', 'images'] as const).map((t) => (
+              <button
+                key={t}
+                role="tab"
+                aria-selected={filters.type === t}
+                className={filters.type === t ? 'scope-tab active' : 'scope-tab'}
+                onClick={() => patch({ type: t })}
+              >
+                {t === 'slides' ? 'Slides' : 'Images'}
               </button>
             ))}
           </div>
@@ -461,6 +477,7 @@ function Card({
 }): JSX.Element {
   const h = cluster.representative
   const isWell = h.kind === 'well-image'
+  const isImg = h.kind === 'archive-image'
   const ocr = h.kind === 'ocr-render' || h.kind === 'ocr-image'
   const badge = clusterBadge(cluster)
   const foot = [h.filename || h.deck, h.slideOrder !== null ? `#${h.slideOrder}` : '', h.date ? h.date.slice(0, 10) : '', h.category]
@@ -474,7 +491,13 @@ function Card({
         ) : (
           <div className="thumb placeholder" aria-hidden />
         )}
-        {isWell ? <span className="ocr-tag well">WELL</span> : ocr ? <span className="ocr-tag">OCR</span> : null}
+        {isWell ? (
+          <span className="ocr-tag well">WELL</span>
+        ) : isImg ? (
+          <span className="ocr-tag img">IMG</span>
+        ) : ocr ? (
+          <span className="ocr-tag">OCR</span>
+        ) : null}
         <button
           className="more"
           title="Actions"
@@ -512,17 +535,18 @@ function ContextMenu({
   onClose: () => void
   onAction: (a: ActionId) => void
 }): JSX.Element {
-  const isWell = cluster.representative.kind === 'well-image'
+  const k = cluster.representative.kind
+  const isImage = k === 'well-image' || k === 'archive-image'
   const items: { id: ActionId; label: string }[] = [
     { id: 'fullsize', label: 'Open full size' },
     { id: 'copy-image', label: 'Copy image (WebP → TalkWeaver)' },
     { id: 'copy-image-png', label: 'Copy as PNG' },
     { id: 'copy-text', label: 'Copy text' },
-    ...(isWell ? [] : [{ id: 'copy-structure' as ActionId, label: 'Copy structure (JSON)' }]),
+    ...(isImage ? [] : [{ id: 'copy-structure' as ActionId, label: 'Copy structure (JSON)' }]),
     { id: 'copy-ref', label: 'Copy reference' },
     { id: 'reveal', label: 'Reveal in Finder' },
     ...(cluster.size > 1 ? [{ id: 'expand' as ActionId, label: `Expand cluster (${cluster.size})` }] : []),
-    ...(isWell ? [] : [{ id: 'context' as ActionId, label: 'See in context (whole deck)' }]),
+    ...(k === 'well-image' ? [] : [{ id: 'context' as ActionId, label: 'See in context (whole deck)' }]),
     { id: 'details', label: 'Show details' }
   ]
   // keep the menu on-screen

@@ -22,7 +22,7 @@ export type ImageNode = {
 
 // Search result shapes (the main process resolves render paths to swarchive:// URLs).
 export type SlideResult = {
-  kind: 'slide' | 'ocr-render' | 'ocr-image' | 'well-image'
+  kind: 'slide' | 'ocr-render' | 'ocr-image' | 'well-image' | 'archive-image'
   title: string
   snippet: string
   text: string
@@ -50,6 +50,7 @@ export type SearchFilters = {
   role: 'content' | 'all'
   cluster: boolean
   scope: 'all' | 'archive' | 'well'
+  type: 'slides' | 'images'
 }
 export type CategoryCount = { category: string; count: number }
 

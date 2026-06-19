@@ -6,8 +6,8 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, watch as fsWatch } 
 import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
-import { archiveResults, deckSlides, slideStructure, type SearchFilters, type EnrichedHit } from './archive'
-import { loadDeckMeta, categoryList } from './deckmeta'
+import { archiveResults, deckSlides, slideStructure, searchImages, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
+import { loadDeckMeta, categoryList, type DeckMetaIndex } from './deckmeta'
 import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, type WellRow } from './well'
 import { runIngest, cancelIngest, detectPython } from './ingest'
 
@@ -204,26 +204,63 @@ app.whenReady().then(() => {
     }
   }
 
+  // An extracted-from-a-deck image → the wire shape, as a standalone image card.
+  const archiveImageToWire = (im: ImageHit, idx: DeckMetaIndex): Record<string, unknown> => {
+    const m = idx[im.deck]
+    return {
+      kind: 'archive-image',
+      title: m?.title || im.deck || '(image)',
+      snippet: (im.snippet || '').slice(0, 160),
+      text: im.snippet || '',
+      rank: 0,
+      deck: im.deck,
+      deckTitle: m?.title || im.deck,
+      filename: `${im.sha256}.${im.format}`,
+      category: m?.category || '',
+      date: m?.date ?? null,
+      slideOrder: null,
+      usedInDecks: im.usedInDecks,
+      reference: im.reference,
+      thumbUrl: swThumb(im.fileAbsPath)
+    }
+  }
+
   ipcMain.handle('archive:search', async (_e, query: string, filters: SearchFilters) => {
     const scope = filters?.scope ?? 'all'
+    const type = filters?.type ?? 'slides'
     const out: Array<Record<string, unknown>> = []
-    if (scope !== 'well' && archiveAvailable()) {
-      try {
-        const clusters = await archiveResults(archiveRoot(), cacheDir(), query ?? '', filters)
-        for (const c of clusters) out.push({ representative: toWire(c.representative), members: c.members.map(toWire), size: c.size, deckCount: c.deckCount })
-      } catch {
-        /* archive search failed → still show well */
-      }
-    }
-    if (scope !== 'archive') {
-      try {
-        const rows = await searchWell(wellRootResolved(), query ?? '', 60)
-        for (const r of rows) {
-          const w = wellToWire(r)
-          out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
+    if (type === 'slides') {
+      // whole slides (the well has no slides, so Well-scope is empty here)
+      if (scope !== 'well' && archiveAvailable()) {
+        try {
+          const clusters = await archiveResults(archiveRoot(), cacheDir(), query ?? '', filters)
+          for (const c of clusters) out.push({ representative: toWire(c.representative), members: c.members.map(toWire), size: c.size, deckCount: c.deckCount })
+        } catch {
+          /* archive search failed */
         }
-      } catch {
-        /* no well yet */
+      }
+    } else {
+      // images: the pictures embedded in decks (separate from the slides) + the well's images
+      if (scope !== 'well' && archiveAvailable()) {
+        try {
+          const idx = loadDeckMeta(archiveRoot(), cacheDir())
+          for (const im of await searchImages(archiveRoot(), query ?? '', 120)) {
+            const w = archiveImageToWire(im, idx)
+            out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
+          }
+        } catch {
+          /* archive images failed → still show well */
+        }
+      }
+      if (scope !== 'archive') {
+        try {
+          for (const r of await searchWell(wellRootResolved(), query ?? '', 60)) {
+            const w = wellToWire(r)
+            out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
+          }
+        } catch {
+          /* no well yet */
+        }
       }
     }
     return out
