@@ -13,13 +13,14 @@
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { existsSync, readFileSync } from 'node:fs'
-import { loadDeckMeta, type DeckMetaIndex } from './deckmeta'
+import { loadDeckMeta, categoryMatches, deckMatchesSubstring, type DeckMetaIndex } from './deckmeta'
 import {
   parseQuery,
   combinedDateFilter,
   resolveOwnershipFilter,
   applyFilters,
   clusterHits,
+  dateMatches,
   type OwnershipFilter,
   type Era
 } from './searchlib'
@@ -407,4 +408,103 @@ export function slideStructure(root: string, deck: string, slideOrder: number | 
   if (slides.length === 0) return null
   const node = slides[slideOrder ?? 0] ?? slides[0]
   return JSON.stringify(node, null, 2)
+}
+
+interface BrowseRow {
+  content_hash: string
+  title: string | null
+  text_content: string | null
+  pid: string
+  ord: number
+}
+
+function toEnriched(root: string, index: DeckMetaIndex, r: { content_hash?: string; title: string | null; text_content: string | null; pid: string; ord: number }): EnrichedHit {
+  const m = index[r.pid]
+  return {
+    kind: 'slide',
+    title: r.title || '(untitled slide)',
+    snippet: plainSnippet(r.text_content || ''),
+    text: r.text_content || '',
+    rank: 0,
+    deck: r.pid,
+    deckTitle: m?.title || r.pid,
+    filename: m?.filename || '',
+    category: m?.category || '',
+    date: m?.date ?? null,
+    slideOrder: r.ord,
+    usedInDecks: 1,
+    reference: r.ord === null ? `[use: ppt:${r.pid}]` : `[use: ppt:${r.pid}#${r.ord}]`,
+    renderAbsPath: renderPath(root, r.pid, r.ord)
+  }
+}
+
+/** Browse (no free-text query): all slides matching the filters, NEWEST DECK FIRST. */
+export async function browseArchive(root: string, cacheDir: string, rawQuery: string, filters: SearchFilters, limit = 200): Promise<EnrichedCluster[]> {
+  const index = loadDeckMeta(root, cacheDir)
+  const parsed = parseQuery(rawQuery)
+  const dateFilter = combinedDateFilter(parsed, filters.era)
+  const ownerFilter = resolveOwnershipFilter(parsed.owner, filters.owner)
+  const catSubs = [...(filters.category ? [filters.category.toLowerCase()] : []), ...parsed.categorySubstrings]
+  const deckSubs = parsed.deckSubstrings
+
+  const pids = Object.keys(index)
+    .filter((pid) => {
+      const m = index[pid]
+      if (dateFilter && !dateMatches(dateFilter, m.date ?? null)) return false
+      if (ownerFilter !== 'all' && (m?.ownership ?? 'unknown') !== ownerFilter) return false
+      for (const s of deckSubs) if (!deckMatchesSubstring(m, pid, s)) return false
+      for (const s of catSubs) if (!categoryMatches(m?.category, s)) return false
+      return true
+    })
+    .sort((a, b) => String(index[b].date || '').localeCompare(String(index[a].date || '')))
+  if (pids.length === 0) return []
+
+  const chosen = pids.slice(0, 120) // cap decks scanned for an unfiltered browse
+  const placeholders = chosen.map(() => '?').join(',')
+  const roleClause = filters.role === 'content' ? `AND (l.role = 'content' OR l.role IS NULL)` : ''
+  const rows = await query<BrowseRow>({
+    binary: sqlite3Binary(),
+    dbPath: slidesDb(root),
+    sql: `SELECT s.content_hash, s.title, s.text_content, l.presentation_id AS pid, l.slide_order AS ord
+          FROM slide_locations l JOIN slides s ON s.content_hash = l.content_hash
+          WHERE l.presentation_id IN (${placeholders}) ${roleClause}`,
+    params: chosen
+  })
+  // newest deck first, then slide order; dedupe identical slides across decks (keep first = newest).
+  rows.sort((a, b) => {
+    const d = String(index[b.pid]?.date || '').localeCompare(String(index[a.pid]?.date || ''))
+    return d !== 0 ? d : a.ord - b.ord
+  })
+  const seen = new Set<string>()
+  const hits: EnrichedHit[] = []
+  for (const r of rows) {
+    if (seen.has(r.content_hash)) continue
+    seen.add(r.content_hash)
+    hits.push(toEnriched(root, index, r))
+    if (hits.length >= limit) break
+  }
+  if (!filters.cluster) return hits.map((h) => ({ representative: h, members: [h], size: 1, deckCount: h.deck ? 1 : 0 }))
+  return clusterHits(hits)
+}
+
+/** Entry point: FTS search when there's free text (≥2 chars), else a newest-first browse. */
+export async function archiveResults(root: string, cacheDir: string, rawQuery: string, filters: SearchFilters): Promise<EnrichedCluster[]> {
+  const parsed = parseQuery(rawQuery)
+  if (parsed.text.trim().length >= 2) return searchArchive(root, cacheDir, rawQuery, filters)
+  return browseArchive(root, cacheDir, rawQuery, filters)
+}
+
+/** All slides of one presentation, in slide order — for "see in context". */
+export async function deckSlides(root: string, cacheDir: string, pid: string): Promise<EnrichedHit[]> {
+  if (!pid) return []
+  const index = loadDeckMeta(root, cacheDir)
+  const rows = await query<{ title: string | null; text_content: string | null; ord: number }>({
+    binary: sqlite3Binary(),
+    dbPath: slidesDb(root),
+    sql: `SELECT s.title, s.text_content, l.slide_order AS ord
+          FROM slide_locations l JOIN slides s ON s.content_hash = l.content_hash
+          WHERE l.presentation_id = ? ORDER BY l.slide_order`,
+    params: [pid]
+  })
+  return rows.map((r) => toEnriched(root, index, { title: r.title, text_content: r.text_content, pid, ord: r.ord }))
 }

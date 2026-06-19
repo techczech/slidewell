@@ -308,6 +308,91 @@ body {
   border-color: var(--oxford);
 }
 
+/* searchable select (Category) */
+.ss {
+  position: relative;
+}
+.ss-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  font-size: 0.82rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+}
+.ss-cur {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ss-pop {
+  position: absolute;
+  z-index: 42;
+  top: calc(100% + 4px);
+  left: 0;
+  width: 280px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+  padding: 6px;
+}
+.ss-search {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  margin-bottom: 4px;
+}
+.ss-list {
+  max-height: 320px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.ss-item {
+  text-align: left;
+  border: 0;
+  background: none;
+  padding: 0.4rem 0.5rem;
+  border-radius: 5px;
+  font-size: 0.83rem;
+  color: var(--ink);
+  cursor: pointer;
+}
+.ss-item:hover {
+  background: #eef1f6;
+}
+.ss-item.active {
+  background: var(--oxford);
+  color: #fff;
+}
+.ss-empty {
+  padding: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* slide-number badge in the deck-context view */
+.slide-num {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(11, 58, 107, 0.85);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
 .badge.clickable {
   cursor: pointer;
   background: #fdeef1;
