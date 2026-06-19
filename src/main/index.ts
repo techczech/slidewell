@@ -2,12 +2,13 @@ import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, clipboard, n
 import sharp from 'sharp'
 import { join } from 'path'
 import { homedir } from 'os'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, watch as fsWatch } from 'fs'
 import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
-import { searchArchive, slideStructure, renderPath, type SearchFilters, type EnrichedHit } from './archive'
+import { searchArchive, slideStructure, type SearchFilters, type EnrichedHit } from './archive'
 import { loadDeckMeta, categoryList } from './deckmeta'
+import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, type WellRow } from './well'
 
 // Custom schemes must be registered as privileged BEFORE app ready so the renderer treats them
 // as standard secure schemes (CSP img-src matching, no mixed-content blocking). SlideWell mirrors
@@ -22,6 +23,8 @@ protocol.registerSchemesAsPrivileged([
 // Simple JSON config — avoids ESM/CJS issues with electron-store (same call TalkWeaver made).
 type Config = {
   archiveRoot?: string
+  wellRoot?: string
+  vaultRoot?: string
   windowBounds?: { width: number; height: number }
 }
 function configPath(): string {
@@ -49,6 +52,35 @@ function archiveRoot(): string {
 function archiveAvailable(): boolean {
   const root = archiveRoot()
   return existsSync(join(root, 'registry'))
+}
+
+// The well is SlideWell-owned; default to a dedicated user folder (NOT inside Core A's git repo),
+// repointable in config. The swarchive:// guard serves it wherever it lives.
+const WELL_DEFAULT = join(homedir(), 'SlideWell', 'well')
+function wellRootResolved(): string {
+  return readConfig().wellRoot ?? WELL_DEFAULT
+}
+
+// TalkWeaver's vault — its images are indexed in place (the vault owns them). Auto-detect from
+// TalkWeaver's own config (userData/config.json) when not explicitly set.
+function detectVaultRoot(): string | null {
+  const cfg = readConfig().vaultRoot
+  if (cfg) return cfg
+  const support = join(homedir(), 'Library', 'Application Support')
+  for (const appdir of ['talk-weaver', 'TalkWeaver']) {
+    try {
+      const tw = JSON.parse(readFileSync(join(support, appdir, 'config.json'), 'utf8')) as { vaultRoot?: string }
+      if (tw.vaultRoot && existsSync(tw.vaultRoot)) return tw.vaultRoot
+    } catch {
+      /* not found */
+    }
+  }
+  return null
+}
+
+// A render/image request is allowed only if it resolves inside one of the roots SlideWell knows.
+function allowedRoots(): string[] {
+  return [archiveRoot(), wellRootResolved(), detectVaultRoot()].filter((r): r is string => Boolean(r))
 }
 
 function createWindow(): BrowserWindow {
@@ -97,19 +129,25 @@ function within(root: string, target: string): boolean {
   const r = resolvePath(root) + pathSep
   return resolvePath(target).startsWith(r)
 }
+function withinAny(roots: string[], target: string): boolean {
+  return roots.some((r) => within(r, target))
+}
+/** Decode a swarchive://f/<b64> URL back to a guarded absolute path, or null. */
+function resolveSwUrl(url: string): string | null {
+  try {
+    const b64 = new URL(url).pathname.replace(/^\/+/, '')
+    const abs = decodeB64Url(b64)
+    return withinAny(allowedRoots(), abs) && existsSync(abs) ? abs : null
+  } catch {
+    return null
+  }
+}
 
 app.whenReady().then(() => {
   protocol.handle('swarchive', (request) => {
-    try {
-      const b64 = new URL(request.url).pathname.replace(/^\/+/, '')
-      const abs = decodeB64Url(b64)
-      if (!within(archiveRoot(), abs) || !existsSync(abs)) {
-        return new Response('not found', { status: 404 })
-      }
-      return net.fetch(pathToFileURL(abs).toString())
-    } catch {
-      return new Response('bad request', { status: 400 })
-    }
+    const abs = resolveSwUrl(request.url)
+    if (!abs) return new Response('not found', { status: 404 })
+    return net.fetch(pathToFileURL(abs).toString())
   })
 
   // --- IPC: the typed contract lives in src/preload/index.ts ---
@@ -117,7 +155,10 @@ app.whenReady().then(() => {
   ipcMain.handle('settings:get-paths', () => ({
     archiveRoot: readConfig().archiveRoot ?? null,
     archiveDefault: ARCHIVE_DEFAULT,
-    archiveAvailable: archiveAvailable()
+    archiveAvailable: archiveAvailable(),
+    wellRoot: wellRootResolved(),
+    vaultRoot: detectVaultRoot(),
+    vaultAvailable: Boolean(detectVaultRoot())
   }))
   ipcMain.handle('settings:choose-archive', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
@@ -136,19 +177,51 @@ app.whenReady().then(() => {
     return { ...rest, thumbUrl: swThumb(renderAbsPath) }
   }
 
-  ipcMain.handle('archive:search', async (_e, query: string, filters: SearchFilters) => {
-    if (!archiveAvailable()) return []
-    try {
-      const clusters = await searchArchive(archiveRoot(), cacheDir(), query ?? '', filters)
-      return clusters.map((c) => ({
-        representative: toWire(c.representative),
-        members: c.members.map(toWire),
-        size: c.size,
-        deckCount: c.deckCount
-      }))
-    } catch {
-      return []
+  // A well image → the same wire shape as an archive hit, so the grid renders it uniformly.
+  const wellToWire = (r: WellRow): Record<string, unknown> => {
+    const abs = wellAbsPath(wellRootResolved(), detectVaultRoot(), r)
+    const sourceLabel = r.source === 'talkweaver' ? 'TalkWeaver' : 'Screenshot'
+    return {
+      kind: 'well-image',
+      title: r.slug ? r.slug.replace(/-/g, ' ') : sourceLabel,
+      snippet: (r.ocr_text || r.notes || '').slice(0, 160),
+      text: r.ocr_text || '',
+      rank: 0,
+      deck: r.source,
+      deckTitle: sourceLabel,
+      filename: `${r.slug}--${r.id}.${r.ext}`,
+      category: r.tags || '',
+      date: r.added_at || null,
+      slideOrder: null,
+      usedInDecks: 1,
+      reference: `![](img-${r.id})`,
+      thumbUrl: swThumb(abs)
     }
+  }
+
+  ipcMain.handle('archive:search', async (_e, query: string, filters: SearchFilters) => {
+    const scope = filters?.scope ?? 'all'
+    const out: Array<Record<string, unknown>> = []
+    if (scope !== 'well' && archiveAvailable()) {
+      try {
+        const clusters = await searchArchive(archiveRoot(), cacheDir(), query ?? '', filters)
+        for (const c of clusters) out.push({ representative: toWire(c.representative), members: c.members.map(toWire), size: c.size, deckCount: c.deckCount })
+      } catch {
+        /* archive search failed → still show well */
+      }
+    }
+    if (scope !== 'archive') {
+      try {
+        const rows = await searchWell(wellRootResolved(), query ?? '', 60)
+        for (const r of rows) {
+          const w = wellToWire(r)
+          out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
+        }
+      } catch {
+        /* no well yet */
+      }
+    }
+    return out
   })
 
   // Distinct deck categories (with counts) for the Category filter dropdown.
@@ -171,20 +244,20 @@ app.whenReady().then(() => {
     }
   })
 
-  // Copy the render's WebP FILE to the clipboard — TalkWeaver's paste reads an image/webp file
-  // item and keeps it as-is (no PNG round-trip). macOS file pasteboard via osascript.
+  // Copy an image FILE (WebP) to the clipboard — TalkWeaver's paste reads an image/webp file item
+  // and keeps it as-is (no PNG round-trip). Resolves the file from its thumbnail URL, so the same
+  // path works for archive renders, well images, and vault images. macOS file pasteboard via osascript.
   const copyFileToClipboard = (abs: string): Promise<boolean> =>
     new Promise((resolve) =>
       execFile('osascript', ['-e', `set the clipboard to POSIX file ${JSON.stringify(abs)}`], (err) => resolve(!err))
     )
-  ipcMain.handle('clipboard:copy-image', async (_e, deck: string, slideOrder: number | null) => {
-    const abs = renderPath(archiveRoot(), deck, slideOrder)
-    if (!abs) return false
-    return copyFileToClipboard(abs)
+  ipcMain.handle('clipboard:copy-image', async (_e, thumbUrl: string) => {
+    const abs = resolveSwUrl(thumbUrl)
+    return abs ? copyFileToClipboard(abs) : false
   })
-  // Copy as a PNG raster bitmap (for Keynote / Slack / web that want a pasted image, not a webp file).
-  ipcMain.handle('clipboard:copy-image-png', async (_e, deck: string, slideOrder: number | null) => {
-    const abs = renderPath(archiveRoot(), deck, slideOrder)
+  // Copy as a PNG raster bitmap (for Keynote / Slack / web that want a pasted image, not a file).
+  ipcMain.handle('clipboard:copy-image-png', async (_e, thumbUrl: string) => {
+    const abs = resolveSwUrl(thumbUrl)
     if (!abs) return false
     try {
       const img = abs.toLowerCase().endsWith('.webp')
@@ -198,20 +271,66 @@ app.whenReady().then(() => {
     }
   })
 
-  // Reveal a slide's render in Finder ("Open containing deck").
-  ipcMain.handle('shell:reveal', (_e, deck: string, slideOrder: number | null) => {
-    const abs = renderPath(archiveRoot(), deck, slideOrder)
+  // Reveal an image in Finder ("open containing deck/folder").
+  ipcMain.handle('shell:reveal', (_e, thumbUrl: string) => {
+    const abs = resolveSwUrl(thumbUrl)
     if (!abs) return false
     shell.showItemInFolder(abs)
     return true
   })
 
+  // --- well / import paths ---
+  ipcMain.handle('settings:choose-vault', async () => {
+    const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+    if (r.canceled || !r.filePaths[0]) return null
+    writeConfig({ vaultRoot: r.filePaths[0] })
+    return r.filePaths[0]
+  })
+  // Re-scan the TalkWeaver vault for new images and index them; returns count added.
+  ipcMain.handle('well:scan-vault', async () => {
+    const vr = detectVaultRoot()
+    if (!vr) return 0
+    try {
+      return await scanVault(archiveRoot(), wellRootResolved(), vr)
+    } catch {
+      return 0
+    }
+  })
+
+  void startWell()
   createWindow()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
+
+// On launch: ensure the well exists, drain anything Raycast dropped while we were closed, index
+// new TalkWeaver vault images, and watch the inbox so future drops ingest live.
+async function startWell(): Promise<void> {
+  try {
+    const root = wellRootResolved()
+    await ensureWell(root)
+    await drainInbox(archiveRoot(), root)
+    const vr = detectVaultRoot()
+    if (vr) void scanVault(archiveRoot(), root, vr)
+    const inbox = join(root, '_inbox')
+    let busy = false
+    fsWatch(inbox, async () => {
+      if (busy) return
+      busy = true
+      setTimeout(async () => {
+        try {
+          await drainInbox(archiveRoot(), root)
+        } finally {
+          busy = false
+        }
+      }, 400)
+    })
+  } catch {
+    /* well unavailable (e.g. archive root missing) — search just shows no well results */
+  }
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()

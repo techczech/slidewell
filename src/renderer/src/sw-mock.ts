@@ -11,15 +11,20 @@ export function installMock(): void {
       slideStructure: async () => null,
       copyImage: async () => false,
       copyImagePng: async () => false,
-      reveal: async () => false
+      reveal: async () => false,
+      scanVault: async () => 0
     },
     settings: {
       getPaths: async () => ({
         archiveRoot: null,
         archiveDefault: '~/gitrepos/05_ppt-tools/ppt-archive',
-        archiveAvailable: false
+        archiveAvailable: false,
+        wellRoot: '~/gitrepos/05_ppt-tools/ppt-archive/well',
+        vaultRoot: null,
+        vaultAvailable: false
       }),
-      chooseArchive: async () => null
+      chooseArchive: async () => null,
+      chooseVault: async () => null
     },
     shell: {
       openPath: async () => false,

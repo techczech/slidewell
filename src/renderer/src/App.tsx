@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount } from '../../preload'
 
-const DEFAULT_FILTERS: SearchFilters = { owner: 'mine', era: 'all', category: '', role: 'content', cluster: true }
+const DEFAULT_FILTERS: SearchFilters = { owner: 'mine', era: 'all', category: '', role: 'content', cluster: true, scope: 'all' }
 
 const ERA_OPTIONS: { value: string; label: string }[] = [
   { value: 'all', label: 'All dates' },
@@ -85,13 +85,13 @@ export default function App(): JSX.Element {
   )
   const copyImage = useCallback(
     async (h: SlideResult) => {
-      setToast((await window.sw.archive.copyImage(h.deck, h.slideOrder)) ? 'Copied WebP (for TalkWeaver)' : 'No image to copy')
+      setToast((await window.sw.archive.copyImage(h.thumbUrl)) ? 'Copied WebP (for TalkWeaver)' : 'No image to copy')
     },
     [setToast]
   )
   const copyImagePng = useCallback(
     async (h: SlideResult) => {
-      setToast((await window.sw.archive.copyImagePng(h.deck, h.slideOrder)) ? 'Copied PNG' : 'No image to copy')
+      setToast((await window.sw.archive.copyImagePng(h.thumbUrl)) ? 'Copied PNG' : 'No image to copy')
     },
     [setToast]
   )
@@ -105,7 +105,7 @@ export default function App(): JSX.Element {
   )
   const reveal = useCallback(
     async (h: SlideResult) => {
-      setToast((await window.sw.archive.reveal(h.deck, h.slideOrder)) ? 'Revealed in Finder' : 'No file on disk')
+      setToast((await window.sw.archive.reveal(h.thumbUrl)) ? 'Revealed in Finder' : 'No file on disk')
     },
     [setToast]
   )
@@ -123,9 +123,9 @@ export default function App(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   }, [lightbox])
 
-  // The backend only searches on a query (≥2 chars) OR a date/category filter — owner/role just
-  // narrow. So the "type to search" prompt shows exactly when none of those is active.
-  const idle = !debounced && filters.era === 'all' && filters.category === ''
+  // The backend searches on a query (≥2 chars) OR a date/category filter — owner/role just narrow.
+  // The Well tab always browses (no query needed). So "type to search" shows only when none apply.
+  const idle = !debounced && filters.era === 'all' && filters.category === '' && filters.scope !== 'well'
 
   return (
     <div className="app" onClick={() => menu && setMenu(null)}>
@@ -147,6 +147,22 @@ export default function App(): JSX.Element {
       </div>
 
       <div className="filterbar">
+        <label className="filter">
+          <span className="filter-label">Source</span>
+          <div className="scope" role="tablist" aria-label="Source scope">
+            {(['all', 'archive', 'well'] as const).map((s) => (
+              <button
+                key={s}
+                role="tab"
+                aria-selected={filters.scope === s}
+                className={filters.scope === s ? 'scope-tab active' : 'scope-tab'}
+                onClick={() => patch({ scope: s })}
+              >
+                {s === 'all' ? 'All' : s === 'archive' ? 'Archive' : 'Well'}
+              </button>
+            ))}
+          </div>
+        </label>
         <Select label="Owner" value={filters.owner} onChange={(v) => patch({ owner: v as SearchFilters['owner'] })}
           options={[
             { value: 'mine', label: 'My decks' },
@@ -174,7 +190,11 @@ export default function App(): JSX.Element {
         ) : loading ? (
           <div className="results-head">searching…</div>
         ) : clusters.length === 0 ? (
-          <Empty title={debounced ? `No matches for “${debounced}”.` : 'No matches for these filters.'} sub="Try a different term or widen the filters." />
+          filters.scope === 'well' && !debounced ? (
+            <Empty title="Your well is empty." sub="Stash a screenshot via the Raycast hotkey, or it fills automatically from images you use in TalkWeaver." />
+          ) : (
+            <Empty title={debounced ? `No matches for “${debounced}”.` : 'No matches for these filters.'} sub="Try a different term or widen the filters." />
+          )
         ) : (
           <>
             <div className="results-head">
@@ -311,7 +331,8 @@ function Card({
   onExpand: () => void
 }): JSX.Element {
   const h = cluster.representative
-  const ocr = h.kind !== 'slide'
+  const isWell = h.kind === 'well-image'
+  const ocr = h.kind === 'ocr-render' || h.kind === 'ocr-image'
   const badge = clusterBadge(cluster)
   const foot = [h.filename || h.deck, h.slideOrder !== null ? `#${h.slideOrder}` : '', h.date ? h.date.slice(0, 10) : '', h.category]
     .filter(Boolean)
@@ -324,7 +345,7 @@ function Card({
         ) : (
           <div className="thumb placeholder" aria-hidden />
         )}
-        {ocr && <span className="ocr-tag">OCR</span>}
+        {isWell ? <span className="ocr-tag well">WELL</span> : ocr ? <span className="ocr-tag">OCR</span> : null}
         <button
           className="more"
           title="Actions"

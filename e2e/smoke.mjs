@@ -50,8 +50,8 @@ try {
     lightboxOpened = (await win.locator('.lightbox').count()) === 1
     if (lightboxOpened) await win.keyboard.press('Escape')
 
-    // filter re-runs the query: switch Date to 2024
-    await win.selectOption('.filterbar .filter:nth-child(2) select', '2024')
+    // filter re-runs the query: switch Date (2nd select: Owner, Date, Category, Slides) to 2024
+    await win.locator('.filterbar select').nth(1).selectOption('2024')
     await win.waitForTimeout(1200)
     const after = await win.locator('main .grid .card').count()
     filterReran = after !== cardCount || after >= 0 // re-queried without crashing
