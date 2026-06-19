@@ -91,6 +91,19 @@ const api = {
   shell: {
     openPath: (path: string): Promise<boolean> => ipcRenderer.invoke('shell:open-path', path),
     openExternal: (url: string): Promise<boolean> => ipcRenderer.invoke('shell:open-external', url)
+  },
+  ingest: {
+    // Run Core A's pipeline over the configured archive roots (crawl → extract → render → OCR).
+    pending: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('ingest:pending'),
+    // Pick a .pptx or a folder, extract + OCR just those.
+    importPath: (): Promise<{ ok: boolean; cancelled?: boolean }> => ipcRenderer.invoke('ingest:import-path'),
+    cancel: (): Promise<boolean> => ipcRenderer.invoke('ingest:cancel'),
+    // Subscribe to streamed progress lines; returns an unsubscribe function.
+    onLine: (cb: (line: string) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, line: string): void => cb(line)
+      ipcRenderer.on('ingest:line', handler)
+      return () => ipcRenderer.removeListener('ingest:line', handler)
+    }
   }
 }
 

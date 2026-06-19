@@ -29,6 +29,8 @@ export default function App(): JSX.Element {
   const [expanded, setExpanded] = useState<SlideClusterResult | null>(null)
   const [details, setDetails] = useState<SlideResult | null>(null)
   const [deckView, setDeckView] = useState<{ title: string; slides: SlideResult[] } | null>(null)
+  const [showImport, setShowImport] = useState(false)
+  const [refreshKey, setRefreshKey] = useState(0)
   const reqId = useRef(0)
   const toastTimer = useRef<ReturnType<typeof setTimeout>>()
 
@@ -62,7 +64,7 @@ export default function App(): JSX.Element {
       setClusters(res)
       setLoading(false)
     })
-  }, [debounced, filters])
+  }, [debounced, filters, refreshKey])
 
   const reps = useMemo(() => clusters.map((c) => c.representative), [clusters])
 
@@ -184,6 +186,9 @@ export default function App(): JSX.Element {
         >
           ▸ Group near-identical
         </button>
+        <button className="toggle import-btn" onClick={() => setShowImport(true)} title="Import PowerPoint into the archive">
+          ⤓ Import…
+        </button>
       </div>
 
       <main className="results">
@@ -300,7 +305,52 @@ export default function App(): JSX.Element {
         />
       )}
 
+      {showImport && <ImportPanel onClose={() => setShowImport(false)} onDone={() => setRefreshKey((k) => k + 1)} />}
+
       {toast && <div className="toast">{toast}</div>}
+    </div>
+  )
+}
+
+function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => void }): JSX.Element {
+  const [lines, setLines] = useState<string[]>([])
+  const [running, setRunning] = useState(false)
+  const logRef = useRef<HTMLPreElement>(null)
+  useEffect(() => window.sw.ingest.onLine((l) => setLines((prev) => [...prev, l])), [])
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+  }, [lines])
+  async function run(fn: () => Promise<{ ok: boolean }>): Promise<void> {
+    setRunning(true)
+    const r = await fn()
+    setRunning(false)
+    if (r.ok) onDone()
+  }
+  return (
+    <div className="overlay" onClick={running ? undefined : onClose}>
+      <div className="modal import" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <b>Import PowerPoint into the archive</b>
+          <button className="copyref" onClick={onClose} disabled={running}>close ✕</button>
+        </div>
+        <div className="import-actions">
+          <button className="primary-btn" disabled={running} onClick={() => run(() => window.sw.ingest.pending())}>
+            Ingest pending (whole archive)
+          </button>
+          <button className="primary-btn" disabled={running} onClick={() => run(() => window.sw.ingest.importPath())}>
+            Import a file or folder…
+          </button>
+          {running && (
+            <button className="copyref" onClick={() => void window.sw.ingest.cancel()}>
+              Cancel
+            </button>
+          )}
+        </div>
+        <pre className="import-log" ref={logRef}>
+          {lines.join('\n') || 'Extraction + OCR run via Core A (ppt-archive); progress streams here. Re-running is safe — done decks are skipped.'}
+        </pre>
+        {running && <div className="results-head">running in the background — you can keep searching</div>}
+      </div>
     </div>
   )
 }

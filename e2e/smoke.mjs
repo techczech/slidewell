@@ -19,7 +19,7 @@ try {
   // filter bar: Owner/Date/Slides native selects (3) + searchable Category + Group toggle + Source scope
   const filterSelects = await win.locator('.filterbar .filter select').count()
   const hasSearchableCategory = (await win.locator('.filterbar .ss-btn').count()) === 1
-  const hasToggle = (await win.locator('.filterbar .toggle').count()) === 1
+  const hasToggle = (await win.locator('.filterbar .toggle', { hasText: 'Group' }).count()) === 1
   const hasScope = (await win.locator('.filterbar .scope-tab').count()) === 3
 
   let browseDefault = 0
@@ -30,6 +30,7 @@ try {
   let hasContext = false
   let lightboxOpened = false
   let filterReran = false
+  let importPanelOk = false
 
   if (archiveConnected) {
     // default browse populates with no query (newest first)
@@ -63,14 +64,20 @@ try {
     await win.waitForTimeout(1200)
     const after = await win.locator('main .grid .card').count()
     filterReran = after >= 0
+
+    // Import panel opens with its two actions + a log (not triggering a real ingest here)
+    await win.locator('.import-btn').click()
+    await win.waitForSelector('.modal.import', { timeout: 4000 })
+    importPanelOk = (await win.locator('.modal.import .primary-btn').count()) === 2 && (await win.locator('.import-log').count()) === 1
+    await win.locator('.modal.import .copyref').click()
   }
 
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
-    (filterSelects === 3 && hasSearchableCategory && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran)
+    (filterSelects === 3 && hasSearchableCategory && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableCategory, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, pass })
+  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableCategory, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, pass })
   await app.close()
   process.exit(pass ? 0 : 2)
 } catch (e) {

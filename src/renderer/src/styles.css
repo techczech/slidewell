@@ -380,6 +380,46 @@ body {
   color: var(--muted);
 }
 
+/* import panel */
+.import-btn {
+  margin-left: auto;
+}
+.modal.import {
+  width: min(720px, 90vw);
+}
+.import-actions {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  margin-bottom: 0.8rem;
+}
+.primary-btn {
+  border: 0;
+  background: var(--oxford);
+  color: #fff;
+  border-radius: 7px;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.primary-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.import-log {
+  background: #1c1a16;
+  color: #e8e2d6;
+  border-radius: 8px;
+  padding: 0.7rem 0.8rem;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 /* slide-number badge in the deck-context view */
 .slide-num {
   position: absolute;
