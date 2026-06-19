@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, watch as fsWatch } 
 import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
-import { searchArchive, slideStructure, type SearchFilters, type EnrichedHit } from './archive'
+import { archiveResults, deckSlides, slideStructure, type SearchFilters, type EnrichedHit } from './archive'
 import { loadDeckMeta, categoryList } from './deckmeta'
 import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, type WellRow } from './well'
 
@@ -204,7 +204,7 @@ app.whenReady().then(() => {
     const out: Array<Record<string, unknown>> = []
     if (scope !== 'well' && archiveAvailable()) {
       try {
-        const clusters = await searchArchive(archiveRoot(), cacheDir(), query ?? '', filters)
+        const clusters = await archiveResults(archiveRoot(), cacheDir(), query ?? '', filters)
         for (const c of clusters) out.push({ representative: toWire(c.representative), members: c.members.map(toWire), size: c.size, deckCount: c.deckCount })
       } catch {
         /* archive search failed → still show well */
@@ -241,6 +241,16 @@ app.whenReady().then(() => {
       return slideStructure(archiveRoot(), deck, slideOrder)
     } catch {
       return null
+    }
+  })
+
+  // All slides of one presentation, in order — for "See in context".
+  ipcMain.handle('archive:deck-slides', async (_e, deck: string) => {
+    if (!archiveAvailable()) return []
+    try {
+      return (await deckSlides(archiveRoot(), cacheDir(), deck)).map(toWire)
+    } catch {
+      return []
     }
   })
 

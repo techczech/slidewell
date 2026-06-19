@@ -28,6 +28,7 @@ export default function App(): JSX.Element {
   const [lightbox, setLightbox] = useState<{ list: SlideResult[]; index: number } | null>(null)
   const [expanded, setExpanded] = useState<SlideClusterResult | null>(null)
   const [details, setDetails] = useState<SlideResult | null>(null)
+  const [deckView, setDeckView] = useState<{ title: string; slides: SlideResult[] } | null>(null)
   const reqId = useRef(0)
   const toastTimer = useRef<ReturnType<typeof setTimeout>>()
 
@@ -123,10 +124,6 @@ export default function App(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   }, [lightbox])
 
-  // The backend searches on a query (≥2 chars) OR a date/category filter — owner/role just narrow.
-  // The Well tab always browses (no query needed). So "type to search" shows only when none apply.
-  const idle = !debounced && filters.era === 'all' && filters.category === '' && filters.scope !== 'well'
-
   return (
     <div className="app" onClick={() => menu && setMenu(null)}>
       <header className="titlebar">
@@ -171,8 +168,13 @@ export default function App(): JSX.Element {
             { value: 'unknown', label: 'Unattributed' }
           ]} />
         <Select label="Date" value={filters.era} onChange={(v) => patch({ era: v })} options={ERA_OPTIONS} />
-        <Select label="Category" value={filters.category} onChange={(v) => patch({ category: v })}
-          options={[{ value: '', label: 'All categories' }, ...categories.map((c) => ({ value: c.category, label: `${c.category} (${c.count})` }))]} />
+        <SearchableSelect
+          label="Category"
+          value={filters.category}
+          allLabel="All categories"
+          options={categories.map((c) => ({ value: c.category, label: c.category, count: c.count }))}
+          onChange={(v) => patch({ category: v })}
+        />
         <Select label="Slides" value={filters.role} onChange={(v) => patch({ role: v as SearchFilters['role'] })}
           options={[{ value: 'content', label: 'Content only' }, { value: 'all', label: 'Incl. structural' }]} />
         <button
@@ -185,21 +187,20 @@ export default function App(): JSX.Element {
       </div>
 
       <main className="results">
-        {idle ? (
-          <Empty title="Search 40,000 slides and their images." sub="Type a query, or pick a Date/Category filter. Power tokens: year:2024 · after:2023 · deck:roundup · cat:mondai · owner:all" />
-        ) : loading ? (
-          <div className="results-head">searching…</div>
+        {loading ? (
+          <div className="results-head">loading…</div>
         ) : clusters.length === 0 ? (
-          filters.scope === 'well' && !debounced ? (
+          filters.scope === 'well' ? (
             <Empty title="Your well is empty." sub="Stash a screenshot via the Raycast hotkey, or it fills automatically from images you use in TalkWeaver." />
           ) : (
-            <Empty title={debounced ? `No matches for “${debounced}”.` : 'No matches for these filters.'} sub="Try a different term or widen the filters." />
+            <Empty title={debounced ? `No matches for “${debounced}”.` : 'No slides match these filters.'} sub="Try a different term or widen the filters." />
           )
         ) : (
           <>
             <div className="results-head">
-              {clusters.length} result{clusters.length === 1 ? '' : 's'}
-              {debounced ? ` for “${debounced}”` : ''}
+              {debounced
+                ? `${clusters.length} result${clusters.length === 1 ? '' : 's'} for “${debounced}”`
+                : `${clusters.length} slide${clusters.length === 1 ? '' : 's'} — newest first`}
               {filters.cluster ? ' · grouped' : ''}
             </div>
             <div className="grid">
@@ -249,6 +250,11 @@ export default function App(): JSX.Element {
             else if (action === 'reveal') void reveal(h)
             else if (action === 'expand') setExpanded(menu.cluster)
             else if (action === 'details') setDetails(h)
+            else if (action === 'context')
+              void window.sw.archive.deckSlides(h.deck).then((slides) => {
+                if (slides.length) setDeckView({ title: h.deckTitle || h.deck, slides })
+                else setToast('No deck context found')
+              })
           }}
         />
       )}
@@ -285,7 +291,52 @@ export default function App(): JSX.Element {
         />
       )}
 
+      {deckView && (
+        <DeckModal
+          title={deckView.title}
+          slides={deckView.slides}
+          onClose={() => setDeckView(null)}
+          onOpen={(idx) => setLightbox({ list: deckView.slides, index: idx })}
+        />
+      )}
+
       {toast && <div className="toast">{toast}</div>}
+    </div>
+  )
+}
+
+function DeckModal({
+  title,
+  slides,
+  onClose,
+  onOpen
+}: {
+  title: string
+  slides: SlideResult[]
+  onClose: () => void
+  onOpen: (index: number) => void
+}): JSX.Element {
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <b>{title}</b> — {slides.length} slide{slides.length === 1 ? '' : 's'} in order
+          <button className="copyref" onClick={onClose}>close ✕</button>
+        </div>
+        <div className="grid">
+          {slides.map((m, i) => (
+            <div className="card" key={`${m.deck}-${m.slideOrder}-${i}`}>
+              <div className="thumb-wrap" onClick={() => onOpen(i)} title="Open full size">
+                {m.thumbUrl ? <img className="thumb" src={m.thumbUrl} alt="" loading="lazy" /> : <div className="thumb placeholder" />}
+                <span className="slide-num">{m.slideOrder !== null ? m.slideOrder + 1 : i + 1}</span>
+              </div>
+              <div className="meta">
+                <div className="card-title" title={m.title}>{m.title}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }
@@ -309,6 +360,60 @@ function Select({
           <option key={o.value} value={o.value}>{o.label}</option>
         ))}
       </select>
+    </label>
+  )
+}
+
+function SearchableSelect({
+  label,
+  value,
+  allLabel,
+  options,
+  onChange
+}: {
+  label: string
+  value: string
+  allLabel: string
+  options: { value: string; label: string; count?: number }[]
+  onChange: (v: string) => void
+}): JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [q, setQ] = useState('')
+  const current = value || allLabel
+  const filtered = q ? options.filter((o) => o.label.toLowerCase().includes(q.toLowerCase())) : options
+  function pick(v: string): void {
+    onChange(v)
+    setOpen(false)
+    setQ('')
+  }
+  return (
+    <label className="filter">
+      <span className="filter-label">{label}</span>
+      <div className="ss">
+        <button className="ss-btn" title={current} onClick={() => setOpen((o) => !o)}>
+          <span className="ss-cur">{current}</span> ▾
+        </button>
+        {open && (
+          <>
+            <div className="menu-scrim" onClick={() => setOpen(false)} />
+            <div className="ss-pop" onClick={(e) => e.stopPropagation()}>
+              <input className="ss-search" autoFocus placeholder="Filter categories…" value={q} onChange={(e) => setQ(e.target.value)} />
+              <div className="ss-list">
+                <button className={value === '' ? 'ss-item active' : 'ss-item'} onClick={() => pick('')}>
+                  {allLabel}
+                </button>
+                {filtered.map((o) => (
+                  <button key={o.value} className={o.value === value ? 'ss-item active' : 'ss-item'} onClick={() => pick(o.value)}>
+                    {o.label}
+                    {o.count !== undefined ? ` (${o.count})` : ''}
+                  </button>
+                ))}
+                {filtered.length === 0 && <div className="ss-empty">no match</div>}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
     </label>
   )
 }
@@ -368,7 +473,7 @@ function Card({
   )
 }
 
-type ActionId = 'fullsize' | 'copy-image' | 'copy-image-png' | 'copy-text' | 'copy-structure' | 'copy-ref' | 'reveal' | 'expand' | 'details'
+type ActionId = 'fullsize' | 'copy-image' | 'copy-image-png' | 'copy-text' | 'copy-structure' | 'copy-ref' | 'reveal' | 'expand' | 'details' | 'context'
 
 function ContextMenu({
   cluster,
@@ -383,15 +488,17 @@ function ContextMenu({
   onClose: () => void
   onAction: (a: ActionId) => void
 }): JSX.Element {
+  const isWell = cluster.representative.kind === 'well-image'
   const items: { id: ActionId; label: string }[] = [
     { id: 'fullsize', label: 'Open full size' },
     { id: 'copy-image', label: 'Copy image (WebP → TalkWeaver)' },
     { id: 'copy-image-png', label: 'Copy as PNG' },
     { id: 'copy-text', label: 'Copy text' },
-    { id: 'copy-structure', label: 'Copy structure (JSON)' },
+    ...(isWell ? [] : [{ id: 'copy-structure' as ActionId, label: 'Copy structure (JSON)' }]),
     { id: 'copy-ref', label: 'Copy reference' },
     { id: 'reveal', label: 'Reveal in Finder' },
     ...(cluster.size > 1 ? [{ id: 'expand' as ActionId, label: `Expand cluster (${cluster.size})` }] : []),
+    ...(isWell ? [] : [{ id: 'context' as ActionId, label: 'See in context (whole deck)' }]),
     { id: 'details', label: 'Show details' }
   ]
   // keep the menu on-screen

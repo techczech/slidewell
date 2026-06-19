@@ -65,6 +65,8 @@ const api = {
     // The structured content (presentation.json node) of one slide — for "Copy structure".
     slideStructure: (deck: string, slideOrder: number | null): Promise<string | null> =>
       ipcRenderer.invoke('archive:slide-structure', deck, slideOrder),
+    // All slides of one presentation, in order — for "See in context".
+    deckSlides: (deck: string): Promise<SlideResult[]> => ipcRenderer.invoke('archive:deck-slides', deck),
     // Copy an image FILE (WebP) to the clipboard (TalkWeaver keeps it as-is). Pass the hit's thumbUrl.
     copyImage: (thumbUrl: string | null): Promise<boolean> => ipcRenderer.invoke('clipboard:copy-image', thumbUrl),
     // Copy as a PNG raster bitmap (for Keynote / Slack / web). Pass the hit's thumbUrl.
