@@ -22,7 +22,7 @@ export type ImageNode = {
 
 // Search result shapes (the main process resolves render paths to swarchive:// URLs).
 export type SlideResult = {
-  kind: 'slide' | 'ocr-render' | 'ocr-image'
+  kind: 'slide' | 'ocr-render' | 'ocr-image' | 'well-image'
   title: string
   snippet: string
   text: string
@@ -49,6 +49,7 @@ export type SearchFilters = {
   category: string // '' = all categories
   role: 'content' | 'all'
   cluster: boolean
+  scope: 'all' | 'archive' | 'well'
 }
 export type CategoryCount = { category: string; count: number }
 
@@ -64,23 +65,26 @@ const api = {
     // The structured content (presentation.json node) of one slide — for "Copy structure".
     slideStructure: (deck: string, slideOrder: number | null): Promise<string | null> =>
       ipcRenderer.invoke('archive:slide-structure', deck, slideOrder),
-    // Copy the render's WebP file to the clipboard (TalkWeaver keeps it as-is, no PNG round-trip).
-    copyImage: (deck: string, slideOrder: number | null): Promise<boolean> =>
-      ipcRenderer.invoke('clipboard:copy-image', deck, slideOrder),
-    // Copy as a PNG raster bitmap (for Keynote / Slack / web).
-    copyImagePng: (deck: string, slideOrder: number | null): Promise<boolean> =>
-      ipcRenderer.invoke('clipboard:copy-image-png', deck, slideOrder),
-    // Reveal a slide's render in Finder ("open containing deck").
-    reveal: (deck: string, slideOrder: number | null): Promise<boolean> =>
-      ipcRenderer.invoke('shell:reveal', deck, slideOrder)
+    // Copy an image FILE (WebP) to the clipboard (TalkWeaver keeps it as-is). Pass the hit's thumbUrl.
+    copyImage: (thumbUrl: string | null): Promise<boolean> => ipcRenderer.invoke('clipboard:copy-image', thumbUrl),
+    // Copy as a PNG raster bitmap (for Keynote / Slack / web). Pass the hit's thumbUrl.
+    copyImagePng: (thumbUrl: string | null): Promise<boolean> => ipcRenderer.invoke('clipboard:copy-image-png', thumbUrl),
+    // Reveal an image in Finder. Pass the hit's thumbUrl.
+    reveal: (thumbUrl: string | null): Promise<boolean> => ipcRenderer.invoke('shell:reveal', thumbUrl),
+    // Re-scan the TalkWeaver vault for new images; returns count added.
+    scanVault: (): Promise<number> => ipcRenderer.invoke('well:scan-vault')
   },
   settings: {
     getPaths: (): Promise<{
       archiveRoot: string | null
       archiveDefault: string
       archiveAvailable: boolean
+      wellRoot: string
+      vaultRoot: string | null
+      vaultAvailable: boolean
     }> => ipcRenderer.invoke('settings:get-paths'),
-    chooseArchive: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-archive')
+    chooseArchive: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-archive'),
+    chooseVault: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-vault')
   },
   shell: {
     openPath: (path: string): Promise<boolean> => ipcRenderer.invoke('shell:open-path', path),

@@ -351,6 +351,7 @@ export interface SearchFilters {
   category: string
   role: 'content' | 'all'
   cluster: boolean
+  scope: 'all' | 'archive' | 'well'
 }
 
 export async function searchArchive(
