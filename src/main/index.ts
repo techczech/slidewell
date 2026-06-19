@@ -9,6 +9,7 @@ import { resolve as resolvePath, sep as pathSep } from 'path'
 import { archiveResults, deckSlides, slideStructure, type SearchFilters, type EnrichedHit } from './archive'
 import { loadDeckMeta, categoryList } from './deckmeta'
 import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, type WellRow } from './well'
+import { runIngest, cancelIngest, detectPython } from './ingest'
 
 // Custom schemes must be registered as privileged BEFORE app ready so the renderer treats them
 // as standard secure schemes (CSP img-src matching, no mixed-content blocking). SlideWell mirrors
@@ -25,6 +26,7 @@ type Config = {
   archiveRoot?: string
   wellRoot?: string
   vaultRoot?: string
+  pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
 function configPath(): string {
@@ -83,6 +85,8 @@ function allowedRoots(): string[] {
   return [archiveRoot(), wellRootResolved(), detectVaultRoot()].filter((r): r is string => Boolean(r))
 }
 
+let mainWindow: BrowserWindow | null = null
+
 function createWindow(): BrowserWindow {
   const bounds = readConfig().windowBounds ?? { width: 1400, height: 900 }
   const win = new BrowserWindow({
@@ -109,6 +113,7 @@ function createWindow(): BrowserWindow {
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+  mainWindow = win
   return win
 }
 
@@ -305,6 +310,26 @@ app.whenReady().then(() => {
     } catch {
       return 0
     }
+  })
+
+  // --- archive ingest (Core A pipeline as streamed subprocesses) ---
+  const sendLine = (s: string): void => mainWindow?.webContents.send('ingest:line', s)
+  const python = (): string => detectPython(readConfig().pythonPath)
+  ipcMain.handle('ingest:pending', async () => {
+    if (!archiveAvailable()) return { ok: false }
+    return runIngest({ archiveRoot: archiveRoot(), python: python(), mode: 'pending' }, sendLine)
+  })
+  ipcMain.handle('ingest:import-path', async () => {
+    const r = await dialog.showOpenDialog({
+      properties: ['openFile', 'openDirectory'],
+      filters: [{ name: 'PowerPoint', extensions: ['pptx', 'ppt'] }]
+    })
+    if (r.canceled || !r.filePaths[0]) return { ok: false, cancelled: true }
+    return runIngest({ archiveRoot: archiveRoot(), python: python(), mode: 'path', targetPath: r.filePaths[0] }, sendLine)
+  })
+  ipcMain.handle('ingest:cancel', () => {
+    cancelIngest()
+    return true
   })
 
   void startWell()

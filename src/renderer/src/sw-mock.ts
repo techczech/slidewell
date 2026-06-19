@@ -30,6 +30,12 @@ export function installMock(): void {
     shell: {
       openPath: async () => false,
       openExternal: async () => false
+    },
+    ingest: {
+      pending: async () => ({ ok: false }),
+      importPath: async () => ({ ok: false }),
+      cancel: async () => true,
+      onLine: () => () => {}
     }
   }
   ;(window as unknown as { sw: SwApi }).sw = mock
