@@ -20,7 +20,7 @@ try {
   const filterSelects = await win.locator('.filterbar .filter select').count()
   const hasSearchableCategory = (await win.locator('.filterbar .ss-btn').count()) === 1
   const hasToggle = (await win.locator('.filterbar .toggle', { hasText: 'Group' }).count()) === 1
-  const hasScope = (await win.locator('.filterbar .scope-tab').count()) === 3
+  const hasScope = (await win.locator('.filterbar [aria-label="Source scope"] .scope-tab').count()) === 3
 
   let browseDefault = 0
   let cardCount = 0
@@ -32,6 +32,9 @@ try {
   let filterReran = false
   let importPanelOk = false
   let contextFilterOk = false
+  let imagesTypeOk = false
+  let imgCards = 0
+  let imgTags = 0
 
   if (archiveConnected) {
     // default browse populates with no query (newest first)
@@ -79,14 +82,23 @@ try {
     await win.waitForTimeout(1000)
     contextFilterOk = (await win.locator('.context-banner').count()) === 1 && (await win.locator('main .grid .card').count()) > 0
     if (contextFilterOk) await win.locator('.context-banner .link').click()
+
+    // Type = Images: extracted images (separate from slides), tagged IMG
+    await win.fill('.search-input', '')
+    await win.waitForTimeout(500)
+    await win.locator('.filterbar .scope-tab', { hasText: 'Images' }).click()
+    await win.waitForTimeout(2500)
+    imgCards = await win.locator('main .grid .card').count()
+    imgTags = await win.locator('main .ocr-tag.img').count()
+    imagesTypeOk = imgCards > 0 && imgTags > 0
   }
 
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
-    (filterSelects === 3 && hasSearchableCategory && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk)
+    (filterSelects === 3 && hasSearchableCategory && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && imagesTypeOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableCategory, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, pass })
+  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableCategory, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, imagesTypeOk, imgCards, imgTags, pass })
   await app.close()
   process.exit(pass ? 0 : 2)
 } catch (e) {
