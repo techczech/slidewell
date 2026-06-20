@@ -98,9 +98,12 @@ const api = {
     deckDetail: (pid: string): Promise<DeckDetail | null> => ipcRenderer.invoke('archive:deck-detail', pid),
     // Stats bundle (timeline of "my" PowerPoint history).
     stats: (): Promise<Stats | null> => ipcRenderer.invoke('archive:stats'),
-    // The structured content (presentation.json node) of one slide — for "Copy structure".
+    // The structured content (presentation.json node) of one slide — for "Copy structure" / inspector JSON.
     slideStructure: (deck: string, slideOrder: number | null): Promise<string | null> =>
       ipcRenderer.invoke('archive:slide-structure', deck, slideOrder),
+    // The embedded image assets on one slide (for the inspector).
+    slideImages: (deck: string, slideOrder: number | null): Promise<Array<{ sha: string; thumbUrl: string | null }>> =>
+      ipcRenderer.invoke('archive:slide-images', deck, slideOrder),
     // All slides of one presentation, in order — for "See in context".
     deckSlides: (deck: string): Promise<SlideResult[]> => ipcRenderer.invoke('archive:deck-slides', deck),
     // Copy an image FILE (WebP) to the clipboard (TalkWeaver keeps it as-is). Pass the hit's thumbUrl.

@@ -121,6 +121,42 @@ body {
   color: var(--muted);
   margin-bottom: 0.6rem;
 }
+.inspector-section {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-top: 0.9rem;
+  font-weight: 700;
+}
+.inspector-assets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 0.4rem;
+}
+.inspector-asset {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #ece5d6;
+}
+.inspector-json {
+  margin-top: 0.4rem;
+  background: #1c1a16;
+  color: #e8e2d6;
+  border-radius: 6px;
+  padding: 0.6rem;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, Menlo, monospace;
+}
 .help-modal {
   width: min(440px, 90vw);
 }

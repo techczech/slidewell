@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, watch as fsWatch } 
 import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
-import { archiveResults, deckSlides, slideStructure, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
+import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
 import { loadDeckMeta, categoryList, type DeckMetaIndex } from './deckmeta'
 import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, type WellRow } from './well'
 import { runIngest, cancelIngest, detectPython } from './ingest'
@@ -331,6 +331,16 @@ app.whenReady().then(() => {
       return slideStructure(archiveRoot(), deck, slideOrder)
     } catch {
       return null
+    }
+  })
+
+  // The embedded image assets on one slide → renderable swarchive:// thumbnails (for the inspector).
+  ipcMain.handle('archive:slide-images', async (_e, deck: string, slideOrder: number | null) => {
+    if (!archiveAvailable()) return []
+    try {
+      return (await slideImages(archiveRoot(), deck, slideOrder)).map((im) => ({ sha: im.sha, thumbUrl: swThumb(im.absPath) }))
+    } catch {
+      return []
     }
   })
 
