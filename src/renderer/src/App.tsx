@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount } from '../../preload'
+import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo } from '../../preload'
 
-const DEFAULT_FILTERS: SearchFilters = { owner: 'mine', era: 'all', category: '', role: 'content', cluster: true, scope: 'all', type: 'slides' }
+type SortKey = 'date-desc' | 'date-asc' | 'title'
+
+const DEFAULT_FILTERS: SearchFilters = { owner: 'mine', era: 'all', category: '', deck: '', role: 'content', cluster: true, scope: 'all', type: 'slides' }
 
 const ERA_OPTIONS: { value: string; label: string }[] = [
   { value: 'all', label: 'All dates' },
@@ -21,6 +23,9 @@ export default function App(): JSX.Element {
   const [archiveOk, setArchiveOk] = useState<boolean | null>(null)
   const [archivePath, setArchivePath] = useState('')
   const [categories, setCategories] = useState<CategoryCount[]>([])
+  const [decks, setDecks] = useState<DeckInfo[]>([])
+  const [sort, setSort] = useState<SortKey>('date-desc')
+  const [groupByDeck, setGroupByDeck] = useState(false)
   const [clusters, setClusters] = useState<SlideClusterResult[]>([])
   const [loading, setLoading] = useState(false)
   const [toast, setToastMsg] = useState<string | null>(null)
@@ -53,7 +58,10 @@ export default function App(): JSX.Element {
       const paths = await window.sw.settings.getPaths()
       setArchiveOk(paths.archiveAvailable)
       setArchivePath(paths.archiveRoot ?? paths.archiveDefault)
-      if (paths.archiveAvailable) setCategories(await window.sw.archive.categories())
+      if (paths.archiveAvailable) {
+        setCategories(await window.sw.archive.categories())
+        setDecks(await window.sw.archive.decks())
+      }
     })()
   }, [])
 
@@ -77,7 +85,45 @@ export default function App(): JSX.Element {
     })
   }, [debounced, filters, refreshKey, deckFilter])
 
-  const reps = useMemo(() => clusters.map((c) => c.representative), [clusters])
+  // Sort + optional group-by-presentation. Nested: groups order by date/title, slides within by number.
+  const view = useMemo(() => {
+    const primary = (a: SlideResult, b: SlideResult): number => {
+      if (sort === 'title') return a.title.localeCompare(b.title)
+      const da = a.date || ''
+      const db = b.date || ''
+      return sort === 'date-asc' ? da.localeCompare(db) : db.localeCompare(da)
+    }
+    if (!groupByDeck) {
+      return { groups: null, flat: [...clusters].sort((x, y) => primary(x.representative, y.representative)) }
+    }
+    const byDeck = new Map<string, SlideClusterResult[]>()
+    for (const c of clusters) {
+      const k = c.representative.deck
+      const arr = byDeck.get(k)
+      if (arr) arr.push(c)
+      else byDeck.set(k, [c])
+    }
+    const groups = [...byDeck.entries()].map(([deck, cs]) => ({
+      deck,
+      title: cs[0].representative.deckTitle || deck,
+      date: cs[0].representative.date,
+      slides: [...cs].sort((a, b) => (a.representative.slideOrder ?? 0) - (b.representative.slideOrder ?? 0))
+    }))
+    groups.sort((a, b) =>
+      sort === 'title'
+        ? a.title.localeCompare(b.title)
+        : sort === 'date-asc'
+          ? String(a.date || '').localeCompare(String(b.date || ''))
+          : String(b.date || '').localeCompare(String(a.date || ''))
+    )
+    return { groups, flat: null }
+  }, [clusters, sort, groupByDeck])
+
+  // representatives in render order, so the lightbox steps through what's shown
+  const orderedReps = useMemo(
+    () => (view.groups ? view.groups.flatMap((g) => g.slides.map((c) => c.representative)) : (view.flat ?? []).map((c) => c.representative)),
+    [view]
+  )
 
   async function chooseArchive(): Promise<void> {
     const picked = await window.sw.settings.chooseArchive()
@@ -207,14 +253,30 @@ export default function App(): JSX.Element {
           options={categories.map((c) => ({ value: c.category, label: c.category, count: c.count }))}
           onChange={(v) => patch({ category: v })}
         />
-        <Select label="Slides" value={filters.role} onChange={(v) => patch({ role: v as SearchFilters['role'] })}
+        <SearchableSelect
+          label="Deck"
+          value={filters.deck}
+          allLabel="All decks"
+          options={decks.map((d) => ({ value: d.title, label: d.title }))}
+          onChange={(v) => patch({ deck: v })}
+        />
+        <Select label="Role" value={filters.role} onChange={(v) => patch({ role: v as SearchFilters['role'] })}
           options={[{ value: 'content', label: 'Content only' }, { value: 'all', label: 'Incl. structural' }]} />
+        <Select label="Sort" value={sort} onChange={(v) => setSort(v as SortKey)}
+          options={[{ value: 'date-desc', label: 'Newest' }, { value: 'date-asc', label: 'Oldest' }, { value: 'title', label: 'Title A–Z' }]} />
         <button
           className={filters.cluster ? 'toggle on' : 'toggle'}
           onClick={() => patch({ cluster: !filters.cluster })}
           title="Collapse near-identical slides into one result"
         >
           ▸ Group near-identical
+        </button>
+        <button
+          className={groupByDeck ? 'toggle on' : 'toggle'}
+          onClick={() => setGroupByDeck((g) => !g)}
+          title="Group results into per-presentation sections (slides ordered by number within each)"
+        >
+          ▦ Group by presentation
         </button>
         <button className="toggle import-btn" onClick={() => setShowImport(true)} title="Import PowerPoint into the archive">
           ⤓ Import…
@@ -243,21 +305,44 @@ export default function App(): JSX.Element {
               <div className="results-head">
                 {debounced
                   ? `${clusters.length} result${clusters.length === 1 ? '' : 's'} for “${debounced}”`
-                  : `${clusters.length} slide${clusters.length === 1 ? '' : 's'} — newest first`}
-                {filters.cluster ? ' · grouped' : ''}
+                  : `${clusters.length} slide${clusters.length === 1 ? '' : 's'}`}
+                {groupByDeck ? ` · ${view.groups?.length ?? 0} presentation${(view.groups?.length ?? 0) === 1 ? '' : 's'}` : ''}
+                {filters.cluster ? ' · near-identical grouped' : ''}
               </div>
             )}
-            <div className="grid">
-              {clusters.map((c, i) => (
-                <Card
-                  key={`${c.representative.deck}-${c.representative.slideOrder}-${i}`}
-                  cluster={c}
-                  onThumb={() => openLightbox(reps, i)}
-                  onMenu={(x, y) => setMenu({ cluster: c, x, y })}
-                  onExpand={() => setExpanded(c)}
-                />
-              ))}
-            </div>
+            {view.groups ? (
+              view.groups.map((g) => (
+                <div className="deck-group" key={g.deck}>
+                  <div className="deck-group-head">
+                    <b>{g.title}</b>
+                    {g.date ? ` · ${g.date.slice(0, 10)}` : ''} · {g.slides.length} slide{g.slides.length === 1 ? '' : 's'}
+                  </div>
+                  <div className="grid">
+                    {g.slides.map((c, j) => (
+                      <Card
+                        key={`${g.deck}-${j}`}
+                        cluster={c}
+                        onThumb={() => openLightbox(orderedReps, orderedReps.indexOf(c.representative))}
+                        onMenu={(x, y) => setMenu({ cluster: c, x, y })}
+                        onExpand={() => setExpanded(c)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="grid">
+                {(view.flat ?? []).map((c, i) => (
+                  <Card
+                    key={`${c.representative.deck}-${c.representative.slideOrder}-${i}`}
+                    cluster={c}
+                    onThumb={() => openLightbox(orderedReps, i)}
+                    onMenu={(x, y) => setMenu({ cluster: c, x, y })}
+                    onExpand={() => setExpanded(c)}
+                  />
+                ))}
+              </div>
+            )}
           </>
         )}
       </main>

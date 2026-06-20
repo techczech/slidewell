@@ -150,6 +150,23 @@ body {
   font-size: inherit;
 }
 
+/* group-by-presentation sections */
+.deck-group {
+  margin-bottom: 1.5rem;
+}
+.deck-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--paper);
+  font-size: 0.82rem;
+  color: var(--oxford);
+  font-weight: 600;
+  padding: 0.35rem 0;
+  margin-bottom: 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+
 /* deck "see in context" banner */
 .context-banner {
   display: flex;

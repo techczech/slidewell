@@ -362,6 +362,7 @@ export interface SearchFilters {
   owner: OwnershipFilter
   era: Era
   category: string
+  deck: string // substring on deck filename/title ('' = any); ANDed with any deck: tokens
   role: 'content' | 'all'
   cluster: boolean
   scope: 'all' | 'archive' | 'well'
@@ -378,16 +379,17 @@ export async function searchArchive(
   const dateFilter = combinedDateFilter(parsed, filters.era)
   const ownerFilter = resolveOwnershipFilter(parsed.owner, filters.owner)
   const categorySubs = [...(filters.category ? [filters.category.toLowerCase()] : []), ...parsed.categorySubstrings]
+  const deckSubs = [...parsed.deckSubstrings, ...(filters.deck ? [filters.deck.toLowerCase()] : [])]
   // owner/role narrow results but never justify a no-text broad search (don't dump the archive);
   // a date/deck/category filter does (mirrors the Raycast rule).
-  const hasFilter = !!dateFilter || parsed.deckSubstrings.length > 0 || categorySubs.length > 0
+  const hasFilter = !!dateFilter || deckSubs.length > 0 || categorySubs.length > 0
   const ftsText = parsed.text.trim()
   // Allow a tokens/filters-only query (e.g. "deck:roundup year:2024") with no free text.
   if (ftsText.length < 2 && !hasFilter) return []
 
   const raw = await searchSlides(root, ftsText.length >= 2 ? ftsText : 'the', 120, filters.role === 'content')
   const index: DeckMetaIndex = loadDeckMeta(root, cacheDir)
-  const filtered = applyFilters(raw, index, dateFilter, parsed.deckSubstrings, ownerFilter, categorySubs).slice(0, 60)
+  const filtered = applyFilters(raw, index, dateFilter, deckSubs, ownerFilter, categorySubs).slice(0, 60)
 
   const enriched: EnrichedHit[] = filtered.map((h) => {
     const m = index[h.deck]
@@ -458,7 +460,7 @@ export async function browseArchive(root: string, cacheDir: string, rawQuery: st
   const dateFilter = combinedDateFilter(parsed, filters.era)
   const ownerFilter = resolveOwnershipFilter(parsed.owner, filters.owner)
   const catSubs = [...(filters.category ? [filters.category.toLowerCase()] : []), ...parsed.categorySubstrings]
-  const deckSubs = parsed.deckSubstrings
+  const deckSubs = [...parsed.deckSubstrings, ...(filters.deck ? [filters.deck.toLowerCase()] : [])]
 
   const pids = Object.keys(index)
     .filter((pid) => {

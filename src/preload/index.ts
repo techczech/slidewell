@@ -47,12 +47,14 @@ export type SearchFilters = {
   owner: 'mine' | 'all' | 'others' | 'unknown'
   era: string // 'all' | 'recent' | 'mid' | 'early' | a year like '2024'
   category: string // '' = all categories
+  deck: string // '' = any deck; else a deck name/substring
   role: 'content' | 'all'
   cluster: boolean
   scope: 'all' | 'archive' | 'well'
   type: 'slides' | 'images'
 }
 export type CategoryCount = { category: string; count: number }
+export type DeckInfo = { id: string; title: string; date: string | null }
 
 const api = {
   archive: {
@@ -63,6 +65,8 @@ const api = {
       ipcRenderer.invoke('archive:search', query, filters),
     // Distinct deck categories (with counts) for the Category filter.
     categories: (): Promise<CategoryCount[]> => ipcRenderer.invoke('archive:categories'),
+    // All decks (newest-first) for the Deck filter picker.
+    decks: (): Promise<DeckInfo[]> => ipcRenderer.invoke('archive:decks'),
     // The structured content (presentation.json node) of one slide — for "Copy structure".
     slideStructure: (deck: string, slideOrder: number | null): Promise<string | null> =>
       ipcRenderer.invoke('archive:slide-structure', deck, slideOrder),
