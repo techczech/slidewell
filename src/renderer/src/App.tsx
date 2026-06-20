@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo } from '../../preload'
+import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail } from '../../preload'
 
 type SortKey = 'date-desc' | 'date-asc' | 'title'
 
@@ -27,6 +27,8 @@ export default function App(): JSX.Element {
   const [sort, setSort] = useState<SortKey>('date-desc')
   const [groupByDeck, setGroupByDeck] = useState(false)
   const [clusters, setClusters] = useState<SlideClusterResult[]>([])
+  const [deckCards, setDeckCards] = useState<DeckCard[]>([])
+  const [selectedDeck, setSelectedDeck] = useState<(DeckDetail & { coverThumbUrl: string | null }) | null>(null)
   const [loading, setLoading] = useState(false)
   const [toast, setToastMsg] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ cluster: SlideClusterResult; x: number; y: number } | null>(null)
@@ -73,16 +75,24 @@ export default function App(): JSX.Element {
   useEffect(() => {
     const id = ++reqId.current
     setLoading(true)
-    const run = deckFilter
-      ? window.sw.archive
-          .deckSlides(deckFilter.pid)
-          .then((slides) => slides.map((s) => ({ representative: s, members: [s], size: 1, deckCount: 1 })))
-      : window.sw.archive.search(debounced, filters)
-    void run.then((res) => {
+    void (async () => {
+      // Deck MODE (browse presentations) — unless we're scoped into one deck via "see in context".
+      if (filters.type === 'decks' && !deckFilter) {
+        const d = await window.sw.archive.listDecks(filters)
+        if (id !== reqId.current) return
+        setDeckCards(d)
+        setClusters([])
+        setLoading(false)
+        return
+      }
+      const res = deckFilter
+        ? (await window.sw.archive.deckSlides(deckFilter.pid)).map((s) => ({ representative: s, members: [s], size: 1, deckCount: 1 }))
+        : await window.sw.archive.search(debounced, filters)
       if (id !== reqId.current) return
+      setDeckCards([])
       setClusters(res)
       setLoading(false)
-    })
+    })()
   }, [debounced, filters, refreshKey, deckFilter])
 
   // Sort + optional group-by-presentation. Nested: groups order by date/title, slides within by number.
@@ -118,6 +128,17 @@ export default function App(): JSX.Element {
     )
     return { groups, flat: null }
   }, [clusters, sort, groupByDeck])
+
+  // deck-mode cards, sorted by the same Sort control
+  const sortedDecks = useMemo(() => {
+    return [...deckCards].sort((a, b) =>
+      sort === 'title'
+        ? a.title.localeCompare(b.title)
+        : sort === 'date-asc'
+          ? String(a.date || '').localeCompare(String(b.date || ''))
+          : String(b.date || '').localeCompare(String(a.date || ''))
+    )
+  }, [deckCards, sort])
 
   // representatives in render order, so the lightbox steps through what's shown
   const orderedReps = useMemo(
@@ -184,7 +205,7 @@ export default function App(): JSX.Element {
   }, [lightbox])
 
   return (
-    <div className="app" onClick={() => menu && setMenu(null)}>
+    <div className={selectedDeck ? 'app has-deck-sidebar' : 'app'} onClick={() => menu && setMenu(null)}>
       <header className="titlebar">
         <span className="wordmark">
           Slide<span className="well">Well</span>
@@ -225,7 +246,7 @@ export default function App(): JSX.Element {
         <label className="filter">
           <span className="filter-label">Type</span>
           <div className="scope" role="tablist" aria-label="Content type">
-            {(['slides', 'images'] as const).map((t) => (
+            {(['slides', 'images', 'decks'] as const).map((t) => (
               <button
                 key={t}
                 role="tab"
@@ -233,7 +254,7 @@ export default function App(): JSX.Element {
                 className={filters.type === t ? 'scope-tab active' : 'scope-tab'}
                 onClick={() => patch({ type: t })}
               >
-                {t === 'slides' ? 'Slides' : 'Images'}
+                {t === 'slides' ? 'Slides' : t === 'images' ? 'Images' : 'Decks'}
               </button>
             ))}
           </div>
@@ -284,7 +305,32 @@ export default function App(): JSX.Element {
       </div>
 
       <main className="results">
-        {loading ? (
+        {filters.type === 'decks' && !deckFilter ? (
+          loading ? (
+            <div className="results-head">loading…</div>
+          ) : sortedDecks.length === 0 ? (
+            <Empty title="No presentations match these filters." sub="Widen the Date / Owner / Category / Deck filters." />
+          ) : (
+            <>
+              <div className="results-head">
+                {sortedDecks.length} presentation{sortedDecks.length === 1 ? '' : 's'} — click one for details
+              </div>
+              <div className="grid deck-grid">
+                {sortedDecks.map((d) => (
+                  <DeckCardView
+                    key={d.id}
+                    deck={d}
+                    selected={selectedDeck?.id === d.id}
+                    onSelect={async () => {
+                      const det = await window.sw.archive.deckDetail(d.id)
+                      if (det) setSelectedDeck({ ...det, coverThumbUrl: d.coverThumbUrl })
+                    }}
+                  />
+                ))}
+              </div>
+            </>
+          )
+        ) : loading ? (
           <div className="results-head">loading…</div>
         ) : clusters.length === 0 ? (
           filters.scope === 'well' ? (
@@ -413,6 +459,21 @@ export default function App(): JSX.Element {
           onCopyText={() => void copyText(details.text, 'slide text')}
           onCopyRef={() => void copyText(details.reference, 'reference')}
           onCopyStructure={() => void copyStructure(details)}
+        />
+      )}
+
+      {selectedDeck && (
+        <DeckSidebar
+          detail={selectedDeck}
+          onClose={() => setSelectedDeck(null)}
+          onSeeAll={() => {
+            const pid = selectedDeck.id
+            const title = selectedDeck.title
+            setSelectedDeck(null)
+            setFilters((f) => ({ ...f, type: 'slides' }))
+            setDeckFilter({ pid, title })
+          }}
+          onReveal={() => void window.sw.archive.reveal(selectedDeck.coverThumbUrl)}
         />
       )}
 
@@ -602,6 +663,70 @@ function Card({
         </div>
       </div>
     </div>
+  )
+}
+
+function DeckCardView({ deck, selected, onSelect }: { deck: DeckCard; selected: boolean; onSelect: () => void }): JSX.Element {
+  return (
+    <div className={selected ? 'card deck-card selected' : 'card deck-card'} onClick={onSelect} title={deck.title}>
+      <div className="thumb-wrap">
+        {deck.coverThumbUrl ? (
+          <img className="thumb" src={deck.coverThumbUrl} alt="" loading="lazy" onError={(e) => (e.currentTarget.style.visibility = 'hidden')} />
+        ) : (
+          <div className="thumb placeholder" />
+        )}
+        <span className="slide-num">{deck.slideCount} slides</span>
+      </div>
+      <div className="meta">
+        <div className="card-title" title={deck.title}>{deck.title}</div>
+        <div className="card-foot">
+          <span className="deck">{[deck.date ? deck.date.slice(0, 10) : '', deck.category].filter(Boolean).join(' · ') || deck.filename}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DeckSidebar({
+  detail,
+  onClose,
+  onSeeAll,
+  onReveal
+}: {
+  detail: DeckDetail & { coverThumbUrl: string | null }
+  onClose: () => void
+  onSeeAll: () => void
+  onReveal: () => void
+}): JSX.Element {
+  const rows: [string, string][] = [
+    ['Date', detail.date ? `${detail.date.slice(0, 10)} (${detail.dateSource})` : '—'],
+    ['Folder', detail.category || '—'],
+    ['File', detail.filename || '—'],
+    ['Slides', String(detail.slideCount)],
+    ['Sections', String(detail.sectionCount)],
+    ['Owner', detail.ownership],
+    ['Source', detail.sourcePath || '—']
+  ]
+  return (
+    <aside className="deck-sidebar">
+      <div className="deck-sidebar-head">
+        <b>{detail.title}</b>
+        <button className="copyref" onClick={onClose}>✕</button>
+      </div>
+      {detail.coverThumbUrl && <img className="deck-sidebar-cover" src={detail.coverThumbUrl} alt="" />}
+      <div className="details-table">
+        {rows.map(([k, v]) => (
+          <div className="drow" key={k}>
+            <span className="dk">{k}</span>
+            <span className="dv">{v}</span>
+          </div>
+        ))}
+      </div>
+      <div className="details-actions">
+        <button className="primary-btn" onClick={onSeeAll}>See all slides</button>
+        <button className="copyref" onClick={onReveal}>Reveal in Finder</button>
+      </div>
+    </aside>
   )
 }
 

@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, watch as fsWatch } 
 import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
-import { archiveResults, deckSlides, slideStructure, searchImages, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
+import { archiveResults, deckSlides, slideStructure, searchImages, listDecks, deckDetail, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
 import { loadDeckMeta, categoryList, type DeckMetaIndex } from './deckmeta'
 import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, type WellRow } from './well'
 import { runIngest, cancelIngest, detectPython } from './ingest'
@@ -291,6 +291,26 @@ app.whenReady().then(() => {
         .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
     } catch {
       return []
+    }
+  })
+
+  // Deck MODE: one card per presentation (title-slide cover), filtered like the slide search.
+  ipcMain.handle('archive:list-decks', async (_e, filters: SearchFilters) => {
+    if (!archiveAvailable()) return []
+    try {
+      const decks = await listDecks(archiveRoot(), cacheDir(), filters)
+      return decks.map(({ coverAbsPath, ...d }) => ({ ...d, coverThumbUrl: swThumb(coverAbsPath) }))
+    } catch {
+      return []
+    }
+  })
+  // Full metadata for one deck (for the sidebar).
+  ipcMain.handle('archive:deck-detail', (_e, pid: string) => {
+    if (!archiveAvailable()) return null
+    try {
+      return deckDetail(archiveRoot(), cacheDir(), pid)
+    } catch {
+      return null
     }
   })
 
