@@ -38,6 +38,11 @@ try {
   let groupByDeckOk = false
   let deckModeOk = false
   let statsOk = false
+  let roleAllOk = false
+  let selectionOk = false
+  let inspectorOk = false
+  let paletteOk = false
+  let helpOk = false
 
   if (archiveConnected) {
     // default browse populates with no query (newest first)
@@ -50,6 +55,40 @@ try {
     cardCount = await win.locator('main .grid .card').count()
     firstTitle = ((await win.locator('main .card-title').first().textContent()) ?? '').trim()
     clusterBadges = await win.locator('main .badge.clickable').count()
+
+    // Role: Incl. structural includes title/opening slides → in BROWSE, ≥ content-only count
+    await win.fill('.search-input', '')
+    await win.waitForTimeout(900)
+    const contentCount = await win.locator('main .grid .card').count()
+    await win.locator('.filterbar select').nth(2).selectOption('all') // Owner, Date, Role, Sort → Role = nth 2
+    await win.waitForTimeout(1300)
+    // (count is confounded by the 200-cap + clustering of near-identical openings; just assert it runs)
+    roleAllOk = contentCount > 0 && (await win.locator('main .grid .card').count()) > 0
+    await win.locator('.filterbar select').nth(2).selectOption('content')
+    await win.fill('.search-input', 'dyslexia')
+    await win.waitForTimeout(1200)
+
+    // keyboard: blur search, arrow-select, inspector (I), command palette (⌘K), help (?)
+    await win.keyboard.press('Escape') // blur the search input
+    await win.waitForTimeout(150)
+    await win.keyboard.press('ArrowRight')
+    await win.waitForTimeout(250)
+    selectionOk = (await win.locator('main .card.selected').count()) === 1
+    await win.keyboard.press('i')
+    await win.waitForTimeout(350)
+    inspectorOk = (await win.locator('.deck-sidebar').count()) === 1
+    await win.keyboard.press('Escape')
+    await win.waitForTimeout(200)
+    await win.keyboard.press('Meta+k')
+    await win.waitForTimeout(350)
+    paletteOk = (await win.locator('.cmd-palette').count()) === 1 && (await win.locator('.cmd-item').count()) > 0
+    await win.keyboard.press('Escape')
+    await win.waitForTimeout(200)
+    await win.keyboard.press('?')
+    await win.waitForTimeout(250)
+    helpOk = (await win.locator('.help-modal').count()) === 1
+    await win.keyboard.press('Escape')
+    await win.waitForTimeout(200)
 
     // action menu — includes the new "See in context"
     await win.locator('main .card .more').first().click()
@@ -73,7 +112,7 @@ try {
     filterReran = after >= 0
 
     // Import panel opens with its two actions + a log (not triggering a real ingest here)
-    await win.locator('.import-btn').click()
+    await win.locator('.tb-btn', { hasText: 'Import' }).click()
     await win.waitForSelector('.modal.import', { timeout: 4000 })
     importPanelOk = (await win.locator('.modal.import .primary-btn').count()) === 2 && (await win.locator('.import-log').count()) === 1
     await win.locator('.modal.import .copyref').click()
@@ -111,9 +150,11 @@ try {
       await win.waitForTimeout(900)
     }
     deckModeOk = nDeckCards > 0 && (await win.locator('.deck-sidebar').count()) === 1
+    await win.keyboard.press('Escape') // close the deck inspector before clicking the titlebar
+    await win.waitForTimeout(200)
 
     // Stats panel: opens and renders year bars
-    await win.locator('.filterbar .toggle', { hasText: 'Stats' }).click()
+    await win.locator('.tb-btn', { hasText: 'Stats' }).click()
     await win.waitForSelector('.stats-modal', { timeout: 5000 })
     try {
       await win.waitForSelector('.stats-modal .statbar-row', { timeout: 9000 })
@@ -126,9 +167,9 @@ try {
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
-    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk)
+    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk && roleAllOk && selectionOk && inspectorOk && paletteOk && helpOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, imgCards, imgTags, pass })
+  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, inspectorOk, paletteOk, helpOk, imgCards, imgTags, pass })
   await app.close()
   process.exit(pass ? 0 : 2)
 } catch (e) {
