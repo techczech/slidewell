@@ -207,6 +207,14 @@ export default function App(): JSX.Element {
   const navCount = deckMode ? sortedDecks.length : orderedReps.length
   const current: SlideResult | DeckCard | null = sel >= 0 && sel < navCount ? (deckMode ? sortedDecks[sel] : orderedReps[sel]) : null
   const selectedRep = !deckMode && sel >= 0 && sel < orderedReps.length ? orderedReps[sel] : null
+  // the lightbox-aware target for ⌘K / shortcuts: the image being viewed in the slideshow, else the grid selection
+  const activeItem: SlideResult | DeckCard | null = lightbox ? lightbox.list[lightbox.index] : current
+  // other slides of the same group (group-by-presentation) — shown in the inspector
+  const siblings = useMemo<SlideResult[]>(() => {
+    if (!selectedRep || !view.groups) return []
+    const g = view.groups.find((grp) => grp.slides.some((c) => c.representative === selectedRep))
+    return g ? g.slides.map((c) => c.representative) : []
+  }, [selectedRep, view])
 
   // reset selection when the result set changes
   useEffect(() => setSel(-1), [debounced, filters, deckFilter, refreshKey])
@@ -227,12 +235,16 @@ export default function App(): JSX.Element {
     }
   }, [current, deckMode, orderedReps, sel, openLightbox])
 
-  // run a command-palette action against the current item (slide/image or deck)
+  // run a command-palette action against the active item: the lightbox image if the slideshow is
+  // open, otherwise the grid selection (deck card or slide). The lightbox path fixes the off-by-one
+  // where ⌘K acted on `current` (the grid sel) instead of the image actually on screen.
   const runAction = useCallback(
     (action: ActionId) => {
-      if (!current) return
-      if (deckMode) {
-        const d = current as DeckCard
+      const target = activeItem
+      if (!target) return
+      // deck-mode actions apply only to a deck card in the grid, never to a lightbox image
+      if (deckMode && !lightbox) {
+        const d = target as DeckCard
         if (action === 'context' || action === 'fullsize') {
           setFilters((f) => ({ ...f, type: 'slides' }))
           setDeckFilter({ pid: d.id, title: d.title })
@@ -240,18 +252,22 @@ export default function App(): JSX.Element {
         else if (action === 'reveal') void window.sw.archive.reveal(d.coverThumbUrl)
         return
       }
-      const h = current as SlideResult
-      if (action === 'fullsize') openLightbox(orderedReps, sel)
-      else if (action === 'details') setInspectorOpen(true)
+      const h = target as SlideResult
+      if (action === 'fullsize') {
+        if (!lightbox) openLightbox(orderedReps, sel)
+      } else if (action === 'details') setInspectorOpen(true)
       else if (action === 'copy-image') void copyImage(h)
       else if (action === 'copy-image-png') void copyImagePng(h)
       else if (action === 'copy-text') void copyText(h.text, 'slide text')
       else if (action === 'copy-structure') void copyStructure(h)
       else if (action === 'copy-ref') void copyText(h.reference, 'reference')
       else if (action === 'reveal') void reveal(h)
-      else if (action === 'context') setDeckFilter({ pid: h.deck, title: h.deckTitle || h.deck })
+      else if (action === 'context') {
+        setLightbox(null)
+        setDeckFilter({ pid: h.deck, title: h.deckTitle || h.deck })
+      }
     },
-    [current, deckMode, orderedReps, sel, openLightbox, copyImage, copyImagePng, copyText, copyStructure, reveal]
+    [activeItem, lightbox, deckMode, orderedReps, sel, openLightbox, copyImage, copyImagePng, copyText, copyStructure, reveal]
   )
 
   // global keyboard layer
@@ -262,8 +278,9 @@ export default function App(): JSX.Element {
       const cmd = e.metaKey || e.ctrlKey
       if (cmd && e.key.toLowerCase() === 'k') {
         e.preventDefault()
-        if (navCount > 0) {
-          if (sel < 0) setSel(0)
+        // works over the lightbox too — acts on the image on screen, not the grid selection
+        if (lightbox || navCount > 0) {
+          if (!lightbox && sel < 0) setSel(0)
           setPaletteOpen(true)
         }
         return
@@ -272,6 +289,16 @@ export default function App(): JSX.Element {
         e.preventDefault()
         searchRef.current?.focus()
         return
+      }
+      // ⌘C copies the active image as WebP (TalkWeaver), ⌘⇧C as PNG — unless the user is
+      // selecting text (e.g. in the inspector JSON), where native copy should win.
+      if (cmd && e.key.toLowerCase() === 'c' && activeItem && !(deckMode && !lightbox)) {
+        const hasSelection = (window.getSelection()?.toString().length ?? 0) > 0
+        if (!hasSelection) {
+          e.preventDefault()
+          runAction(e.shiftKey ? 'copy-image-png' : 'copy-image')
+          return
+        }
       }
       if (e.key === 'Escape') {
         if (paletteOpen) setPaletteOpen(false)
@@ -344,11 +371,47 @@ export default function App(): JSX.Element {
         case 'O':
           setShowImport(true)
           break
+        // action shortcuts (mirrored in the ⌘K palette) — act on the active item
+        case 't':
+        case 'T':
+          if (activeItem) {
+            e.preventDefault()
+            runAction('copy-text')
+          }
+          break
+        case 'j':
+        case 'J':
+          if (activeItem) {
+            e.preventDefault()
+            runAction('copy-structure')
+          }
+          break
+        case 'r':
+        case 'R':
+          if (activeItem) {
+            e.preventDefault()
+            runAction('copy-ref')
+          }
+          break
+        case 'f':
+        case 'F':
+          if (activeItem) {
+            e.preventDefault()
+            runAction('reveal')
+          }
+          break
+        case 'x':
+        case 'X':
+          if (activeItem) {
+            e.preventDefault()
+            runAction('context')
+          }
+          break
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navCount, sel, activateCurrent, paletteOpen, lightbox, inspectorOpen, showHelp, showStats, showImport, deckFilter, filters, openStats])
+  }, [navCount, sel, activeItem, runAction, activateCurrent, paletteOpen, lightbox, deckMode, inspectorOpen, showHelp, showStats, showImport, deckFilter, filters, openStats])
 
   // when inspecting a deck, fetch its full metadata (re-fetches as selection moves)
   useEffect(() => {
@@ -682,6 +745,11 @@ export default function App(): JSX.Element {
               <SlideInspector
                 hit={selectedRep}
                 pos={`${sel + 1} / ${orderedReps.length}`}
+                siblings={siblings}
+                onNavigate={(rep) => {
+                  const idx = orderedReps.indexOf(rep)
+                  if (idx >= 0) setSel(idx)
+                }}
                 onClose={() => setInspectorOpen(false)}
                 onFullsize={() => openLightbox(orderedReps, sel)}
                 onCopyText={() => void copyText(selectedRep.text, 'slide text')}
@@ -699,10 +767,10 @@ export default function App(): JSX.Element {
               />
             ))}
 
-      {paletteOpen && current && (
+      {paletteOpen && activeItem && (
         <CommandPalette
-          item={current}
-          deckMode={deckMode}
+          item={activeItem}
+          deckMode={deckMode && !lightbox}
           onClose={() => setPaletteOpen(false)}
           onRun={(a) => {
             setPaletteOpen(false)
@@ -1289,30 +1357,32 @@ function DetailsModal({
   )
 }
 
-function actionItems(deckMode: boolean, kind?: string): { id: ActionId; label: string }[] {
+function actionItems(deckMode: boolean, kind?: string): { id: ActionId; label: string; shortcut?: string }[] {
   if (deckMode)
     return [
-      { id: 'fullsize', label: 'See all slides in this deck' },
-      { id: 'details', label: 'Show metadata (inspector)' },
-      { id: 'reveal', label: 'Reveal in Finder' }
+      { id: 'fullsize', label: 'See all slides in this deck', shortcut: '↵' },
+      { id: 'details', label: 'Show metadata (inspector)', shortcut: 'I' },
+      { id: 'reveal', label: 'Reveal in Finder', shortcut: 'F' }
     ]
   const isImage = kind === 'well-image' || kind === 'archive-image'
   return [
-    { id: 'fullsize', label: 'Open full size' },
-    { id: 'details', label: 'Show metadata (inspector)' },
-    { id: 'copy-image', label: 'Copy image (WebP → TalkWeaver)' },
-    { id: 'copy-image-png', label: 'Copy as PNG' },
-    { id: 'copy-text', label: 'Copy text' },
-    ...(isImage ? [] : [{ id: 'copy-structure' as ActionId, label: 'Copy structure (JSON)' }]),
-    { id: 'copy-ref', label: 'Copy reference' },
-    { id: 'reveal', label: 'Reveal in Finder' },
-    ...(kind === 'well-image' ? [] : [{ id: 'context' as ActionId, label: 'See in context (whole deck)' }])
+    { id: 'fullsize', label: 'Open full size', shortcut: '↵' },
+    { id: 'details', label: 'Show metadata (inspector)', shortcut: 'I' },
+    { id: 'copy-image', label: 'Copy image (WebP → TalkWeaver)', shortcut: '⌘C' },
+    { id: 'copy-image-png', label: 'Copy as PNG', shortcut: '⌘⇧C' },
+    { id: 'copy-text', label: 'Copy text', shortcut: 'T' },
+    ...(isImage ? [] : [{ id: 'copy-structure' as ActionId, label: 'Copy structure (JSON)', shortcut: 'J' }]),
+    { id: 'copy-ref', label: 'Copy reference', shortcut: 'R' },
+    { id: 'reveal', label: 'Reveal in Finder', shortcut: 'F' },
+    ...(kind === 'well-image' ? [] : [{ id: 'context' as ActionId, label: 'See in context (whole deck)', shortcut: 'X' }])
   ]
 }
 
 function SlideInspector({
   hit,
   pos,
+  siblings,
+  onNavigate,
   onClose,
   onFullsize,
   onCopyText,
@@ -1323,6 +1393,8 @@ function SlideInspector({
 }: {
   hit: SlideResult
   pos: string
+  siblings: SlideResult[]
+  onNavigate: (rep: SlideResult) => void
   onClose: () => void
   onFullsize: () => void
   onCopyText: () => void
@@ -1334,7 +1406,7 @@ function SlideInspector({
   const isSlide = hit.kind === 'slide'
   const kindLabel = hit.kind === 'slide' ? 'slide' : hit.kind === 'well-image' ? 'well image' : hit.kind === 'archive-image' ? 'embedded image' : 'OCR text'
   const [json, setJson] = useState<string | null>(null)
-  const [assets, setAssets] = useState<Array<{ sha: string; thumbUrl: string | null }>>([])
+  const [assets, setAssets] = useState<Array<{ thumbUrl: string | null }>>([])
   useEffect(() => {
     setJson(null)
     setAssets([])
@@ -1369,6 +1441,28 @@ function SlideInspector({
           </div>
         ))}
         {!isSlide && hit.text && <div className="details-text">{hit.text}</div>}
+        {siblings.length > 1 && (
+          <>
+            <div className="inspector-section">Other slides in this presentation ({siblings.length - 1})</div>
+            <div className="inspector-assets">
+              {siblings.map(
+                (sib, i) =>
+                  sib.thumbUrl && (
+                    <img
+                      key={`${sib.deck}-${sib.slideOrder}-${i}`}
+                      className={sib === hit ? 'inspector-asset wide current' : 'inspector-asset wide'}
+                      src={sib.thumbUrl}
+                      alt=""
+                      title={sib.title}
+                      loading="lazy"
+                      onClick={() => onNavigate(sib)}
+                      onError={(e) => (e.currentTarget.style.display = 'none')}
+                    />
+                  )
+              )}
+            </div>
+          </>
+        )}
         {isSlide && assets.length > 0 && (
           <>
             <div className="inspector-section">Image assets ({assets.length})</div>
@@ -1376,15 +1470,7 @@ function SlideInspector({
               {assets.map(
                 (a, i) =>
                   a.thumbUrl && (
-                    <img
-                      key={`${a.sha}-${i}`}
-                      className="inspector-asset"
-                      src={a.thumbUrl}
-                      alt=""
-                      title={a.sha}
-                      loading="lazy"
-                      onError={(e) => (e.currentTarget.style.display = 'none')}
-                    />
+                    <img key={i} className="inspector-asset" src={a.thumbUrl} alt="" loading="lazy" onError={(e) => (e.currentTarget.style.display = 'none')} />
                   )
               )}
             </div>
@@ -1452,7 +1538,8 @@ function CommandPalette({
         <div className="cmd-list">
           {filtered.map((a, i) => (
             <button key={a.id} className={i === hi ? 'cmd-item active' : 'cmd-item'} onMouseEnter={() => setHi(i)} onClick={() => onRun(a.id)}>
-              {a.label}
+              <span className="cmd-label">{a.label}</span>
+              {a.shortcut && <kbd className="cmd-shortcut">{a.shortcut}</kbd>}
             </button>
           ))}
           {filtered.length === 0 && <div className="ss-empty">no actions</div>}
@@ -1469,6 +1556,9 @@ function HelpOverlay({ onClose }: { onClose: () => void }): JSX.Element {
     ['Enter', 'Open full size (deck: open it)'],
     ['I  ·  Space', 'Toggle inspector sidebar'],
     ['⌘K', 'Command palette (actions)'],
+    ['⌘C  ·  ⌘⇧C', 'Copy image (WebP) · as PNG'],
+    ['T · J · R', 'Copy text · structure · reference'],
+    ['F · X', 'Reveal in Finder · See in context'],
     ['1 · 2 · 3', 'Slides · Images · Decks'],
     ['G', 'Group by presentation'],
     ['C', 'Cluster near-identical'],

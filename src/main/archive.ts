@@ -435,19 +435,36 @@ export function slideStructure(root: string, deck: string, slideOrder: number | 
   return JSON.stringify(node, null, 2)
 }
 
-/** The embedded image assets on one slide (from images.db image_locations) → absolute paths. */
-export async function slideImages(root: string, deck: string, slideOrder: number | null): Promise<Array<{ sha: string; absPath: string | null }>> {
-  if (!deck || slideOrder === null) return []
+/**
+ * The embedded image assets on one slide, taken from the slide's OWN presentation.json node
+ * (each image block has `src` relative to the extracted deck folder). Derived from the same node
+ * as slideStructure, so it can never drift from the displayed JSON — unlike image_locations, whose
+ * slide_order is offset from slide_locations.
+ */
+export function slideImages(root: string, deck: string, slideOrder: number | null): Array<{ absPath: string | null; src: string }> {
+  if (!deck) return []
   try {
-    const rows = await query<{ sha256: string; fn: string | null }>({
-      binary: sqlite3Binary(),
-      dbPath: imagesDb(root),
-      sql: `SELECT sha256, original_filename AS fn FROM image_locations WHERE presentation_id = ? AND slide_order = ?`,
-      params: [deck, slideOrder]
-    })
-    return rows.map((r) => {
-      const ext = (r.fn?.split('.').pop() || '').toLowerCase() || 'png'
-      return { sha: r.sha256, absPath: imagePath(root, r.sha256, ext, deck, `media/${r.fn || ''}`) }
+    const doc = JSON.parse(readFileSync(join(root, 'extracted', deck, 'presentation.json'), 'utf8')) as { sections?: Array<{ slides?: unknown[] }> }
+    const slides: unknown[] = []
+    for (const s of doc.sections ?? []) for (const sl of s.slides ?? []) slides.push(sl)
+    const node = slides[slideOrder ?? 0] ?? slides[0]
+    if (!node) return []
+    const srcs: string[] = []
+    const walk = (o: unknown): void => {
+      if (Array.isArray(o)) {
+        for (const v of o) walk(v)
+        return
+      }
+      if (o && typeof o === 'object') {
+        const obj = o as Record<string, unknown>
+        if (obj.type === 'image' && typeof obj.src === 'string') srcs.push(obj.src)
+        for (const v of Object.values(obj)) walk(v)
+      }
+    }
+    walk(node)
+    return srcs.map((src) => {
+      const abs = join(root, 'extracted', deck, src)
+      return { src, absPath: existsSync(abs) ? abs : null }
     })
   } catch {
     return []

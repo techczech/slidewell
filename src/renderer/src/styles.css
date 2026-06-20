@@ -101,7 +101,10 @@ body {
   padding: 4px;
 }
 .cmd-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
   width: 100%;
   text-align: left;
   border: 0;
@@ -115,6 +118,26 @@ body {
 .cmd-item.active {
   background: var(--oxford);
   color: #fff;
+}
+.cmd-label {
+  flex: 1;
+}
+.cmd-shortcut {
+  flex: none;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.05);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  min-width: 1.4rem;
+  text-align: center;
+}
+.cmd-item.active .cmd-shortcut {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.35);
 }
 .inspector-pos {
   font-size: 0.72rem;
@@ -142,6 +165,21 @@ body {
   border: 1px solid var(--line);
   border-radius: 5px;
   background: #ece5d6;
+}
+/* 16:9 slide thumbnails for the group-siblings strip — two per row, clickable */
+.inspector-asset.wide {
+  width: calc(50% - 3px);
+  height: auto;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  cursor: pointer;
+}
+.inspector-asset.wide:hover {
+  border-color: var(--oxford);
+}
+.inspector-asset.wide.current {
+  outline: 2px solid var(--oxford);
+  border-color: var(--oxford);
 }
 .inspector-json {
   margin-top: 0.4rem;
@@ -363,7 +401,7 @@ body {
   outline-offset: 1px;
 }
 .has-sidebar .results {
-  margin-right: 332px;
+  margin-right: 432px;
 }
 .card.selected,
 .deck-card.selected {
@@ -375,7 +413,7 @@ body {
   top: 2.7rem; /* sit below the titlebar so its actions stay clickable */
   right: 0;
   bottom: 0;
-  width: 320px;
+  width: 420px;
   z-index: 30;
   background: var(--card);
   border-left: 1px solid var(--line);
