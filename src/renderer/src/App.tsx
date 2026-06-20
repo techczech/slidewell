@@ -40,9 +40,15 @@ export default function App(): JSX.Element {
   const [deckFilter, setDeckFilter] = useState<{ pid: string; title: string } | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [showStats, setShowStats] = useState(false)
+  const [showHelp, setShowHelp] = useState(false)
   const [stats, setStats] = useState<Stats | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
+  // keyboard selection + inspector + command palette
+  const [sel, setSel] = useState(-1)
+  const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   const reqId = useRef(0)
+  const searchRef = useRef<HTMLInputElement>(null)
   const toastTimer = useRef<ReturnType<typeof setTimeout>>()
 
   const setToast = useCallback((msg: string) => {
@@ -97,6 +103,54 @@ export default function App(): JSX.Element {
     })()
   }, [debounced, filters, refreshKey, deckFilter])
 
+  // ----- actions (defined before selection/keyboard handlers that reference them) -----
+  const copyText = useCallback(
+    async (s: string, label: string) => {
+      await navigator.clipboard.writeText(s)
+      setToast(`Copied ${label}`)
+    },
+    [setToast]
+  )
+  const copyImage = useCallback(
+    async (h: SlideResult) => {
+      setToast((await window.sw.archive.copyImage(h.thumbUrl)) ? 'Copied WebP (for TalkWeaver)' : 'No image to copy')
+    },
+    [setToast]
+  )
+  const copyImagePng = useCallback(
+    async (h: SlideResult) => {
+      setToast((await window.sw.archive.copyImagePng(h.thumbUrl)) ? 'Copied PNG' : 'No image to copy')
+    },
+    [setToast]
+  )
+  const copyStructure = useCallback(
+    async (h: SlideResult) => {
+      const s = await window.sw.archive.slideStructure(h.deck, h.slideOrder)
+      if (s) await copyText(s, 'slide structure')
+      else setToast('No structure found')
+    },
+    [copyText, setToast]
+  )
+  const reveal = useCallback(
+    async (h: SlideResult) => {
+      setToast((await window.sw.archive.reveal(h.thumbUrl)) ? 'Revealed in Finder' : 'No file on disk')
+    },
+    [setToast]
+  )
+  const openLightbox = useCallback((list: SlideResult[], index: number) => setLightbox({ list, index }), [])
+
+  // lightbox keyboard nav
+  useEffect(() => {
+    if (!lightbox) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setLightbox(null)
+      else if (e.key === 'ArrowRight') setLightbox((l) => (l ? { ...l, index: Math.min(l.index + 1, l.list.length - 1) } : l))
+      else if (e.key === 'ArrowLeft') setLightbox((l) => (l ? { ...l, index: Math.max(l.index - 1, 0) } : l))
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [lightbox])
+
   // Sort + optional group-by-presentation. Nested: groups order by date/title, slides within by number.
   const view = useMemo(() => {
     const primary = (a: SlideResult, b: SlideResult): number => {
@@ -148,6 +202,169 @@ export default function App(): JSX.Element {
     [view]
   )
 
+  // keyboard selection model: one list of items (slides/images OR decks), a current selection.
+  const deckMode = filters.type === 'decks' && !deckFilter
+  const navCount = deckMode ? sortedDecks.length : orderedReps.length
+  const current: SlideResult | DeckCard | null = sel >= 0 && sel < navCount ? (deckMode ? sortedDecks[sel] : orderedReps[sel]) : null
+  const selectedRep = !deckMode && sel >= 0 && sel < orderedReps.length ? orderedReps[sel] : null
+
+  // reset selection when the result set changes
+  useEffect(() => setSel(-1), [debounced, filters, deckFilter, refreshKey])
+
+  const openStats = useCallback(() => {
+    setShowStats(true)
+    if (!stats) void window.sw.archive.stats().then(setStats)
+  }, [stats])
+
+  const activateCurrent = useCallback(() => {
+    if (!current) return
+    if (deckMode) {
+      const d = current as DeckCard
+      setFilters((f) => ({ ...f, type: 'slides' }))
+      setDeckFilter({ pid: d.id, title: d.title })
+    } else {
+      openLightbox(orderedReps, sel)
+    }
+  }, [current, deckMode, orderedReps, sel, openLightbox])
+
+  // run a command-palette action against the current item (slide/image or deck)
+  const runAction = useCallback(
+    (action: ActionId) => {
+      if (!current) return
+      if (deckMode) {
+        const d = current as DeckCard
+        if (action === 'context' || action === 'fullsize') {
+          setFilters((f) => ({ ...f, type: 'slides' }))
+          setDeckFilter({ pid: d.id, title: d.title })
+        } else if (action === 'details') setInspectorOpen(true)
+        else if (action === 'reveal') void window.sw.archive.reveal(d.coverThumbUrl)
+        return
+      }
+      const h = current as SlideResult
+      if (action === 'fullsize') openLightbox(orderedReps, sel)
+      else if (action === 'details') setInspectorOpen(true)
+      else if (action === 'copy-image') void copyImage(h)
+      else if (action === 'copy-image-png') void copyImagePng(h)
+      else if (action === 'copy-text') void copyText(h.text, 'slide text')
+      else if (action === 'copy-structure') void copyStructure(h)
+      else if (action === 'copy-ref') void copyText(h.reference, 'reference')
+      else if (action === 'reveal') void reveal(h)
+      else if (action === 'context') setDeckFilter({ pid: h.deck, title: h.deckTitle || h.deck })
+    },
+    [current, deckMode, orderedReps, sel, openLightbox, copyImage, copyImagePng, copyText, copyStructure, reveal]
+  )
+
+  // global keyboard layer
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const el = document.activeElement as HTMLElement | null
+      const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
+      const cmd = e.metaKey || e.ctrlKey
+      if (cmd && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        if (navCount > 0) {
+          if (sel < 0) setSel(0)
+          setPaletteOpen(true)
+        }
+        return
+      }
+      if (cmd && e.key.toLowerCase() === 'f') {
+        e.preventDefault()
+        searchRef.current?.focus()
+        return
+      }
+      if (e.key === 'Escape') {
+        if (paletteOpen) setPaletteOpen(false)
+        else if (lightbox) setLightbox(null)
+        else if (showHelp) setShowHelp(false)
+        else if (showStats) setShowStats(false)
+        else if (showImport) setShowImport(false)
+        else if (inspectorOpen) setInspectorOpen(false)
+        else if (deckFilter) setDeckFilter(null)
+        else if (typing) el?.blur()
+        return
+      }
+      if (typing || cmd) return
+      switch (e.key) {
+        case '/':
+          e.preventDefault()
+          searchRef.current?.focus()
+          break
+        case '?':
+          setShowHelp(true)
+          break
+        case 'ArrowRight':
+        case 'ArrowDown':
+          if (navCount) {
+            e.preventDefault()
+            setSel((s) => Math.min(s < 0 ? 0 : s + 1, navCount - 1))
+          }
+          break
+        case 'ArrowLeft':
+        case 'ArrowUp':
+          if (navCount) {
+            e.preventDefault()
+            setSel((s) => Math.max(s <= 0 ? 0 : s - 1, 0))
+          }
+          break
+        case 'Enter':
+          activateCurrent()
+          break
+        case 'i':
+        case 'I':
+        case ' ':
+          if (navCount) {
+            e.preventDefault()
+            if (sel < 0) setSel(0)
+            setInspectorOpen((o) => !o)
+          }
+          break
+        case '1':
+          patch({ type: 'slides' })
+          break
+        case '2':
+          patch({ type: 'images' })
+          break
+        case '3':
+          patch({ type: 'decks' })
+          break
+        case 'g':
+        case 'G':
+          setGroupByDeck((x) => !x)
+          break
+        case 'c':
+        case 'C':
+          patch({ cluster: !filters.cluster })
+          break
+        case 's':
+        case 'S':
+          openStats()
+          break
+        case 'o':
+        case 'O':
+          setShowImport(true)
+          break
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [navCount, sel, activateCurrent, paletteOpen, lightbox, inspectorOpen, showHelp, showStats, showImport, deckFilter, filters, openStats])
+
+  // when inspecting a deck, fetch its full metadata (re-fetches as selection moves)
+  useEffect(() => {
+    if (inspectorOpen && deckMode && current) {
+      const d = current as DeckCard
+      void window.sw.archive.deckDetail(d.id).then((det) => {
+        if (det) setSelectedDeck({ ...det, coverThumbUrl: d.coverThumbUrl })
+      })
+    }
+  }, [inspectorOpen, deckMode, current])
+
+  // keep the selected card scrolled into view as you arrow through
+  useEffect(() => {
+    if (sel >= 0) document.querySelector('.card.selected, .deck-card.selected')?.scrollIntoView({ block: 'nearest' })
+  }, [sel])
+
   async function chooseArchive(): Promise<void> {
     const picked = await window.sw.settings.chooseArchive()
     if (picked) {
@@ -158,67 +375,38 @@ export default function App(): JSX.Element {
     }
   }
 
-  // ----- actions -----
-  const copyText = useCallback(
-    async (s: string, label: string) => {
-      await navigator.clipboard.writeText(s)
-      setToast(`Copied ${label}`)
-    },
-    [setToast]
-  )
-  const copyImage = useCallback(
-    async (h: SlideResult) => {
-      setToast((await window.sw.archive.copyImage(h.thumbUrl)) ? 'Copied WebP (for TalkWeaver)' : 'No image to copy')
-    },
-    [setToast]
-  )
-  const copyImagePng = useCallback(
-    async (h: SlideResult) => {
-      setToast((await window.sw.archive.copyImagePng(h.thumbUrl)) ? 'Copied PNG' : 'No image to copy')
-    },
-    [setToast]
-  )
-  const copyStructure = useCallback(
-    async (h: SlideResult) => {
-      const s = await window.sw.archive.slideStructure(h.deck, h.slideOrder)
-      if (s) await copyText(s, 'slide structure')
-      else setToast('No structure found')
-    },
-    [copyText, setToast]
-  )
-  const reveal = useCallback(
-    async (h: SlideResult) => {
-      setToast((await window.sw.archive.reveal(h.thumbUrl)) ? 'Revealed in Finder' : 'No file on disk')
-    },
-    [setToast]
-  )
-  const openLightbox = useCallback((list: SlideResult[], index: number) => setLightbox({ list, index }), [])
-
-  // lightbox keyboard nav
-  useEffect(() => {
-    if (!lightbox) return
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setLightbox(null)
-      else if (e.key === 'ArrowRight') setLightbox((l) => (l ? { ...l, index: Math.min(l.index + 1, l.list.length - 1) } : l))
-      else if (e.key === 'ArrowLeft') setLightbox((l) => (l ? { ...l, index: Math.max(l.index - 1, 0) } : l))
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [lightbox])
-
   return (
-    <div className={selectedDeck ? 'app has-deck-sidebar' : 'app'} onClick={() => menu && setMenu(null)}>
+    <div className={inspectorOpen ? 'app has-sidebar' : 'app'} onClick={() => menu && setMenu(null)}>
       <header className="titlebar">
         <span className="wordmark">
           Slide<span className="well">Well</span>
         </span>
         <span className="tagline">the well — your slides &amp; images in one place</span>
+        <div className="titlebar-actions">
+          <button
+            className="tb-btn"
+            onClick={() => {
+              setShowStats(true)
+              if (!stats) void window.sw.archive.stats().then(setStats)
+            }}
+            title="Your PowerPoint history in numbers (S)"
+          >
+            📊 Stats
+          </button>
+          <button className="tb-btn" onClick={() => setShowImport(true)} title="Import PowerPoint into the archive (O)">
+            ⤓ Import
+          </button>
+          <button className="tb-btn" onClick={() => setShowHelp(true)} title="Keyboard shortcuts (?)">
+            ⌨
+          </button>
+        </div>
       </header>
 
       <div className="searchbar">
         <input
+          ref={searchRef}
           className="search-input"
-          placeholder="Search slide text &amp; OCR…  (try: year:2024 deck:roundup owner:all)"
+          placeholder="Search slide text &amp; OCR…   /  focus · ⌘K actions · ←→ navigate · I inspector"
           value={query}
           onChange={(e) => {
             setDeckFilter(null)
@@ -297,22 +485,9 @@ export default function App(): JSX.Element {
         <button
           className={groupByDeck ? 'toggle on' : 'toggle'}
           onClick={() => setGroupByDeck((g) => !g)}
-          title="Group results into per-presentation sections (slides ordered by number within each)"
+          title="Group results into per-presentation sections (G)"
         >
           ▦ Group by presentation
-        </button>
-        <button
-          className="toggle"
-          onClick={() => {
-            setShowStats(true)
-            if (!stats) void window.sw.archive.stats().then(setStats)
-          }}
-          title="Your PowerPoint history in numbers"
-        >
-          📊 Stats
-        </button>
-        <button className="toggle import-btn" onClick={() => setShowImport(true)} title="Import PowerPoint into the archive">
-          ⤓ Import…
         </button>
       </div>
 
@@ -328,14 +503,14 @@ export default function App(): JSX.Element {
                 {sortedDecks.length} presentation{sortedDecks.length === 1 ? '' : 's'} — click one for details
               </div>
               <div className="grid deck-grid">
-                {sortedDecks.map((d) => (
+                {sortedDecks.map((d, i) => (
                   <DeckCardView
                     key={d.id}
                     deck={d}
-                    selected={selectedDeck?.id === d.id}
-                    onSelect={async () => {
-                      const det = await window.sw.archive.deckDetail(d.id)
-                      if (det) setSelectedDeck({ ...det, coverThumbUrl: d.coverThumbUrl })
+                    selected={current === d}
+                    onSelect={() => {
+                      setSel(i)
+                      setInspectorOpen(true)
                     }}
                   />
                 ))}
@@ -376,15 +551,23 @@ export default function App(): JSX.Element {
                     {g.date ? ` · ${g.date.slice(0, 10)}` : ''} · {g.slides.length} slide{g.slides.length === 1 ? '' : 's'}
                   </div>
                   <div className="grid">
-                    {g.slides.map((c, j) => (
-                      <Card
-                        key={`${g.deck}-${j}`}
-                        cluster={c}
-                        onThumb={() => openLightbox(orderedReps, orderedReps.indexOf(c.representative))}
-                        onMenu={(x, y) => setMenu({ cluster: c, x, y })}
-                        onExpand={() => setExpanded(c)}
-                      />
-                    ))}
+                    {g.slides.map((c, j) => {
+                      const idx = orderedReps.indexOf(c.representative)
+                      return (
+                        <Card
+                          key={`${g.deck}-${j}`}
+                          cluster={c}
+                          selected={c.representative === selectedRep}
+                          onSelect={() => setSel(idx)}
+                          onThumb={() => {
+                            setSel(idx)
+                            openLightbox(orderedReps, idx)
+                          }}
+                          onMenu={(x, y) => setMenu({ cluster: c, x, y })}
+                          onExpand={() => setExpanded(c)}
+                        />
+                      )
+                    })}
                   </div>
                 </div>
               ))
@@ -394,7 +577,12 @@ export default function App(): JSX.Element {
                   <Card
                     key={`${c.representative.deck}-${c.representative.slideOrder}-${i}`}
                     cluster={c}
-                    onThumb={() => openLightbox(orderedReps, i)}
+                    selected={c.representative === selectedRep}
+                    onSelect={() => setSel(i)}
+                    onThumb={() => {
+                      setSel(i)
+                      openLightbox(orderedReps, i)
+                    }}
                     onMenu={(x, y) => setMenu({ cluster: c, x, y })}
                     onExpand={() => setExpanded(c)}
                   />
@@ -474,20 +662,56 @@ export default function App(): JSX.Element {
         />
       )}
 
-      {selectedDeck && (
-        <DeckSidebar
-          detail={selectedDeck}
-          onClose={() => setSelectedDeck(null)}
-          onSeeAll={() => {
-            const pid = selectedDeck.id
-            const title = selectedDeck.title
-            setSelectedDeck(null)
-            setFilters((f) => ({ ...f, type: 'slides' }))
-            setDeckFilter({ pid, title })
+      {inspectorOpen &&
+        (deckMode
+          ? selectedDeck && (
+              <DeckSidebar
+                detail={selectedDeck}
+                onClose={() => setInspectorOpen(false)}
+                onSeeAll={() => {
+                  const pid = selectedDeck.id
+                  const title = selectedDeck.title
+                  setInspectorOpen(false)
+                  setFilters((f) => ({ ...f, type: 'slides' }))
+                  setDeckFilter({ pid, title })
+                }}
+                onReveal={() => void window.sw.archive.reveal(selectedDeck.coverThumbUrl)}
+              />
+            )
+          : selectedRep && (
+              <SlideInspector
+                hit={selectedRep}
+                pos={`${sel + 1} / ${orderedReps.length}`}
+                onClose={() => setInspectorOpen(false)}
+                onFullsize={() => openLightbox(orderedReps, sel)}
+                onCopyText={() => void copyText(selectedRep.text, 'slide text')}
+                onCopyRef={() => void copyText(selectedRep.reference, 'reference')}
+                onCopyImage={() => void copyImage(selectedRep)}
+                onReveal={() => void reveal(selectedRep)}
+                onContext={
+                  selectedRep.kind !== 'well-image'
+                    ? () => {
+                        setInspectorOpen(false)
+                        setDeckFilter({ pid: selectedRep.deck, title: selectedRep.deckTitle || selectedRep.deck })
+                      }
+                    : undefined
+                }
+              />
+            ))}
+
+      {paletteOpen && current && (
+        <CommandPalette
+          item={current}
+          deckMode={deckMode}
+          onClose={() => setPaletteOpen(false)}
+          onRun={(a) => {
+            setPaletteOpen(false)
+            runAction(a)
           }}
-          onReveal={() => void window.sw.archive.reveal(selectedDeck.coverThumbUrl)}
         />
       )}
+
+      {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
 
       {showImport && <ImportPanel onClose={() => setShowImport(false)} onDone={() => setRefreshKey((k) => k + 1)} />}
 
@@ -626,11 +850,15 @@ function clusterBadge(c: SlideClusterResult): string {
 
 function Card({
   cluster,
+  selected,
+  onSelect,
   onThumb,
   onMenu,
   onExpand
 }: {
   cluster: SlideClusterResult
+  selected: boolean
+  onSelect: () => void
   onThumb: () => void
   onMenu: (x: number, y: number) => void
   onExpand: () => void
@@ -644,8 +872,16 @@ function Card({
     .filter(Boolean)
     .join(' · ')
   return (
-    <div className="card" onContextMenu={(e) => { e.preventDefault(); onMenu(e.clientX, e.clientY) }}>
-      <div className="thumb-wrap" onClick={onThumb} title="Open full size">
+    <div
+      className={selected ? 'card selected' : 'card'}
+      onClick={onSelect}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        onSelect()
+        onMenu(e.clientX, e.clientY)
+      }}
+    >
+      <div className="thumb-wrap" onClick={(e) => { e.stopPropagation(); onThumb() }} title="Open full size">
         {h.thumbUrl ? (
           <img className="thumb" src={h.thumbUrl} alt="" loading="lazy" onError={(e) => (e.currentTarget.style.visibility = 'hidden')} />
         ) : (
@@ -1047,6 +1283,175 @@ function DetailsModal({
               <button className="copyref" onClick={onCopyRef}>copy ref</button>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function actionItems(deckMode: boolean, kind?: string): { id: ActionId; label: string }[] {
+  if (deckMode)
+    return [
+      { id: 'fullsize', label: 'See all slides in this deck' },
+      { id: 'details', label: 'Show metadata (inspector)' },
+      { id: 'reveal', label: 'Reveal in Finder' }
+    ]
+  const isImage = kind === 'well-image' || kind === 'archive-image'
+  return [
+    { id: 'fullsize', label: 'Open full size' },
+    { id: 'details', label: 'Show metadata (inspector)' },
+    { id: 'copy-image', label: 'Copy image (WebP → TalkWeaver)' },
+    { id: 'copy-image-png', label: 'Copy as PNG' },
+    { id: 'copy-text', label: 'Copy text' },
+    ...(isImage ? [] : [{ id: 'copy-structure' as ActionId, label: 'Copy structure (JSON)' }]),
+    { id: 'copy-ref', label: 'Copy reference' },
+    { id: 'reveal', label: 'Reveal in Finder' },
+    ...(kind === 'well-image' ? [] : [{ id: 'context' as ActionId, label: 'See in context (whole deck)' }])
+  ]
+}
+
+function SlideInspector({
+  hit,
+  pos,
+  onClose,
+  onFullsize,
+  onCopyText,
+  onCopyRef,
+  onCopyImage,
+  onReveal,
+  onContext
+}: {
+  hit: SlideResult
+  pos: string
+  onClose: () => void
+  onFullsize: () => void
+  onCopyText: () => void
+  onCopyRef: () => void
+  onCopyImage: () => void
+  onReveal: () => void
+  onContext?: () => void
+}): JSX.Element {
+  const kindLabel = hit.kind === 'slide' ? 'slide' : hit.kind === 'well-image' ? 'well image' : hit.kind === 'archive-image' ? 'embedded image' : 'OCR text'
+  const rows: [string, string][] = [
+    ['Deck', hit.deckTitle || hit.deck || '—'],
+    ['File', hit.filename || '—'],
+    ...(hit.slideOrder !== null ? ([['Slide', String(hit.slideOrder + 1)]] as [string, string][]) : []),
+    ['Date', hit.date ? hit.date.slice(0, 10) : '—'],
+    ['Category', hit.category || '—'],
+    ['Used in', `${hit.usedInDecks} deck${hit.usedInDecks === 1 ? '' : 's'}`],
+    ['Kind', kindLabel],
+    ['Reference', hit.reference]
+  ]
+  return (
+    <aside className="deck-sidebar">
+      <div className="deck-sidebar-head">
+        <b>{hit.title}</b>
+        <button className="copyref" onClick={onClose}>✕</button>
+      </div>
+      <div className="inspector-pos">{pos} · ←/→ to navigate</div>
+      {hit.thumbUrl && <img className="deck-sidebar-cover" src={hit.thumbUrl} alt="" />}
+      <div className="details-table">
+        {rows.map(([k, v]) => (
+          <div className="drow" key={k}>
+            <span className="dk">{k}</span>
+            <span className="dv">{v}</span>
+          </div>
+        ))}
+        {hit.text && <div className="details-text">{hit.text}</div>}
+      </div>
+      <div className="details-actions">
+        <button className="primary-btn" onClick={onFullsize}>Full size</button>
+        <button className="copyref" onClick={onCopyImage}>copy img</button>
+        <button className="copyref" onClick={onCopyText}>copy text</button>
+        <button className="copyref" onClick={onCopyRef}>copy ref</button>
+        <button className="copyref" onClick={onReveal}>reveal</button>
+        {onContext && <button className="copyref" onClick={onContext}>in context</button>}
+      </div>
+    </aside>
+  )
+}
+
+function CommandPalette({
+  item,
+  deckMode,
+  onClose,
+  onRun
+}: {
+  item: SlideResult | DeckCard
+  deckMode: boolean
+  onClose: () => void
+  onRun: (a: ActionId) => void
+}): JSX.Element {
+  const kind = 'kind' in item ? (item as SlideResult).kind : undefined
+  const all = actionItems(deckMode, kind)
+  const [q, setQ] = useState('')
+  const [hi, setHi] = useState(0)
+  const filtered = q ? all.filter((a) => a.label.toLowerCase().includes(q.toLowerCase())) : all
+  useEffect(() => setHi(0), [q])
+  const title = item.title
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="cmd-palette" onClick={(e) => e.stopPropagation()}>
+        <input
+          className="cmd-input"
+          autoFocus
+          placeholder={`Actions for “${title}”…`}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowDown') {
+              e.preventDefault()
+              setHi((h) => Math.min(h + 1, filtered.length - 1))
+            } else if (e.key === 'ArrowUp') {
+              e.preventDefault()
+              setHi((h) => Math.max(h - 1, 0))
+            } else if (e.key === 'Enter') {
+              e.preventDefault()
+              if (filtered[hi]) onRun(filtered[hi].id)
+            }
+          }}
+        />
+        <div className="cmd-list">
+          {filtered.map((a, i) => (
+            <button key={a.id} className={i === hi ? 'cmd-item active' : 'cmd-item'} onMouseEnter={() => setHi(i)} onClick={() => onRun(a.id)}>
+              {a.label}
+            </button>
+          ))}
+          {filtered.length === 0 && <div className="ss-empty">no actions</div>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function HelpOverlay({ onClose }: { onClose: () => void }): JSX.Element {
+  const rows: [string, string][] = [
+    ['/  ·  ⌘F', 'Focus search'],
+    ['← → ↑ ↓', 'Move selection'],
+    ['Enter', 'Open full size (deck: open it)'],
+    ['I  ·  Space', 'Toggle inspector sidebar'],
+    ['⌘K', 'Command palette (actions)'],
+    ['1 · 2 · 3', 'Slides · Images · Decks'],
+    ['G', 'Group by presentation'],
+    ['C', 'Cluster near-identical'],
+    ['S · O', 'Stats · Import'],
+    ['Esc', 'Close / back'],
+    ['?', 'This help']
+  ]
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal help-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <b>⌨ Keyboard shortcuts</b>
+          <button className="copyref" onClick={onClose}>close ✕</button>
+        </div>
+        <div className="details-table">
+          {rows.map(([k, v]) => (
+            <div className="drow" key={k}>
+              <span className="dk help-key">{k}</span>
+              <span className="dv">{v}</span>
+            </div>
+          ))}
         </div>
       </div>
     </div>

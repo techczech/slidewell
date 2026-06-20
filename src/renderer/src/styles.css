@@ -55,6 +55,80 @@ body {
   font-size: 0.8rem;
   color: var(--muted);
 }
+.titlebar-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  -webkit-app-region: no-drag;
+}
+.tb-btn {
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.tb-btn:hover {
+  background: #fff;
+}
+
+/* command palette (⌘K) */
+.cmd-palette {
+  width: min(540px, 92vw);
+  align-self: flex-start;
+  margin-top: 12vh;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+.cmd-input {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 0.8rem 1rem;
+  font-size: 1rem;
+  background: var(--card);
+  color: var(--ink);
+  outline: none;
+}
+.cmd-list {
+  max-height: 50vh;
+  overflow: auto;
+  padding: 4px;
+}
+.cmd-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  font-size: 0.88rem;
+  color: var(--ink);
+  cursor: pointer;
+}
+.cmd-item.active {
+  background: var(--oxford);
+  color: #fff;
+}
+.inspector-pos {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-bottom: 0.6rem;
+}
+.help-modal {
+  width: min(440px, 90vw);
+}
+.help-key {
+  width: 7rem !important;
+  font-family: ui-monospace, Menlo, monospace;
+  color: var(--ink) !important;
+}
 
 .searchbar {
   display: flex;
@@ -252,12 +326,17 @@ body {
   outline: 2px solid var(--oxford);
   outline-offset: 1px;
 }
-.has-deck-sidebar .results {
+.has-sidebar .results {
   margin-right: 332px;
+}
+.card.selected,
+.deck-card.selected {
+  outline: 2px solid var(--oxford);
+  outline-offset: 1px;
 }
 .deck-sidebar {
   position: fixed;
-  top: 0;
+  top: 2.7rem; /* sit below the titlebar so its actions stay clickable */
   right: 0;
   bottom: 0;
   width: 320px;
@@ -266,7 +345,6 @@ body {
   border-left: 1px solid var(--line);
   box-shadow: -6px 0 24px rgba(0, 0, 0, 0.08);
   padding: 1rem;
-  padding-top: 2rem;
   overflow-y: auto;
 }
 .deck-sidebar-head {
