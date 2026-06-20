@@ -37,6 +37,7 @@ try {
   let imgTags = 0
   let groupByDeckOk = false
   let deckModeOk = false
+  let statsOk = false
 
   if (archiveConnected) {
     // default browse populates with no query (newest first)
@@ -110,14 +111,24 @@ try {
       await win.waitForTimeout(900)
     }
     deckModeOk = nDeckCards > 0 && (await win.locator('.deck-sidebar').count()) === 1
+
+    // Stats panel: opens and renders year bars
+    await win.locator('.filterbar .toggle', { hasText: 'Stats' }).click()
+    await win.waitForSelector('.stats-modal', { timeout: 5000 })
+    try {
+      await win.waitForSelector('.stats-modal .statbar-row', { timeout: 9000 })
+    } catch {
+      /* no bars */
+    }
+    statsOk = (await win.locator('.stats-modal .statbar-row').count()) > 0
   }
 
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
-    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk)
+    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, imgCards, imgTags, pass })
+  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, imgCards, imgTags, pass })
   await app.close()
   process.exit(pass ? 0 : 2)
 } catch (e) {

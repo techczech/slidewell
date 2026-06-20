@@ -11,6 +11,7 @@ export function installMock(): void {
       decks: async () => [],
       listDecks: async () => [],
       deckDetail: async () => null,
+      stats: async () => null,
       slideStructure: async () => null,
       deckSlides: async () => [],
       copyImage: async () => false,

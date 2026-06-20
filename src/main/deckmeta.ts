@@ -17,6 +17,8 @@ export interface DeckMeta {
   title: string
   date: string | null
   dateSource: 'created' | 'modified' | 'none'
+  created: string | null
+  modified: string | null
   filename: string
   sourcePath: string
   ownership: Ownership
@@ -113,7 +115,7 @@ interface PMeta {
   last_modified_by?: string
   category?: string
 }
-const CACHE_VERSION = 1
+const CACHE_VERSION = 2 // bumped: added created/modified
 const CACHE_FILENAME = 'deck-meta-cache.json'
 
 function extractedRoot(archiveRoot: string): string {
@@ -161,6 +163,8 @@ function scanDeckMeta(archiveRoot: string): { index: DeckMetaIndex; newestMtimeM
       title: meta?.title?.trim() || id,
       date,
       dateSource,
+      created: created || null,
+      modified: modified || null,
       filename: meta?.source_file?.trim() || `${id}.pptx`,
       sourcePath: meta?.source_path?.trim() || '',
       ownership: resolveOwnership(meta ?? {}),
