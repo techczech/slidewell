@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, watch as fsWatch } 
 import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
-import { archiveResults, deckSlides, slideStructure, searchImages, listDecks, deckDetail, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
+import { archiveResults, deckSlides, slideStructure, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
 import { loadDeckMeta, categoryList, type DeckMetaIndex } from './deckmeta'
 import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, type WellRow } from './well'
 import { runIngest, cancelIngest, detectPython } from './ingest'
@@ -309,6 +309,16 @@ app.whenReady().then(() => {
     if (!archiveAvailable()) return null
     try {
       return deckDetail(archiveRoot(), cacheDir(), pid)
+    } catch {
+      return null
+    }
+  })
+
+  // Stats bundle (timeline of "my" PowerPoint history) for the Stats view.
+  ipcMain.handle('archive:stats', async () => {
+    if (!archiveAvailable()) return null
+    try {
+      return await archiveStats(archiveRoot(), cacheDir())
     } catch {
       return null
     }

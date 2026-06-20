@@ -1,4 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { Stats } from '../main/stats'
+
+export type { Stats } from '../main/stats'
 
 // One Image Node entity is shared with TalkWeaver (CONTEXT.md / ADR-0020, ADR-0026): a
 // content-addressed image + sidecar. In SlideWell it also carries provenance + notes. On disk
@@ -93,6 +96,8 @@ const api = {
     listDecks: (filters: SearchFilters): Promise<DeckCard[]> => ipcRenderer.invoke('archive:list-decks', filters),
     // Full metadata for one deck (sidebar).
     deckDetail: (pid: string): Promise<DeckDetail | null> => ipcRenderer.invoke('archive:deck-detail', pid),
+    // Stats bundle (timeline of "my" PowerPoint history).
+    stats: (): Promise<Stats | null> => ipcRenderer.invoke('archive:stats'),
     // The structured content (presentation.json node) of one slide — for "Copy structure".
     slideStructure: (deck: string, slideOrder: number | null): Promise<string | null> =>
       ipcRenderer.invoke('archive:slide-structure', deck, slideOrder),

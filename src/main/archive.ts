@@ -14,6 +14,7 @@ import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { existsSync, readFileSync } from 'node:fs'
 import { loadDeckMeta, categoryMatches, deckMatchesSubstring, type DeckMetaIndex } from './deckmeta'
+import { computeStats, type StatsDeck, type Stats } from './stats'
 import {
   parseQuery,
   combinedDateFilter,
@@ -563,6 +564,32 @@ export async function listDecks(root: string, cacheDir: string, filters: SearchF
       }
     })
     .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
+}
+
+/** The Stats bundle for "my" decks (ownership=mine, like the Raycast stats command). */
+export async function archiveStats(root: string, cacheDir: string): Promise<Stats> {
+  const index = loadDeckMeta(root, cacheDir)
+  const counts = await slideCounts(root, true) // content slides, matching search
+  const decks: StatsDeck[] = Object.entries(index)
+    .filter(([, m]) => m.ownership === 'mine')
+    .map(([id, m]) => ({
+      id,
+      title: m.title,
+      date: m.date,
+      category: m.category,
+      slideCount: counts[id] ?? 0,
+      created: m.created,
+      modified: m.modified,
+      filename: m.filename
+    }))
+  let totalImages = 0
+  try {
+    const r = await query<{ n: number }>({ binary: sqlite3Binary(), dbPath: imagesDb(root), sql: `SELECT COUNT(*) AS n FROM images` })
+    totalImages = Number(r[0]?.n) || 0
+  } catch {
+    /* images.db absent */
+  }
+  return computeStats(decks, totalImages)
 }
 
 export interface DeckDetail {
