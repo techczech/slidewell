@@ -1331,7 +1331,18 @@ function SlideInspector({
   onReveal: () => void
   onContext?: () => void
 }): JSX.Element {
+  const isSlide = hit.kind === 'slide'
   const kindLabel = hit.kind === 'slide' ? 'slide' : hit.kind === 'well-image' ? 'well image' : hit.kind === 'archive-image' ? 'embedded image' : 'OCR text'
+  const [json, setJson] = useState<string | null>(null)
+  const [assets, setAssets] = useState<Array<{ sha: string; thumbUrl: string | null }>>([])
+  useEffect(() => {
+    setJson(null)
+    setAssets([])
+    if (isSlide) {
+      void window.sw.archive.slideStructure(hit.deck, hit.slideOrder).then(setJson)
+      void window.sw.archive.slideImages(hit.deck, hit.slideOrder).then(setAssets)
+    }
+  }, [hit, isSlide])
   const rows: [string, string][] = [
     ['Deck', hit.deckTitle || hit.deck || '—'],
     ['File', hit.filename || '—'],
@@ -1357,7 +1368,34 @@ function SlideInspector({
             <span className="dv">{v}</span>
           </div>
         ))}
-        {hit.text && <div className="details-text">{hit.text}</div>}
+        {!isSlide && hit.text && <div className="details-text">{hit.text}</div>}
+        {isSlide && assets.length > 0 && (
+          <>
+            <div className="inspector-section">Image assets ({assets.length})</div>
+            <div className="inspector-assets">
+              {assets.map(
+                (a, i) =>
+                  a.thumbUrl && (
+                    <img
+                      key={`${a.sha}-${i}`}
+                      className="inspector-asset"
+                      src={a.thumbUrl}
+                      alt=""
+                      title={a.sha}
+                      loading="lazy"
+                      onError={(e) => (e.currentTarget.style.display = 'none')}
+                    />
+                  )
+              )}
+            </div>
+          </>
+        )}
+        {isSlide && (
+          <>
+            <div className="inspector-section">Full JSON</div>
+            <pre className="inspector-json">{json ?? '…'}</pre>
+          </>
+        )}
       </div>
       <div className="details-actions">
         <button className="primary-btn" onClick={onFullsize}>Full size</button>

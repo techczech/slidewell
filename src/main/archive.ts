@@ -132,6 +132,15 @@ export function renderPath(root: string, presentationId: string, slideOrder: num
   return existsSync(p) ? p : null
 }
 
+/** Probe the content-addressed media-store for <sha>.<ext> across common extensions. */
+function mediaStoreBySha(root: string, sha256: string): string | null {
+  for (const ext of ['webp', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff']) {
+    const p = join(root, 'media-store', `${sha256}.${ext}`)
+    if (existsSync(p)) return p
+  }
+  return null
+}
+
 /** Absolute path to an extracted image: media-store/<sha>.<ext> first, then per-deck rel_path. */
 export function imagePath(root: string, sha256: string, format: string, presentationId: string, relPath: string): string | null {
   const store = join(root, 'media-store', `${sha256}.${format}`)
@@ -140,7 +149,7 @@ export function imagePath(root: string, sha256: string, format: string, presenta
     const p = join(root, 'extracted', presentationId, relPath)
     if (existsSync(p)) return p
   }
-  return null
+  return mediaStoreBySha(root, sha256)
 }
 
 export type SlideHit = {
@@ -424,6 +433,25 @@ export function slideStructure(root: string, deck: string, slideOrder: number | 
   if (slides.length === 0) return null
   const node = slides[slideOrder ?? 0] ?? slides[0]
   return JSON.stringify(node, null, 2)
+}
+
+/** The embedded image assets on one slide (from images.db image_locations) → absolute paths. */
+export async function slideImages(root: string, deck: string, slideOrder: number | null): Promise<Array<{ sha: string; absPath: string | null }>> {
+  if (!deck || slideOrder === null) return []
+  try {
+    const rows = await query<{ sha256: string; fn: string | null }>({
+      binary: sqlite3Binary(),
+      dbPath: imagesDb(root),
+      sql: `SELECT sha256, original_filename AS fn FROM image_locations WHERE presentation_id = ? AND slide_order = ?`,
+      params: [deck, slideOrder]
+    })
+    return rows.map((r) => {
+      const ext = (r.fn?.split('.').pop() || '').toLowerCase() || 'png'
+      return { sha: r.sha256, absPath: imagePath(root, r.sha256, ext, deck, `media/${r.fn || ''}`) }
+    })
+  } catch {
+    return []
+  }
 }
 
 interface BrowseRow {
