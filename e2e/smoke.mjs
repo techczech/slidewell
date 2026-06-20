@@ -42,6 +42,7 @@ try {
   let selectionOk = false
   let inspectorOk = false
   let paletteOk = false
+  let lightboxPaletteOk = false
   let helpOk = false
 
   if (archiveConnected) {
@@ -81,7 +82,10 @@ try {
     await win.waitForTimeout(200)
     await win.keyboard.press('Meta+k')
     await win.waitForTimeout(350)
-    paletteOk = (await win.locator('.cmd-palette').count()) === 1 && (await win.locator('.cmd-item').count()) > 0
+    paletteOk =
+      (await win.locator('.cmd-palette').count()) === 1 &&
+      (await win.locator('.cmd-item').count()) > 0 &&
+      (await win.locator('.cmd-shortcut').count()) > 0 // actions list their keyboard shortcuts
     await win.keyboard.press('Escape')
     await win.waitForTimeout(200)
     await win.keyboard.press('?')
@@ -103,7 +107,15 @@ try {
     // lightbox
     await win.locator('main .card .thumb-wrap').first().click()
     lightboxOpened = (await win.locator('.lightbox').count()) === 1
-    if (lightboxOpened) await win.keyboard.press('Escape')
+    if (lightboxOpened) {
+      // ⌘K must work over the lightbox (acts on the image on screen, not the grid selection)
+      await win.keyboard.press('Meta+k')
+      await win.waitForTimeout(300)
+      lightboxPaletteOk = (await win.locator('.cmd-palette').count()) === 1
+      await win.keyboard.press('Escape')
+      await win.waitForTimeout(150)
+      await win.keyboard.press('Escape')
+    }
 
     // a filter re-runs (Date select: Owner, Date, Slides → nth 1)
     await win.locator('.filterbar select').nth(1).selectOption('2024')
@@ -167,9 +179,9 @@ try {
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
-    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk && roleAllOk && selectionOk && inspectorOk && paletteOk && helpOk)
+    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk && roleAllOk && selectionOk && inspectorOk && paletteOk && lightboxPaletteOk && helpOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, inspectorOk, paletteOk, helpOk, imgCards, imgTags, pass })
+  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, inspectorOk, paletteOk, lightboxPaletteOk, helpOk, imgCards, imgTags, pass })
   await app.close()
   process.exit(pass ? 0 : 2)
 } catch (e) {

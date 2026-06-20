@@ -102,7 +102,7 @@ const api = {
     slideStructure: (deck: string, slideOrder: number | null): Promise<string | null> =>
       ipcRenderer.invoke('archive:slide-structure', deck, slideOrder),
     // The embedded image assets on one slide (for the inspector).
-    slideImages: (deck: string, slideOrder: number | null): Promise<Array<{ sha: string; thumbUrl: string | null }>> =>
+    slideImages: (deck: string, slideOrder: number | null): Promise<Array<{ thumbUrl: string | null }>> =>
       ipcRenderer.invoke('archive:slide-images', deck, slideOrder),
     // All slides of one presentation, in order — for "See in context".
     deckSlides: (deck: string): Promise<SlideResult[]> => ipcRenderer.invoke('archive:deck-slides', deck),

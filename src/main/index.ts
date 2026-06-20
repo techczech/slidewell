@@ -335,10 +335,10 @@ app.whenReady().then(() => {
   })
 
   // The embedded image assets on one slide → renderable swarchive:// thumbnails (for the inspector).
-  ipcMain.handle('archive:slide-images', async (_e, deck: string, slideOrder: number | null) => {
+  ipcMain.handle('archive:slide-images', (_e, deck: string, slideOrder: number | null) => {
     if (!archiveAvailable()) return []
     try {
-      return (await slideImages(archiveRoot(), deck, slideOrder)).map((im) => ({ sha: im.sha, thumbUrl: swThumb(im.absPath) }))
+      return slideImages(archiveRoot(), deck, slideOrder).map((im) => ({ thumbUrl: swThumb(im.absPath) }))
     } catch {
       return []
     }
