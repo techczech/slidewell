@@ -366,7 +366,7 @@ export interface SearchFilters {
   role: 'content' | 'all'
   cluster: boolean
   scope: 'all' | 'archive' | 'well'
-  type: 'slides' | 'images'
+  type: 'slides' | 'images' | 'decks'
 }
 
 export async function searchArchive(
@@ -507,6 +507,104 @@ export async function archiveResults(root: string, cacheDir: string, rawQuery: s
   const parsed = parseQuery(rawQuery)
   if (parsed.text.trim().length >= 2) return searchArchive(root, cacheDir, rawQuery, filters)
   return browseArchive(root, cacheDir, rawQuery, filters)
+}
+
+// ---------- Deck mode: browse presentations by their title slide ----------
+export interface DeckCard {
+  id: string
+  title: string
+  date: string | null
+  category: string
+  filename: string
+  ownership: string
+  slideCount: number
+  coverAbsPath: string | null // render of slide 0 (the title slide)
+}
+
+async function slideCounts(root: string, contentOnly: boolean): Promise<Record<string, number>> {
+  const roleClause = contentOnly ? `WHERE role = 'content' OR role IS NULL` : ''
+  const rows = await query<{ pid: string; n: number }>({
+    binary: sqlite3Binary(),
+    dbPath: slidesDb(root),
+    sql: `SELECT presentation_id AS pid, COUNT(*) AS n FROM slide_locations ${roleClause} GROUP BY presentation_id`
+  })
+  const out: Record<string, number> = {}
+  for (const r of rows) out[r.pid] = Number(r.n) || 0
+  return out
+}
+
+/** One card per presentation (cover = title-slide render), filtered by the same Date/Owner/Category/Deck filters. */
+export async function listDecks(root: string, cacheDir: string, filters: SearchFilters): Promise<DeckCard[]> {
+  const index = loadDeckMeta(root, cacheDir)
+  const dateFilter = combinedDateFilter(parseQuery(''), filters.era)
+  const cat = (filters.category || '').toLowerCase()
+  const deckNeedle = (filters.deck || '').toLowerCase()
+  const counts = await slideCounts(root, filters.role === 'content')
+  return Object.keys(index)
+    .filter((pid) => {
+      const m = index[pid]
+      if (dateFilter && !dateMatches(dateFilter, m.date ?? null)) return false
+      if (filters.owner !== 'all' && (m.ownership ?? 'unknown') !== filters.owner) return false
+      if (cat && !categoryMatches(m.category, cat)) return false
+      if (deckNeedle && !deckMatchesSubstring(m, pid, deckNeedle)) return false
+      return true
+    })
+    .map((pid) => {
+      const m = index[pid]
+      return {
+        id: pid,
+        title: m.title || pid,
+        date: m.date,
+        category: m.category,
+        filename: m.filename,
+        ownership: m.ownership,
+        slideCount: counts[pid] ?? 0,
+        coverAbsPath: renderPath(root, pid, 0)
+      }
+    })
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
+}
+
+export interface DeckDetail {
+  id: string
+  title: string
+  date: string | null
+  dateSource: string
+  category: string
+  filename: string
+  ownership: string
+  sourcePath: string
+  sectionCount: number
+  slideCount: number
+}
+
+/** Full metadata for one deck (reads its presentation.json for section/slide counts) — for the sidebar. */
+export function deckDetail(root: string, cacheDir: string, pid: string): DeckDetail | null {
+  if (!pid) return null
+  const m = loadDeckMeta(root, cacheDir)[pid]
+  let sectionCount = 0
+  let slideCount = 0
+  try {
+    const doc = JSON.parse(readFileSync(join(root, 'extracted', pid, 'presentation.json'), 'utf8')) as {
+      sections?: Array<{ slides?: unknown[] }>
+    }
+    sectionCount = (doc.sections ?? []).length
+    for (const s of doc.sections ?? []) slideCount += (s.slides ?? []).length
+  } catch {
+    /* no json */
+  }
+  return {
+    id: pid,
+    title: m?.title || pid,
+    date: m?.date ?? null,
+    dateSource: m?.dateSource ?? 'none',
+    category: m?.category || '',
+    filename: m?.filename || '',
+    ownership: m?.ownership || 'unknown',
+    sourcePath: m?.sourcePath || '',
+    sectionCount,
+    slideCount
+  }
 }
 
 /** All slides of one presentation, in slide order — for "see in context". */

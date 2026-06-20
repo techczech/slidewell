@@ -51,10 +51,32 @@ export type SearchFilters = {
   role: 'content' | 'all'
   cluster: boolean
   scope: 'all' | 'archive' | 'well'
-  type: 'slides' | 'images'
+  type: 'slides' | 'images' | 'decks'
 }
 export type CategoryCount = { category: string; count: number }
 export type DeckInfo = { id: string; title: string; date: string | null }
+export type DeckCard = {
+  id: string
+  title: string
+  date: string | null
+  category: string
+  filename: string
+  ownership: string
+  slideCount: number
+  coverThumbUrl: string | null
+}
+export type DeckDetail = {
+  id: string
+  title: string
+  date: string | null
+  dateSource: string
+  category: string
+  filename: string
+  ownership: string
+  sourcePath: string
+  sectionCount: number
+  slideCount: number
+}
 
 const api = {
   archive: {
@@ -67,6 +89,10 @@ const api = {
     categories: (): Promise<CategoryCount[]> => ipcRenderer.invoke('archive:categories'),
     // All decks (newest-first) for the Deck filter picker.
     decks: (): Promise<DeckInfo[]> => ipcRenderer.invoke('archive:decks'),
+    // Deck MODE: one card per presentation (title-slide cover).
+    listDecks: (filters: SearchFilters): Promise<DeckCard[]> => ipcRenderer.invoke('archive:list-decks', filters),
+    // Full metadata for one deck (sidebar).
+    deckDetail: (pid: string): Promise<DeckDetail | null> => ipcRenderer.invoke('archive:deck-detail', pid),
     // The structured content (presentation.json node) of one slide — for "Copy structure".
     slideStructure: (deck: string, slideOrder: number | null): Promise<string | null> =>
       ipcRenderer.invoke('archive:slide-structure', deck, slideOrder),

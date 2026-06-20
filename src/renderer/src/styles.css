@@ -150,6 +150,53 @@ body {
   font-size: inherit;
 }
 
+/* deck mode */
+.deck-grid {
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+.deck-card {
+  cursor: pointer;
+}
+.deck-card.selected {
+  outline: 2px solid var(--oxford);
+  outline-offset: 1px;
+}
+.has-deck-sidebar .results {
+  margin-right: 332px;
+}
+.deck-sidebar {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 320px;
+  z-index: 30;
+  background: var(--card);
+  border-left: 1px solid var(--line);
+  box-shadow: -6px 0 24px rgba(0, 0, 0, 0.08);
+  padding: 1rem;
+  padding-top: 2rem;
+  overflow-y: auto;
+}
+.deck-sidebar-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin-bottom: 0.7rem;
+  font-size: 0.95rem;
+  line-height: 1.3;
+}
+.deck-sidebar-head .copyref {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.deck-sidebar-cover {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 0.8rem;
+}
+
 /* group-by-presentation sections */
 .deck-group {
   margin-bottom: 1.5rem;

@@ -36,6 +36,7 @@ try {
   let imgCards = 0
   let imgTags = 0
   let groupByDeckOk = false
+  let deckModeOk = false
 
   if (archiveConnected) {
     // default browse populates with no query (newest first)
@@ -99,14 +100,24 @@ try {
     imgCards = await win.locator('main .grid .card').count()
     imgTags = await win.locator('main .ocr-tag.img').count()
     imagesTypeOk = imgCards > 0 && imgTags > 0
+
+    // Deck MODE: a card per presentation + a metadata sidebar on click
+    await win.locator('.filterbar .scope-tab', { hasText: 'Decks' }).click()
+    await win.waitForTimeout(1600)
+    const nDeckCards = await win.locator('main .deck-card').count()
+    if (nDeckCards > 0) {
+      await win.locator('main .deck-card').first().click()
+      await win.waitForTimeout(900)
+    }
+    deckModeOk = nDeckCards > 0 && (await win.locator('.deck-sidebar').count()) === 1
   }
 
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
-    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk)
+    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, imgCards, imgTags, pass })
+  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, imgCards, imgTags, pass })
   await app.close()
   process.exit(pass ? 0 : 2)
 } catch (e) {
