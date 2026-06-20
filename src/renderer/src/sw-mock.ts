@@ -8,6 +8,7 @@ export function installMock(): void {
       available: async () => false,
       search: async () => [],
       categories: async () => [],
+      decks: async () => [],
       slideStructure: async () => null,
       deckSlides: async () => [],
       copyImage: async () => false,

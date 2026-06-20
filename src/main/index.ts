@@ -244,7 +244,12 @@ app.whenReady().then(() => {
       if (scope !== 'well' && archiveAvailable()) {
         try {
           const idx = loadDeckMeta(archiveRoot(), cacheDir())
+          const deckNeedle = (filters.deck || '').toLowerCase()
           for (const im of await searchImages(archiveRoot(), query ?? '', 120)) {
+            if (deckNeedle) {
+              const m = idx[im.deck]
+              if (!`${im.deck} ${m?.title || ''} ${m?.filename || ''}`.toLowerCase().includes(deckNeedle)) continue
+            }
             const w = archiveImageToWire(im, idx)
             out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
           }
@@ -271,6 +276,19 @@ app.whenReady().then(() => {
     if (!archiveAvailable()) return []
     try {
       return categoryList(loadDeckMeta(archiveRoot(), cacheDir()))
+    } catch {
+      return []
+    }
+  })
+
+  // All decks (id, title, date) newest-first, for the Deck filter picker.
+  ipcMain.handle('archive:decks', () => {
+    if (!archiveAvailable()) return []
+    try {
+      const idx = loadDeckMeta(archiveRoot(), cacheDir())
+      return Object.entries(idx)
+        .map(([id, m]) => ({ id, title: m.title || id, date: m.date }))
+        .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
     } catch {
       return []
     }

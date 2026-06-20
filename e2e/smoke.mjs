@@ -17,9 +17,9 @@ try {
   const archiveConnected = /archive connected/.test(status ?? '')
 
   // filter bar: Owner/Date/Slides native selects (3) + searchable Category + Group toggle + Source scope
-  const filterSelects = await win.locator('.filterbar .filter select').count()
-  const hasSearchableCategory = (await win.locator('.filterbar .ss-btn').count()) === 1
-  const hasToggle = (await win.locator('.filterbar .toggle', { hasText: 'Group' }).count()) === 1
+  const filterSelects = await win.locator('.filterbar .filter select').count() // Owner, Date, Role, Sort
+  const hasSearchableFilters = (await win.locator('.filterbar .ss-btn').count()) >= 2 // Category + Deck
+  const hasToggle = (await win.locator('.filterbar .toggle', { hasText: 'near-identical' }).count()) === 1
   const hasScope = (await win.locator('.filterbar [aria-label="Source scope"] .scope-tab').count()) === 3
 
   let browseDefault = 0
@@ -35,6 +35,7 @@ try {
   let imagesTypeOk = false
   let imgCards = 0
   let imgTags = 0
+  let groupByDeckOk = false
 
   if (archiveConnected) {
     // default browse populates with no query (newest first)
@@ -83,6 +84,13 @@ try {
     contextFilterOk = (await win.locator('.context-banner').count()) === 1 && (await win.locator('main .grid .card').count()) > 0
     if (contextFilterOk) await win.locator('.context-banner .link').click()
 
+    // Group by presentation → per-deck sections; Sort by title re-renders without crashing
+    await win.locator('.filterbar .toggle', { hasText: 'Group by presentation' }).click()
+    await win.waitForTimeout(800)
+    groupByDeckOk = (await win.locator('.deck-group').count()) > 0
+    await win.locator('.filterbar select').nth(3).selectOption('title') // Owner, Date, Role, Sort → nth 3
+    await win.waitForTimeout(500)
+
     // Type = Images: extracted images (separate from slides), tagged IMG
     await win.fill('.search-input', '')
     await win.waitForTimeout(500)
@@ -96,9 +104,9 @@ try {
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
-    (filterSelects === 3 && hasSearchableCategory && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && imagesTypeOk)
+    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableCategory, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, imagesTypeOk, imgCards, imgTags, pass })
+  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, imgCards, imgTags, pass })
   await app.close()
   process.exit(pass ? 0 : 2)
 } catch (e) {
