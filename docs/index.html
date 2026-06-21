@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SlideWell — your slides &amp; images in one place</title>
+<meta name="description" content="A desktop app that searches your whole PowerPoint archive and image collection — slide text, OCR, embedded images — locally, and triages screenshots into a reusable well. Companion to TalkWeaver." />
+<link rel="canonical" href="https://talkweaver.app/slidewell/" />
+<meta property="og:title" content="SlideWell" />
+<meta property="og:description" content="Search every slide and image you've ever made — locally. The well you draw slides and images from. Companion to TalkWeaver." />
+<meta property="og:url" content="https://talkweaver.app/slidewell/" />
+<style>
+  :root {
+    --ink: #1c1a16; --muted: #6b6356; --line: #e2dacb;
+    --oxford: #0b3a6b; --claret: #9f1239; --bg: #f7f3ea; --card: #fffdf8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; color: var(--ink); background: var(--bg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 24px; }
+  header { padding: 72px 0 36px; text-align: center; }
+  .badge { display: inline-block; font-size: 13px; font-weight: 700; letter-spacing: 0.04em;
+    text-transform: uppercase; color: var(--oxford); background: #e6eef7; padding: 5px 12px; border-radius: 999px; }
+  h1 { font-size: 48px; line-height: 1.05; margin: 18px 0 12px; letter-spacing: -0.025em; }
+  h1 .mark { color: var(--claret); }
+  .tagline { font-size: 21px; color: var(--muted); margin: 0 auto 28px; max-width: 34ch; }
+  .btns { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+  .btn { display: inline-block; padding: 12px 22px; border-radius: 10px; font-weight: 600;
+    text-decoration: none; border: 1px solid var(--line); }
+  .btn.primary { background: var(--oxford); color: #fff; border-color: var(--oxford); }
+  .btn.ghost { background: var(--card); color: var(--ink); }
+  .note { color: var(--muted); font-size: 14px; margin-top: 14px; }
+  .shot { margin: 40px auto 0; max-width: 880px; }
+  .shot img { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: 0 24px 60px -24px rgba(11,58,107,0.4); background: var(--card); }
+  .shot figcaption { color: var(--muted); font-size: 13px; text-align: center; margin-top: 10px; }
+  section { padding: 44px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 26px; letter-spacing: -0.01em; margin: 0 0 22px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 22px; }
+  .card h3 { margin: 0 0 6px; font-size: 16px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+  code { background: #efe7d7; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
+  kbd { background: var(--card); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px;
+    padding: 1px 7px; font: 13px ui-monospace, monospace; color: var(--ink); }
+  .keys { display: flex; flex-wrap: wrap; gap: 10px 18px; }
+  .keys div { color: var(--muted); font-size: 15px; }
+  .callout { background: #fbf3df; border: 1px solid #e9d9a8; border-radius: 10px; padding: 14px 18px;
+    font-size: 14px; color: #6b5310; }
+  footer { padding: 40px 0 80px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); text-align: center; }
+  a { color: var(--oxford); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <span class="badge">Companion to TalkWeaver</span>
+    <h1>Slide<span class="mark">·</span>Well</h1>
+    <p class="tagline">Every slide and image you've ever made — searchable, in one place, on your Mac.</p>
+    <div class="btns">
+      <a class="btn primary" href="https://github.com/techczech/slidewell/releases">Download for Mac</a>
+      <a class="btn ghost" href="https://github.com/techczech/slidewell">View source</a>
+    </div>
+    <p class="note">macOS · open source (MIT) · your files never leave your computer.</p>
+
+    <figure class="shot">
+      <img src="screenshots/home.png" alt="SlideWell showing a grid of slide thumbnails with a search box and Slides / Images / Decks filters." onerror="this.closest('.shot').style.display='none'" />
+      <figcaption>Search slide text and OCR across your whole archive — browse by slide, image, or presentation.</figcaption>
+    </figure>
+  </header>
+
+  <section>
+    <h2>One well for slides and images</h2>
+    <div class="grid">
+      <div class="card"><h3>Search everything</h3><p>Slide text and OCR across your extracted PowerPoint archive, the images inside those slides, and the net-new images you collect — all from one search box.</p></div>
+      <div class="card"><h3>Slides · Images · Decks</h3><p>Browse the same library three ways: individual slides, standalone images, or whole presentations by their title slide with metadata.</p></div>
+      <div class="card"><h3>Bring your PowerPoints in</h3><p>Import a file or a whole folder; SlideWell extracts the text, structure, slide renders, and embedded images and indexes them for search.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Screenshot &amp; video triage</h2>
+    <div class="grid">
+      <div class="card"><h3>Point it at a folder</h3><p>A screenshots folder (e.g. OneDrive) is scanned recursively and OCR'd, so you can search the text inside your screenshots.</p></div>
+      <div class="card"><h3>Keep the keepers</h3><p>Sweep through 6-up, select the ones worth reusing into your well and dismiss the rest. Decisions are remembered, so the next pass only shows what's new.</p></div>
+      <div class="card"><h3>Short videos too</h3><p>Clips get a poster frame and inline playback; keep the ones you'll reuse.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Reuse, fast</h2>
+    <div class="grid">
+      <div class="card"><h3>Copy the right thing</h3><p>Copy a slide's image as WebP (straight into TalkWeaver) or as PNG, or copy its text, its structure, or a reference.</p></div>
+      <div class="card"><h3>See it in context</h3><p>Open any slide in the order of its whole presentation, and pull from any of them.</p></div>
+      <div class="card"><h3>Entirely local</h3><p>No cloud, no account. The index lives on your machine and your files stay where they are.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Keyboard, everywhere</h2>
+    <div class="keys">
+      <div><kbd>/</kbd> search</div>
+      <div><kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> navigate</div>
+      <div><kbd>⌘K</kbd> command palette</div>
+      <div><kbd>⌘C</kbd> copy image · <kbd>⌘⇧C</kbd> as PNG</div>
+      <div><kbd>Space</kbd> select (triage)</div>
+      <div><kbd>?</kbd> shortcuts</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Get started</h2>
+    <p><strong>macOS:</strong> open the <code>.dmg</code> and drag <strong>SlideWell</strong> to Applications.
+       The app isn't notarised yet, so the first launch is blocked — right-click the app and choose
+       <strong>Open</strong>, then <strong>Open</strong> again at the prompt.
+       (Or in Terminal: <code>xattr -dr com.apple.quarantine "/Applications/SlideWell.app"</code>.)</p>
+    <p class="callout">
+      Early release: the download isn't code-signed or notarised yet, so macOS will warn you the
+      first time (that's the step above, not a problem with the app). It's built automatically and
+      still settling — if anything misbehaves, please
+      <a href="https://github.com/techczech/slidewell/issues">open an issue on GitHub</a>.
+    </p>
+    <div class="btns" style="justify-content:flex-start;margin-top:18px">
+      <a class="btn primary" href="https://github.com/techczech/slidewell/releases">Download for Mac</a>
+    </div>
+  </section>
+
+  <footer>
+    <p>Made by <a href="https://dominiklukes.net">Dominik Lukeš</a> with Claude Code.
+       Companion to <a href="https://talkweaver.app">TalkWeaver</a>.</p>
+    <p>Built with Electron. MIT licensed ·
+    <a href="https://github.com/techczech/slidewell">github.com/techczech/slidewell</a> ·
+    <a href="https://github.com/techczech/slidewell/issues">feedback</a></p>
+  </footer>
+
+</div>
+</body>
+</html>
