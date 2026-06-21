@@ -947,3 +947,212 @@ body {
   font-size: 0.85rem;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
 }
+
+/* --- triage (ADR-0029) --- */
+.triage-overlay {
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 2.7rem 1.2rem 1.2rem;
+}
+.triage-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+}
+.triage-head {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.triage-head b {
+  font-size: 1rem;
+}
+.triage-root {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-family: ui-monospace, Menlo, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 38vw;
+  direction: rtl; /* keep the tail (folder name) visible */
+  text-align: left;
+}
+.triage-head-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.triage-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.triage-controls .search-input {
+  flex: 1;
+  min-width: 220px;
+}
+.triage-progress {
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+.triage-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--muted);
+  padding: 2rem;
+}
+.triage-empty p {
+  max-width: 32rem;
+  line-height: 1.5;
+}
+.triage-grid {
+  flex: 1;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 12px;
+  padding: 1rem;
+  align-content: start;
+}
+.triage-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+  cursor: pointer;
+}
+.triage-card.selected {
+  outline: 2px solid var(--oxford);
+  outline-offset: 1px;
+}
+.triage-card.state-included {
+  border-color: #2f7d4f;
+}
+.triage-card.state-excluded {
+  opacity: 0.55;
+}
+.triage-thumb {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  background: #ece5d6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.triage-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.triage-play {
+  position: absolute;
+  font-size: 1.6rem;
+  color: #fff;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.triage-size {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  font-size: 0.66rem;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+}
+.triage-size.large {
+  background: var(--accent);
+}
+.triage-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 1.3rem;
+  height: 1.3rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 0.8rem;
+  color: #fff;
+}
+.triage-badge.included {
+  background: #2f7d4f;
+}
+.triage-badge.excluded {
+  background: #8a8275;
+}
+.triage-meta {
+  padding: 0.45rem 0.55rem 0.3rem;
+  flex: 1;
+  min-height: 0;
+}
+.triage-name {
+  font-size: 0.76rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.triage-snip {
+  font-size: 0.68rem;
+  color: var(--muted);
+  margin-top: 0.2rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.triage-actions {
+  display: flex;
+  gap: 4px;
+  padding: 0 0.5rem 0.5rem;
+}
+.triage-actions button {
+  flex: 1;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 5px;
+  padding: 0.25rem 0;
+  font-size: 0.72rem;
+  cursor: pointer;
+  color: var(--ink);
+}
+.triage-actions .ti-inc:hover {
+  background: #2f7d4f;
+  border-color: #2f7d4f;
+  color: #fff;
+}
+.triage-actions .ti-exc:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.triage-preview-overlay {
+  z-index: 70;
+}
+.triage-preview-overlay video.lb-img {
+  max-width: 86vw;
+  max-height: 76vh;
+  background: #000;
+}

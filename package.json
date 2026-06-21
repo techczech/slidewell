@@ -10,7 +10,8 @@
     "preview": "electron-vite preview",
     "start": "electron .",
     "dist:mac": "tsc --noEmit && electron-vite build && electron-builder --mac --dir",
-    "test:smoke": "electron-vite build && node e2e/smoke.mjs"
+    "test:smoke": "electron-vite build && node e2e/smoke.mjs",
+    "test:triage": "electron-vite build && node e2e/triage.mjs"
   },
   "build": {
     "appId": "net.dominiklukes.slidewell",

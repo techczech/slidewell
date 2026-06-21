@@ -57,6 +57,20 @@ export type SearchFilters = {
   type: 'slides' | 'images' | 'decks'
 }
 export type CategoryCount = { category: string; count: number }
+// A scanned item in a Triage source (ADR-0029) — not yet in the library unless state==='included'.
+export type TriageItem = {
+  hash: string
+  kind: 'image' | 'video'
+  filename: string
+  ext: string
+  state: 'undecided' | 'included' | 'excluded'
+  sizeMB: number
+  large: boolean // video over the 20 MB gate — include needs an explicit confirm
+  snippet: string
+  thumbUrl: string | null
+  mediaUrl: string | null // video source file (for inline playback); null for images
+}
+export type TriageCounts = { undecided: number; included: number; excluded: number; total: number }
 export type DeckInfo = { id: string; title: string; date: string | null }
 export type DeckCard = {
   id: string
@@ -123,9 +137,27 @@ const api = {
       wellRoot: string
       vaultRoot: string | null
       vaultAvailable: boolean
+      screenshotRoot: string | null
+      screenshotAvailable: boolean
     }> => ipcRenderer.invoke('settings:get-paths'),
     chooseArchive: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-archive'),
-    chooseVault: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-vault')
+    chooseVault: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-vault'),
+    chooseScreenshotFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-screenshot-folder')
+  },
+  // Triage source workflow (ADR-0029): scan a folder, browse/decide, promote keepers into the well.
+  triage: {
+    scan: (): Promise<{ ok: boolean; indexed: number; total: number }> => ipcRenderer.invoke('triage:scan'),
+    list: (query: string, state: string): Promise<{ items: TriageItem[]; counts: TriageCounts }> => ipcRenderer.invoke('triage:list', query, state),
+    decide: (hash: string, action: 'include' | 'exclude' | 'reset', force?: boolean): Promise<{ state: string; wellId?: string; gated?: boolean; sizeMB?: number }> =>
+      ipcRenderer.invoke('triage:decide', hash, action, force),
+    // Paste-to-include: ingest the clipboard image straight into the well. Returns the new id or null.
+    paste: (): Promise<{ id: string } | null> => ipcRenderer.invoke('well:add-from-clipboard'),
+    // Stream scan progress; returns an unsubscribe function.
+    onProgress: (cb: (line: string) => void): (() => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, line: string): void => cb(line)
+      ipcRenderer.on('triage:progress', handler)
+      return () => ipcRenderer.removeListener('triage:progress', handler)
+    }
   },
   shell: {
     openPath: (path: string): Promise<boolean> => ipcRenderer.invoke('shell:open-path', path),

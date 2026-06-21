@@ -1,14 +1,15 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage } from 'electron'
 import sharp from 'sharp'
 import { join } from 'path'
-import { homedir } from 'os'
+import { homedir, tmpdir } from 'os'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, watch as fsWatch } from 'fs'
 import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
 import { loadDeckMeta, categoryList, type DeckMetaIndex } from './deckmeta'
-import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, type WellRow } from './well'
+import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, ingestScreenshot, type WellRow } from './well'
+import { scanTriageSource, listTriage, triageCounts, setTriageDecision, VIDEO_GATE_BYTES, type TriageRow } from './triage'
 import { runIngest, cancelIngest, detectPython } from './ingest'
 
 // Custom schemes must be registered as privileged BEFORE app ready so the renderer treats them
@@ -26,6 +27,7 @@ type Config = {
   archiveRoot?: string
   wellRoot?: string
   vaultRoot?: string
+  screenshotRoot?: string
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -80,9 +82,17 @@ function detectVaultRoot(): string | null {
   return null
 }
 
+// The Triage source — a folder SlideWell reads but never owns (e.g. a OneDrive screenshots folder,
+// ADR-0029). Null until the user picks one in the Triage screen / Settings.
+function screenshotRootResolved(): string | null {
+  const r = readConfig().screenshotRoot
+  return r && existsSync(r) ? r : null
+}
+
 // A render/image request is allowed only if it resolves inside one of the roots SlideWell knows.
+// The Triage source is included so source screenshots/video posters render via swarchive://.
 function allowedRoots(): string[] {
-  return [archiveRoot(), wellRootResolved(), detectVaultRoot()].filter((r): r is string => Boolean(r))
+  return [archiveRoot(), wellRootResolved(), detectVaultRoot(), screenshotRootResolved()].filter((r): r is string => Boolean(r))
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -163,7 +173,9 @@ app.whenReady().then(() => {
     archiveAvailable: archiveAvailable(),
     wellRoot: wellRootResolved(),
     vaultRoot: detectVaultRoot(),
-    vaultAvailable: Boolean(detectVaultRoot())
+    vaultAvailable: Boolean(detectVaultRoot()),
+    screenshotRoot: screenshotRootResolved(),
+    screenshotAvailable: Boolean(screenshotRootResolved())
   }))
   ipcMain.handle('settings:choose-archive', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
@@ -404,6 +416,81 @@ app.whenReady().then(() => {
       return await scanVault(archiveRoot(), wellRootResolved(), vr)
     } catch {
       return 0
+    }
+  })
+
+  // --- triage (ADR-0029): scan a source folder, browse/decide, promote keepers into the well ---
+  ipcMain.handle('settings:choose-screenshot-folder', async () => {
+    const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+    if (r.canceled || !r.filePaths[0]) return null
+    writeConfig({ screenshotRoot: r.filePaths[0] })
+    return r.filePaths[0]
+  })
+  // One row → renderable wire shape. Images render from the source file; videos from a cached poster,
+  // with mediaUrl pointing at the source file so the renderer can play it inline.
+  const triageToWire = (r: TriageRow, sourceRoot: string, wellR: string): Record<string, unknown> => {
+    const isVideo = r.kind === 'video'
+    const fileAbs = join(sourceRoot, r.rel_path)
+    const posterAbs = r.poster_rel ? join(wellR, r.poster_rel) : null
+    const sizeBytes = Number(r.size) || 0
+    return {
+      hash: r.hash,
+      kind: r.kind,
+      filename: r.filename,
+      ext: r.ext,
+      state: r.state,
+      sizeMB: Math.round((sizeBytes / 1048576) * 10) / 10,
+      large: isVideo && sizeBytes > VIDEO_GATE_BYTES,
+      snippet: (r.ocr_text || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+      thumbUrl: swThumb(isVideo ? posterAbs : fileAbs),
+      mediaUrl: isVideo ? swThumb(fileAbs) : null
+    }
+  }
+  ipcMain.handle('triage:scan', async () => {
+    const src = screenshotRootResolved()
+    if (!src) return { ok: false, indexed: 0, total: 0 }
+    const onP = (m: string): void => void mainWindow?.webContents.send('triage:progress', m)
+    try {
+      const res = await scanTriageSource(archiveRoot(), wellRootResolved(), src, onP)
+      return { ok: true, ...res }
+    } catch {
+      return { ok: false, indexed: 0, total: 0 }
+    }
+  })
+  ipcMain.handle('triage:list', async (_e, q: string, state: string) => {
+    const src = screenshotRootResolved()
+    const wellR = wellRootResolved()
+    const empty = { items: [], counts: { undecided: 0, included: 0, excluded: 0, total: 0 } }
+    if (!src) return empty
+    try {
+      const rows = await listTriage(wellR, q ?? '', state ?? 'undecided')
+      const counts = await triageCounts(wellR)
+      return { items: rows.map((r) => triageToWire(r, src, wellR)), counts }
+    } catch {
+      return empty
+    }
+  })
+  ipcMain.handle('triage:decide', async (_e, hash: string, action: 'include' | 'exclude' | 'reset', force?: boolean) => {
+    const src = screenshotRootResolved()
+    if (!src) return { state: 'undecided' }
+    try {
+      return await setTriageDecision(archiveRoot(), wellRootResolved(), src, hash, action, Boolean(force))
+    } catch {
+      return { state: 'undecided' }
+    }
+  })
+  // Paste-to-include: read an image off the clipboard and ingest it straight into the well (the paste
+  // IS the keep decision, ADR-0029). Returns the new well id or null when the clipboard has no image.
+  ipcMain.handle('well:add-from-clipboard', async () => {
+    const img = clipboard.readImage()
+    if (img.isEmpty()) return null
+    const tmp = join(tmpdir(), `sw-paste-${Date.now()}.png`)
+    try {
+      writeFileSync(tmp, img.toPNG())
+      const res = await ingestScreenshot(archiveRoot(), wellRootResolved(), tmp, 'screenshot')
+      return res ? { id: res.id } : null
+    } catch {
+      return null
     }
   })
 
