@@ -469,16 +469,18 @@ app.whenReady().then(() => {
       return { ok: false, indexed: 0, total: 0 }
     }
   })
-  ipcMain.handle('triage:list', async (_e, q: string, state: string, sort?: string) => {
+  ipcMain.handle('triage:list', async (_e, q: string, state: string, sort?: string, limit?: number, offset?: number) => {
     const src = screenshotRootResolved()
     const wellR = wellRootResolved()
-    const empty = { items: [], counts: { undecided: 0, included: 0, excluded: 0, total: 0 } }
+    const empty = { items: [], counts: { undecided: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }
     if (!src) return empty
     try {
       const s = sort === 'date-desc' || sort === 'date-asc' ? sort : 'scanned'
-      const rows = await listTriage(wellR, q ?? '', state ?? 'undecided', s)
+      const lim = typeof limit === 'number' && limit > 0 ? Math.min(limit, 500) : 150
+      const off = typeof offset === 'number' && offset > 0 ? offset : 0
+      const rows = await listTriage(wellR, q ?? '', state ?? 'undecided', s, lim, off)
       const counts = await triageCounts(wellR)
-      return { items: rows.map((r) => triageToWire(r, src, wellR)), counts }
+      return { items: rows.map((r) => triageToWire(r, src, wellR)), counts, hasMore: rows.length === lim }
     } catch {
       return empty
     }

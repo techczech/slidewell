@@ -219,7 +219,7 @@ const LIST_COLS =
 export type TriageSort = 'scanned' | 'date-desc' | 'date-asc'
 
 /** Browse/search the triage index. sort: scanned (default) | date-desc | date-asc (by file mtime). */
-export async function listTriage(wellRoot: string, raw: string, state: string, sort: TriageSort = 'scanned', limit = 400): Promise<TriageRow[]> {
+export async function listTriage(wellRoot: string, raw: string, state: string, sort: TriageSort = 'scanned', limit = 150, offset = 0): Promise<TriageRow[]> {
   const db = triageDb(wellRoot)
   if (!existsSync(db)) return []
   const stateClause = state && state !== 'all' ? `COALESCE(d.state, 'undecided') = '${state.replace(/[^a-z]/g, '')}'` : ''
@@ -229,10 +229,10 @@ export async function listTriage(wellRoot: string, raw: string, state: string, s
   if (raw && raw.trim().length >= 2) {
     const q = safeFtsQuery(raw)
     const where = `triage_fts MATCH ?${stateClause ? ` AND ${stateClause}` : ''}`
-    return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} WHERE ${where} ${useDate ? dateOrder : 'ORDER BY rank'} LIMIT ?`, [q, limit])
+    return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} WHERE ${where} ${useDate ? dateOrder : 'ORDER BY rank'} LIMIT ? OFFSET ?`, [q, limit, offset])
   }
   const where = stateClause ? `WHERE ${stateClause}` : ''
-  return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} ${where} ${useDate ? dateOrder : 'ORDER BY triage_fts.scanned_at DESC'} LIMIT ?`, [limit])
+  return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} ${where} ${useDate ? dateOrder : 'ORDER BY triage_fts.scanned_at DESC'} LIMIT ? OFFSET ?`, [limit, offset])
 }
 
 export async function triageCounts(wellRoot: string): Promise<{ undecided: number; included: number; excluded: number; total: number }> {

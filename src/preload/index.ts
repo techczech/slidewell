@@ -150,8 +150,13 @@ const api = {
   // Triage source workflow (ADR-0029): scan a folder, browse/decide, promote keepers into the well.
   triage: {
     scan: (): Promise<{ ok: boolean; indexed: number; total: number; offline: number }> => ipcRenderer.invoke('triage:scan'),
-    list: (query: string, state: string, sort?: 'scanned' | 'date-desc' | 'date-asc'): Promise<{ items: TriageItem[]; counts: TriageCounts }> =>
-      ipcRenderer.invoke('triage:list', query, state, sort),
+    list: (
+      query: string,
+      state: string,
+      sort?: 'scanned' | 'date-desc' | 'date-asc',
+      limit?: number,
+      offset?: number
+    ): Promise<{ items: TriageItem[]; counts: TriageCounts; hasMore: boolean }> => ipcRenderer.invoke('triage:list', query, state, sort, limit, offset),
     decide: (hash: string, action: 'include' | 'exclude' | 'reset', force?: boolean): Promise<{ state: string; wellId?: string; gated?: boolean; sizeMB?: number }> =>
       ipcRenderer.invoke('triage:decide', hash, action, force),
     // Paste-to-include: ingest the clipboard image straight into the well. Returns the new id or null.
