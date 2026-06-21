@@ -434,6 +434,13 @@ app.whenReady().then(() => {
     const fileAbs = join(sourceRoot, r.rel_path)
     const posterAbs = r.poster_rel ? join(wellR, r.poster_rel) : null
     const sizeBytes = Number(r.size) || 0
+    const mtime = Number(r.mtime) || 0
+    let date = ''
+    try {
+      date = new Date(mtime).toISOString().slice(0, 10)
+    } catch {
+      /* bad mtime → no date */
+    }
     // Never point a thumbnail/media URL at an online-only placeholder — loading it would force a download.
     return {
       hash: r.hash,
@@ -442,6 +449,8 @@ app.whenReady().then(() => {
       ext: r.ext,
       state: r.state,
       offline,
+      mtime,
+      date,
       sizeMB: Math.round((sizeBytes / 1048576) * 10) / 10,
       large: isVideo && sizeBytes > VIDEO_GATE_BYTES,
       snippet: (r.ocr_text || '').replace(/\s+/g, ' ').trim().slice(0, 160),
@@ -460,13 +469,14 @@ app.whenReady().then(() => {
       return { ok: false, indexed: 0, total: 0 }
     }
   })
-  ipcMain.handle('triage:list', async (_e, q: string, state: string) => {
+  ipcMain.handle('triage:list', async (_e, q: string, state: string, sort?: string) => {
     const src = screenshotRootResolved()
     const wellR = wellRootResolved()
     const empty = { items: [], counts: { undecided: 0, included: 0, excluded: 0, total: 0 } }
     if (!src) return empty
     try {
-      const rows = await listTriage(wellR, q ?? '', state ?? 'undecided')
+      const s = sort === 'date-desc' || sort === 'date-asc' ? sort : 'scanned'
+      const rows = await listTriage(wellR, q ?? '', state ?? 'undecided', s)
       const counts = await triageCounts(wellR)
       return { items: rows.map((r) => triageToWire(r, src, wellR)), counts }
     } catch {

@@ -837,6 +837,23 @@ export default function App(): JSX.Element {
   )
 }
 
+// Partition triage items into [date, items] groups, preserving the (date-sorted) order.
+function groupByDateList(items: TriageItem[]): Array<[string, TriageItem[]]> {
+  const groups: Array<[string, TriageItem[]]> = []
+  const map = new Map<string, TriageItem[]>()
+  for (const it of items) {
+    const d = it.date || ''
+    let arr = map.get(d)
+    if (!arr) {
+      arr = []
+      map.set(d, arr)
+      groups.push([d, arr])
+    }
+    arr.push(it)
+  }
+  return groups
+}
+
 // ADR-0029: triage a source folder of screenshots/videos. Reads but never owns the folder; include
 // promotes a file into the well, exclude remembers its hash. The App's global keyboard layer yields
 // to this panel (it bails while showTriage), so we run our own.
@@ -847,6 +864,8 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
   const [q, setQ] = useState('')
   const [debq, setDebq] = useState('')
   const [stateFilter, setStateFilter] = useState<'undecided' | 'included' | 'excluded' | 'all'>('undecided')
+  const [sort, setSort] = useState<'scanned' | 'date-desc' | 'date-asc'>('scanned')
+  const [groupByDate, setGroupByDate] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [progress, setProgress] = useState('')
   const [sel, setSel] = useState(0)
@@ -858,16 +877,18 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
     return () => clearTimeout(t)
   }, [q])
 
+  // grouping needs the list date-ordered so each day's items are contiguous
+  const listSort = groupByDate && !sort.startsWith('date') ? 'date-desc' : sort
   const refresh = useCallback(async () => {
     try {
-      const r = await window.sw.triage.list(debq, stateFilter)
+      const r = await window.sw.triage.list(debq, stateFilter, listSort)
       setItems(r.items)
       setCounts(r.counts)
       setSel((s) => Math.min(s, Math.max(0, r.items.length - 1)))
     } catch {
       /* a mid-scan read may briefly lose to a write; the next tick retries */
     }
-  }, [debq, stateFilter])
+  }, [debq, stateFilter, listSort])
 
   // Lazy load: as the scan streams progress, re-list (throttled) so rows appear as they land —
   // the user sees continuous movement instead of a blank "scanning…".
@@ -929,11 +950,26 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
         onToast(`Gated at 20 MB (${r.sizeMB} MB)`)
         return
       }
-      onToast(action === 'include' ? 'Included → added to the well' : action === 'exclude' ? 'Excluded' : 'Reset')
+      const newState = (r.state as TriageItem['state']) || 'undecided'
+      // update the card in place (don't refetch) so a just-selected item stays visible to unselect,
+      // and the grid doesn't reshuffle under you while you work through it
+      setItems((prev) => prev.map((it) => (it.hash === item.hash ? { ...it, state: newState } : it)))
+      setCounts((c) => {
+        if (item.state === newState) return c
+        const next = { ...c }
+        const bump = (k: TriageItem['state'], d: number): void => {
+          if (k === 'included') next.included += d
+          else if (k === 'excluded') next.excluded += d
+          else next.undecided += d
+        }
+        bump(item.state, -1)
+        bump(newState, 1)
+        return next
+      })
+      onToast(action === 'include' ? 'Selected → added to the well' : action === 'exclude' ? 'Excluded' : 'Unselected')
       onChanged()
-      await refresh()
     },
-    [onChanged, onToast, refresh]
+    [onChanged, onToast]
   )
 
   const paste = useCallback(async () => {
@@ -960,8 +996,17 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
         void paste()
         return
       }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
+        // ⌘Y — see the full image/video
+        const cur = preview ?? items[sel]
+        if (cur) {
+          e.preventDefault()
+          setPreview(cur)
+        }
+        return
+      }
       if (preview) {
-        if (e.key === 'i' || e.key === 'I') {
+        if (e.key === ' ' || e.key === 'i' || e.key === 'I') {
           e.preventDefault()
           void decide(preview, 'include')
           setPreview(null)
@@ -969,6 +1014,9 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
           e.preventDefault()
           void decide(preview, 'exclude')
           setPreview(null)
+        } else if (e.key === 'u' || e.key === 'U') {
+          e.preventDefault()
+          void decide(preview, 'reset')
         }
         return
       }
@@ -980,9 +1028,18 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault()
         setSel((s) => Math.max(s - 1, 0))
-      } else if ((e.key === 'Enter' || e.key === ' ') && cur) {
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSel((s) => Math.min((s < 0 ? 0 : s) + 6, items.length - 1)) // a row is 6 columns
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSel((s) => Math.max((s < 0 ? 0 : s) - 6, 0))
+      } else if (e.key === 'Enter' && cur) {
         e.preventDefault()
         setPreview(cur)
+      } else if (e.key === ' ' && cur) {
+        e.preventDefault()
+        void decide(cur, 'include') // Space = select (keep)
       } else if ((e.key === 'i' || e.key === 'I') && cur) {
         e.preventDefault()
         void decide(cur, 'include')
@@ -991,7 +1048,7 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
         void decide(cur, 'exclude')
       } else if ((e.key === 'u' || e.key === 'U') && cur) {
         e.preventDefault()
-        void decide(cur, 'reset')
+        void decide(cur, 'reset') // U = unselect
       } else if (e.key === '/') {
         e.preventDefault()
         searchRef.current?.focus()
@@ -1040,7 +1097,13 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
           ) : (
             <>
               <div className="triage-controls">
-                <input ref={searchRef} className="search-input" placeholder="Search text in screenshots…   /  focus · I include · X exclude · Enter preview" value={q} onChange={(e) => setQ(e.target.value)} />
+                <input
+                  ref={searchRef}
+                  className="search-input"
+                  placeholder="Search text in screenshots…   /  focus · Space select · U unselect · X exclude · ⌘Y full"
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                />
                 <div className="scope" role="tablist" aria-label="Triage state">
                   {(['undecided', 'included', 'excluded', 'all'] as const).map((s) => (
                     <button key={s} role="tab" aria-selected={stateFilter === s} className={stateFilter === s ? 'scope-tab active' : 'scope-tab'} onClick={() => setStateFilter(s)}>
@@ -1049,6 +1112,14 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
                     </button>
                   ))}
                 </div>
+                <select className="triage-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)} aria-label="Sort">
+                  <option value="scanned">Recently scanned</option>
+                  <option value="date-desc">Date — newest</option>
+                  <option value="date-asc">Date — oldest</option>
+                </select>
+                <label className="toggle" title="Group by capture date">
+                  <input type="checkbox" checked={groupByDate} onChange={(e) => setGroupByDate(e.target.checked)} /> Group by date
+                </label>
                 {progress && <span className="triage-progress">{progress}</span>}
               </div>
 
@@ -1061,8 +1132,24 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
                     </button>
                   )}
                 </div>
+              ) : groupByDate ? (
+                <div className="triage-scroll">
+                  {groupByDateList(items).map(([date, group]) => (
+                    <div className="triage-group" key={date || 'unknown'}>
+                      <div className="triage-group-head">
+                        {date || 'unknown date'} · {group.length}
+                      </div>
+                      <div className="triage-grid">
+                        {group.map((it) => {
+                          const i = items.indexOf(it)
+                          return <TriageCard key={it.hash} item={it} selected={i === sel} onSelect={() => setSel(i)} onOpen={() => setPreview(it)} onDecide={(a) => void decide(it, a)} />
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               ) : (
-                <div className="triage-grid">
+                <div className="triage-grid triage-scroll">
                   {items.map((it, i) => (
                     <TriageCard key={it.hash} item={it} selected={i === sel} onSelect={() => setSel(i)} onOpen={() => setPreview(it)} onDecide={(a) => void decide(it, a)} />
                   ))}
@@ -1120,13 +1207,13 @@ function TriageCard({
       </div>
       <div className="triage-actions">
         {item.state !== 'included' && (
-          <button className="ti-inc" disabled={item.offline} title={item.offline ? 'Download it in OneDrive first' : ''} onClick={(e) => { e.stopPropagation(); onDecide('include') }}>Include</button>
+          <button className="ti-inc" disabled={item.offline} title={item.offline ? 'Download it in OneDrive first' : 'Select / keep (Space)'} onClick={(e) => { e.stopPropagation(); onDecide('include') }}>Select</button>
         )}
         {item.state !== 'excluded' && (
-          <button className="ti-exc" onClick={(e) => { e.stopPropagation(); onDecide('exclude') }}>Exclude</button>
+          <button className="ti-exc" title="Exclude (X)" onClick={(e) => { e.stopPropagation(); onDecide('exclude') }}>Exclude</button>
         )}
         {item.state !== 'undecided' && (
-          <button className="ti-rst" onClick={(e) => { e.stopPropagation(); onDecide('reset') }}>Reset</button>
+          <button className="ti-rst" title="Unselect (U)" onClick={(e) => { e.stopPropagation(); onDecide('reset') }}>Unselect</button>
         )}
       </div>
     </div>
@@ -1149,9 +1236,9 @@ function TriagePreview({ item, onClose, onDecide }: { item: TriageItem; onClose:
         <div className="lb-bar">
           <div className="lb-title">{item.filename}</div>
           <div className="lb-meta">{[item.kind, item.kind === 'video' ? `${item.sizeMB} MB` : '', `state: ${item.state}`].filter(Boolean).join(' · ')}</div>
-          <button className="ti-inc" onClick={() => onDecide('include')}>Include (I)</button>
+          <button className="ti-inc" onClick={() => onDecide('include')}>Select (Space)</button>
           <button className="ti-exc" onClick={() => onDecide('exclude')}>Exclude (X)</button>
-          {item.state !== 'undecided' && <button className="copyref" onClick={() => onDecide('reset')}>Reset</button>}
+          {item.state !== 'undecided' && <button className="copyref" onClick={() => onDecide('reset')}>Unselect (U)</button>}
           <button className="copyref" onClick={onClose}>close ✕</button>
         </div>
       </div>
@@ -1934,7 +2021,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }): JSX.Element {
     ['G', 'Group by presentation'],
     ['C', 'Cluster near-identical'],
     ['S · O', 'Stats · Import'],
-    ['⛏ Triage', 'Triage screenshots/videos (toolbar) — then I/X to keep/skip'],
+    ['⛏ Triage', 'Triage (toolbar) — Space select · U unselect · X exclude · ⌘Y full · sort/group by date'],
     ['Esc', 'Close / back'],
     ['?', 'This help']
   ]

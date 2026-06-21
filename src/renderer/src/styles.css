@@ -1022,14 +1022,41 @@ body {
   max-width: 32rem;
   line-height: 1.5;
 }
-.triage-grid {
+.triage-scroll {
   flex: 1;
   overflow: auto;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  gap: 12px;
   padding: 1rem;
+}
+.triage-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr); /* always 6 across */
+  gap: 12px;
   align-content: start;
+}
+.triage-sort {
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.8rem;
+}
+.triage-group {
+  margin-bottom: 1.1rem;
+}
+.triage-group-head {
+  position: sticky;
+  top: -1rem;
+  z-index: 1;
+  background: var(--card);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 0.4rem 0;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--line);
 }
 .triage-card {
   display: flex;
@@ -1073,7 +1100,7 @@ body {
 .triage-thumb {
   position: relative;
   aspect-ratio: 16 / 10;
-  background: #ece5d6;
+  background: #efeadf; /* letterbox behind contained images — uniform tile, nothing cropped */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1081,7 +1108,7 @@ body {
 .triage-thumb img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain; /* show the whole screenshot, never crop */
 }
 .triage-play {
   position: absolute;
