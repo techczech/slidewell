@@ -45,8 +45,11 @@ export async function query<T = Record<string, string>>(
   params: Array<string | number | null> = [],
   timeoutMs = 8000
 ): Promise<T[]> {
-  const script = inline(sql, params)
-  const out = await exec(['-json', '-readonly', `file:${dbPath}?mode=ro`], script.endsWith(';') ? script : `${script};`, timeoutMs)
+  // `.timeout` is a CLI dot-command: it sets the busy timeout silently (a `PRAGMA busy_timeout`
+  // would emit its own result row and corrupt the -json output with a second JSON array).
+  const body = inline(sql, params)
+  const script = `.timeout 4000\n${body.endsWith(';') ? body : `${body};`}`
+  const out = await exec(['-json', '-readonly', `file:${dbPath}?mode=ro`], script, timeoutMs)
   const t = out.trim()
   if (!t) return []
   try {
@@ -58,8 +61,9 @@ export async function query<T = Record<string, string>>(
 
 /** Write/DDL → executes against a writable DB (created if absent). */
 export async function run(dbPath: string, sql: string, params: Array<string | number | null> = [], timeoutMs = 8000): Promise<void> {
-  const script = inline(sql, params)
-  await exec([dbPath], script.endsWith(';') ? script : `${script};`, timeoutMs)
+  const body = inline(sql, params)
+  const script = `.timeout 4000\n${body.endsWith(';') ? body : `${body};`}`
+  await exec([dbPath], script, timeoutMs)
 }
 
 /** Sanitise a user string for FTS5 MATCH (wrap bare tokens in quotes unless it uses FTS syntax). */

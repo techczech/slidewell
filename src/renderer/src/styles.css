@@ -1050,6 +1050,26 @@ body {
 .triage-card.state-excluded {
   opacity: 0.55;
 }
+.triage-card.offline {
+  border-style: dashed;
+}
+.triage-cloud {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  color: var(--muted);
+  font-size: 1.4rem;
+}
+.triage-cloud span {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.triage-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 .triage-thumb {
   position: relative;
   aspect-ratio: 16 / 10;
