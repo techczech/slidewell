@@ -858,17 +858,35 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
     return () => clearTimeout(t)
   }, [q])
 
+  const refresh = useCallback(async () => {
+    try {
+      const r = await window.sw.triage.list(debq, stateFilter)
+      setItems(r.items)
+      setCounts(r.counts)
+      setSel((s) => Math.min(s, Math.max(0, r.items.length - 1)))
+    } catch {
+      /* a mid-scan read may briefly lose to a write; the next tick retries */
+    }
+  }, [debq, stateFilter])
+
+  // Lazy load: as the scan streams progress, re-list (throttled) so rows appear as they land —
+  // the user sees continuous movement instead of a blank "scanning…".
+  const refreshRef = useRef(refresh)
+  const lastTickRef = useRef(0)
+  useEffect(() => {
+    refreshRef.current = refresh
+  }, [refresh])
   useEffect(() => {
     void window.sw.settings.getPaths().then((p) => setRoot(p.screenshotRoot))
-    return window.sw.triage.onProgress(setProgress)
+    return window.sw.triage.onProgress((line) => {
+      setProgress(line)
+      const now = Date.now()
+      if (now - lastTickRef.current > 600) {
+        lastTickRef.current = now
+        void refreshRef.current()
+      }
+    })
   }, [])
-
-  const refresh = useCallback(async () => {
-    const r = await window.sw.triage.list(debq, stateFilter)
-    setItems(r.items)
-    setCounts(r.counts)
-    setSel((s) => Math.min(s, Math.max(0, r.items.length - 1)))
-  }, [debq, stateFilter])
 
   useEffect(() => {
     if (root) void refresh()
@@ -897,6 +915,10 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
 
   const decide = useCallback(
     async (item: TriageItem, action: 'include' | 'exclude' | 'reset') => {
+      if (action === 'include' && item.offline) {
+        onToast('Not downloaded — open it in OneDrive first')
+        return
+      }
       let force = false
       if (action === 'include' && item.large) {
         if (!window.confirm(`“${item.filename}” is ${item.sizeMB} MB — over the 20 MB video gate. Include it anyway?`)) return
@@ -1079,14 +1101,16 @@ function TriageCard({
 }): JSX.Element {
   const badge = item.state === 'included' ? '✓' : item.state === 'excluded' ? '✗' : ''
   return (
-    <div className={`triage-card state-${item.state}${selected ? ' selected' : ''}`} onClick={onSelect} onDoubleClick={onOpen}>
-      <div className="triage-thumb" onClick={(e) => { e.stopPropagation(); onOpen() }} title="Open preview">
+    <div className={`triage-card state-${item.state}${selected ? ' selected' : ''}${item.offline ? ' offline' : ''}`} onClick={onSelect} onDoubleClick={onOpen}>
+      <div className="triage-thumb" onClick={(e) => { e.stopPropagation(); onOpen() }} title={item.offline ? 'Not downloaded from OneDrive yet' : 'Open preview'}>
         {item.thumbUrl ? (
           <img src={item.thumbUrl} alt="" loading="lazy" onError={(e) => (e.currentTarget.style.visibility = 'hidden')} />
+        ) : item.offline ? (
+          <div className="triage-cloud" aria-hidden>☁︎<span>not downloaded</span></div>
         ) : (
           <div className="thumb placeholder" aria-hidden />
         )}
-        {item.kind === 'video' && <span className="triage-play">▶</span>}
+        {item.kind === 'video' && !item.offline && <span className="triage-play">▶</span>}
         {item.kind === 'video' && <span className={item.large ? 'triage-size large' : 'triage-size'}>{item.sizeMB} MB{item.large ? ' ⚠' : ''}</span>}
         {badge && <span className={`triage-badge ${item.state}`}>{badge}</span>}
       </div>
@@ -1096,7 +1120,7 @@ function TriageCard({
       </div>
       <div className="triage-actions">
         {item.state !== 'included' && (
-          <button className="ti-inc" onClick={(e) => { e.stopPropagation(); onDecide('include') }}>Include</button>
+          <button className="ti-inc" disabled={item.offline} title={item.offline ? 'Download it in OneDrive first' : ''} onClick={(e) => { e.stopPropagation(); onDecide('include') }}>Include</button>
         )}
         {item.state !== 'excluded' && (
           <button className="ti-exc" onClick={(e) => { e.stopPropagation(); onDecide('exclude') }}>Exclude</button>

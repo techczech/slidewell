@@ -430,20 +430,23 @@ app.whenReady().then(() => {
   // with mediaUrl pointing at the source file so the renderer can play it inline.
   const triageToWire = (r: TriageRow, sourceRoot: string, wellR: string): Record<string, unknown> => {
     const isVideo = r.kind === 'video'
+    const offline = r.offline === '1'
     const fileAbs = join(sourceRoot, r.rel_path)
     const posterAbs = r.poster_rel ? join(wellR, r.poster_rel) : null
     const sizeBytes = Number(r.size) || 0
+    // Never point a thumbnail/media URL at an online-only placeholder — loading it would force a download.
     return {
       hash: r.hash,
       kind: r.kind,
       filename: r.filename,
       ext: r.ext,
       state: r.state,
+      offline,
       sizeMB: Math.round((sizeBytes / 1048576) * 10) / 10,
       large: isVideo && sizeBytes > VIDEO_GATE_BYTES,
       snippet: (r.ocr_text || '').replace(/\s+/g, ' ').trim().slice(0, 160),
-      thumbUrl: swThumb(isVideo ? posterAbs : fileAbs),
-      mediaUrl: isVideo ? swThumb(fileAbs) : null
+      thumbUrl: offline ? null : swThumb(isVideo ? posterAbs : fileAbs),
+      mediaUrl: offline || !isVideo ? null : swThumb(fileAbs)
     }
   }
   ipcMain.handle('triage:scan', async () => {

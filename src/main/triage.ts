@@ -32,23 +32,42 @@ function postersDir(wellRoot: string): string {
 async function ensureTriage(wellRoot: string): Promise<void> {
   mkdirSync(postersDir(wellRoot), { recursive: true })
   const db = triageDb(wellRoot)
+  // NB: NOT WAL — our reads open the db read-only (mode=ro), which can't see un-checkpointed WAL
+  // frames. The default rollback journal + a busy_timeout (sqlite.ts) lets mid-scan reads simply
+  // wait out the sub-millisecond write locks, and the UI retries on the next progress tick.
+  // The scan index gained an `offline` column (OneDrive placeholders). It is fully rebuildable, so
+  // if an older schema is present just drop + recreate it; decisions (keyed by hash) are preserved.
+  try {
+    await query(db, 'SELECT offline FROM triage_fts LIMIT 0', [])
+  } catch {
+    await run(db, 'DROP TABLE IF EXISTS triage_fts').catch(() => undefined)
+  }
   await run(
     db,
     `CREATE VIRTUAL TABLE IF NOT EXISTS triage_fts USING fts5(
        hash UNINDEXED, kind UNINDEXED, rel_path UNINDEXED, filename, ext UNINDEXED,
-       size UNINDEXED, mtime UNINDEXED, poster_rel UNINDEXED, ocr_text, scanned_at UNINDEXED
+       size UNINDEXED, mtime UNINDEXED, poster_rel UNINDEXED, offline UNINDEXED, ocr_text, scanned_at UNINDEXED
      )`
   )
   await run(db, `CREATE TABLE IF NOT EXISTS triage_decisions (hash TEXT PRIMARY KEY, state TEXT NOT NULL, decided_at TEXT, well_id TEXT)`)
 }
 
-function hashFile(path: string): Promise<string> {
+// Content hash of a file, or null if the read stalls (e.g. a OneDrive placeholder that slipped past
+// the blocks===0 check and is silently downloading). The timeout keeps one bad file from freezing
+// the whole scan — the caller degrades a null to a "not downloaded" row.
+function hashFile(path: string, timeoutMs = 15000): Promise<string | null> {
   return new Promise((resolve) => {
     const h = createHash('sha256')
     const s = createReadStream(path)
+    const done = (v: string | null): void => {
+      clearTimeout(t)
+      s.destroy()
+      resolve(v)
+    }
+    const t = setTimeout(() => done(null), timeoutMs)
     s.on('data', (d) => h.update(d))
-    s.on('end', () => resolve(h.digest('hex').slice(0, 12)))
-    s.on('error', () => resolve(createHash('sha256').update(path).digest('hex').slice(0, 12)))
+    s.on('end', () => done(h.digest('hex').slice(0, 12)))
+    s.on('error', () => done(null))
   })
 }
 
@@ -76,57 +95,107 @@ interface ScanRow {
   mtime: string
 }
 
+interface ScanItem {
+  abs: string
+  rel: string
+  kind: 'image' | 'video'
+  ext: string
+  size: number
+  mtime: number
+  offline: boolean
+}
+
 /**
- * Recursively scan a Triage source. Incremental: a file whose (size, mtime) match an existing scan
- * record is skipped without re-hashing or re-OCR. New/changed files are hashed and OCR'd (videos via
- * a poster frame). Returns the number of files (re)indexed. Streams progress via onProgress.
+ * Recursively scan a Triage source in two phases so the UI gets continuous feedback (ADR-0029):
+ *
+ *  - Phase 0 (fast): walk + stat every media file. `stat` never hydrates OneDrive placeholders, so
+ *    this completes even on a folder that is mostly online-only. Emits a running "found N" count.
+ *  - Phase 1 (incremental): for each new/changed file, hash + OCR it and write its row, emitting
+ *    `processed i/N` per file so the caller can show progress and re-list as rows land.
+ *
+ * OneDrive **online-only placeholders** (size > 0 but zero allocated blocks) are indexed from their
+ * stat alone and NEVER read — reading would force a slow download (the "stuck on nothing" symptom).
+ * They are flagged `offline` so the UI can show them as "not downloaded" and skip their thumbnails.
  */
 export async function scanTriageSource(
   archiveRoot: string,
   wellRoot: string,
   sourceRoot: string,
   onProgress?: (msg: string) => void
-): Promise<{ indexed: number; total: number }> {
-  if (!existsSync(sourceRoot)) return { indexed: 0, total: 0 }
+): Promise<{ indexed: number; total: number; offline: number }> {
+  if (!existsSync(sourceRoot)) return { indexed: 0, total: 0, offline: 0 }
   await ensureTriage(wellRoot)
   const db = triageDb(wellRoot)
   const prior = await query<ScanRow>(db, 'SELECT rel_path, size, mtime FROM triage_fts', [])
   const seen = new Map(prior.map((r) => [r.rel_path, `${r.size}:${r.mtime}`]))
-  let indexed = 0
-  let total = 0
+
+  // Phase 0 — enumerate (stat only).
+  const files: ScanItem[] = []
   for (const { abs } of walk(sourceRoot)) {
     const ext = extname(abs).slice(1).toLowerCase()
     const kind = VIDEO_EXT.has(ext) ? 'video' : IMAGE_EXT.has(ext) ? 'image' : null
     if (!kind) continue
-    total++
-    const st = statSync(abs)
-    const rel = relative(sourceRoot, abs)
-    const sig = `${st.size}:${Math.round(st.mtimeMs)}`
-    if (seen.get(rel) === sig) continue // unchanged since last scan
-    const hash = await hashFile(abs)
-    let posterRel: string | null = null
-    let ocr = ''
-    if (kind === 'video') {
-      const posterAbs = join(postersDir(wellRoot), `${hash}.jpg`)
-      if (existsSync(posterAbs) || (await makePoster(abs, posterAbs))) {
-        posterRel = relative(wellRoot, posterAbs)
-        ocr = await ocrImage(archiveRoot, posterAbs)
-      }
-    } else {
-      ocr = await ocrImage(archiveRoot, abs)
+    try {
+      const st = statSync(abs)
+      files.push({ abs, rel: relative(sourceRoot, abs), kind, ext, size: st.size, mtime: Math.round(st.mtimeMs), offline: st.size > 0 && st.blocks === 0 })
+    } catch {
+      continue
     }
-    await run(db, 'DELETE FROM triage_fts WHERE rel_path = ?', [rel])
+    if (files.length % 200 === 0) onProgress?.(`found ${files.length} media files…`)
+  }
+  onProgress?.(`found ${files.length} media files — reading…`)
+
+  // Phase 1 — process new/changed files one at a time, committing + reporting per file.
+  let indexed = 0
+  let offlineN = 0
+  let i = 0
+  for (const f of files) {
+    i++
+    const sig = `${f.size}:${f.mtime}`
+    if (seen.get(f.rel) === sig) {
+      if (f.offline) offlineN++
+      continue
+    }
+    const pathId = (): string => 'p:' + createHash('sha256').update(`${f.rel}:${sig}`).digest('hex').slice(0, 11)
+    let hash: string
+    let ocr = ''
+    let posterRel = ''
+    let rowOffline = f.offline
+    if (f.offline) {
+      hash = pathId() // online-only placeholder; never read
+      offlineN++
+    } else {
+      const h = await hashFile(f.abs)
+      if (h === null) {
+        // unreadable / stalled read — treat like a not-downloaded file rather than hang
+        hash = pathId()
+        rowOffline = true
+        offlineN++
+      } else if (f.kind === 'video') {
+        hash = h
+        const posterAbs = join(postersDir(wellRoot), `${hash}.jpg`)
+        if (existsSync(posterAbs) || (await makePoster(f.abs, posterAbs))) {
+          posterRel = relative(wellRoot, posterAbs)
+          ocr = await ocrImage(archiveRoot, posterAbs)
+        }
+        indexed++
+      } else {
+        hash = h
+        ocr = await ocrImage(archiveRoot, f.abs)
+        indexed++
+      }
+    }
     await run(
       db,
-      `INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, poster_rel, ocr_text, scanned_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [hash, kind, rel, abs.split('/').pop() || rel, ext, String(st.size), String(Math.round(st.mtimeMs)), posterRel || '', ocr, new Date().toISOString()]
+      `DELETE FROM triage_fts WHERE rel_path = ?;
+       INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, poster_rel, offline, ocr_text, scanned_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [f.rel, hash, f.kind, f.rel, f.abs.split('/').pop() || f.rel, f.ext, String(f.size), String(f.mtime), posterRel, rowOffline ? '1' : '0', ocr, new Date().toISOString()]
     )
-    indexed++
-    if (indexed % 10 === 0) onProgress?.(`scanned ${indexed} new of ${total}…`)
+    if (i % 3 === 0 || i === files.length) onProgress?.(`processed ${i}/${files.length} · ${indexed} read · ${offlineN} not downloaded`)
   }
-  onProgress?.(`done — ${indexed} new, ${total} media files`)
-  return { indexed, total }
+  onProgress?.(`done — ${indexed} read, ${offlineN} not downloaded, ${files.length} total`)
+  return { indexed, total: files.length, offline: offlineN }
 }
 
 export interface TriageRow {
@@ -137,13 +206,14 @@ export interface TriageRow {
   ext: string
   size: string
   poster_rel: string
+  offline: string
   ocr_text: string
   state: string
   well_id: string | null
 }
 
 const LIST_COLS =
-  'triage_fts.hash, triage_fts.kind, triage_fts.rel_path, triage_fts.filename, triage_fts.ext, triage_fts.size, triage_fts.poster_rel, triage_fts.ocr_text, COALESCE(d.state, \'undecided\') AS state, d.well_id'
+  'triage_fts.hash, triage_fts.kind, triage_fts.rel_path, triage_fts.filename, triage_fts.ext, triage_fts.size, triage_fts.poster_rel, triage_fts.offline, triage_fts.ocr_text, COALESCE(d.state, \'undecided\') AS state, d.well_id'
 
 /** Browse/search the triage index. Empty query → newest scanned first; state '' or 'all' → no filter. */
 export async function listTriage(wellRoot: string, raw: string, state: string, limit = 150): Promise<TriageRow[]> {
