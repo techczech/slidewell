@@ -20,9 +20,11 @@ mkdirSync(userData, { recursive: true })
 mkdirSync(join(source, 'sub'), { recursive: true }) // a subfolder, to prove recursive traversal
 writeFileSync(join(source, 'one.png'), Buffer.from(RED, 'base64'))
 writeFileSync(join(source, 'sub', 'two.png'), Buffer.from(BLUE, 'base64')) // nested
+writeFileSync(join(source, 'dup.png'), Buffer.from(BLUE, 'base64')) // SAME bytes as two.png → same content hash
 // distinct capture dates so date sort/group has something to order
 utimesSync(join(source, 'one.png'), new Date('2024-06-01'), new Date('2024-06-01'))
 utimesSync(join(source, 'sub', 'two.png'), new Date('2020-01-15'), new Date('2020-01-15'))
+utimesSync(join(source, 'dup.png'), new Date('2022-03-03'), new Date('2022-03-03'))
 // pre-seed the config the app reads (isolated well + the fixture as the Triage source)
 writeFileSync(join(userData, 'config.json'), JSON.stringify({ wellRoot, screenshotRoot: source }), 'utf8')
 
@@ -39,18 +41,20 @@ try {
   await win.waitForSelector('.triage-panel', { timeout: 5000 })
   result.panelOpened = (await win.locator('.triage-panel').count()) === 1
 
-  // scan the fixture (recursive: 2 files across a subfolder)
+  // scan the fixture (recursive: 3 files across a subfolder, two of them byte-identical)
   const scan = await win.evaluate(() => window.sw.triage.scan())
   result.scanned = scan.indexed
-  result.recursiveOk = scan.total === 2 // found the nested file too
+  result.recursiveOk = scan.total === 3 // found the nested file too
 
-  // list undecided
-  let listing = await win.evaluate(() => window.sw.triage.list('', 'undecided'))
-  result.undecidedAfterScan = listing.counts.undecided
+  const all0 = (await win.evaluate(() => window.sw.triage.list('', 'all', 'date-desc', 50, 0))).items
+  result.undecidedAfterScan = (await win.evaluate(() => window.sw.triage.list('', 'undecided'))).counts.undecided
+  // unique React keys: 3 distinct files but only 2 distinct content hashes (two.png == dup.png)
+  result.distinctPaths = new Set(all0.map((i) => i.relPath)).size
+  result.distinctHashes = new Set(all0.map((i) => i.hash)).size
 
-  // render check: force the UI to re-list (switch to All), then confirm cards have real height
-  // (regression: cards once collapsed to ~2px because aspect-ratio on the thumb didn't feed back
-  // into the flex card inside the grid cell)
+  // render check: force the UI to re-list (switch to All), then confirm ALL THREE cards render
+  // (regression: cards keyed by content hash collided for duplicates → ghost cards) AND have real
+  // height (earlier regression: aspect-ratio thumb collapsed the flex card to ~2px)
   await win.locator('.triage-controls .scope-tab', { hasText: 'All' }).click()
   await win.waitForTimeout(600)
   result.cardsRendered = await win.locator('.triage-card').count()
@@ -70,41 +74,41 @@ try {
   await win.locator('.triage-controls .toggle input').uncheck()
   await win.waitForTimeout(300)
 
-  // include the first item → it should leave 'undecided' and appear in 'included'
-  const firstHash = listing.items[0].hash
-  const dec = await win.evaluate((h) => window.sw.triage.decide(h, 'include'), firstHash)
+  // include the UNIQUE-content file → exactly one item becomes included
+  const oneItem = all0.find((i) => i.filename === 'one.png')
+  const dec = await win.evaluate((h) => window.sw.triage.decide(h, 'include'), oneItem.hash)
   result.includeState = dec.state
   result.wellId = Boolean(dec.wellId)
 
-  listing = await win.evaluate(() => window.sw.triage.list('', 'all'))
-  result.includedCount = listing.counts.included
-  result.undecidedCount = listing.counts.undecided
-
-  // exclude the other → remembered by hash
-  const other = listing.items.find((i) => i.state === 'undecided')
-  await win.evaluate((h) => window.sw.triage.decide(h, 'exclude'), other.hash)
+  // exclude one of the DUPLICATES → both byte-identical files share the hash-keyed decision
+  const twoItem = all0.find((i) => i.filename === 'two.png')
+  await win.evaluate((h) => window.sw.triage.decide(h, 'exclude'), twoItem.hash)
   const after = await win.evaluate(() => window.sw.triage.list('', 'all'))
-  result.excludedCount = after.counts.excluded
+  result.includedCount = after.counts.included // one.png
+  result.excludedCount = after.counts.excluded // two.png + dup.png (shared content hash)
+  result.undecidedCount = after.counts.undecided
 
   // date sort: newest-first vs oldest-first must flip, and every item carries a YYYY-MM-DD date
   const desc = await win.evaluate(() => window.sw.triage.list('', 'all', 'date-desc'))
   const asc = await win.evaluate(() => window.sw.triage.list('', 'all', 'date-asc'))
   result.datesOk = desc.items.every((i) => /^\d{4}-\d{2}-\d{2}$/.test(i.date))
-  result.dateSortFlips = desc.items[0].hash === asc.items[asc.items.length - 1].hash && desc.items[0].date >= desc.items[1].date
+  result.dateSortFlips = desc.items[0].relPath === asc.items[asc.items.length - 1].relPath && desc.items[0].date >= desc.items[1].date
 
   pass =
     result.panelOpened &&
-    result.scanned === 2 &&
+    result.scanned === 3 &&
     result.recursiveOk &&
-    result.undecidedAfterScan === 2 &&
-    result.cardsRendered === 2 &&
+    result.undecidedAfterScan === 3 &&
+    result.distinctPaths === 3 &&
+    result.distinctHashes === 2 &&
+    result.cardsRendered === 3 &&
     result.cardHeightOk &&
     result.groupCols === 6 &&
     result.includeState === 'included' &&
     result.wellId &&
     result.includedCount === 1 &&
-    result.undecidedCount === 1 &&
-    result.excludedCount === 1 &&
+    result.excludedCount === 2 &&
+    result.undecidedCount === 0 &&
     result.datesOk &&
     result.dateSortFlips
 } catch (e) {

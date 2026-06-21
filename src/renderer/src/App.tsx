@@ -1161,7 +1161,7 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
                       <div className="triage-grid">
                         {group.map((it) => {
                           const i = items.indexOf(it)
-                          return <TriageCard key={it.hash} item={it} selected={i === sel} onSelect={() => setSel(i)} onOpen={() => setPreview(it)} onDecide={(a) => void decide(it, a)} />
+                          return <TriageCard key={it.relPath} item={it} selected={i === sel} onSelect={() => setSel(i)} onOpen={() => setPreview(it)} onDecide={(a) => void decide(it, a)} />
                         })}
                       </div>
                     </div>
@@ -1170,7 +1170,7 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
               ) : (
                 <div className="triage-grid triage-scroll">
                   {items.map((it, i) => (
-                    <TriageCard key={it.hash} item={it} selected={i === sel} onSelect={() => setSel(i)} onOpen={() => setPreview(it)} onDecide={(a) => void decide(it, a)} />
+                    <TriageCard key={it.relPath} item={it} selected={i === sel} onSelect={() => setSel(i)} onOpen={() => setPreview(it)} onDecide={(a) => void decide(it, a)} />
                   ))}
                 </div>
               )}

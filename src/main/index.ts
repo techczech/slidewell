@@ -444,6 +444,7 @@ app.whenReady().then(() => {
     // Never point a thumbnail/media URL at an online-only placeholder — loading it would force a download.
     return {
       hash: r.hash,
+      relPath: r.rel_path, // unique per file (the hash is the CONTENT hash and repeats for duplicates)
       kind: r.kind,
       filename: r.filename,
       ext: r.ext,
