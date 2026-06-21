@@ -46,6 +46,7 @@ try {
   let paletteOk = false
   let lightboxPaletteOk = false
   let helpOk = false
+  let triageOpensOk = false
 
   if (archiveConnected) {
     // default browse populates with no query (newest first)
@@ -104,6 +105,13 @@ try {
     await win.keyboard.press('?')
     await win.waitForTimeout(250)
     helpOk = (await win.locator('.help-modal').count()) === 1
+    await win.keyboard.press('Escape')
+    await win.waitForTimeout(200)
+
+    // Triage screen opens from the toolbar and renders (deeper scan/include flow: e2e/triage.mjs)
+    await win.locator('.titlebar-actions .tb-btn', { hasText: 'Triage' }).click()
+    await win.waitForTimeout(300)
+    triageOpensOk = (await win.locator('.triage-panel').count()) === 1
     await win.keyboard.press('Escape')
     await win.waitForTimeout(200)
 
@@ -198,9 +206,9 @@ try {
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
-    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk && roleAllOk && selectionOk && rowNavOk && clickSelectsOk && inspectorOk && paletteOk && lightboxPaletteOk && helpOk)
+    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk && roleAllOk && selectionOk && rowNavOk && clickSelectsOk && inspectorOk && paletteOk && lightboxPaletteOk && helpOk && triageOpensOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, rowNavOk, clickSelectsOk, inspectorOk, paletteOk, lightboxPaletteOk, helpOk, imgCards, imgTags, pass })
+  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, rowNavOk, clickSelectsOk, inspectorOk, paletteOk, lightboxPaletteOk, helpOk, triageOpensOk, imgCards, imgTags, pass })
   await app.close()
   process.exit(pass ? 0 : 2)
 } catch (e) {

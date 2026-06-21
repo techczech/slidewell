@@ -9,7 +9,7 @@
  */
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, copyFileSync, createReadStream } from 'node:fs'
 import { join, dirname, extname, basename } from 'node:path'
 import sharp from 'sharp'
 import { query, run, safeFtsQuery } from './sqlite'
@@ -127,6 +127,62 @@ export async function ingestScreenshot(
     )
   }
   await upsert(root, { id, slug, ext, relPath, storeRoot: 'well', source, tags: '', notes: '', ocr: text })
+  return { id, relPath }
+}
+
+export function findFfmpeg(): string {
+  for (const p of ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg']) if (existsSync(p)) return p
+  return 'ffmpeg'
+}
+
+/** Grab one representative frame from a video (1s in; fall back to frame 0 for very short clips). */
+export function makePoster(srcAbs: string, destAbs: string): Promise<boolean> {
+  const ff = findFfmpeg()
+  const args = (ss: string): string[] => ['-loglevel', 'error', '-ss', ss, '-i', srcAbs, '-frames:v', '1', '-q:v', '3', '-y', destAbs]
+  return new Promise((resolve) => {
+    execFile(ff, args('1'), { timeout: 25000 }, (err) => {
+      if (!err && existsSync(destAbs)) return resolve(true)
+      execFile(ff, args('0'), { timeout: 25000 }, (e2) => resolve(!e2 && existsSync(destAbs)))
+    })
+  })
+}
+
+function hashFileStream(path: string): Promise<string> {
+  return new Promise((resolve) => {
+    const h = createHash('sha256')
+    const s = createReadStream(path)
+    s.on('data', (d) => h.update(d))
+    s.on('end', () => resolve(h.digest('hex').slice(0, 7)))
+    s.on('error', () => resolve(createHash('sha256').update(path).digest('hex').slice(0, 7)))
+  })
+}
+
+/**
+ * Promote a short video into the well (ADR-0029): copy as-is (never re-encoded — ADR-0028), generate
+ * a poster, write a `vid`-style sidecar. Stored as `{slug}--{id}.{ext}` under `videos/` so it is
+ * discoverable on disk without the app (ADR-0026) and reusable by TalkWeaver. The 20 MB gate is
+ * enforced by the caller (triage), so a forced large video still copies here.
+ */
+export async function ingestVideo(archiveRoot: string, root: string, srcPath: string): Promise<{ id: string; relPath: string } | null> {
+  if (!existsSync(srcPath)) return null
+  await ensureWell(root)
+  mkdirSync(join(root, 'videos'), { recursive: true })
+  const ext = (extname(srcPath).slice(1) || 'mp4').toLowerCase()
+  const id = await hashFileStream(srcPath)
+  const slug = slugify(basename(srcPath).replace(/\.[^.]+$/, ''), 'video')
+  const relPath = join('videos', `${slug}--${id}.${ext}`)
+  const dest = join(root, relPath)
+  if (!existsSync(dest)) {
+    copyFileSync(srcPath, dest)
+    const posterAbs = join(root, 'videos', `${slug}--${id}.jpg`)
+    await makePoster(srcPath, posterAbs)
+    const sidecar = join(root, 'videos', `${slug}--${id}.yml`)
+    writeFileSync(
+      sidecar,
+      [`id: ${id}`, `created: ${nowIso().slice(0, 10)}`, 'provenance: added', 'source: triage', 'kind: video', 'alt: ""', 'caption: ""', 'tags: []', 'notes: ""'].join('\n') + '\n',
+      'utf8'
+    )
+  }
   return { id, relPath }
 }
 

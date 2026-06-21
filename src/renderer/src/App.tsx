@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats } from '../../preload'
+import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts } from '../../preload'
 
 type SortKey = 'date-desc' | 'date-asc' | 'title'
 
@@ -40,6 +40,7 @@ export default function App(): JSX.Element {
   const [deckFilter, setDeckFilter] = useState<{ pid: string; title: string } | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [showStats, setShowStats] = useState(false)
+  const [showTriage, setShowTriage] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
   const [stats, setStats] = useState<Stats | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
@@ -302,6 +303,7 @@ export default function App(): JSX.Element {
       setSel(best >= 0 ? best : dir > 0 ? navCount - 1 : 0)
     }
     const onKey = (e: KeyboardEvent): void => {
+      if (showTriage) return // the Triage panel owns the keyboard while it is open
       const el = document.activeElement as HTMLElement | null
       const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
       const cmd = e.metaKey || e.ctrlKey
@@ -451,7 +453,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navCount, sel, activeItem, runAction, activateCurrent, paletteOpen, lightbox, deckMode, inspectorOpen, showHelp, showStats, showImport, deckFilter, filters, openStats])
+  }, [navCount, sel, activeItem, runAction, activateCurrent, paletteOpen, lightbox, deckMode, inspectorOpen, showHelp, showStats, showImport, showTriage, deckFilter, filters, openStats])
 
   // when inspecting a deck, fetch its full metadata (re-fetches as selection moves)
   useEffect(() => {
@@ -495,6 +497,9 @@ export default function App(): JSX.Element {
             title="Your PowerPoint history in numbers (S)"
           >
             📊 Stats
+          </button>
+          <button className="tb-btn" onClick={() => setShowTriage(true)} title="Triage screenshots & videos from your source folder">
+            ⛏ Triage
           </button>
           <button className="tb-btn" onClick={() => setShowImport(true)} title="Import PowerPoint into the archive (O)">
             ⤓ Import
@@ -823,9 +828,309 @@ export default function App(): JSX.Element {
 
       {showImport && <ImportPanel onClose={() => setShowImport(false)} onDone={() => setRefreshKey((k) => k + 1)} />}
 
+      {showTriage && <TriagePanel onClose={() => setShowTriage(false)} onChanged={() => setRefreshKey((k) => k + 1)} onToast={setToast} />}
+
       {showStats && <StatsPanel stats={stats} onClose={() => setShowStats(false)} />}
 
       {toast && <div className="toast">{toast}</div>}
+    </div>
+  )
+}
+
+// ADR-0029: triage a source folder of screenshots/videos. Reads but never owns the folder; include
+// promotes a file into the well, exclude remembers its hash. The App's global keyboard layer yields
+// to this panel (it bails while showTriage), so we run our own.
+function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onChanged: () => void; onToast: (m: string) => void }): JSX.Element {
+  const [root, setRoot] = useState<string | null | undefined>(undefined) // undefined = loading, null = unset
+  const [items, setItems] = useState<TriageItem[]>([])
+  const [counts, setCounts] = useState<TriageCounts>({ undecided: 0, included: 0, excluded: 0, total: 0 })
+  const [q, setQ] = useState('')
+  const [debq, setDebq] = useState('')
+  const [stateFilter, setStateFilter] = useState<'undecided' | 'included' | 'excluded' | 'all'>('undecided')
+  const [scanning, setScanning] = useState(false)
+  const [progress, setProgress] = useState('')
+  const [sel, setSel] = useState(0)
+  const [preview, setPreview] = useState<TriageItem | null>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebq(q), 250)
+    return () => clearTimeout(t)
+  }, [q])
+
+  useEffect(() => {
+    void window.sw.settings.getPaths().then((p) => setRoot(p.screenshotRoot))
+    return window.sw.triage.onProgress(setProgress)
+  }, [])
+
+  const refresh = useCallback(async () => {
+    const r = await window.sw.triage.list(debq, stateFilter)
+    setItems(r.items)
+    setCounts(r.counts)
+    setSel((s) => Math.min(s, Math.max(0, r.items.length - 1)))
+  }, [debq, stateFilter])
+
+  useEffect(() => {
+    if (root) void refresh()
+  }, [root, refresh])
+
+  const scan = useCallback(async () => {
+    setScanning(true)
+    setProgress('scanning…')
+    const r = await window.sw.triage.scan()
+    setScanning(false)
+    setProgress(r.ok ? `${r.indexed} new · ${r.total} media files` : 'scan failed')
+    await refresh()
+  }, [refresh])
+
+  const chooseFolder = useCallback(async () => {
+    const p = await window.sw.settings.chooseScreenshotFolder()
+    if (!p) return
+    setRoot(p)
+    setScanning(true)
+    setProgress('scanning…')
+    const r = await window.sw.triage.scan()
+    setScanning(false)
+    setProgress(`${r.indexed} new · ${r.total} media files`)
+    await refresh()
+  }, [refresh])
+
+  const decide = useCallback(
+    async (item: TriageItem, action: 'include' | 'exclude' | 'reset') => {
+      let force = false
+      if (action === 'include' && item.large) {
+        if (!window.confirm(`“${item.filename}” is ${item.sizeMB} MB — over the 20 MB video gate. Include it anyway?`)) return
+        force = true
+      }
+      const r = await window.sw.triage.decide(item.hash, action, force)
+      if (r.gated) {
+        onToast(`Gated at 20 MB (${r.sizeMB} MB)`)
+        return
+      }
+      onToast(action === 'include' ? 'Included → added to the well' : action === 'exclude' ? 'Excluded' : 'Reset')
+      onChanged()
+      await refresh()
+    },
+    [onChanged, onToast, refresh]
+  )
+
+  const paste = useCallback(async () => {
+    const r = await window.sw.triage.paste()
+    onToast(r ? 'Pasted → added to the well' : 'No image on the clipboard')
+    if (r) onChanged()
+  }, [onChanged, onToast])
+
+  useEffect(() => {
+    document.querySelector('.triage-card.selected')?.scrollIntoView({ block: 'nearest' })
+  }, [sel, items])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const el = document.activeElement as HTMLElement | null
+      const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
+      if (e.key === 'Escape') {
+        if (preview) setPreview(null)
+        else onClose()
+        return
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {
+        e.preventDefault()
+        void paste()
+        return
+      }
+      if (preview) {
+        if (e.key === 'i' || e.key === 'I') {
+          e.preventDefault()
+          void decide(preview, 'include')
+          setPreview(null)
+        } else if (e.key === 'x' || e.key === 'X') {
+          e.preventDefault()
+          void decide(preview, 'exclude')
+          setPreview(null)
+        }
+        return
+      }
+      if (typing) return
+      const cur = items[sel]
+      if (e.key === 'ArrowRight') {
+        e.preventDefault()
+        setSel((s) => Math.min(s + 1, items.length - 1))
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault()
+        setSel((s) => Math.max(s - 1, 0))
+      } else if ((e.key === 'Enter' || e.key === ' ') && cur) {
+        e.preventDefault()
+        setPreview(cur)
+      } else if ((e.key === 'i' || e.key === 'I') && cur) {
+        e.preventDefault()
+        void decide(cur, 'include')
+      } else if ((e.key === 'x' || e.key === 'X') && cur) {
+        e.preventDefault()
+        void decide(cur, 'exclude')
+      } else if ((e.key === 'u' || e.key === 'U') && cur) {
+        e.preventDefault()
+        void decide(cur, 'reset')
+      } else if (e.key === '/') {
+        e.preventDefault()
+        searchRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [items, sel, preview, decide, paste, onClose])
+
+  return (
+    <>
+      <div className="overlay triage-overlay" onClick={onClose}>
+        <div className="triage-panel" onClick={(e) => e.stopPropagation()}>
+          <div className="triage-head">
+            <b>⛏ Triage</b>
+            {typeof root === 'string' && (
+              <span className="triage-root" title={root}>
+                {root}
+              </span>
+            )}
+            <div className="triage-head-actions">
+              <button className="tb-btn" onClick={() => void paste()} title="Paste an image from the clipboard (⌘V)">
+                ⎘ Paste
+              </button>
+              <button className="tb-btn" onClick={() => void scan()} disabled={scanning || !root} title="Re-scan the source for new files">
+                {scanning ? '… scanning' : '⟳ Rescan'}
+              </button>
+              <button className="tb-btn" onClick={() => void chooseFolder()}>
+                {root ? '⌖ Change folder' : '⌖ Choose folder'}
+              </button>
+              <button className="copyref" onClick={onClose}>
+                close ✕
+              </button>
+            </div>
+          </div>
+
+          {root === undefined ? (
+            <div className="triage-empty">loading…</div>
+          ) : root === null ? (
+            <div className="triage-empty">
+              <p>Pick a screenshots folder to triage. SlideWell reads it but never moves, renames, or changes your files — only the ones you include are copied into the well.</p>
+              <button className="primary-btn" onClick={() => void chooseFolder()}>
+                ⌖ Choose folder
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="triage-controls">
+                <input ref={searchRef} className="search-input" placeholder="Search text in screenshots…   /  focus · I include · X exclude · Enter preview" value={q} onChange={(e) => setQ(e.target.value)} />
+                <div className="scope" role="tablist" aria-label="Triage state">
+                  {(['undecided', 'included', 'excluded', 'all'] as const).map((s) => (
+                    <button key={s} role="tab" aria-selected={stateFilter === s} className={stateFilter === s ? 'scope-tab active' : 'scope-tab'} onClick={() => setStateFilter(s)}>
+                      {s[0].toUpperCase() + s.slice(1)}
+                      {s !== 'all' ? ` ${counts[s]}` : ''}
+                    </button>
+                  ))}
+                </div>
+                {progress && <span className="triage-progress">{progress}</span>}
+              </div>
+
+              {items.length === 0 ? (
+                <div className="triage-empty">
+                  <p>{scanning ? 'Scanning…' : counts.total === 0 ? 'Nothing scanned yet.' : `No ${stateFilter} items.`}</p>
+                  {counts.total === 0 && !scanning && (
+                    <button className="primary-btn" onClick={() => void scan()}>
+                      ⟳ Scan this folder
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="triage-grid">
+                  {items.map((it, i) => (
+                    <TriageCard key={it.hash} item={it} selected={i === sel} onSelect={() => setSel(i)} onOpen={() => setPreview(it)} onDecide={(a) => void decide(it, a)} />
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+      {preview && (
+        <TriagePreview
+          item={preview}
+          onClose={() => setPreview(null)}
+          onDecide={(a) => {
+            void decide(preview, a)
+            setPreview(null)
+          }}
+        />
+      )}
+    </>
+  )
+}
+
+function TriageCard({
+  item,
+  selected,
+  onSelect,
+  onOpen,
+  onDecide
+}: {
+  item: TriageItem
+  selected: boolean
+  onSelect: () => void
+  onOpen: () => void
+  onDecide: (a: 'include' | 'exclude' | 'reset') => void
+}): JSX.Element {
+  const badge = item.state === 'included' ? '✓' : item.state === 'excluded' ? '✗' : ''
+  return (
+    <div className={`triage-card state-${item.state}${selected ? ' selected' : ''}`} onClick={onSelect} onDoubleClick={onOpen}>
+      <div className="triage-thumb" onClick={(e) => { e.stopPropagation(); onOpen() }} title="Open preview">
+        {item.thumbUrl ? (
+          <img src={item.thumbUrl} alt="" loading="lazy" onError={(e) => (e.currentTarget.style.visibility = 'hidden')} />
+        ) : (
+          <div className="thumb placeholder" aria-hidden />
+        )}
+        {item.kind === 'video' && <span className="triage-play">▶</span>}
+        {item.kind === 'video' && <span className={item.large ? 'triage-size large' : 'triage-size'}>{item.sizeMB} MB{item.large ? ' ⚠' : ''}</span>}
+        {badge && <span className={`triage-badge ${item.state}`}>{badge}</span>}
+      </div>
+      <div className="triage-meta">
+        <div className="triage-name" title={item.filename}>{item.filename}</div>
+        {item.snippet && <div className="triage-snip">{item.snippet}</div>}
+      </div>
+      <div className="triage-actions">
+        {item.state !== 'included' && (
+          <button className="ti-inc" onClick={(e) => { e.stopPropagation(); onDecide('include') }}>Include</button>
+        )}
+        {item.state !== 'excluded' && (
+          <button className="ti-exc" onClick={(e) => { e.stopPropagation(); onDecide('exclude') }}>Exclude</button>
+        )}
+        {item.state !== 'undecided' && (
+          <button className="ti-rst" onClick={(e) => { e.stopPropagation(); onDecide('reset') }}>Reset</button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function TriagePreview({ item, onClose, onDecide }: { item: TriageItem; onClose: () => void; onDecide: (a: 'include' | 'exclude' | 'reset') => void }): JSX.Element {
+  return (
+    <div className="overlay triage-preview-overlay" onClick={onClose}>
+      <div className="lightbox" onClick={(e) => e.stopPropagation()}>
+        <div className="lb-stage">
+          {item.kind === 'video' && item.mediaUrl ? (
+            <video className="lb-img" src={item.mediaUrl} controls autoPlay />
+          ) : item.thumbUrl ? (
+            <img className="lb-img" src={item.thumbUrl} alt={item.filename} />
+          ) : (
+            <div className="lb-img placeholder">no preview</div>
+          )}
+        </div>
+        <div className="lb-bar">
+          <div className="lb-title">{item.filename}</div>
+          <div className="lb-meta">{[item.kind, item.kind === 'video' ? `${item.sizeMB} MB` : '', `state: ${item.state}`].filter(Boolean).join(' · ')}</div>
+          <button className="ti-inc" onClick={() => onDecide('include')}>Include (I)</button>
+          <button className="ti-exc" onClick={() => onDecide('exclude')}>Exclude (X)</button>
+          {item.state !== 'undecided' && <button className="copyref" onClick={() => onDecide('reset')}>Reset</button>}
+          <button className="copyref" onClick={onClose}>close ✕</button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1605,6 +1910,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }): JSX.Element {
     ['G', 'Group by presentation'],
     ['C', 'Cluster near-identical'],
     ['S · O', 'Stats · Import'],
+    ['⛏ Triage', 'Triage screenshots/videos (toolbar) — then I/X to keep/skip'],
     ['Esc', 'Close / back'],
     ['?', 'This help']
   ]
