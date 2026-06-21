@@ -48,6 +48,17 @@ try {
   let listing = await win.evaluate(() => window.sw.triage.list('', 'undecided'))
   result.undecidedAfterScan = listing.counts.undecided
 
+  // render check: force the UI to re-list (switch to All), then confirm cards have real height
+  // (regression: cards once collapsed to ~2px because aspect-ratio on the thumb didn't feed back
+  // into the flex card inside the grid cell)
+  await win.locator('.triage-controls .scope-tab', { hasText: 'All' }).click()
+  await win.waitForTimeout(600)
+  result.cardsRendered = await win.locator('.triage-card').count()
+  result.cardHeightOk = await win.evaluate(() => {
+    const c = document.querySelector('.triage-card')
+    return c ? c.getBoundingClientRect().height > 100 : false
+  })
+
   // include the first item → it should leave 'undecided' and appear in 'included'
   const firstHash = listing.items[0].hash
   const dec = await win.evaluate((h) => window.sw.triage.decide(h, 'include'), firstHash)
@@ -70,15 +81,13 @@ try {
   result.datesOk = desc.items.every((i) => /^\d{4}-\d{2}-\d{2}$/.test(i.date))
   result.dateSortFlips = desc.items[0].hash === asc.items[asc.items.length - 1].hash && desc.items[0].date >= desc.items[1].date
 
-  // the grid should have rendered cards for the scanned items
-  await win.waitForTimeout(300)
-  result.cardsRendered = await win.locator('.triage-card').count()
-
   pass =
     result.panelOpened &&
     result.scanned === 2 &&
     result.recursiveOk &&
     result.undecidedAfterScan === 2 &&
+    result.cardsRendered === 2 &&
+    result.cardHeightOk &&
     result.includeState === 'included' &&
     result.wellId &&
     result.includedCount === 1 &&
