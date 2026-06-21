@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts } from '../../preload'
+import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency } from '../../preload'
 
 type SortKey = 'date-desc' | 'date-asc' | 'title'
 
@@ -41,6 +41,7 @@ export default function App(): JSX.Element {
   const [showImport, setShowImport] = useState(false)
   const [showStats, setShowStats] = useState(false)
   const [showTriage, setShowTriage] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
   const [stats, setStats] = useState<Stats | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
@@ -303,7 +304,7 @@ export default function App(): JSX.Element {
       setSel(best >= 0 ? best : dir > 0 ? navCount - 1 : 0)
     }
     const onKey = (e: KeyboardEvent): void => {
-      if (showTriage) return // the Triage panel owns the keyboard while it is open
+      if (showTriage || showSettings) return // these panels own the keyboard while open
       const el = document.activeElement as HTMLElement | null
       const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
       const cmd = e.metaKey || e.ctrlKey
@@ -453,7 +454,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navCount, sel, activeItem, runAction, activateCurrent, paletteOpen, lightbox, deckMode, inspectorOpen, showHelp, showStats, showImport, showTriage, deckFilter, filters, openStats])
+  }, [navCount, sel, activeItem, runAction, activateCurrent, paletteOpen, lightbox, deckMode, inspectorOpen, showHelp, showStats, showImport, showTriage, showSettings, deckFilter, filters, openStats])
 
   // when inspecting a deck, fetch its full metadata (re-fetches as selection moves)
   useEffect(() => {
@@ -503,6 +504,9 @@ export default function App(): JSX.Element {
           </button>
           <button className="tb-btn" onClick={() => setShowImport(true)} title="Import PowerPoint into the archive (O)">
             ⤓ Import
+          </button>
+          <button className="tb-btn" onClick={() => setShowSettings(true)} title="Settings · folders · requirements">
+            ⚙
           </button>
           <button className="tb-btn" onClick={() => setShowHelp(true)} title="Keyboard shortcuts (?)">
             ⌨
@@ -831,6 +835,8 @@ export default function App(): JSX.Element {
       {showTriage && <TriagePanel onClose={() => setShowTriage(false)} onChanged={() => setRefreshKey((k) => k + 1)} onToast={setToast} />}
 
       {showStats && <StatsPanel stats={stats} onClose={() => setShowStats(false)} />}
+
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onChanged={() => setRefreshKey((k) => k + 1)} />}
 
       {toast && <div className="toast">{toast}</div>}
     </div>
@@ -1271,6 +1277,102 @@ function TriagePreview({ item, onClose, onDecide }: { item: TriageItem; onClose:
           {item.state !== 'undecided' && <button className="copyref" onClick={() => onDecide('reset')}>Unselect (U)</button>}
           <button className="copyref" onClick={onClose}>close ✕</button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }): JSX.Element {
+  const [paths, setPaths] = useState<{ archiveRoot: string | null; wellRoot: string; vaultRoot: string | null; screenshotRoot: string | null } | null>(null)
+  const [deps, setDeps] = useState<Dependency[]>([])
+  const [reqUrl, setReqUrl] = useState('https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md')
+
+  const load = useCallback(async () => {
+    const p = await window.sw.settings.getPaths()
+    setPaths({ archiveRoot: p.archiveRoot, wellRoot: p.wellRoot, vaultRoot: p.vaultRoot, screenshotRoot: p.screenshotRoot })
+    const d = await window.sw.settings.dependencies()
+    setDeps(d.deps)
+    setReqUrl(d.requirementsUrl)
+  }, [])
+  useEffect(() => {
+    void load()
+  }, [load])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const openReq = (): void => void window.sw.shell.openExternal(reqUrl)
+  const choose = async (which: 'archive' | 'vault' | 'screenshot'): Promise<void> => {
+    const fn =
+      which === 'archive' ? window.sw.settings.chooseArchive : which === 'vault' ? window.sw.settings.chooseVault : window.sw.settings.chooseScreenshotFolder
+    const r = await fn()
+    if (r) {
+      await load()
+      onChanged()
+    }
+  }
+
+  const folders: Array<{ key: 'archive' | 'vault' | 'screenshot' | 'well'; label: string; value: string | null; choosable: boolean }> = [
+    { key: 'archive', label: 'Archive (Core A engine)', value: paths?.archiveRoot ?? null, choosable: true },
+    { key: 'well', label: 'Well (SlideWell store)', value: paths?.wellRoot ?? null, choosable: false },
+    { key: 'vault', label: 'TalkWeaver vault', value: paths?.vaultRoot ?? null, choosable: true },
+    { key: 'screenshot', label: 'Triage source folder', value: paths?.screenshotRoot ?? null, choosable: true }
+  ]
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal settings-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <b>⚙ Settings</b>
+          <button className="copyref" onClick={onClose}>close ✕</button>
+        </div>
+
+        <div className="settings-section">Folders</div>
+        <div className="settings-rows">
+          {folders.map((f) => (
+            <div className="settings-row" key={f.key}>
+              <div className="settings-row-main">
+                <div className="settings-row-label">{f.label}</div>
+                <div className="settings-row-detail" title={f.value || ''}>{f.value || '— not set —'}</div>
+              </div>
+              {f.choosable && (
+                <button className="copyref" onClick={() => void choose(f.key as 'archive' | 'vault' | 'screenshot')}>
+                  Choose…
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="settings-section">
+          Requirements
+          <button className="link settings-reqlink" onClick={openReq}>full setup guide on GitHub →</button>
+        </div>
+        <div className="settings-rows">
+          {deps.map((d) => (
+            <div className={`settings-row dep ${d.found ? 'ok' : d.required ? 'bad' : 'warn'}`} key={d.key}>
+              <span className="dep-badge">{d.found ? '✓' : '⚠'}</span>
+              <div className="settings-row-main">
+                <div className="settings-row-label">
+                  {d.label}
+                  {d.required && !d.found ? ' · required' : ''}
+                </div>
+                <div className="settings-row-detail">
+                  {d.requiredFor}
+                  {d.found ? '' : ` — ${d.install}`}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="settings-note">
+          Anything missing just disables its feature — SlideWell still runs. See the{' '}
+          <button className="link" onClick={openReq}>requirements guide</button> to install what you need.
+        </p>
       </div>
     </div>
   )

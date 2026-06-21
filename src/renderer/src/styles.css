@@ -1210,6 +1210,93 @@ body {
   max-height: 76vh;
   background: #000;
 }
+/* --- settings --- */
+.settings-modal {
+  width: min(620px, 92vw);
+  max-height: 82vh;
+  overflow-y: auto;
+}
+.settings-section {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 1.1rem 0 0.5rem;
+}
+.settings-reqlink {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+.settings-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.settings-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.settings-row-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.settings-row-detail {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-family: ui-monospace, Menlo, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.settings-row.dep .dep-badge {
+  flex: none;
+  width: 1.4rem;
+  height: 1.4rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 0.8rem;
+  color: #fff;
+}
+.settings-row.dep.ok .dep-badge {
+  background: #2f7d4f;
+}
+.settings-row.dep.warn {
+  border-color: #e9d9a8;
+  background: #fdfaf1;
+}
+.settings-row.dep.warn .dep-badge {
+  background: #b8860b;
+}
+.settings-row.dep.bad {
+  border-color: #e4b4bf;
+  background: #fcf2f4;
+}
+.settings-row.dep.bad .dep-badge {
+  background: var(--accent);
+}
+.settings-note {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin: 0.9rem 0 0;
+}
+
 .triage-foot {
   display: flex;
   align-items: center;

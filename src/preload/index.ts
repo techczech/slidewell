@@ -57,6 +57,16 @@ export type SearchFilters = {
   type: 'slides' | 'images' | 'decks'
 }
 export type CategoryCount = { category: string; count: number }
+// An external tool SlideWell depends on, with detected presence — shown in Settings (REQUIREMENTS.md).
+export type Dependency = {
+  key: string
+  label: string
+  found: boolean
+  detail: string
+  requiredFor: string
+  install: string
+  required: boolean
+}
 // A scanned item in a Triage source (ADR-0029) — not yet in the library unless state==='included'.
 export type TriageItem = {
   hash: string // content hash — the DECISION key; repeats across duplicate files (not unique)
@@ -146,7 +156,9 @@ const api = {
     }> => ipcRenderer.invoke('settings:get-paths'),
     chooseArchive: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-archive'),
     chooseVault: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-vault'),
-    chooseScreenshotFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-screenshot-folder')
+    chooseScreenshotFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-screenshot-folder'),
+    // Detected status of external tools (engine, OCR, ffmpeg, LibreOffice…) + the Requirements URL.
+    dependencies: (): Promise<{ requirementsUrl: string; deps: Dependency[] }> => ipcRenderer.invoke('settings:dependencies')
   },
   // Triage source workflow (ADR-0029): scan a folder, browse/decide, promote keepers into the well.
   triage: {

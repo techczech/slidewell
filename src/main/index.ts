@@ -8,9 +8,11 @@ import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
 import { loadDeckMeta, categoryList, type DeckMetaIndex } from './deckmeta'
-import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, ingestScreenshot, type WellRow } from './well'
+import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, ingestScreenshot, findFfmpeg, type WellRow } from './well'
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, VIDEO_GATE_BYTES, type TriageRow } from './triage'
-import { runIngest, cancelIngest, detectPython } from './ingest'
+import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
+
+const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
 
 // Custom schemes must be registered as privileged BEFORE app ready so the renderer treats them
 // as standard secure schemes (CSP img-src matching, no mixed-content blocking). SlideWell mirrors
@@ -185,6 +187,27 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('shell:open-path', (_e, p: string) => shell.openPath(p).then((err) => err === ''))
   ipcMain.handle('shell:open-external', (_e, url: string) => shell.openExternal(url).then(() => true))
+
+  // Detected status of the external tools SlideWell leans on — surfaced in Settings so users know
+  // what to install. `required` deps gate core features; the rest degrade gracefully when absent.
+  ipcMain.handle('settings:dependencies', () => {
+    const py = detectPython(readConfig().pythonPath)
+    const ocrBin = join(archiveRoot(), 'tools', 'ocr', 'vision_ocr')
+    const ocrSwift = join(archiveRoot(), 'tools', 'ocr', 'vision_ocr.swift')
+    const ff = findFfmpeg()
+    const render = findRenderTools()
+    return {
+      requirementsUrl: REQUIREMENTS_URL,
+      deps: [
+        { key: 'archive', label: 'PowerPoint archive engine (Core A · ppt-archive)', found: archiveAvailable(), detail: archiveRoot(), requiredFor: 'Slide/Deck search & PPTX import', install: 'Clone techczech/ppt-archive and point Settings at it', required: true },
+        { key: 'python', label: 'Python 3 (+ python-pptx, Pillow, lxml)', found: py === 'python3' || existsSync(py), detail: py, requiredFor: 'PPTX import (extraction)', install: 'pip install python-pptx Pillow lxml pdf2image', required: false },
+        { key: 'ocr', label: 'macOS Vision OCR helper (vision_ocr)', found: existsSync(ocrBin) || existsSync(ocrSwift), detail: existsSync(ocrBin) ? ocrBin : ocrSwift, requiredFor: 'Text search inside images & screenshots', install: 'Ships with ppt-archive (tools/ocr)', required: false },
+        { key: 'ffmpeg', label: 'ffmpeg', found: ff !== 'ffmpeg', detail: ff !== 'ffmpeg' ? ff : 'not found on PATH', requiredFor: 'Video poster frames & triage playback', install: 'brew install ffmpeg', required: false },
+        { key: 'libreoffice', label: 'LibreOffice (soffice)', found: Boolean(render.soffice), detail: render.soffice || 'not found', requiredFor: 'Slide render thumbnails', install: 'brew install --cask libreoffice', required: false },
+        { key: 'poppler', label: 'Poppler (pdftoppm)', found: Boolean(render.pdftoppm), detail: render.pdftoppm || 'not found', requiredFor: 'Slide render thumbnails', install: 'brew install poppler', required: false }
+      ]
+    }
+  })
 
   // Read-only search over Core A. Returns [] when the archive isn't present (UI degrades gracefully).
   // renderAbsPath is converted to a renderable swarchive:// URL here; the renderer never sees raw paths.
