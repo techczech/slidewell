@@ -2,7 +2,7 @@
 // but against throwaway dirs (temp userData + temp well + a fixture source folder), so it never
 // touches the user's real well/config. Run: `node e2e/triage.mjs` (after `npm run build`).
 import { _electron as electron } from 'playwright'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -20,6 +20,9 @@ mkdirSync(userData, { recursive: true })
 mkdirSync(join(source, 'sub'), { recursive: true }) // a subfolder, to prove recursive traversal
 writeFileSync(join(source, 'one.png'), Buffer.from(RED, 'base64'))
 writeFileSync(join(source, 'sub', 'two.png'), Buffer.from(BLUE, 'base64')) // nested
+// distinct capture dates so date sort/group has something to order
+utimesSync(join(source, 'one.png'), new Date('2024-06-01'), new Date('2024-06-01'))
+utimesSync(join(source, 'sub', 'two.png'), new Date('2020-01-15'), new Date('2020-01-15'))
 // pre-seed the config the app reads (isolated well + the fixture as the Triage source)
 writeFileSync(join(userData, 'config.json'), JSON.stringify({ wellRoot, screenshotRoot: source }), 'utf8')
 
@@ -61,6 +64,12 @@ try {
   const after = await win.evaluate(() => window.sw.triage.list('', 'all'))
   result.excludedCount = after.counts.excluded
 
+  // date sort: newest-first vs oldest-first must flip, and every item carries a YYYY-MM-DD date
+  const desc = await win.evaluate(() => window.sw.triage.list('', 'all', 'date-desc'))
+  const asc = await win.evaluate(() => window.sw.triage.list('', 'all', 'date-asc'))
+  result.datesOk = desc.items.every((i) => /^\d{4}-\d{2}-\d{2}$/.test(i.date))
+  result.dateSortFlips = desc.items[0].hash === asc.items[asc.items.length - 1].hash && desc.items[0].date >= desc.items[1].date
+
   // the grid should have rendered cards for the scanned items
   await win.waitForTimeout(300)
   result.cardsRendered = await win.locator('.triage-card').count()
@@ -74,7 +83,9 @@ try {
     result.wellId &&
     result.includedCount === 1 &&
     result.undecidedCount === 1 &&
-    result.excludedCount === 1
+    result.excludedCount === 1 &&
+    result.datesOk &&
+    result.dateSortFlips
 } catch (e) {
   result.error = String(e)
 } finally {

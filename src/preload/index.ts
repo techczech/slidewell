@@ -65,6 +65,8 @@ export type TriageItem = {
   ext: string
   state: 'undecided' | 'included' | 'excluded'
   offline: boolean // OneDrive online-only placeholder — not downloaded, so not read/thumbnailed
+  mtime: number // file modified time (epoch ms) — capture time, for sort/group by date
+  date: string // YYYY-MM-DD derived from mtime
   sizeMB: number
   large: boolean // video over the 20 MB gate — include needs an explicit confirm
   snippet: string
@@ -148,7 +150,8 @@ const api = {
   // Triage source workflow (ADR-0029): scan a folder, browse/decide, promote keepers into the well.
   triage: {
     scan: (): Promise<{ ok: boolean; indexed: number; total: number; offline: number }> => ipcRenderer.invoke('triage:scan'),
-    list: (query: string, state: string): Promise<{ items: TriageItem[]; counts: TriageCounts }> => ipcRenderer.invoke('triage:list', query, state),
+    list: (query: string, state: string, sort?: 'scanned' | 'date-desc' | 'date-asc'): Promise<{ items: TriageItem[]; counts: TriageCounts }> =>
+      ipcRenderer.invoke('triage:list', query, state, sort),
     decide: (hash: string, action: 'include' | 'exclude' | 'reset', force?: boolean): Promise<{ state: string; wellId?: string; gated?: boolean; sizeMB?: number }> =>
       ipcRenderer.invoke('triage:decide', hash, action, force),
     // Paste-to-include: ingest the clipboard image straight into the well. Returns the new id or null.

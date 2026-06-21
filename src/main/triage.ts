@@ -205,6 +205,7 @@ export interface TriageRow {
   filename: string
   ext: string
   size: string
+  mtime: string
   poster_rel: string
   offline: string
   ocr_text: string
@@ -213,21 +214,25 @@ export interface TriageRow {
 }
 
 const LIST_COLS =
-  'triage_fts.hash, triage_fts.kind, triage_fts.rel_path, triage_fts.filename, triage_fts.ext, triage_fts.size, triage_fts.poster_rel, triage_fts.offline, triage_fts.ocr_text, COALESCE(d.state, \'undecided\') AS state, d.well_id'
+  'triage_fts.hash, triage_fts.kind, triage_fts.rel_path, triage_fts.filename, triage_fts.ext, triage_fts.size, triage_fts.mtime, triage_fts.poster_rel, triage_fts.offline, triage_fts.ocr_text, COALESCE(d.state, \'undecided\') AS state, d.well_id'
 
-/** Browse/search the triage index. Empty query → newest scanned first; state '' or 'all' → no filter. */
-export async function listTriage(wellRoot: string, raw: string, state: string, limit = 150): Promise<TriageRow[]> {
+export type TriageSort = 'scanned' | 'date-desc' | 'date-asc'
+
+/** Browse/search the triage index. sort: scanned (default) | date-desc | date-asc (by file mtime). */
+export async function listTriage(wellRoot: string, raw: string, state: string, sort: TriageSort = 'scanned', limit = 400): Promise<TriageRow[]> {
   const db = triageDb(wellRoot)
   if (!existsSync(db)) return []
   const stateClause = state && state !== 'all' ? `COALESCE(d.state, 'undecided') = '${state.replace(/[^a-z]/g, '')}'` : ''
   const join = 'triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash'
+  const dateOrder = `ORDER BY CAST(triage_fts.mtime AS INTEGER) ${sort === 'date-asc' ? 'ASC' : 'DESC'}`
+  const useDate = sort === 'date-asc' || sort === 'date-desc'
   if (raw && raw.trim().length >= 2) {
     const q = safeFtsQuery(raw)
     const where = `triage_fts MATCH ?${stateClause ? ` AND ${stateClause}` : ''}`
-    return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} WHERE ${where} ORDER BY rank LIMIT ?`, [q, limit])
+    return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} WHERE ${where} ${useDate ? dateOrder : 'ORDER BY rank'} LIMIT ?`, [q, limit])
   }
   const where = stateClause ? `WHERE ${stateClause}` : ''
-  return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} ${where} ORDER BY triage_fts.scanned_at DESC LIMIT ?`, [limit])
+  return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} ${where} ${useDate ? dateOrder : 'ORDER BY triage_fts.scanned_at DESC'} LIMIT ?`, [limit])
 }
 
 export async function triageCounts(wellRoot: string): Promise<{ undecided: number; included: number; excluded: number; total: number }> {
