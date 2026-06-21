@@ -1,32 +1,33 @@
 # SlideWell
 
-**Your slides and images in one place — the well.**
+**Your slides and images in one place — the well you draw slides and images from.** Companion to [TalkWeaver](https://talkweaver.app).
 
-SlideWell is a desktop app for browsing, searching, and reusing every slide and image you have: the whole legacy PowerPoint archive *and* a growing well of images you collect for later. It is the companion to [TalkWeaver](../talk-weaver) — TalkWeaver authors presentations; SlideWell is where their raw material lives and is found.
+SlideWell browses, searches, and reuses every slide and image you have: the whole legacy PowerPoint archive *and* a growing well of images you collect for later. TalkWeaver authors presentations; SlideWell is where their raw material lives and is found.
+
+**Website & downloads:** [talkweaver.app/slidewell](https://talkweaver.app/slidewell) · macOS · MIT.
 
 ## What it does
 
 - **Imports PowerPoint** (a file or a whole folder) and extracts each slide's text, structure, a slide render, and the images inside it — reusing the proven `ppt-archive` (Core A) engine.
-- **Searches everything together** — slide text, OCR'd text from images, and (planned) multimodal embeddings for finding images by what they show.
-- **Holds an image well** — drop in screenshots and found images you might use later; they're auto-tagged and instantly findable. No folders, just tags and search.
-- **Feeds TalkWeaver** — pull a slide or image straight into a presentation, with reuse, lineage, and versioning tracked by SlideWell, not baked into your Markdown.
+- **Searches everything together** — slide text and OCR'd image text — and browses three ways: individual **Slides**, standalone **Images**, or whole **Decks** by their title slide.
+- **Triages screenshots & short videos** — point it at a folder (e.g. OneDrive); it scans recursively, OCRs for search, and you keep the ones worth reusing into the well and dismiss the rest (decisions remembered by content hash).
+- **Holds an image well** — net-new screenshots and found images, organised by tags + search, never folders.
+- **Feeds TalkWeaver** — copy a slide's image (WebP), PNG, text, structure, or reference; see any slide in the context of its whole presentation. Keyboard-first (⌘K command palette), entirely local.
 
 ## Status
 
-Early scaffold. The architecture is decided (see below); the app shell builds and launches. Search, import, the well, and embeddings are the build order in `_TASK-LOG/RESUME.md`.
-
-## Architecture
-
-Electron + React + TypeScript (electron-vite), mirroring TalkWeaver for shared UI and one Image Node model across both apps. Heavy work (extraction, OCR via macOS Vision, embeddings via MLX) runs in Core A's Python pipeline; the app shell is a fast UI over the on-disk archive.
-
-Direction layer (glossary + binding decisions) lives centrally in [`presentation-system`](../../05_ppt-tools/presentation-system): **ADR-0026**, CONTEXT.md (`SlideWell`, `Added image`, `Image Node`), ROADMAP P7.
+Early / soft launch. Downloads are built in CI and are **not Apple-notarised** — the first launch needs right-click → **Open** (or `xattr -dr com.apple.quarantine "/Applications/SlideWell.app"`). The app currently relies on a local engine — the `ppt-archive` Core A toolchain, the macOS Vision OCR helper, and `ffmpeg`; bundling these so it runs self-contained on any Mac is in progress. Direction layer (glossary + binding decisions) lives in [`presentation-system`](https://github.com/techczech/presentation-system) (ADR-0026/0029/0030, CONTEXT.md).
 
 ## Develop
 
 ```sh
-npm ci
-npm run dev      # dev server + Electron, renderer HMR
-npm run build    # typecheck + production build
+npm install
+npm run dev          # electron-vite dev (renderer HMR + Electron)
+npm run build        # typecheck + build main/preload/renderer
+npm run test:smoke   # Playwright _electron smoke test
+npm run test:triage  # isolated triage end-to-end
+npm run icon         # regenerate build/icon.icns
+npm run dist:mac     # package a DMG into release/
 ```
 
-Requires the `ppt-archive` extraction store for real data; without it the app launches and reports "archive not found" (choose its folder in the status bar).
+Releases are cut by tagging — `git tag v0.1.0 && git push --tags` → `.github/workflows/release.yml` builds the DMG and opens a draft GitHub Release. Needs the `ppt-archive` store for real data; without it the app launches and reports "archive not connected" (point it at your folder in Settings).

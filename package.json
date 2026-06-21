@@ -1,15 +1,17 @@
 {
   "name": "slidewell",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "SlideWell — desktop slide & image archive (the well) for the presentation ecosystem",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && electron-vite build",
+    "icon": "node build/make-icon.mjs",
     "preview": "electron-vite preview",
     "start": "electron .",
-    "dist:mac": "tsc --noEmit && electron-vite build && electron-builder --mac --dir",
+    "pack": "electron-vite build && electron-builder --mac --dir",
+    "dist:mac": "tsc --noEmit && electron-vite build && electron-builder --mac",
     "test:smoke": "electron-vite build && node e2e/smoke.mjs",
     "test:triage": "electron-vite build && node e2e/triage.mjs"
   },
@@ -18,17 +20,30 @@
     "productName": "SlideWell",
     "asar": false,
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "out/**/*",
       "package.json"
     ],
     "mac": {
-      "target": "dir",
+      "target": "dmg",
+      "icon": "build/icon.icns",
       "category": "public.app-category.productivity",
       "identity": null
-    }
+    },
+    "dmg": {
+      "title": "SlideWell ${version}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "techczech",
+        "repo": "slidewell",
+        "releaseType": "draft"
+      }
+    ]
   },
   "devDependencies": {
     "@codemirror/autocomplete": "^6.18.6",
