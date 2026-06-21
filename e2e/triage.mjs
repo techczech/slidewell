@@ -59,6 +59,17 @@ try {
     return c ? c.getBoundingClientRect().height > 100 : false
   })
 
+  // group-by-date must stay a 6-column grid (regression: it collapsed to a 1-col list because
+  // `1fr` tracks couldn't shrink below the filename width)
+  await win.locator('.triage-controls .toggle input').check()
+  await win.waitForTimeout(500)
+  result.groupCols = await win.evaluate(() => {
+    const g = document.querySelector('.triage-group .triage-grid')
+    return g ? getComputedStyle(g).gridTemplateColumns.split(/\s+/).filter(Boolean).length : 0
+  })
+  await win.locator('.triage-controls .toggle input').uncheck()
+  await win.waitForTimeout(300)
+
   // include the first item → it should leave 'undecided' and appear in 'included'
   const firstHash = listing.items[0].hash
   const dec = await win.evaluate((h) => window.sw.triage.decide(h, 'include'), firstHash)
@@ -88,6 +99,7 @@ try {
     result.undecidedAfterScan === 2 &&
     result.cardsRendered === 2 &&
     result.cardHeightOk &&
+    result.groupCols === 6 &&
     result.includeState === 'included' &&
     result.wellId &&
     result.includedCount === 1 &&

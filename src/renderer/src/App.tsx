@@ -869,8 +869,11 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
   const [scanning, setScanning] = useState(false)
   const [progress, setProgress] = useState('')
   const [sel, setSel] = useState(0)
+  const [page, setPage] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
   const [preview, setPreview] = useState<TriageItem | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const PAGE = 150
 
   useEffect(() => {
     const t = setTimeout(() => setDebq(q), 250)
@@ -881,14 +884,22 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
   const listSort = groupByDate && !sort.startsWith('date') ? 'date-desc' : sort
   const refresh = useCallback(async () => {
     try {
-      const r = await window.sw.triage.list(debq, stateFilter, listSort)
+      const r = await window.sw.triage.list(debq, stateFilter, listSort, PAGE, page * PAGE)
       setItems(r.items)
       setCounts(r.counts)
+      setHasMore(r.hasMore)
       setSel((s) => Math.min(s, Math.max(0, r.items.length - 1)))
     } catch {
       /* a mid-scan read may briefly lose to a write; the next tick retries */
     }
-  }, [debq, stateFilter, listSort])
+  }, [debq, stateFilter, listSort, page])
+
+  // a filter/search/sort change resets to the first page
+  useEffect(() => setPage(0), [debq, stateFilter, listSort])
+  // jump to the top of the grid when the page changes
+  useEffect(() => {
+    document.querySelector('.triage-scroll')?.scrollTo(0, 0)
+  }, [page])
 
   // Lazy load: as the scan streams progress, re-list (throttled) so rows appear as they land —
   // the user sees continuous movement instead of a blank "scanning…".
@@ -1049,6 +1060,14 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
       } else if ((e.key === 'u' || e.key === 'U') && cur) {
         e.preventDefault()
         void decide(cur, 'reset') // U = unselect
+      } else if (e.key === '[') {
+        e.preventDefault()
+        setPage((p) => Math.max(0, p - 1))
+        setSel(0)
+      } else if (e.key === ']' && hasMore) {
+        e.preventDefault()
+        setPage((p) => p + 1)
+        setSel(0)
       } else if (e.key === '/') {
         e.preventDefault()
         searchRef.current?.focus()
@@ -1056,7 +1075,7 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [items, sel, preview, decide, paste, onClose])
+  }, [items, sel, preview, hasMore, decide, paste, onClose])
 
   return (
     <>
@@ -1100,7 +1119,7 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
                 <input
                   ref={searchRef}
                   className="search-input"
-                  placeholder="Search text in screenshots…   /  focus · Space select · U unselect · X exclude · ⌘Y full"
+                  placeholder="Search text in screenshots…   /  focus · Space select · U unselect · X exclude · ⌘Y full · [ ] page"
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
                 />
@@ -1153,6 +1172,17 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
                   {items.map((it, i) => (
                     <TriageCard key={it.hash} item={it} selected={i === sel} onSelect={() => setSel(i)} onOpen={() => setPreview(it)} onDecide={(a) => void decide(it, a)} />
                   ))}
+                </div>
+              )}
+
+              {(page > 0 || hasMore) && (
+                <div className="triage-foot">
+                  <button disabled={page === 0} onClick={() => { setPage((p) => Math.max(0, p - 1)); setSel(0) }}>‹ Prev  [</button>
+                  <span>
+                    {items.length > 0 ? `${page * PAGE + 1}–${page * PAGE + items.length}` : '0'}
+                    {!debq ? ` of ${stateFilter === 'all' ? counts.total : counts[stateFilter]}` : ''}
+                  </span>
+                  <button disabled={!hasMore} onClick={() => { setPage((p) => p + 1); setSel(0) }}>]  Next ›</button>
                 </div>
               )}
             </>
