@@ -272,6 +272,35 @@ export default function App(): JSX.Element {
 
   // global keyboard layer
   useEffect(() => {
+    // move the selection one visual row up (dir=-1) or down (dir=+1). Works from the rendered card
+    // geometry, so it respects the live column count and group boundaries; picks the card on the
+    // nearest adjacent row whose horizontal centre is closest to the current one.
+    const moveByRow = (dir: 1 | -1): void => {
+      const cards = Array.from(document.querySelectorAll<HTMLElement>('main .grid .card'))
+      if (cards.length === 0) return
+      if (sel < 0) {
+        setSel(0)
+        return
+      }
+      const cur = cards[sel]?.getBoundingClientRect()
+      if (!cur) return
+      const curMidX = cur.left + cur.width / 2
+      let best = -1
+      let bestScore = Infinity
+      for (let k = 0; k < cards.length; k++) {
+        const r = cards[k].getBoundingClientRect()
+        const rowDelta = r.top - cur.top
+        const onAdjacentSide = dir > 0 ? rowDelta > cur.height * 0.5 : rowDelta < -cur.height * 0.5
+        if (!onAdjacentSide) continue
+        const dx = Math.abs(r.left + r.width / 2 - curMidX)
+        const score = Math.abs(rowDelta) * 10000 + dx // nearest row first, then nearest column
+        if (score < bestScore) {
+          bestScore = score
+          best = k
+        }
+      }
+      setSel(best >= 0 ? best : dir > 0 ? navCount - 1 : 0)
+    }
     const onKey = (e: KeyboardEvent): void => {
       const el = document.activeElement as HTMLElement | null
       const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
@@ -320,22 +349,33 @@ export default function App(): JSX.Element {
         case '?':
           setShowHelp(true)
           break
+        // arrows move the grid selection; while the lightbox is open it owns ←/→ (its own listener)
         case 'ArrowRight':
-        case 'ArrowDown':
-          if (navCount) {
+          if (navCount && !lightbox) {
             e.preventDefault()
             setSel((s) => Math.min(s < 0 ? 0 : s + 1, navCount - 1))
           }
           break
         case 'ArrowLeft':
-        case 'ArrowUp':
-          if (navCount) {
+          if (navCount && !lightbox) {
             e.preventDefault()
             setSel((s) => Math.max(s <= 0 ? 0 : s - 1, 0))
           }
           break
+        case 'ArrowDown':
+          if (navCount && !lightbox) {
+            e.preventDefault()
+            moveByRow(1)
+          }
+          break
+        case 'ArrowUp':
+          if (navCount && !lightbox) {
+            e.preventDefault()
+            moveByRow(-1)
+          }
+          break
         case 'Enter':
-          activateCurrent()
+          if (!lightbox) activateCurrent()
           break
         case 'i':
         case 'I':
@@ -943,13 +983,14 @@ function Card({
     <div
       className={selected ? 'card selected' : 'card'}
       onClick={onSelect}
+      onDoubleClick={onThumb}
       onContextMenu={(e) => {
         e.preventDefault()
         onSelect()
         onMenu(e.clientX, e.clientY)
       }}
     >
-      <div className="thumb-wrap" onClick={(e) => { e.stopPropagation(); onThumb() }} title="Open full size">
+      <div className="thumb-wrap" title="Click to select · double-click to open">
         {h.thumbUrl ? (
           <img className="thumb" src={h.thumbUrl} alt="" loading="lazy" onError={(e) => (e.currentTarget.style.visibility = 'hidden')} />
         ) : (
@@ -1552,8 +1593,9 @@ function CommandPalette({
 function HelpOverlay({ onClose }: { onClose: () => void }): JSX.Element {
   const rows: [string, string][] = [
     ['/  ·  ⌘F', 'Focus search'],
-    ['← → ↑ ↓', 'Move selection'],
-    ['Enter', 'Open full size (deck: open it)'],
+    ['← →', 'Previous / next'],
+    ['↑ ↓', 'Up / down a row'],
+    ['Enter · dbl-click', 'Open full size (deck: open it)'],
     ['I  ·  Space', 'Toggle inspector sidebar'],
     ['⌘K', 'Command palette (actions)'],
     ['⌘C  ·  ⌘⇧C', 'Copy image (WebP) · as PNG'],

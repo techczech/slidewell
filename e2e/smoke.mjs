@@ -40,6 +40,8 @@ try {
   let statsOk = false
   let roleAllOk = false
   let selectionOk = false
+  let rowNavOk = false
+  let clickSelectsOk = false
   let inspectorOk = false
   let paletteOk = false
   let lightboxPaletteOk = false
@@ -72,9 +74,20 @@ try {
     // keyboard: blur search, arrow-select, inspector (I), command palette (⌘K), help (?)
     await win.keyboard.press('Escape') // blur the search input
     await win.waitForTimeout(150)
-    await win.keyboard.press('ArrowRight')
-    await win.waitForTimeout(250)
-    selectionOk = (await win.locator('main .card.selected').count()) === 1
+    // index of the selected card among the rendered grid (DOM order == orderedReps order)
+    const selIndex = () =>
+      win.evaluate(() => Array.from(document.querySelectorAll('main .grid .card')).findIndex((c) => c.classList.contains('selected')))
+    await win.keyboard.press('ArrowRight') // selects the first card
+    await win.waitForTimeout(150)
+    const i0 = await selIndex()
+    selectionOk = i0 >= 0 && (await win.locator('main .card.selected').count()) === 1
+    await win.keyboard.press('ArrowRight') // → next item (step of 1)
+    await win.waitForTimeout(150)
+    const i1 = await selIndex()
+    await win.keyboard.press('ArrowDown') // → down a row (step = column count > 1)
+    await win.waitForTimeout(150)
+    const i2 = await selIndex()
+    rowNavOk = i1 - i0 === 1 && i2 - i1 > 1 // right moves by 1; down jumps a whole row
     await win.keyboard.press('i')
     await win.waitForTimeout(350)
     inspectorOk = (await win.locator('.deck-sidebar').count()) === 1
@@ -104,8 +117,14 @@ try {
     await win.locator('.menu-scrim').click()
     if (!hasExpected) menuItems = -menuItems
 
-    // lightbox
-    await win.locator('main .card .thumb-wrap').first().click()
+    // a single click selects but must NOT launch the slideshow
+    await win.locator('main .card').nth(2).click()
+    await win.waitForTimeout(200)
+    clickSelectsOk = (await win.locator('.lightbox').count()) === 0 && (await win.locator('main .card.selected').count()) === 1
+
+    // lightbox — opened by an extra (double) click, not a single one
+    await win.locator('main .card .thumb-wrap').first().dblclick()
+    await win.waitForTimeout(200)
     lightboxOpened = (await win.locator('.lightbox').count()) === 1
     if (lightboxOpened) {
       // ⌘K must work over the lightbox (acts on the image on screen, not the grid selection)
@@ -179,9 +198,9 @@ try {
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
-    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk && roleAllOk && selectionOk && inspectorOk && paletteOk && lightboxPaletteOk && helpOk)
+    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk && roleAllOk && selectionOk && rowNavOk && clickSelectsOk && inspectorOk && paletteOk && lightboxPaletteOk && helpOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, inspectorOk, paletteOk, lightboxPaletteOk, helpOk, imgCards, imgTags, pass })
+  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, rowNavOk, clickSelectsOk, inspectorOk, paletteOk, lightboxPaletteOk, helpOk, imgCards, imgTags, pass })
   await app.close()
   process.exit(pass ? 0 : 2)
 } catch (e) {
