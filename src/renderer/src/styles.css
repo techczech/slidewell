@@ -1049,7 +1049,7 @@ body {
 }
 .triage-group-head {
   position: sticky;
-  top: -1rem;
+  top: 0;
   z-index: 1;
   background: var(--card);
   font-size: 0.72rem;

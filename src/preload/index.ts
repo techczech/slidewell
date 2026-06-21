@@ -59,7 +59,8 @@ export type SearchFilters = {
 export type CategoryCount = { category: string; count: number }
 // A scanned item in a Triage source (ADR-0029) — not yet in the library unless state==='included'.
 export type TriageItem = {
-  hash: string
+  hash: string // content hash — the DECISION key; repeats across duplicate files (not unique)
+  relPath: string // source-relative path — unique per file; use as the React key
   kind: 'image' | 'video'
   filename: string
   ext: string
