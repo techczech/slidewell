@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, clipboard, n
 import sharp from 'sharp'
 import { join, basename } from 'path'
 import { homedir, tmpdir } from 'os'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, watch as fsWatch } from 'fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, watch as fsWatch } from 'fs'
 import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
@@ -202,7 +202,9 @@ app.whenReady().then(() => {
     screenshotRoot: screenshotRootResolved(),
     screenshotAvailable: Boolean(screenshotRootResolved()),
     conversionsRoot: conversionsRootResolved(),
-    convertOcrDefault: Boolean(readConfig().convertOcrByDefault)
+    convertOcrDefault: Boolean(readConfig().convertOcrByDefault),
+    othersArchiveRoot: othersArchiveRootResolved(),
+    othersArchiveAvailable: othersArchiveAvailable()
   }))
   ipcMain.handle('settings:choose-archive', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
@@ -251,9 +253,16 @@ app.whenReady().then(() => {
   // Read-only search over Core A. Returns [] when the archive isn't present (UI degrades gracefully).
   // renderAbsPath is converted to a renderable swarchive:// URL here; the renderer never sees raw paths.
   const cacheDir = (): string => app.getPath('userData')
-  const toWire = (h: EnrichedHit): Record<string, unknown> => {
+  // Which archive store holds this deck's extraction — mine first, else the Others' Library. Lets
+  // inspect/context actions resolve a result to the right store without threading library everywhere.
+  const rootForDeck = (deck: string): string => {
+    if (deck && existsSync(join(archiveRoot(), 'extracted', deck))) return archiveRoot()
+    if (deck && existsSync(join(othersArchiveRootResolved(), 'extracted', deck))) return othersArchiveRootResolved()
+    return archiveRoot()
+  }
+  const toWire = (h: EnrichedHit, library: 'mine' | 'others' = 'mine'): Record<string, unknown> => {
     const { renderAbsPath, ...rest } = h
-    return { ...rest, thumbUrl: swThumb(renderAbsPath) }
+    return { ...rest, thumbUrl: swThumb(renderAbsPath), library }
   }
 
   // A well image → the same wire shape as an archive hit, so the grid renders it uniformly.
@@ -274,14 +283,16 @@ app.whenReady().then(() => {
       slideOrder: null,
       usedInDecks: 1,
       reference: `![](img-${r.id})`,
-      thumbUrl: swThumb(abs)
+      thumbUrl: swThumb(abs),
+      library: 'mine'
     }
   }
 
   // An extracted-from-a-deck image → the wire shape, as a standalone image card.
-  const archiveImageToWire = (im: ImageHit, idx: DeckMetaIndex): Record<string, unknown> => {
+  const archiveImageToWire = (im: ImageHit, idx: DeckMetaIndex, library: 'mine' | 'others' = 'mine'): Record<string, unknown> => {
     const m = idx[im.deck]
     return {
+      library,
       kind: 'archive-image',
       title: m?.title || im.deck || '(image)',
       snippet: (im.snippet || '').slice(0, 160),
@@ -302,44 +313,53 @@ app.whenReady().then(() => {
   ipcMain.handle('archive:search', async (_e, query: string, filters: SearchFilters) => {
     const scope = filters?.scope ?? 'all'
     const type = filters?.type ?? 'slides'
+    // Which store(s) to search (ADR-0031): the user's archive, the separate Others' Library, or both.
+    const lib = filters?.library ?? 'mine'
+    const includeMine = lib !== 'others'
+    const includeOthers = lib !== 'mine'
     const out: Array<Record<string, unknown>> = []
+
+    const pushSlides = async (root: string, library: 'mine' | 'others'): Promise<void> => {
+      const clusters = await archiveResults(root, cacheDir(), query ?? '', filters)
+      for (const c of clusters) out.push({ representative: toWire(c.representative, library), members: c.members.map((m) => toWire(m, library)), size: c.size, deckCount: c.deckCount })
+    }
+    const pushImages = async (root: string, library: 'mine' | 'others'): Promise<void> => {
+      const idx = loadDeckMeta(root, cacheDir())
+      const deckNeedle = (filters.deck || '').toLowerCase()
+      for (const im of await searchImages(root, query ?? '', 120)) {
+        if (deckNeedle) {
+          const m = idx[im.deck]
+          if (!`${im.deck} ${m?.title || ''} ${m?.filename || ''}`.toLowerCase().includes(deckNeedle)) continue
+        }
+        const w = archiveImageToWire(im, idx, library)
+        out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
+      }
+    }
+
     if (type === 'slides') {
       // whole slides (the well has no slides, so Well-scope is empty here)
-      if (scope !== 'well' && archiveAvailable()) {
-        try {
-          const clusters = await archiveResults(archiveRoot(), cacheDir(), query ?? '', filters)
-          for (const c of clusters) out.push({ representative: toWire(c.representative), members: c.members.map(toWire), size: c.size, deckCount: c.deckCount })
-        } catch {
-          /* archive search failed */
-        }
+      if (scope !== 'well' && includeMine && archiveAvailable()) {
+        try { await pushSlides(archiveRoot(), 'mine') } catch { /* mine search failed */ }
+      }
+      if (scope !== 'well' && includeOthers && othersArchiveAvailable()) {
+        try { await pushSlides(othersArchiveRootResolved(), 'others') } catch { /* others search failed */ }
       }
     } else {
       // images: the pictures embedded in decks (separate from the slides) + the well's images
-      if (scope !== 'well' && archiveAvailable()) {
-        try {
-          const idx = loadDeckMeta(archiveRoot(), cacheDir())
-          const deckNeedle = (filters.deck || '').toLowerCase()
-          for (const im of await searchImages(archiveRoot(), query ?? '', 120)) {
-            if (deckNeedle) {
-              const m = idx[im.deck]
-              if (!`${im.deck} ${m?.title || ''} ${m?.filename || ''}`.toLowerCase().includes(deckNeedle)) continue
-            }
-            const w = archiveImageToWire(im, idx)
-            out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
-          }
-        } catch {
-          /* archive images failed → still show well */
-        }
+      if (scope !== 'well' && includeMine && archiveAvailable()) {
+        try { await pushImages(archiveRoot(), 'mine') } catch { /* mine images failed */ }
       }
-      if (scope !== 'archive') {
+      if (scope !== 'well' && includeOthers && othersArchiveAvailable()) {
+        try { await pushImages(othersArchiveRootResolved(), 'others') } catch { /* others images failed */ }
+      }
+      // the well is the user's own — shown for Mine/All, not when searching Others only
+      if (scope !== 'archive' && includeMine) {
         try {
           for (const r of await searchWell(wellRootResolved(), query ?? '', 60)) {
             const w = wellToWire(r)
             out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
           }
-        } catch {
-          /* no well yet */
-        }
+        } catch { /* no well yet */ }
       }
     }
     return out
@@ -370,19 +390,25 @@ app.whenReady().then(() => {
 
   // Deck MODE: one card per presentation (title-slide cover), filtered like the slide search.
   ipcMain.handle('archive:list-decks', async (_e, filters: SearchFilters) => {
-    if (!archiveAvailable()) return []
-    try {
-      const decks = await listDecks(archiveRoot(), cacheDir(), filters)
-      return decks.map(({ coverAbsPath, ...d }) => ({ ...d, coverThumbUrl: swThumb(coverAbsPath) }))
-    } catch {
-      return []
+    const lib = filters?.library ?? 'mine'
+    const out: Array<Record<string, unknown>> = []
+    const add = async (root: string, library: 'mine' | 'others'): Promise<void> => {
+      const decks = await listDecks(root, cacheDir(), filters)
+      for (const { coverAbsPath, ...d } of decks) out.push({ ...d, coverThumbUrl: swThumb(coverAbsPath), library })
     }
+    if (lib !== 'others' && archiveAvailable()) {
+      try { await add(archiveRoot(), 'mine') } catch { /* mine decks failed */ }
+    }
+    if (lib !== 'mine' && othersArchiveAvailable()) {
+      try { await add(othersArchiveRootResolved(), 'others') } catch { /* others decks failed */ }
+    }
+    return out
   })
-  // Full metadata for one deck (for the sidebar).
+  // Full metadata for one deck (for the sidebar). Resolves to whichever store holds the deck.
   ipcMain.handle('archive:deck-detail', (_e, pid: string) => {
-    if (!archiveAvailable()) return null
+    if (!archiveAvailable() && !othersArchiveAvailable()) return null
     try {
-      return deckDetail(archiveRoot(), cacheDir(), pid)
+      return deckDetail(rootForDeck(pid), cacheDir(), pid)
     } catch {
       return null
     }
@@ -400,9 +426,9 @@ app.whenReady().then(() => {
 
   // The structured content (presentation.json node) of one slide — for "Copy structure".
   ipcMain.handle('archive:slide-structure', (_e, deck: string, slideOrder: number | null) => {
-    if (!archiveAvailable()) return null
+    if (!archiveAvailable() && !othersArchiveAvailable()) return null
     try {
-      return slideStructure(archiveRoot(), deck, slideOrder)
+      return slideStructure(rootForDeck(deck), deck, slideOrder)
     } catch {
       return null
     }
@@ -410,19 +436,21 @@ app.whenReady().then(() => {
 
   // The embedded image assets on one slide → renderable swarchive:// thumbnails (for the inspector).
   ipcMain.handle('archive:slide-images', (_e, deck: string, slideOrder: number | null) => {
-    if (!archiveAvailable()) return []
+    if (!archiveAvailable() && !othersArchiveAvailable()) return []
     try {
-      return slideImages(archiveRoot(), deck, slideOrder).map((im) => ({ thumbUrl: swThumb(im.absPath) }))
+      return slideImages(rootForDeck(deck), deck, slideOrder).map((im) => ({ thumbUrl: swThumb(im.absPath) }))
     } catch {
       return []
     }
   })
 
-  // All slides of one presentation, in order — for "See in context".
+  // All slides of one presentation, in order — for "See in context". Tagged with the store it came from.
   ipcMain.handle('archive:deck-slides', async (_e, deck: string) => {
-    if (!archiveAvailable()) return []
+    if (!archiveAvailable() && !othersArchiveAvailable()) return []
     try {
-      return (await deckSlides(archiveRoot(), cacheDir(), deck)).map(toWire)
+      const root = rootForDeck(deck)
+      const library = root === othersArchiveRootResolved() && root !== archiveRoot() ? 'others' : 'mine'
+      return (await deckSlides(root, cacheDir(), deck)).map((h) => toWire(h, library))
     } catch {
       return []
     }
@@ -570,6 +598,38 @@ app.whenReady().then(() => {
     } catch {
       return null
     }
+  })
+
+  // --- Others' Library (Scenario A, ADR-0031): a separate store for other people's decks ---
+  ipcMain.handle('settings:choose-others-folder', async () => {
+    const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
+    if (r.canceled || !r.filePaths[0]) return null
+    const picked = r.filePaths[0]
+    // Never let the Others' Library overlap the personal archive — that would defeat the separation.
+    if (within(picked, archiveRoot()) || within(archiveRoot(), picked) || resolvePath(picked) === resolvePath(archiveRoot())) {
+      await dialog.showMessageBox({ type: 'warning', buttons: ['OK'], message: "That folder overlaps your own archive.", detail: 'Pick a separate location for the Others’ Library so other people’s slides never mix into your archive.' })
+      return readConfig().othersArchiveRoot ?? null
+    }
+    writeConfig({ othersArchiveRoot: picked })
+    return picked
+  })
+  // Purge the whole Others' Library (its built store only) — never touches the personal archive.
+  ipcMain.handle('settings:clear-others-library', async () => {
+    const root = othersArchiveRootResolved()
+    if (resolvePath(root) === resolvePath(archiveRoot()) || within(archiveRoot(), root)) return { ok: false }
+    const res = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Cancel', 'Clear it'],
+      defaultId: 0,
+      cancelId: 0,
+      message: 'Clear the Others’ Library?',
+      detail: `Deletes everything imported into ${root}. Your own archive is untouched.`
+    })
+    if (res.response !== 1) return { ok: false, cancelled: true }
+    for (const sub of ['extracted', 'registry', 'media-store']) {
+      try { rmSync(join(root, sub), { recursive: true, force: true }) } catch { /* best-effort */ }
+    }
+    return { ok: true }
   })
 
   // --- archive ingest (Core A pipeline as streamed subprocesses) ---

@@ -39,6 +39,7 @@ export type SlideResult = {
   usedInDecks: number
   reference: string // `[use: ppt:<id>#<order>]`
   thumbUrl: string | null
+  library?: 'mine' | 'others' // which archive store this came from (Others' Library = badged)
 }
 export type SlideClusterResult = {
   representative: SlideResult
@@ -55,6 +56,8 @@ export type SearchFilters = {
   cluster: boolean
   scope: 'all' | 'archive' | 'well'
   type: 'slides' | 'images' | 'decks'
+  // Which archive store to search: the user's own, the separate Others' Library, or both (ADR-0031).
+  library: 'mine' | 'others' | 'all'
 }
 export type CategoryCount = { category: string; count: number }
 // An external tool SlideWell depends on, with detected presence — shown in Settings (REQUIREMENTS.md).
@@ -95,6 +98,7 @@ export type DeckCard = {
   ownership: string
   slideCount: number
   coverThumbUrl: string | null
+  library?: 'mine' | 'others'
 }
 export type DeckDetail = {
   id: string
@@ -155,6 +159,8 @@ const api = {
       screenshotAvailable: boolean
       conversionsRoot: string | null
       convertOcrDefault: boolean
+      othersArchiveRoot: string
+      othersArchiveAvailable: boolean
     }> => ipcRenderer.invoke('settings:get-paths'),
     chooseArchive: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-archive'),
     chooseVault: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-vault'),
@@ -163,6 +169,9 @@ const api = {
     chooseConversionsFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-conversions-folder'),
     // Persist the default state of the convert OCR toggle.
     setConvertOcr: (on: boolean): Promise<boolean> => ipcRenderer.invoke('settings:set-convert-ocr', on),
+    // Others' Library (Scenario A): pick its separate store folder, or purge it wholesale.
+    chooseOthersFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-others-folder'),
+    clearOthersLibrary: (): Promise<{ ok: boolean; cancelled?: boolean }> => ipcRenderer.invoke('settings:clear-others-library'),
     // Detected status of external tools (engine, OCR, ffmpeg, LibreOffice…) + the Requirements URL.
     dependencies: (): Promise<{ requirementsUrl: string; deps: Dependency[] }> => ipcRenderer.invoke('settings:dependencies')
   },
@@ -196,8 +205,10 @@ const api = {
     pending: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('ingest:pending'),
     // Pick a .pptx or a folder to import; returns the path so the panel shows it first (null = cancelled).
     choosePath: (): Promise<string | null> => ipcRenderer.invoke('ingest:choose-path'),
-    // Import an already-chosen path (extract + OCR into the archive).
-    runPath: (targetPath: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('ingest:run-path', targetPath),
+    // Import an already-chosen path (extract + OCR). library 'others' routes it into the separate
+    // Others' Library store instead of the user's archive (ADR-0031).
+    runPath: (targetPath: string, library?: 'mine' | 'others'): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('ingest:run-path', targetPath, library),
     cancel: (): Promise<boolean> => ipcRenderer.invoke('ingest:cancel'),
     // Subscribe to streamed progress lines; returns an unsubscribe function.
     onLine: (cb: (line: string) => void): (() => void) => {
