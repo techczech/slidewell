@@ -91,7 +91,7 @@ export interface IngestOpts {
   // archive; a separate "Others' Library" store when importing other people's decks (Scenario A).
   dataRoot: string
   python: string
-  mode: 'pending' | 'path'
+  mode: 'pending' | 'path' | 'reindex'
   targetPath?: string
 }
 
@@ -112,7 +112,16 @@ export async function runIngest(opts: IngestOpts, onLine: (s: string) => void): 
     onLine('  Install for slide thumbnails: brew install --cask libreoffice && brew install poppler (see Requirements in Settings).')
   }
   let steps: Step[]
-  if (opts.mode === 'path' && opts.targetPath) {
+  if (opts.mode === 'reindex') {
+    // Rebuild the index from the extractions already in dataRoot (no extract step) — used after a
+    // delete to bring the registry back in sync with what's left on disk.
+    steps = [
+      { label: 'Rebuild slide & image index', args: ['-m', 'tools.dedup.migrate', data] },
+      ...(render.available ? [{ label: 'Render slides', args: ['-m', 'tools.renders.cli', data, 'render-all'] }] : []),
+      { label: 'OCR', args: ['-m', 'tools.ocr.cli', data, 'ingest-all'] },
+      { label: 'Content-address media', args: ['-m', 'tools.media_store.cli', data, 'migrate'] }
+    ]
+  } else if (opts.mode === 'path' && opts.targetPath) {
     const isDir = (() => {
       try {
         return statSync(opts.targetPath).isDirectory()

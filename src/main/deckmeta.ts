@@ -8,7 +8,7 @@
  * when a newer presentation.json appears (mtime check) — so the parallel
  * extraction pipeline writing new decks invalidates the cache automatically.
  */
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
 export type Ownership = 'mine' | 'others' | 'unknown'
@@ -197,6 +197,20 @@ function currentNewestMtime(archiveRoot: string): number {
 }
 
 let memo: { archiveRoot: string; index: DeckMetaIndex } | null = null
+
+/**
+ * Drop the cached deck index (in-memory memo + on-disk cache) so the next load rescans.
+ * Call after any store mutation that mtime-invalidation can't see — chiefly DELETES (removing a
+ * deck doesn't bump any mtime), but also imports, so new/removed decks show without an app restart.
+ */
+export function invalidateDeckMeta(cacheDir: string): void {
+  memo = null
+  try {
+    rmSync(join(cacheDir, CACHE_FILENAME), { force: true })
+  } catch {
+    /* best-effort */
+  }
+}
 
 /** Load the deck-meta index, cached on disk (mtime-invalidated) + in memory. */
 export function loadDeckMeta(archiveRoot: string, cacheDir: string): DeckMetaIndex {

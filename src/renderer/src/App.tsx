@@ -227,6 +227,18 @@ export default function App(): JSX.Element {
     if (!stats) void window.sw.archive.stats().then(setStats)
   }, [stats])
 
+  // Delete-by-filter: remove the Others' Library decks matching the current query + filters
+  // (the main process shows a confirm with the real count). No filter → deletes the whole library.
+  const deleteOthersMatching = useCallback(async () => {
+    const r = await window.sw.archive.deleteOthersMatching(debounced, filters)
+    if (r.ok) {
+      setToast(`Deleted ${r.deleted ?? 0} deck${r.deleted === 1 ? '' : 's'} from Others' Library`)
+      setRefreshKey((k) => k + 1)
+    } else if (!r.cancelled) {
+      setToast('Nothing matched — nothing deleted')
+    }
+  }, [debounced, filters, setToast])
+
   const activateCurrent = useCallback(() => {
     if (!current) return
     if (deckMode) {
@@ -627,6 +639,15 @@ export default function App(): JSX.Element {
         >
           ▦ Group by presentation
         </button>
+        {filters.library === 'others' && (
+          <button
+            className="toggle danger"
+            onClick={() => void deleteOthersMatching()}
+            title="Delete the Others' Library decks matching the current filter/search (no filter = the whole library). Your own archive is never touched."
+          >
+            🗑 Delete matching…
+          </button>
+        )}
       </div>
 
       <main className="results">
