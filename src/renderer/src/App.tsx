@@ -1438,6 +1438,10 @@ function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => v
     const p = await window.sw.ingest.choosePath()
     if (p) setTarget(p)
   }
+  async function changeArchive(): Promise<void> {
+    const p = await window.sw.settings.chooseArchive()
+    if (p) setArchive(p)
+  }
   async function run(fn: () => Promise<{ ok: boolean }>): Promise<void> {
     setRunning(true)
     const r = await fn()
@@ -1465,8 +1469,9 @@ function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => v
           <div className="settings-row">
             <div className="settings-row-main">
               <div className="settings-row-label">Where it goes</div>
-              <div className="settings-row-detail" title={archive}>{archive || '— archive not set —'} <i>(the archive, fixed)</i></div>
+              <div className="settings-row-detail" title={archive}>{archive || '— archive not set —'} <i>(your archive — Import always lands here)</i></div>
             </div>
+            <button className="copyref" disabled={running} title="Repoint the archive folder (where imported slides are catalogued)" onClick={() => void changeArchive()}>Change…</button>
           </div>
         </div>
         <div className="import-actions">
