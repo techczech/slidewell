@@ -34,6 +34,7 @@ type Config = {
   screenshotRoot?: string
   conversionsRoot?: string // default destination for throwaway PPTX→Outline conversions
   convertOcrByDefault?: boolean // initial state of the convert OCR toggle
+  othersArchiveRoot?: string // the Others' Library store (Scenario A) — other people's decks, kept separate
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -71,6 +72,17 @@ function wellRootResolved(): string {
   return readConfig().wellRoot ?? WELL_DEFAULT
 }
 
+// The Others' Library (Scenario A, ADR-0031): a SEPARATE Core A archive store for other people's
+// decks — built by the same engine (ppt-archive's tools/), never merged into the personal archive.
+// Default to a dedicated user folder; configurable in Settings; created on first import.
+const OTHERS_DEFAULT = join(homedir(), 'SlideWell', 'others-library')
+function othersArchiveRootResolved(): string {
+  return readConfig().othersArchiveRoot ?? OTHERS_DEFAULT
+}
+function othersArchiveAvailable(): boolean {
+  return existsSync(join(othersArchiveRootResolved(), 'registry'))
+}
+
 // TalkWeaver's vault — its images are indexed in place (the vault owns them). Auto-detect from
 // TalkWeaver's own config (userData/config.json) when not explicitly set.
 function detectVaultRoot(): string | null {
@@ -105,7 +117,7 @@ function conversionsRootResolved(): string | null {
 // A render/image request is allowed only if it resolves inside one of the roots SlideWell knows.
 // The Triage source is included so source screenshots/video posters render via swarchive://.
 function allowedRoots(): string[] {
-  return [archiveRoot(), wellRootResolved(), detectVaultRoot(), screenshotRootResolved()].filter((r): r is string => Boolean(r))
+  return [archiveRoot(), othersArchiveRootResolved(), wellRootResolved(), detectVaultRoot(), screenshotRootResolved()].filter((r): r is string => Boolean(r))
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -571,7 +583,7 @@ app.whenReady().then(() => {
       archiveMissingLine()
       return { ok: false }
     }
-    return runIngest({ archiveRoot: archiveRoot(), python: python(), mode: 'pending' }, sendLine)
+    return runIngest({ engineRoot: archiveRoot(), dataRoot: archiveRoot(), python: python(), mode: 'pending' }, sendLine)
   })
   // Pick the file/folder to import (returns the path so the panel can SHOW it before committing).
   ipcMain.handle('ingest:choose-path', async () => {
@@ -582,7 +594,9 @@ app.whenReady().then(() => {
     return r.canceled || !r.filePaths[0] ? null : r.filePaths[0]
   })
   // Run the import against an already-chosen path (no dialog — the panel confirmed what + where).
-  ipcMain.handle('ingest:run-path', async (_e, targetPath: string) => {
+  // library 'others' routes the data into the separate Others' Library store (Scenario A); the
+  // ENGINE is always the user's ppt-archive (that's where Core A's tools/ live).
+  ipcMain.handle('ingest:run-path', async (_e, targetPath: string, library?: 'mine' | 'others') => {
     if (!archiveAvailable()) {
       archiveMissingLine()
       return { ok: false }
@@ -591,7 +605,9 @@ app.whenReady().then(() => {
       sendLine('✕ Pick a file or folder to import first.')
       return { ok: false }
     }
-    return runIngest({ archiveRoot: archiveRoot(), python: python(), mode: 'path', targetPath }, sendLine)
+    const dataRoot = library === 'others' ? othersArchiveRootResolved() : archiveRoot()
+    if (library === 'others') sendLine(`→ Importing into your Others' Library (kept separate from your archive): ${dataRoot}`)
+    return runIngest({ engineRoot: archiveRoot(), dataRoot, python: python(), mode: 'path', targetPath }, sendLine)
   })
   ipcMain.handle('ingest:cancel', () => {
     cancelIngest()
