@@ -153,10 +153,16 @@ const api = {
       vaultAvailable: boolean
       screenshotRoot: string | null
       screenshotAvailable: boolean
+      conversionsRoot: string | null
+      convertOcrDefault: boolean
     }> => ipcRenderer.invoke('settings:get-paths'),
     chooseArchive: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-archive'),
     chooseVault: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-vault'),
     chooseScreenshotFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-screenshot-folder'),
+    // Default destination folder for throwaway conversions (pre-fills the convert save dialog).
+    chooseConversionsFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-conversions-folder'),
+    // Persist the default state of the convert OCR toggle.
+    setConvertOcr: (on: boolean): Promise<boolean> => ipcRenderer.invoke('settings:set-convert-ocr', on),
     // Detected status of external tools (engine, OCR, ffmpeg, LibreOffice…) + the Requirements URL.
     dependencies: (): Promise<{ requirementsUrl: string; deps: Dependency[] }> => ipcRenderer.invoke('settings:dependencies')
   },
@@ -196,6 +202,17 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, line: string): void => cb(line)
       ipcRenderer.on('ingest:line', handler)
       return () => ipcRenderer.removeListener('ingest:line', handler)
+    }
+  },
+  // Sideband, throwaway: convert someone else's .pptx to a mechanical Outline folder you pick.
+  // Never catalogued into the archive or vault (distinct from `ingest`). Streams progress lines.
+  convert: {
+    pptxToOutline: (opts: { ocr: boolean }): Promise<{ ok: boolean; cancelled?: boolean; outDir?: string; error?: string }> =>
+      ipcRenderer.invoke('convert:pptx-to-outline', opts),
+    onLine: (cb: (line: string) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, line: string): void => cb(line)
+      ipcRenderer.on('convert:line', handler)
+      return () => ipcRenderer.removeListener('convert:line', handler)
     }
   }
 }

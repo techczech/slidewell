@@ -39,6 +39,7 @@ export default function App(): JSX.Element {
   // every slide fully usable (not a read-only popup). Cleared by typing or changing a filter.
   const [deckFilter, setDeckFilter] = useState<{ pid: string; title: string } | null>(null)
   const [showImport, setShowImport] = useState(false)
+  const [showConvert, setShowConvert] = useState(false)
   const [showStats, setShowStats] = useState(false)
   const [showTriage, setShowTriage] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -338,6 +339,7 @@ export default function App(): JSX.Element {
         else if (showHelp) setShowHelp(false)
         else if (showStats) setShowStats(false)
         else if (showImport) setShowImport(false)
+        else if (showConvert) setShowConvert(false)
         else if (inspectorOpen) setInspectorOpen(false)
         else if (deckFilter) setDeckFilter(null)
         else if (typing) el?.blur()
@@ -454,7 +456,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navCount, sel, activeItem, runAction, activateCurrent, paletteOpen, lightbox, deckMode, inspectorOpen, showHelp, showStats, showImport, showTriage, showSettings, deckFilter, filters, openStats])
+  }, [navCount, sel, activeItem, runAction, activateCurrent, paletteOpen, lightbox, deckMode, inspectorOpen, showHelp, showStats, showImport, showConvert, showTriage, showSettings, deckFilter, filters, openStats])
 
   // when inspecting a deck, fetch its full metadata (re-fetches as selection moves)
   useEffect(() => {
@@ -504,6 +506,13 @@ export default function App(): JSX.Element {
           </button>
           <button className="tb-btn" onClick={() => setShowImport(true)} title="Import PowerPoint into the archive (O)">
             ⤓ Import
+          </button>
+          <button
+            className="tb-btn"
+            onClick={() => setShowConvert(true)}
+            title="Convert someone else's PowerPoint to an editable Outline — saved where you choose, never added to your archive or vault"
+          >
+            ⇄ Convert
           </button>
           <button className="tb-btn" onClick={() => setShowSettings(true)} title="Settings · folders · requirements">
             ⚙
@@ -831,6 +840,8 @@ export default function App(): JSX.Element {
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
 
       {showImport && <ImportPanel onClose={() => setShowImport(false)} onDone={() => setRefreshKey((k) => k + 1)} />}
+
+      {showConvert && <ConvertPanel onClose={() => setShowConvert(false)} />}
 
       {showTriage && <TriagePanel onClose={() => setShowTriage(false)} onChanged={() => setRefreshKey((k) => k + 1)} onToast={setToast} />}
 
@@ -1283,13 +1294,15 @@ function TriagePreview({ item, onClose, onDecide }: { item: TriageItem; onClose:
 }
 
 function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }): JSX.Element {
-  const [paths, setPaths] = useState<{ archiveRoot: string | null; wellRoot: string; vaultRoot: string | null; screenshotRoot: string | null } | null>(null)
+  const [paths, setPaths] = useState<{ archiveRoot: string | null; wellRoot: string; vaultRoot: string | null; screenshotRoot: string | null; conversionsRoot: string | null } | null>(null)
+  const [convertOcr, setConvertOcr] = useState(false)
   const [deps, setDeps] = useState<Dependency[]>([])
   const [reqUrl, setReqUrl] = useState('https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md')
 
   const load = useCallback(async () => {
     const p = await window.sw.settings.getPaths()
-    setPaths({ archiveRoot: p.archiveRoot, wellRoot: p.wellRoot, vaultRoot: p.vaultRoot, screenshotRoot: p.screenshotRoot })
+    setPaths({ archiveRoot: p.archiveRoot, wellRoot: p.wellRoot, vaultRoot: p.vaultRoot, screenshotRoot: p.screenshotRoot, conversionsRoot: p.conversionsRoot })
+    setConvertOcr(p.convertOcrDefault)
     const d = await window.sw.settings.dependencies()
     setDeps(d.deps)
     setReqUrl(d.requirementsUrl)
@@ -1306,9 +1319,15 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
   }, [onClose])
 
   const openReq = (): void => void window.sw.shell.openExternal(reqUrl)
-  const choose = async (which: 'archive' | 'vault' | 'screenshot'): Promise<void> => {
+  const choose = async (which: 'archive' | 'vault' | 'screenshot' | 'conversions'): Promise<void> => {
     const fn =
-      which === 'archive' ? window.sw.settings.chooseArchive : which === 'vault' ? window.sw.settings.chooseVault : window.sw.settings.chooseScreenshotFolder
+      which === 'archive'
+        ? window.sw.settings.chooseArchive
+        : which === 'vault'
+          ? window.sw.settings.chooseVault
+          : which === 'conversions'
+            ? window.sw.settings.chooseConversionsFolder
+            : window.sw.settings.chooseScreenshotFolder
     const r = await fn()
     if (r) {
       await load()
@@ -1316,11 +1335,12 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
     }
   }
 
-  const folders: Array<{ key: 'archive' | 'vault' | 'screenshot' | 'well'; label: string; value: string | null; choosable: boolean }> = [
+  const folders: Array<{ key: 'archive' | 'vault' | 'screenshot' | 'well' | 'conversions'; label: string; value: string | null; choosable: boolean }> = [
     { key: 'archive', label: 'Archive (Core A engine)', value: paths?.archiveRoot ?? null, choosable: true },
     { key: 'well', label: 'Well (SlideWell store)', value: paths?.wellRoot ?? null, choosable: false },
     { key: 'vault', label: 'TalkWeaver vault', value: paths?.vaultRoot ?? null, choosable: true },
-    { key: 'screenshot', label: 'Triage source folder', value: paths?.screenshotRoot ?? null, choosable: true }
+    { key: 'screenshot', label: 'Triage source folder', value: paths?.screenshotRoot ?? null, choosable: true },
+    { key: 'conversions', label: 'Conversions output (not-mine, default)', value: paths?.conversionsRoot ?? null, choosable: true }
   ]
 
   return (
@@ -1340,12 +1360,33 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
                 <div className="settings-row-detail" title={f.value || ''}>{f.value || '— not set —'}</div>
               </div>
               {f.choosable && (
-                <button className="copyref" onClick={() => void choose(f.key as 'archive' | 'vault' | 'screenshot')}>
+                <button className="copyref" onClick={() => void choose(f.key as 'archive' | 'vault' | 'screenshot' | 'conversions')}>
                   Choose…
                 </button>
               )}
             </div>
           ))}
+        </div>
+
+        <div className="settings-section">Conversions</div>
+        <div className="settings-rows">
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">OCR image text by default</div>
+              <div className="settings-row-detail">When converting someone’s deck, recognise text inside images (macOS Vision) and inline it into the Outline.</div>
+            </div>
+            <label className="toggle" title="Default state of the OCR toggle in the Convert panel">
+              <input
+                type="checkbox"
+                checked={convertOcr}
+                onChange={(e) => {
+                  setConvertOcr(e.target.checked)
+                  void window.sw.settings.setConvertOcr(e.target.checked)
+                }}
+              />{' '}
+              {convertOcr ? 'On' : 'Off'}
+            </label>
+          </div>
         </div>
 
         <div className="settings-section">
@@ -1416,6 +1457,63 @@ function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => v
           {lines.join('\n') || 'Extraction + OCR run via Core A (ppt-archive); progress streams here. Re-running is safe — done decks are skipped.'}
         </pre>
         {running && <div className="results-head">running in the background — you can keep searching</div>}
+      </div>
+    </div>
+  )
+}
+
+// Convert (sideband, throwaway): turn SOMEONE ELSE'S .pptx into a mechanical Outline folder the
+// user picks. Never catalogued into the archive/vault — a distinct verb from Import.
+function ConvertPanel({ onClose }: { onClose: () => void }): JSX.Element {
+  const [lines, setLines] = useState<string[]>([])
+  const [running, setRunning] = useState(false)
+  const [ocr, setOcr] = useState(false)
+  const [done, setDone] = useState<string | null>(null)
+  const logRef = useRef<HTMLPreElement>(null)
+  useEffect(() => window.sw.convert.onLine((l) => setLines((prev) => [...prev, l])), [])
+  useEffect(() => {
+    void window.sw.settings.getPaths().then((p) => setOcr(p.convertOcrDefault))
+  }, [])
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+  }, [lines])
+  async function run(): Promise<void> {
+    setRunning(true)
+    setDone(null)
+    setLines([])
+    const r = await window.sw.convert.pptxToOutline({ ocr })
+    setRunning(false)
+    if (r.ok && r.outDir) setDone(r.outDir)
+  }
+  const toggleOcr = (v: boolean): void => {
+    setOcr(v)
+    void window.sw.settings.setConvertOcr(v)
+  }
+  return (
+    <div className="overlay" onClick={running ? undefined : onClose}>
+      <div className="modal import" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <b>Convert a PowerPoint to an Outline</b>
+          <button className="copyref" onClick={onClose} disabled={running}>close ✕</button>
+        </div>
+        <p className="settings-note">
+          Turns someone else’s <code>.pptx</code> into an editable TalkWeaver Outline saved wherever you choose. It’s never
+          added to your archive or vault, and the folder is stamped <code>origin: external</code> so it stays clearly not-yours.
+        </p>
+        <div className="import-actions">
+          <label className="toggle" title="Recognise text inside images (macOS Vision) and inline it into the Outline">
+            <input type="checkbox" checked={ocr} onChange={(e) => toggleOcr(e.target.checked)} /> OCR image text
+          </label>
+          <button className="primary-btn" disabled={running} onClick={() => void run()}>
+            Choose a .pptx to convert…
+          </button>
+        </div>
+        <pre className="import-log" ref={logRef}>
+          {lines.join('\n') ||
+            'Pick a PowerPoint; SlideWell extracts it in a scratch space and writes a mechanical Outline folder (outline + assets) to the location you choose. Nothing is added to your library.'}
+        </pre>
+        {done && <div className="results-head">✓ Saved to {done} — revealed in Finder.</div>}
+        {running && <div className="results-head">converting…</div>}
       </div>
     </div>
   )
