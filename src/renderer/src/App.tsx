@@ -3,7 +3,7 @@ import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, Dec
 
 type SortKey = 'date-desc' | 'date-asc' | 'title'
 
-const DEFAULT_FILTERS: SearchFilters = { owner: 'mine', era: 'all', category: '', deck: '', role: 'content', cluster: true, scope: 'all', type: 'slides' }
+const DEFAULT_FILTERS: SearchFilters = { owner: 'mine', era: 'all', category: '', deck: '', role: 'content', cluster: true, scope: 'all', type: 'slides', library: 'mine' }
 
 const ERA_OPTIONS: { value: string; label: string }[] = [
   { value: 'all', label: 'All dates' },
@@ -550,6 +550,23 @@ export default function App(): JSX.Element {
                 onClick={() => patch({ scope: s })}
               >
                 {s === 'all' ? 'All' : s === 'archive' ? 'Archive' : 'Well'}
+              </button>
+            ))}
+          </div>
+        </label>
+        <label className="filter">
+          <span className="filter-label">Library</span>
+          <div className="scope" role="tablist" aria-label="Which library">
+            {(['mine', 'others', 'all'] as const).map((l) => (
+              <button
+                key={l}
+                role="tab"
+                aria-selected={filters.library === l}
+                className={filters.library === l ? 'scope-tab active' : 'scope-tab'}
+                title={l === 'mine' ? 'Your own archive' : l === 'others' ? "Other people's slides (kept separate)" : 'Both libraries'}
+                onClick={() => patch({ library: l })}
+              >
+                {l === 'mine' ? 'Mine' : l === 'others' ? 'Others' : 'All'}
               </button>
             ))}
           </div>
@@ -1294,14 +1311,14 @@ function TriagePreview({ item, onClose, onDecide }: { item: TriageItem; onClose:
 }
 
 function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }): JSX.Element {
-  const [paths, setPaths] = useState<{ archiveRoot: string | null; wellRoot: string; vaultRoot: string | null; screenshotRoot: string | null; conversionsRoot: string | null } | null>(null)
+  const [paths, setPaths] = useState<{ archiveRoot: string | null; wellRoot: string; vaultRoot: string | null; screenshotRoot: string | null; conversionsRoot: string | null; othersArchiveRoot: string } | null>(null)
   const [convertOcr, setConvertOcr] = useState(false)
   const [deps, setDeps] = useState<Dependency[]>([])
   const [reqUrl, setReqUrl] = useState('https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md')
 
   const load = useCallback(async () => {
     const p = await window.sw.settings.getPaths()
-    setPaths({ archiveRoot: p.archiveRoot, wellRoot: p.wellRoot, vaultRoot: p.vaultRoot, screenshotRoot: p.screenshotRoot, conversionsRoot: p.conversionsRoot })
+    setPaths({ archiveRoot: p.archiveRoot, wellRoot: p.wellRoot, vaultRoot: p.vaultRoot, screenshotRoot: p.screenshotRoot, conversionsRoot: p.conversionsRoot, othersArchiveRoot: p.othersArchiveRoot })
     setConvertOcr(p.convertOcrDefault)
     const d = await window.sw.settings.dependencies()
     setDeps(d.deps)
@@ -1319,7 +1336,7 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
   }, [onClose])
 
   const openReq = (): void => void window.sw.shell.openExternal(reqUrl)
-  const choose = async (which: 'archive' | 'vault' | 'screenshot' | 'conversions'): Promise<void> => {
+  const choose = async (which: 'archive' | 'vault' | 'screenshot' | 'conversions' | 'others'): Promise<void> => {
     const fn =
       which === 'archive'
         ? window.sw.settings.chooseArchive
@@ -1327,16 +1344,26 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
           ? window.sw.settings.chooseVault
           : which === 'conversions'
             ? window.sw.settings.chooseConversionsFolder
-            : window.sw.settings.chooseScreenshotFolder
+            : which === 'others'
+              ? window.sw.settings.chooseOthersFolder
+              : window.sw.settings.chooseScreenshotFolder
     const r = await fn()
     if (r) {
       await load()
       onChanged()
     }
   }
+  const clearOthers = async (): Promise<void> => {
+    const r = await window.sw.settings.clearOthersLibrary()
+    if (r.ok) {
+      await load()
+      onChanged()
+    }
+  }
 
-  const folders: Array<{ key: 'archive' | 'vault' | 'screenshot' | 'well' | 'conversions'; label: string; value: string | null; choosable: boolean }> = [
-    { key: 'archive', label: 'Archive (Core A engine)', value: paths?.archiveRoot ?? null, choosable: true },
+  const folders: Array<{ key: 'archive' | 'vault' | 'screenshot' | 'well' | 'conversions' | 'others'; label: string; value: string | null; choosable: boolean }> = [
+    { key: 'archive', label: 'Archive (Core A engine · your decks)', value: paths?.archiveRoot ?? null, choosable: true },
+    { key: 'others', label: "Others’ Library (other people’s slides, separate)", value: paths?.othersArchiveRoot ?? null, choosable: true },
     { key: 'well', label: 'Well (SlideWell store)', value: paths?.wellRoot ?? null, choosable: false },
     { key: 'vault', label: 'TalkWeaver vault', value: paths?.vaultRoot ?? null, choosable: true },
     { key: 'screenshot', label: 'Triage source folder', value: paths?.screenshotRoot ?? null, choosable: true },
@@ -1360,12 +1387,19 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
                 <div className="settings-row-detail" title={f.value || ''}>{f.value || '— not set —'}</div>
               </div>
               {f.choosable && (
-                <button className="copyref" onClick={() => void choose(f.key as 'archive' | 'vault' | 'screenshot' | 'conversions')}>
+                <button className="copyref" onClick={() => void choose(f.key as 'archive' | 'vault' | 'screenshot' | 'conversions' | 'others')}>
                   Choose…
                 </button>
               )}
             </div>
           ))}
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">Others’ Library — purge</div>
+              <div className="settings-row-detail"><i>Delete everything imported into the Others’ Library. Your own archive is never touched.</i></div>
+            </div>
+            <button className="copyref" onClick={() => void clearOthers()}>Clear library…</button>
+          </div>
         </div>
 
         <div className="settings-section">Conversions</div>
@@ -1426,10 +1460,15 @@ function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => v
   const [running, setRunning] = useState(false)
   const [target, setTarget] = useState<string | null>(null)
   const [archive, setArchive] = useState('')
+  const [othersRoot, setOthersRoot] = useState('')
+  const [destLib, setDestLib] = useState<'mine' | 'others'>('mine')
   const logRef = useRef<HTMLPreElement>(null)
   useEffect(() => window.sw.ingest.onLine((l) => setLines((prev) => [...prev, l])), [])
   useEffect(() => {
-    void window.sw.settings.getPaths().then((p) => setArchive(p.archiveRoot ?? p.archiveDefault))
+    void window.sw.settings.getPaths().then((p) => {
+      setArchive(p.archiveRoot ?? p.archiveDefault)
+      setOthersRoot(p.othersArchiveRoot)
+    })
   }, [])
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
@@ -1448,13 +1487,24 @@ function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => v
     <div className="overlay" onClick={running ? undefined : onClose}>
       <div className="modal import" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <b>Import PowerPoint into the archive</b>
+          <b>Import PowerPoint</b>
           <button className="copyref" onClick={onClose} disabled={running}>close ✕</button>
         </div>
         <p className="settings-note">
-          Adds slides to your searchable <b>archive</b> (extract + OCR via Core A) — catalogued as part of your library. For your own decks.
+          Extracts + OCRs slides into a searchable library. Choose <b>your archive</b> (your own decks) or your separate{' '}
+          <b>Others’ Library</b> (other people’s slides, kept out of your archive).
         </p>
         <div className="settings-rows">
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">Add to which library</div>
+              <div className="settings-row-detail"><i>{destLib === 'mine' ? 'Catalogued as part of your own library.' : 'A separate store — other people’s slides never mix into your archive.'}</i></div>
+            </div>
+            <div className="scope" role="tablist" aria-label="Destination library">
+              <button role="tab" aria-selected={destLib === 'mine'} className={destLib === 'mine' ? 'scope-tab active' : 'scope-tab'} onClick={() => setDestLib('mine')}>My archive</button>
+              <button role="tab" aria-selected={destLib === 'others'} className={destLib === 'others' ? 'scope-tab active' : 'scope-tab'} onClick={() => setDestLib('others')}>Others’ library</button>
+            </div>
+          </div>
           <div className="settings-row">
             <div className="settings-row-main">
               <div className="settings-row-label">What to import</div>
@@ -1465,24 +1515,26 @@ function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => v
           <div className="settings-row">
             <div className="settings-row-main">
               <div className="settings-row-label">Where it goes</div>
-              <div className="settings-row-detail" title={archive}>{archive || '— archive not set —'}</div>
-              <div className="settings-row-detail"><i>Your archive — Import always lands here. Change the archive folder in ⚙ Settings.</i></div>
+              <div className="settings-row-detail" title={destLib === 'mine' ? archive : othersRoot}>{(destLib === 'mine' ? archive : othersRoot) || '— not set —'}</div>
+              <div className="settings-row-detail"><i>{destLib === 'mine' ? 'Your archive (change it in ⚙ Settings).' : 'Your Others’ Library (change it in ⚙ Settings).'}</i></div>
             </div>
           </div>
         </div>
         <div className="import-actions">
-          <button className="primary-btn" disabled={running || !target} onClick={() => target && void run(() => window.sw.ingest.runPath(target))}>
-            Import this
+          <button className="primary-btn" disabled={running || !target} onClick={() => target && void run(() => window.sw.ingest.runPath(target, destLib))}>
+            {destLib === 'mine' ? 'Import to my archive' : 'Import to Others’ library'}
           </button>
-          <button className="copyref" disabled={running} title="Crawl + extract every not-yet-imported deck already in the archive" onClick={() => void run(() => window.sw.ingest.pending())}>
-            …or ingest everything pending
-          </button>
+          {destLib === 'mine' && (
+            <button className="copyref" disabled={running} title="Crawl + extract every not-yet-imported deck already in the archive" onClick={() => void run(() => window.sw.ingest.pending())}>
+              …or ingest everything pending
+            </button>
+          )}
           {running && (
             <button className="copyref" onClick={() => void window.sw.ingest.cancel()}>Cancel</button>
           )}
         </div>
         <pre className="import-log" ref={logRef}>
-          {lines.join('\n') || 'Choose a file/folder, then “Import this”. Extraction + OCR run via Core A; progress streams here. Re-running is safe — done decks are skipped.'}
+          {lines.join('\n') || 'Pick the destination library, choose a file/folder, then Import. Extraction + OCR run via Core A; progress streams here. Re-running is safe — done decks are skipped.'}
         </pre>
         {running && <div className="results-head">running in the background — you can keep searching</div>}
       </div>
@@ -1713,6 +1765,7 @@ function Card({
         ) : ocr ? (
           <span className="ocr-tag">OCR</span>
         ) : null}
+        {h.library === 'others' && <span className="ocr-tag others" title="From your Others' Library — not your own deck">OTHERS</span>}
         <button
           className="more"
           title="Actions"
@@ -1892,6 +1945,7 @@ function DeckCardView({ deck, selected, onSelect }: { deck: DeckCard; selected: 
           <div className="thumb placeholder" />
         )}
         <span className="slide-num">{deck.slideCount} slides</span>
+        {deck.library === 'others' && <span className="ocr-tag others" title="From your Others' Library">OTHERS</span>}
       </div>
       <div className="meta">
         <div className="card-title" title={deck.title}>{deck.title}</div>

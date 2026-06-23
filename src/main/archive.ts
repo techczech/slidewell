@@ -377,6 +377,7 @@ export interface SearchFilters {
   cluster: boolean
   scope: 'all' | 'archive' | 'well'
   type: 'slides' | 'images' | 'decks'
+  library?: 'mine' | 'others' | 'all'
 }
 
 export async function searchArchive(
