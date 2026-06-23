@@ -634,6 +634,15 @@ body {
   color: #fff;
   border-color: var(--oxford);
 }
+.toggle.danger {
+  color: #9a2a2a;
+  border-color: #d9b3b3;
+}
+.toggle.danger:hover {
+  background: #9a2a2a;
+  border-color: #9a2a2a;
+  color: #fff;
+}
 
 /* searchable select (Category) */
 .ss {
