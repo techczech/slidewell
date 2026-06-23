@@ -194,8 +194,10 @@ const api = {
   ingest: {
     // Run Core A's pipeline over the configured archive roots (crawl → extract → render → OCR).
     pending: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('ingest:pending'),
-    // Pick a .pptx or a folder, extract + OCR just those.
-    importPath: (): Promise<{ ok: boolean; cancelled?: boolean }> => ipcRenderer.invoke('ingest:import-path'),
+    // Pick a .pptx or a folder to import; returns the path so the panel shows it first (null = cancelled).
+    choosePath: (): Promise<string | null> => ipcRenderer.invoke('ingest:choose-path'),
+    // Import an already-chosen path (extract + OCR into the archive).
+    runPath: (targetPath: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('ingest:run-path', targetPath),
     cancel: (): Promise<boolean> => ipcRenderer.invoke('ingest:cancel'),
     // Subscribe to streamed progress lines; returns an unsubscribe function.
     onLine: (cb: (line: string) => void): (() => void) => {
@@ -207,8 +209,12 @@ const api = {
   // Sideband, throwaway: convert someone else's .pptx to a mechanical Outline folder you pick.
   // Never catalogued into the archive or vault (distinct from `ingest`). Streams progress lines.
   convert: {
-    pptxToOutline: (opts: { ocr: boolean }): Promise<{ ok: boolean; cancelled?: boolean; outDir?: string; error?: string }> =>
-      ipcRenderer.invoke('convert:pptx-to-outline', opts),
+    // Step 1: pick the source .pptx (null = cancelled). Step 2: pick the destination folder
+    // (pre-filled from the source name + conversionsRoot). Step 3: run with both chosen.
+    chooseSource: (): Promise<string | null> => ipcRenderer.invoke('convert:choose-source'),
+    chooseDest: (sourcePath: string): Promise<string | null> => ipcRenderer.invoke('convert:choose-dest', sourcePath),
+    run: (opts: { pptxPath: string; outDir: string; ocr: boolean }): Promise<{ ok: boolean; cancelled?: boolean; outDir?: string; error?: string }> =>
+      ipcRenderer.invoke('convert:run', opts),
     onLine: (cb: (line: string) => void): (() => void) => {
       const handler = (_event: Electron.IpcRendererEvent, line: string): void => cb(line)
       ipcRenderer.on('convert:line', handler)

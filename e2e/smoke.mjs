@@ -161,11 +161,14 @@ try {
     const after = await win.locator('main .grid .card').count()
     filterReran = after >= 0
 
-    // Import panel opens with its two actions + a log (not triggering a real ingest here)
+    // Import panel opens with its What/Where rows + an Import action + a log (no real ingest here)
     await win.locator('.tb-btn', { hasText: 'Import' }).click()
     await win.waitForSelector('.modal.import', { timeout: 4000 })
-    importPanelOk = (await win.locator('.modal.import .primary-btn').count()) === 2 && (await win.locator('.import-log').count()) === 1
-    await win.locator('.modal.import .copyref').click()
+    importPanelOk =
+      (await win.locator('.modal.import .settings-row').count()) >= 2 &&
+      (await win.locator('.modal.import .primary-btn').count()) >= 1 &&
+      (await win.locator('.import-log').count()) === 1
+    await win.locator('.modal.import .modal-head .copyref').click()
 
     // "See in context" now filters the grid to the whole deck (banner + cards), not a popup
     await win.locator('main .card .more').first().click()

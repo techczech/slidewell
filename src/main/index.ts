@@ -553,13 +553,18 @@ app.whenReady().then(() => {
     if (!archiveAvailable()) return { ok: false }
     return runIngest({ archiveRoot: archiveRoot(), python: python(), mode: 'pending' }, sendLine)
   })
-  ipcMain.handle('ingest:import-path', async () => {
+  // Pick the file/folder to import (returns the path so the panel can SHOW it before committing).
+  ipcMain.handle('ingest:choose-path', async () => {
     const r = await dialog.showOpenDialog({
       properties: ['openFile', 'openDirectory'],
       filters: [{ name: 'PowerPoint', extensions: ['pptx', 'ppt'] }]
     })
-    if (r.canceled || !r.filePaths[0]) return { ok: false, cancelled: true }
-    return runIngest({ archiveRoot: archiveRoot(), python: python(), mode: 'path', targetPath: r.filePaths[0] }, sendLine)
+    return r.canceled || !r.filePaths[0] ? null : r.filePaths[0]
+  })
+  // Run the import against an already-chosen path (no dialog — the panel confirmed what + where).
+  ipcMain.handle('ingest:run-path', async (_e, targetPath: string) => {
+    if (!archiveAvailable() || !targetPath) return { ok: false }
+    return runIngest({ archiveRoot: archiveRoot(), python: python(), mode: 'path', targetPath }, sendLine)
   })
   ipcMain.handle('ingest:cancel', () => {
     cancelIngest()
@@ -579,38 +584,41 @@ app.whenReady().then(() => {
     writeConfig({ convertOcrByDefault: Boolean(on) })
     return Boolean(on)
   })
-  ipcMain.handle('convert:pptx-to-outline', async (_e, opts: { ocr: boolean }) => {
+  // Step 1: pick the source .pptx — returns its path so the panel SHOWS it before converting.
+  ipcMain.handle('convert:choose-source', async () => {
+    const pick = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'PowerPoint', extensions: ['pptx', 'ppt'] }] })
+    return pick.canceled || !pick.filePaths[0] ? null : pick.filePaths[0]
+  })
+  // Step 2: pick the destination folder, pre-filled from the source name + the conversionsRoot default.
+  ipcMain.handle('convert:choose-dest', async (_e, sourcePath: string) => {
+    const suggested = slugify(basename(sourcePath || '').replace(/\.(pptx|ppt)$/i, '')) || 'converted'
+    const defDir = conversionsRootResolved()
+    const defaultPath = join(defDir && existsSync(defDir) ? defDir : homedir(), suggested)
+    const save = await dialog.showSaveDialog({ title: 'Save the converted Outline folder as…', buttonLabel: 'Choose', defaultPath })
+    return save.canceled || !save.filePath ? null : save.filePath
+  })
+  // Step 3: run the conversion against the already-chosen source + destination (no dialogs here).
+  ipcMain.handle('convert:run', async (_e, opts: { pptxPath: string; outDir: string; ocr: boolean }) => {
     if (!archiveAvailable()) {
       sendConvertLine('✕ Archive engine not found — set it in Settings (extraction needs Core A).')
       return { ok: false, error: 'archive unavailable' }
     }
-    const pick = await dialog.showOpenDialog({
-      properties: ['openFile'],
-      filters: [{ name: 'PowerPoint', extensions: ['pptx', 'ppt'] }]
-    })
-    if (pick.canceled || !pick.filePaths[0]) return { ok: false, cancelled: true }
-    const pptxPath = pick.filePaths[0]
-    const suggested = slugify(basename(pptxPath).replace(/\.(pptx|ppt)$/i, '')) || 'converted'
-    const defDir = conversionsRootResolved()
-    const defaultPath = join(defDir && existsSync(defDir) ? defDir : homedir(), suggested)
-    const save = await dialog.showSaveDialog({ title: 'Save converted Outline folder as…', buttonLabel: 'Convert here', defaultPath })
-    if (save.canceled || !save.filePath) return { ok: false, cancelled: true }
-    const outDir = save.filePath
+    if (!opts?.pptxPath || !opts?.outDir) return { ok: false, error: 'pick a PowerPoint and a destination first' }
     try {
-      if (existsSync(outDir) && readdirSync(outDir).length > 0) {
+      if (existsSync(opts.outDir) && readdirSync(opts.outDir).length > 0) {
         const res = await dialog.showMessageBox({
           type: 'warning',
           buttons: ['Cancel', 'Write here anyway'],
           defaultId: 0,
           cancelId: 0,
-          message: `“${basename(outDir)}” already exists and isn't empty. Write the converted Outline into it anyway?`
+          message: `“${basename(opts.outDir)}” already exists and isn't empty. Write the converted Outline into it anyway?`
         })
         if (res.response !== 1) return { ok: false, cancelled: true }
       }
     } catch {
       /* stat race → proceed */
     }
-    const r = await convertPptxToOutline({ archiveRoot: archiveRoot(), python: python(), pptxPath, outDir, ocr: Boolean(opts?.ocr) }, sendConvertLine)
+    const r = await convertPptxToOutline({ archiveRoot: archiveRoot(), python: python(), pptxPath: opts.pptxPath, outDir: opts.outDir, ocr: Boolean(opts?.ocr) }, sendConvertLine)
     if (r.ok && r.outDir) {
       const outlineFile = join(r.outDir, `${slugify(basename(r.outDir)) || 'converted'}-outline.md`)
       shell.showItemInFolder(existsSync(outlineFile) ? outlineFile : r.outDir)

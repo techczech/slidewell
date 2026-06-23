@@ -53,12 +53,15 @@ export function installMock(): void {
     },
     ingest: {
       pending: async () => ({ ok: false }),
-      importPath: async () => ({ ok: false }),
+      choosePath: async () => null,
+      runPath: async () => ({ ok: false }),
       cancel: async () => true,
       onLine: () => () => {}
     },
     convert: {
-      pptxToOutline: async () => ({ ok: false }),
+      chooseSource: async () => null,
+      chooseDest: async () => null,
+      run: async () => ({ ok: false }),
       onLine: () => () => {}
     }
   }
