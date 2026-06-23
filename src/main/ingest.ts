@@ -7,7 +7,7 @@
  * default /opt/anaconda3/bin/python3 (verified to have python-pptx/lxml/PIL), config-overridable.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, statSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 export function detectPython(override?: string | null): string {
@@ -85,7 +85,11 @@ export function runPythonStep(python: string, cwd: string, step: Step, onLine: (
 }
 
 export interface IngestOpts {
-  archiveRoot: string
+  // The Core A engine root (where tools/ live) — used for cwd + PYTHONPATH.
+  engineRoot: string
+  // Where extracted/ + registry/ + media-store/ are written. Equals engineRoot for the user's own
+  // archive; a separate "Others' Library" store when importing other people's decks (Scenario A).
+  dataRoot: string
   python: string
   mode: 'pending' | 'path'
   targetPath?: string
@@ -93,8 +97,13 @@ export interface IngestOpts {
 
 export async function runIngest(opts: IngestOpts, onLine: (s: string) => void): Promise<{ ok: boolean }> {
   cancelled = false
-  const cwd = opts.archiveRoot
+  const cwd = opts.engineRoot
+  const data = opts.dataRoot
   const py = opts.python
+  // The data root may be a fresh Others' Library — ensure its store dirs exist before the tools write.
+  mkdirSync(join(data, 'extracted'), { recursive: true })
+  mkdirSync(join(data, 'registry'), { recursive: true })
+  const extractedDir = join(data, 'extracted')
   // Slide renders need LibreOffice + Poppler; if either is missing, skip rendering and still
   // import text/structure/images/OCR (graceful degrade — see REQUIREMENTS.md).
   const render = findRenderTools()
@@ -111,24 +120,24 @@ export async function runIngest(opts: IngestOpts, onLine: (s: string) => void): 
         return false
       }
     })()
-    const ex = ['-m', 'tools.unified_extractor.cli', 'extract', opts.targetPath, '--output', './extracted']
+    const ex = ['-m', 'tools.unified_extractor.cli', 'extract', opts.targetPath, '--output', extractedDir]
     if (render.available) ex.push('--screenshots') // --screenshots triggers the LibreOffice render
     if (isDir) ex.push('--batch')
     steps = [
       { label: `Extract ${isDir ? 'folder' : 'file'}${render.available ? ' + render' : ' (no render)'}`, args: ex },
-      { label: 'OCR', args: ['-m', 'tools.ocr.cli', '.', 'ingest-all'] },
-      { label: 'Content-address media', args: ['-m', 'tools.media_store.cli', '.', 'migrate'] }
+      { label: 'OCR', args: ['-m', 'tools.ocr.cli', data, 'ingest-all'] },
+      { label: 'Content-address media', args: ['-m', 'tools.media_store.cli', data, 'migrate'] }
     ]
   } else {
     steps = [
       { label: 'Crawl for new PowerPoint', args: ['tools/crawler.py'] },
       {
         label: 'Extract (skip duplicates)',
-        args: ['-m', 'tools.unified_extractor.cli', 'from-manifest', 'manifest/ppt-manifest.json', '--skip-duplicates', '--output', './extracted']
+        args: ['-m', 'tools.unified_extractor.cli', 'from-manifest', 'manifest/ppt-manifest.json', '--skip-duplicates', '--output', extractedDir]
       },
-      ...(render.available ? [{ label: 'Render slides', args: ['-m', 'tools.renders.cli', '.', 'render-all'] }] : []),
-      { label: 'OCR images + renders', args: ['-m', 'tools.ocr.cli', '.', 'ingest-all'] },
-      { label: 'Content-address media', args: ['-m', 'tools.media_store.cli', '.', 'migrate'] }
+      ...(render.available ? [{ label: 'Render slides', args: ['-m', 'tools.renders.cli', data, 'render-all'] }] : []),
+      { label: 'OCR images + renders', args: ['-m', 'tools.ocr.cli', data, 'ingest-all'] },
+      { label: 'Content-address media', args: ['-m', 'tools.media_store.cli', data, 'migrate'] }
     ]
   }
   for (const step of steps) {
