@@ -1,8 +1,8 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage } from 'electron'
 import sharp from 'sharp'
-import { join } from 'path'
+import { join, basename } from 'path'
 import { homedir, tmpdir } from 'os'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, watch as fsWatch } from 'fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, watch as fsWatch } from 'fs'
 import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
@@ -11,6 +11,8 @@ import { loadDeckMeta, categoryList, type DeckMetaIndex } from './deckmeta'
 import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, ingestScreenshot, findFfmpeg, type WellRow } from './well'
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, VIDEO_GATE_BYTES, type TriageRow } from './triage'
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
+import { convertPptxToOutline } from './convert'
+import { slugify } from './outline'
 
 const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
 
@@ -30,6 +32,8 @@ type Config = {
   wellRoot?: string
   vaultRoot?: string
   screenshotRoot?: string
+  conversionsRoot?: string // default destination for throwaway PPTX→Outline conversions
+  convertOcrByDefault?: boolean // initial state of the convert OCR toggle
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -89,6 +93,13 @@ function detectVaultRoot(): string | null {
 function screenshotRootResolved(): string | null {
   const r = readConfig().screenshotRoot
   return r && existsSync(r) ? r : null
+}
+
+// The default destination for throwaway conversions (Settings-chosen). Pre-fills the save dialog;
+// any single conversion can still redirect elsewhere. Returned even if missing — the convert
+// handler falls back to home when it no longer exists.
+function conversionsRootResolved(): string | null {
+  return readConfig().conversionsRoot ?? null
 }
 
 // A render/image request is allowed only if it resolves inside one of the roots SlideWell knows.
@@ -177,7 +188,9 @@ app.whenReady().then(() => {
     vaultRoot: detectVaultRoot(),
     vaultAvailable: Boolean(detectVaultRoot()),
     screenshotRoot: screenshotRootResolved(),
-    screenshotAvailable: Boolean(screenshotRootResolved())
+    screenshotAvailable: Boolean(screenshotRootResolved()),
+    conversionsRoot: conversionsRootResolved(),
+    convertOcrDefault: Boolean(readConfig().convertOcrByDefault)
   }))
   ipcMain.handle('settings:choose-archive', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
@@ -551,6 +564,58 @@ app.whenReady().then(() => {
   ipcMain.handle('ingest:cancel', () => {
     cancelIngest()
     return true
+  })
+
+  // --- convert (sideband, throwaway): someone else's .pptx → a mechanical Outline folder,
+  //     saved wherever the user picks. Never touches the archive registry or the vault. ---
+  const sendConvertLine = (s: string): void => mainWindow?.webContents.send('convert:line', s)
+  ipcMain.handle('settings:choose-conversions-folder', async () => {
+    const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
+    if (r.canceled || !r.filePaths[0]) return null
+    writeConfig({ conversionsRoot: r.filePaths[0] })
+    return r.filePaths[0]
+  })
+  ipcMain.handle('settings:set-convert-ocr', (_e, on: boolean) => {
+    writeConfig({ convertOcrByDefault: Boolean(on) })
+    return Boolean(on)
+  })
+  ipcMain.handle('convert:pptx-to-outline', async (_e, opts: { ocr: boolean }) => {
+    if (!archiveAvailable()) {
+      sendConvertLine('✕ Archive engine not found — set it in Settings (extraction needs Core A).')
+      return { ok: false, error: 'archive unavailable' }
+    }
+    const pick = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'PowerPoint', extensions: ['pptx', 'ppt'] }]
+    })
+    if (pick.canceled || !pick.filePaths[0]) return { ok: false, cancelled: true }
+    const pptxPath = pick.filePaths[0]
+    const suggested = slugify(basename(pptxPath).replace(/\.(pptx|ppt)$/i, '')) || 'converted'
+    const defDir = conversionsRootResolved()
+    const defaultPath = join(defDir && existsSync(defDir) ? defDir : homedir(), suggested)
+    const save = await dialog.showSaveDialog({ title: 'Save converted Outline folder as…', buttonLabel: 'Convert here', defaultPath })
+    if (save.canceled || !save.filePath) return { ok: false, cancelled: true }
+    const outDir = save.filePath
+    try {
+      if (existsSync(outDir) && readdirSync(outDir).length > 0) {
+        const res = await dialog.showMessageBox({
+          type: 'warning',
+          buttons: ['Cancel', 'Write here anyway'],
+          defaultId: 0,
+          cancelId: 0,
+          message: `“${basename(outDir)}” already exists and isn't empty. Write the converted Outline into it anyway?`
+        })
+        if (res.response !== 1) return { ok: false, cancelled: true }
+      }
+    } catch {
+      /* stat race → proceed */
+    }
+    const r = await convertPptxToOutline({ archiveRoot: archiveRoot(), python: python(), pptxPath, outDir, ocr: Boolean(opts?.ocr) }, sendConvertLine)
+    if (r.ok && r.outDir) {
+      const outlineFile = join(r.outDir, `${slugify(basename(r.outDir)) || 'converted'}-outline.md`)
+      shell.showItemInFolder(existsSync(outlineFile) ? outlineFile : r.outDir)
+    }
+    return r
   })
 
   void startWell()
