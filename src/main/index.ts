@@ -195,8 +195,22 @@ app.whenReady().then(() => {
   ipcMain.handle('settings:choose-archive', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
-    writeConfig({ archiveRoot: r.filePaths[0] })
-    return r.filePaths[0]
+    const picked = r.filePaths[0]
+    // Guard: a folder with no registry/ isn't a built Core A archive. Picking one silently breaks
+    // search + import, so warn and keep the current setting unless the user insists.
+    if (!existsSync(join(picked, 'registry'))) {
+      const res = await dialog.showMessageBox({
+        type: 'warning',
+        buttons: ['Cancel', 'Use anyway'],
+        defaultId: 0,
+        cancelId: 0,
+        message: `“${basename(picked)}” doesn’t look like a built archive — no “registry” folder inside.`,
+        detail: 'Point this at your ppt-archive engine (the folder that contains registry/, extracted/, media-store/). Search and import need it.'
+      })
+      if (res.response !== 1) return readConfig().archiveRoot ?? null
+    }
+    writeConfig({ archiveRoot: picked })
+    return picked
   })
   ipcMain.handle('shell:open-path', (_e, p: string) => shell.openPath(p).then((err) => err === ''))
   ipcMain.handle('shell:open-external', (_e, url: string) => shell.openExternal(url).then(() => true))
@@ -549,8 +563,14 @@ app.whenReady().then(() => {
   // --- archive ingest (Core A pipeline as streamed subprocesses) ---
   const sendLine = (s: string): void => mainWindow?.webContents.send('ingest:line', s)
   const python = (): string => detectPython(readConfig().pythonPath)
+  // Streamed feedback when import can't even start — otherwise the button "does nothing".
+  const archiveMissingLine = (): void =>
+    sendLine(`✕ No archive found at ${archiveRoot()} — it must contain a "registry" folder. Set a valid archive in Settings (⚙ → Archive).`)
   ipcMain.handle('ingest:pending', async () => {
-    if (!archiveAvailable()) return { ok: false }
+    if (!archiveAvailable()) {
+      archiveMissingLine()
+      return { ok: false }
+    }
     return runIngest({ archiveRoot: archiveRoot(), python: python(), mode: 'pending' }, sendLine)
   })
   // Pick the file/folder to import (returns the path so the panel can SHOW it before committing).
@@ -563,7 +583,14 @@ app.whenReady().then(() => {
   })
   // Run the import against an already-chosen path (no dialog — the panel confirmed what + where).
   ipcMain.handle('ingest:run-path', async (_e, targetPath: string) => {
-    if (!archiveAvailable() || !targetPath) return { ok: false }
+    if (!archiveAvailable()) {
+      archiveMissingLine()
+      return { ok: false }
+    }
+    if (!targetPath) {
+      sendLine('✕ Pick a file or folder to import first.')
+      return { ok: false }
+    }
     return runIngest({ archiveRoot: archiveRoot(), python: python(), mode: 'path', targetPath }, sendLine)
   })
   ipcMain.handle('ingest:cancel', () => {
