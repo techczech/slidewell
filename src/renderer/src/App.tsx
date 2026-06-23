@@ -1419,14 +1419,25 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
   )
 }
 
+const fileName = (p: string): string => p.split('/').pop() || p
+
 function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => void }): JSX.Element {
   const [lines, setLines] = useState<string[]>([])
   const [running, setRunning] = useState(false)
+  const [target, setTarget] = useState<string | null>(null)
+  const [archive, setArchive] = useState('')
   const logRef = useRef<HTMLPreElement>(null)
   useEffect(() => window.sw.ingest.onLine((l) => setLines((prev) => [...prev, l])), [])
   useEffect(() => {
+    void window.sw.settings.getPaths().then((p) => setArchive(p.archiveRoot ?? p.archiveDefault))
+  }, [])
+  useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [lines])
+  async function choose(): Promise<void> {
+    const p = await window.sw.ingest.choosePath()
+    if (p) setTarget(p)
+  }
   async function run(fn: () => Promise<{ ok: boolean }>): Promise<void> {
     setRunning(true)
     const r = await fn()
@@ -1440,21 +1451,37 @@ function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => v
           <b>Import PowerPoint into the archive</b>
           <button className="copyref" onClick={onClose} disabled={running}>close ✕</button>
         </div>
+        <p className="settings-note">
+          Adds slides to your searchable <b>archive</b> (extract + OCR via Core A) — catalogued as part of your library. For your own decks.
+        </p>
+        <div className="settings-rows">
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">What to import</div>
+              <div className="settings-row-detail" title={target ?? ''}>{target ?? '— no file or folder chosen —'}</div>
+            </div>
+            <button className="copyref" disabled={running} onClick={() => void choose()}>Choose file / folder…</button>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">Where it goes</div>
+              <div className="settings-row-detail" title={archive}>{archive || '— archive not set —'} <i>(the archive, fixed)</i></div>
+            </div>
+          </div>
+        </div>
         <div className="import-actions">
-          <button className="primary-btn" disabled={running} onClick={() => run(() => window.sw.ingest.pending())}>
-            Ingest pending (whole archive)
+          <button className="primary-btn" disabled={running || !target} onClick={() => target && void run(() => window.sw.ingest.runPath(target))}>
+            Import this
           </button>
-          <button className="primary-btn" disabled={running} onClick={() => run(() => window.sw.ingest.importPath())}>
-            Import a file or folder…
+          <button className="copyref" disabled={running} title="Crawl + extract every not-yet-imported deck already in the archive" onClick={() => void run(() => window.sw.ingest.pending())}>
+            …or ingest everything pending
           </button>
           {running && (
-            <button className="copyref" onClick={() => void window.sw.ingest.cancel()}>
-              Cancel
-            </button>
+            <button className="copyref" onClick={() => void window.sw.ingest.cancel()}>Cancel</button>
           )}
         </div>
         <pre className="import-log" ref={logRef}>
-          {lines.join('\n') || 'Extraction + OCR run via Core A (ppt-archive); progress streams here. Re-running is safe — done decks are skipped.'}
+          {lines.join('\n') || 'Choose a file/folder, then “Import this”. Extraction + OCR run via Core A; progress streams here. Re-running is safe — done decks are skipped.'}
         </pre>
         {running && <div className="results-head">running in the background — you can keep searching</div>}
       </div>
@@ -1463,11 +1490,13 @@ function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => v
 }
 
 // Convert (sideband, throwaway): turn SOMEONE ELSE'S .pptx into a mechanical Outline folder the
-// user picks. Never catalogued into the archive/vault — a distinct verb from Import.
+// user picks. Source + destination + options are all chosen IN the panel before the final Convert.
 function ConvertPanel({ onClose }: { onClose: () => void }): JSX.Element {
   const [lines, setLines] = useState<string[]>([])
   const [running, setRunning] = useState(false)
   const [ocr, setOcr] = useState(false)
+  const [source, setSource] = useState<string | null>(null)
+  const [dest, setDest] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
   const logRef = useRef<HTMLPreElement>(null)
   useEffect(() => window.sw.convert.onLine((l) => setLines((prev) => [...prev, l])), [])
@@ -1477,11 +1506,24 @@ function ConvertPanel({ onClose }: { onClose: () => void }): JSX.Element {
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [lines])
+  async function chooseSource(): Promise<void> {
+    const p = await window.sw.convert.chooseSource()
+    if (p) {
+      setSource(p)
+      setDone(null)
+    }
+  }
+  async function chooseDest(): Promise<void> {
+    if (!source) return
+    const p = await window.sw.convert.chooseDest(source)
+    if (p) setDest(p)
+  }
   async function run(): Promise<void> {
+    if (!source || !dest) return
     setRunning(true)
     setDone(null)
     setLines([])
-    const r = await window.sw.convert.pptxToOutline({ ocr })
+    const r = await window.sw.convert.run({ pptxPath: source, outDir: dest, ocr })
     setRunning(false)
     if (r.ok && r.outDir) setDone(r.outDir)
   }
@@ -1493,24 +1535,45 @@ function ConvertPanel({ onClose }: { onClose: () => void }): JSX.Element {
     <div className="overlay" onClick={running ? undefined : onClose}>
       <div className="modal import" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <b>Convert a PowerPoint to an Outline</b>
+          <b>Convert someone else’s PowerPoint to an Outline</b>
           <button className="copyref" onClick={onClose} disabled={running}>close ✕</button>
         </div>
         <p className="settings-note">
-          Turns someone else’s <code>.pptx</code> into an editable TalkWeaver Outline saved wherever you choose. It’s never
-          added to your archive or vault, and the folder is stamped <code>origin: external</code> so it stays clearly not-yours.
+          Makes an editable TalkWeaver Outline saved wherever you choose. <b>Never</b> added to your archive or vault, and stamped <code>origin: external</code> so it stays clearly not-yours.
         </p>
+        <div className="settings-rows">
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">1 · PowerPoint to convert</div>
+              <div className="settings-row-detail" title={source ?? ''}>{source ? fileName(source) : '— no file chosen —'}</div>
+            </div>
+            <button className="copyref" disabled={running} onClick={() => void chooseSource()}>Choose .pptx…</button>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">2 · Save the Outline to</div>
+              <div className="settings-row-detail" title={dest ?? ''}>{dest ?? (source ? '— choose a destination folder —' : '— pick a PowerPoint first —')}</div>
+            </div>
+            <button className="copyref" disabled={running || !source} onClick={() => void chooseDest()}>Choose folder…</button>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">3 · OCR image text</div>
+              <div className="settings-row-detail">Recognise text inside images (macOS Vision) and inline it into the Outline.</div>
+            </div>
+            <label className="toggle">
+              <input type="checkbox" checked={ocr} onChange={(e) => toggleOcr(e.target.checked)} /> {ocr ? 'On' : 'Off'}
+            </label>
+          </div>
+        </div>
         <div className="import-actions">
-          <label className="toggle" title="Recognise text inside images (macOS Vision) and inline it into the Outline">
-            <input type="checkbox" checked={ocr} onChange={(e) => toggleOcr(e.target.checked)} /> OCR image text
-          </label>
-          <button className="primary-btn" disabled={running} onClick={() => void run()}>
-            Choose a .pptx to convert…
+          <button className="primary-btn" disabled={running || !source || !dest} onClick={() => void run()}>
+            Convert →
           </button>
         </div>
         <pre className="import-log" ref={logRef}>
           {lines.join('\n') ||
-            'Pick a PowerPoint; SlideWell extracts it in a scratch space and writes a mechanical Outline folder (outline + assets) to the location you choose. Nothing is added to your library.'}
+            'Pick a PowerPoint and a destination folder, then Convert. SlideWell extracts it in a scratch space and writes a mechanical Outline (outline + assets) where you chose. Nothing is added to your library.'}
         </pre>
         {done && <div className="results-head">✓ Saved to {done} — revealed in Finder.</div>}
         {running && <div className="results-head">converting…</div>}
