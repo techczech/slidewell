@@ -22,6 +22,7 @@ export interface DeckMeta {
   filename: string
   sourcePath: string
   ownership: Ownership
+  author: string // raw PPTX author (or last_modified_by fallback); '' when none — for display
   category: string
 }
 export type DeckMetaIndex = Record<string, DeckMeta>
@@ -115,7 +116,7 @@ interface PMeta {
   last_modified_by?: string
   category?: string
 }
-const CACHE_VERSION = 2 // bumped: added created/modified
+const CACHE_VERSION = 3 // bumped: added author (carried through for display)
 const CACHE_FILENAME = 'deck-meta-cache.json'
 
 function extractedRoot(archiveRoot: string): string {
@@ -168,6 +169,7 @@ function scanDeckMeta(archiveRoot: string): { index: DeckMetaIndex; newestMtimeM
       filename: meta?.source_file?.trim() || `${id}.pptx`,
       sourcePath: meta?.source_path?.trim() || '',
       ownership: resolveOwnership(meta ?? {}),
+      author: String(meta?.author ?? meta?.last_modified_by ?? '').trim(),
       category: resolveCategory(meta ?? {})
     }
   }

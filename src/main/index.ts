@@ -284,7 +284,9 @@ app.whenReady().then(() => {
       usedInDecks: 1,
       reference: `![](img-${r.id})`,
       thumbUrl: swThumb(abs),
-      library: 'mine'
+      library: 'mine',
+      ownership: 'mine', // the well is the user's own content → author renders as "me"
+      author: ''
     }
   }
 
@@ -306,7 +308,9 @@ app.whenReady().then(() => {
       slideOrder: null,
       usedInDecks: im.usedInDecks,
       reference: im.reference,
-      thumbUrl: swThumb(im.fileAbsPath)
+      thumbUrl: swThumb(im.fileAbsPath),
+      ownership: m?.ownership || 'unknown',
+      author: m?.author || ''
     }
   }
 
@@ -408,7 +412,11 @@ app.whenReady().then(() => {
   ipcMain.handle('archive:deck-detail', (_e, pid: string) => {
     if (!archiveAvailable() && !othersArchiveAvailable()) return null
     try {
-      return deckDetail(rootForDeck(pid), cacheDir(), pid)
+      const root = rootForDeck(pid)
+      const d = deckDetail(root, cacheDir(), pid)
+      if (!d) return null
+      const library = root === othersArchiveRootResolved() && root !== archiveRoot() ? 'others' : 'mine'
+      return { ...d, library }
     } catch {
       return null
     }
