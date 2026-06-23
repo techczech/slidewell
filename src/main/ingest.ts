@@ -40,7 +40,7 @@ export function findRenderTools(): { soffice: string | null; pdftoppm: string | 
   return { soffice, pdftoppm, available: Boolean(soffice && pdftoppm) }
 }
 
-interface Step {
+export interface Step {
   label: string
   args: string[]
 }
@@ -59,7 +59,7 @@ export function cancelIngest(): void {
   }
 }
 
-function runStep(python: string, cwd: string, step: Step, onLine: (s: string) => void): Promise<number> {
+export function runPythonStep(python: string, cwd: string, step: Step, onLine: (s: string) => void): Promise<number> {
   return new Promise((resolve) => {
     onLine(`\n▶ ${step.label}`)
     // archiveRoot makes `tools.*` importable; archiveRoot/tools makes the bare `embeddings`
@@ -136,7 +136,7 @@ export async function runIngest(opts: IngestOpts, onLine: (s: string) => void): 
       onLine('✕ cancelled')
       return { ok: false }
     }
-    const code = await runStep(py, cwd, step, onLine)
+    const code = await runPythonStep(py, cwd, step, onLine)
     if (cancelled) {
       onLine('✕ cancelled')
       return { ok: false }
