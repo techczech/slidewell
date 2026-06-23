@@ -7,7 +7,7 @@ import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
-import { loadDeckMeta, categoryList, type DeckMetaIndex } from './deckmeta'
+import { loadDeckMeta, categoryList, invalidateDeckMeta, type DeckMetaIndex } from './deckmeta'
 import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, ingestScreenshot, findFfmpeg, type WellRow } from './well'
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, VIDEO_GATE_BYTES, type TriageRow } from './triage'
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
@@ -323,8 +323,11 @@ app.whenReady().then(() => {
     const includeOthers = lib !== 'mine'
     const out: Array<Record<string, unknown>> = []
 
+    // The others store has no "mine" decks, so the owner filter (default 'mine') would exclude
+    // everything — neutralize it to 'all' there. Author is the lens for the Others' Library.
+    const forStore = (library: 'mine' | 'others'): SearchFilters => (library === 'others' ? { ...filters, owner: 'all' } : filters)
     const pushSlides = async (root: string, library: 'mine' | 'others'): Promise<void> => {
-      const clusters = await archiveResults(root, cacheDir(), query ?? '', filters)
+      const clusters = await archiveResults(root, cacheDir(), query ?? '', forStore(library))
       for (const c of clusters) out.push({ representative: toWire(c.representative, library), members: c.members.map((m) => toWire(m, library)), size: c.size, deckCount: c.deckCount })
     }
     const pushImages = async (root: string, library: 'mine' | 'others'): Promise<void> => {
@@ -397,7 +400,8 @@ app.whenReady().then(() => {
     const lib = filters?.library ?? 'mine'
     const out: Array<Record<string, unknown>> = []
     const add = async (root: string, library: 'mine' | 'others'): Promise<void> => {
-      const decks = await listDecks(root, cacheDir(), filters)
+      const f = library === 'others' ? { ...filters, owner: 'all' as const } : filters
+      const decks = await listDecks(root, cacheDir(), f)
       for (const { coverAbsPath, ...d } of decks) out.push({ ...d, coverThumbUrl: swThumb(coverAbsPath), library })
     }
     if (lib !== 'others' && archiveAvailable()) {
@@ -651,7 +655,9 @@ app.whenReady().then(() => {
       archiveMissingLine()
       return { ok: false }
     }
-    return runIngest({ engineRoot: archiveRoot(), dataRoot: archiveRoot(), python: python(), mode: 'pending' }, sendLine)
+    const r = await runIngest({ engineRoot: archiveRoot(), dataRoot: archiveRoot(), python: python(), mode: 'pending' }, sendLine)
+    invalidateDeckMeta(cacheDir())
+    return r
   })
   // Pick the file/folder to import (returns the path so the panel can SHOW it before committing).
   ipcMain.handle('ingest:choose-path', async () => {
@@ -675,7 +681,9 @@ app.whenReady().then(() => {
     }
     const dataRoot = library === 'others' ? othersArchiveRootResolved() : archiveRoot()
     if (library === 'others') sendLine(`→ Importing into your Others' Library (kept separate from your archive): ${dataRoot}`)
-    return runIngest({ engineRoot: archiveRoot(), dataRoot, python: python(), mode: 'path', targetPath }, sendLine)
+    const r = await runIngest({ engineRoot: archiveRoot(), dataRoot, python: python(), mode: 'path', targetPath }, sendLine)
+    invalidateDeckMeta(cacheDir()) // new decks added → drop the cached index so they show without restart
+    return r
   })
   ipcMain.handle('ingest:cancel', () => {
     cancelIngest()
@@ -735,6 +743,80 @@ app.whenReady().then(() => {
       shell.showItemInFolder(existsSync(outlineFile) ? outlineFile : r.outDir)
     }
     return r
+  })
+
+  // Delete-by-filter (ADR-0031): remove every Others' Library deck matching the current query +
+  // filters, then rebuild the index from what remains. No filter → deletes the whole library.
+  // Scoped to the Others' Library only — never the personal archive.
+  ipcMain.handle('others:delete-matching', async (_e, query: string, filters: SearchFilters) => {
+    const root = othersArchiveRootResolved()
+    if (!othersArchiveAvailable()) return { ok: false, deleted: 0 }
+    const f: SearchFilters = { ...filters, owner: 'all', library: 'others' }
+    // Decks matching the deck-level filters; narrowed to those with matching content when there's free text.
+    const ids = new Set<string>()
+    try {
+      for (const d of await listDecks(root, cacheDir(), f)) ids.add(d.id)
+    } catch {
+      /* none */
+    }
+    const q = (query ?? '').trim()
+    if (q.length >= 2 && ids.size) {
+      const hit = new Set<string>()
+      try {
+        for (const c of await archiveResults(root, cacheDir(), q, f)) {
+          if (c.representative.deck) hit.add(c.representative.deck)
+          for (const m of c.members) if (m.deck) hit.add(m.deck)
+        }
+      } catch {
+        /* none */
+      }
+      try {
+        for (const im of await searchImages(root, q, 1000)) if (im.deck) hit.add(im.deck)
+      } catch {
+        /* none */
+      }
+      for (const id of [...ids]) if (!hit.has(id)) ids.delete(id)
+    }
+    const idList = [...ids].filter(Boolean)
+    if (idList.length === 0) return { ok: false, deleted: 0 }
+    const res = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Cancel', `Delete ${idList.length}`],
+      defaultId: 0,
+      cancelId: 0,
+      message: `Delete ${idList.length} deck${idList.length === 1 ? '' : 's'} from your Others' Library?`,
+      detail: 'Removed from this separate store only — your own archive and the source files are untouched.'
+    })
+    if (res.response !== 1) return { ok: false, cancelled: true }
+    for (const id of idList) {
+      try {
+        rmSync(join(root, 'extracted', id), { recursive: true, force: true })
+      } catch {
+        /* best-effort */
+      }
+    }
+    // Rebuild the index from what's left (registry/media-store are derived, so wipe + reindex).
+    try {
+      rmSync(join(root, 'registry'), { recursive: true, force: true })
+    } catch {
+      /* */
+    }
+    try {
+      rmSync(join(root, 'media-store'), { recursive: true, force: true })
+    } catch {
+      /* */
+    }
+    let remaining = 0
+    try {
+      remaining = readdirSync(join(root, 'extracted')).length
+    } catch {
+      remaining = 0
+    }
+    if (remaining > 0 && archiveAvailable()) {
+      await runIngest({ engineRoot: archiveRoot(), dataRoot: root, python: python(), mode: 'reindex' }, sendConvertLine)
+    }
+    invalidateDeckMeta(cacheDir()) // the deck set changed; drop the cached index so search reflects it
+    return { ok: true, deleted: idList.length }
   })
 
   void startWell()

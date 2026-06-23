@@ -150,7 +150,11 @@ const api = {
     // Reveal an image in Finder. Pass the hit's thumbUrl.
     reveal: (thumbUrl: string | null): Promise<boolean> => ipcRenderer.invoke('shell:reveal', thumbUrl),
     // Re-scan the TalkWeaver vault for new images; returns count added.
-    scanVault: (): Promise<number> => ipcRenderer.invoke('well:scan-vault')
+    scanVault: (): Promise<number> => ipcRenderer.invoke('well:scan-vault'),
+    // Delete every Others' Library deck matching the current query + filters, then rebuild its
+    // index (ADR-0031). No filter → deletes the whole Others' Library. Never touches your archive.
+    deleteOthersMatching: (query: string, filters: SearchFilters): Promise<{ ok: boolean; deleted?: number; cancelled?: boolean }> =>
+      ipcRenderer.invoke('others:delete-matching', query, filters)
   },
   settings: {
     getPaths: (): Promise<{
