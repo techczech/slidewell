@@ -23,7 +23,8 @@ Electron + React + TS (electron-vite), mirrored from `talk-weaver`. Shipped (see
    - Remaining follow-ups: image-search FTS upgrade (still LIKE on media.db); per-OCR role filter (skipped for speed); presentation_id→folder map for renders (works today as pid==folder name, make robust); native macOS Quick Look (currently in-app lightbox); keyboard shortcuts for actions.
 2. ~~**Import**~~ — **DONE** (`archive-ingest`): Core A pipeline as streamed subprocesses; progress UI; extract-in-place.
 3. ~~**The well + Triage**~~ — **DONE** (`image-well-and-sources`, `screenshot-video-triage`): `provenance=added` Image Nodes; paste/screenshot/vault ingest; triage a source folder.
-3b. ~~**Convert (Scenario B)**~~ — **DONE** (`convert-pptx-to-outline`): throwaway PPTX→Outline, sideband, fire-and-forget. Mechanical only; OCR optional. Scenario A ("borrowed media library" — not-mine media kept/purgeable in the well) still pending its own spec.
+3b. ~~**Convert (Scenario B)**~~ — **DONE** (`convert-pptx-to-outline`): throwaway PPTX→Outline, sideband, fire-and-forget. Mechanical only; OCR optional.
+3c. ~~**Others' Library (Scenario A)**~~ — **DONE** (`others-library`): import + search other people's decks in a SEPARATE Core A store (`othersArchiveRoot`, default `~/SlideWell/others-library`); same engine, separate data root; `library: mine|others|all` scope + OTHERS badge; Settings chooser + Clear. Decision: presentation-system **ADR-0031** (DRAFT branch `adr-0031-others-library`, pending grill). Deferred: lineage/reuse from others→Talks; multiple others' stores; others "ingest pending".
 4. **Tracking index** — lightweight git-referenced slide index (full + partial/SimHash) for lineage/drift/versioning (ADR-0026).
 5. **Semantic search** — unified text+image over MLX embeddings (qwen3-embeddings-mlx; Qwen3-VL scaffold), served by SlideWell's local process; FTS-degraded when off.
 
