@@ -31,13 +31,17 @@ export function installMock(): void {
         screenshotRoot: null,
         screenshotAvailable: false,
         conversionsRoot: null,
-        convertOcrDefault: false
+        convertOcrDefault: false,
+        othersArchiveRoot: '~/SlideWell/others-library',
+        othersArchiveAvailable: false
       }),
       chooseArchive: async () => null,
       chooseVault: async () => null,
       chooseScreenshotFolder: async () => null,
       chooseConversionsFolder: async () => null,
       setConvertOcr: async (on: boolean) => on,
+      chooseOthersFolder: async () => null,
+      clearOthersLibrary: async () => ({ ok: false }),
       dependencies: async () => ({ requirementsUrl: '', deps: [] })
     },
     triage: {
