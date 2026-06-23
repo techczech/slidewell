@@ -40,6 +40,8 @@ export type SlideResult = {
   reference: string // `[use: ppt:<id>#<order>]`
   thumbUrl: string | null
   library?: 'mine' | 'others' // which archive store this came from (Others' Library = badged)
+  ownership?: string // deck ownership (mine|others|unknown) — for the author label
+  author?: string // raw deck author ('' when none)
 }
 export type SlideClusterResult = {
   representative: SlideResult
@@ -96,6 +98,7 @@ export type DeckCard = {
   category: string
   filename: string
   ownership: string
+  author?: string
   slideCount: number
   coverThumbUrl: string | null
   library?: 'mine' | 'others'
@@ -108,6 +111,8 @@ export type DeckDetail = {
   category: string
   filename: string
   ownership: string
+  author?: string
+  library?: 'mine' | 'others'
   sourcePath: string
   sectionCount: number
   slideCount: number

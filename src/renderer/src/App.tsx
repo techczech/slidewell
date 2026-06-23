@@ -1455,6 +1455,11 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
 
 const fileName = (p: string): string => p.split('/').pop() || p
 
+// The displayed author/owner of a result. In the Others' Library it's the deck's author (else
+// "unknown"); in your own archive it's "me" by default, unless a deck is detected as someone else's.
+const authorOf = (h: { library?: 'mine' | 'others'; ownership?: string; author?: string }): string =>
+  h.library === 'others' ? h.author?.trim() || 'unknown' : h.ownership === 'others' && h.author?.trim() ? h.author.trim() : 'me'
+
 function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => void }): JSX.Element {
   const [lines, setLines] = useState<string[]>([])
   const [running, setRunning] = useState(false)
@@ -1738,7 +1743,8 @@ function Card({
   const isImg = h.kind === 'archive-image'
   const ocr = h.kind === 'ocr-render' || h.kind === 'ocr-image'
   const badge = clusterBadge(cluster)
-  const foot = [h.filename || h.deck, h.slideOrder !== null ? `#${h.slideOrder}` : '', h.date ? h.date.slice(0, 10) : '', h.category]
+  const who = authorOf(h)
+  const foot = [h.filename || h.deck, h.slideOrder !== null ? `#${h.slideOrder}` : '', h.date ? h.date.slice(0, 10) : '', h.category, who !== 'me' ? `by ${who}` : '']
     .filter(Boolean)
     .join(' · ')
   return (
@@ -1950,7 +1956,7 @@ function DeckCardView({ deck, selected, onSelect }: { deck: DeckCard; selected: 
       <div className="meta">
         <div className="card-title" title={deck.title}>{deck.title}</div>
         <div className="card-foot">
-          <span className="deck">{[deck.date ? deck.date.slice(0, 10) : '', deck.category].filter(Boolean).join(' · ') || deck.filename}</span>
+          <span className="deck">{[deck.date ? deck.date.slice(0, 10) : '', deck.category, authorOf(deck) !== 'me' ? `by ${authorOf(deck)}` : ''].filter(Boolean).join(' · ') || deck.filename}</span>
         </div>
       </div>
     </div>
@@ -1975,6 +1981,7 @@ function DeckSidebar({
     ['Slides', String(detail.slideCount)],
     ['Sections', String(detail.sectionCount)],
     ['Owner', detail.ownership],
+    ['Author', authorOf({ library: detail.library, ownership: detail.ownership, author: detail.author })],
     ['Source', detail.sourcePath || '—']
   ]
   return (
@@ -2226,6 +2233,7 @@ function SlideInspector({
     ...(hit.slideOrder !== null ? ([['Slide', String(hit.slideOrder + 1)]] as [string, string][]) : []),
     ['Date', hit.date ? hit.date.slice(0, 10) : '—'],
     ['Category', hit.category || '—'],
+    ['Author', authorOf(hit)],
     ['Used in', `${hit.usedInDecks} deck${hit.usedInDecks === 1 ? '' : 's'}`],
     ['Kind', kindLabel],
     ['Reference', hit.reference]
