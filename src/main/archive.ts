@@ -361,6 +361,8 @@ export interface EnrichedHit {
   usedInDecks: number
   reference: string
   renderAbsPath: string | null
+  ownership: string // deck ownership (mine|others|unknown) — lets the UI render the author label
+  author: string // raw deck author ('' when none)
 }
 export interface EnrichedCluster {
   representative: EnrichedHit
@@ -409,7 +411,9 @@ export async function searchArchive(
       deckTitle: m?.title || h.deck,
       filename: m?.filename || '',
       category: m?.category || '',
-      date: m?.date ?? null
+      date: m?.date ?? null,
+      ownership: m?.ownership || 'unknown',
+      author: m?.author || ''
     }
   })
 
@@ -496,7 +500,9 @@ function toEnriched(root: string, index: DeckMetaIndex, r: { content_hash?: stri
     slideOrder: r.ord,
     usedInDecks: 1,
     reference: r.ord === null ? `[use: ppt:${r.pid}]` : `[use: ppt:${r.pid}#${r.ord}]`,
-    renderAbsPath: renderPath(root, r.pid, r.ord)
+    renderAbsPath: renderPath(root, r.pid, r.ord),
+    ownership: m?.ownership || 'unknown',
+    author: m?.author || ''
   }
 }
 
@@ -564,6 +570,7 @@ export interface DeckCard {
   category: string
   filename: string
   ownership: string
+  author: string
   slideCount: number
   coverAbsPath: string | null // render of slide 0 (the title slide)
 }
@@ -605,6 +612,7 @@ export async function listDecks(root: string, cacheDir: string, filters: SearchF
         category: m.category,
         filename: m.filename,
         ownership: m.ownership,
+        author: m.author || '',
         slideCount: counts[pid] ?? 0,
         coverAbsPath: renderPath(root, pid, 0)
       }
@@ -646,6 +654,7 @@ export interface DeckDetail {
   category: string
   filename: string
   ownership: string
+  author: string
   sourcePath: string
   sectionCount: number
   slideCount: number
@@ -674,6 +683,7 @@ export function deckDetail(root: string, cacheDir: string, pid: string): DeckDet
     category: m?.category || '',
     filename: m?.filename || '',
     ownership: m?.ownership || 'unknown',
+    author: m?.author || '',
     sourcePath: m?.sourcePath || '',
     sectionCount,
     slideCount
