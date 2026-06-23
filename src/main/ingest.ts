@@ -125,6 +125,10 @@ export async function runIngest(opts: IngestOpts, onLine: (s: string) => void): 
     if (isDir) ex.push('--batch')
     steps = [
       { label: `Extract ${isDir ? 'folder' : 'file'}${render.available ? ' + render' : ' (no render)'}`, args: ex },
+      // Build the slide + image registry (slides/slide_locations/slides_fts) from the extractions —
+      // without this, slide & deck SEARCH find nothing (only OCR is indexed). Run before OCR so
+      // slides_fts exists for OCR mirroring.
+      { label: 'Build slide & image index', args: ['-m', 'tools.dedup.migrate', data] },
       { label: 'OCR', args: ['-m', 'tools.ocr.cli', data, 'ingest-all'] },
       { label: 'Content-address media', args: ['-m', 'tools.media_store.cli', data, 'migrate'] }
     ]
@@ -135,6 +139,7 @@ export async function runIngest(opts: IngestOpts, onLine: (s: string) => void): 
         label: 'Extract (skip duplicates)',
         args: ['-m', 'tools.unified_extractor.cli', 'from-manifest', 'manifest/ppt-manifest.json', '--skip-duplicates', '--output', extractedDir]
       },
+      { label: 'Build slide & image index', args: ['-m', 'tools.dedup.migrate', data] },
       ...(render.available ? [{ label: 'Render slides', args: ['-m', 'tools.renders.cli', data, 'render-all'] }] : []),
       { label: 'OCR images + renders', args: ['-m', 'tools.ocr.cli', data, 'ingest-all'] },
       { label: 'Content-address media', args: ['-m', 'tools.media_store.cli', data, 'migrate'] }
