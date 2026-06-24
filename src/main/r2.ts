@@ -28,6 +28,7 @@ export function makeR2(cfg: R2Settings, creds: R2Creds): {
   head: (key: string) => Promise<Response>
   get: (key: string) => Promise<Response>
   put: (key: string, body: Uint8Array | Buffer, contentType?: string) => Promise<Response>
+  del: (key: string) => Promise<Response>
   list: (prefix: string, max?: number) => Promise<Response>
 } {
   const aws = new AwsClient({ accessKeyId: creds.accessKeyId, secretAccessKey: creds.secretAccessKey, region: 'auto', service: 's3' })
@@ -38,6 +39,7 @@ export function makeR2(cfg: R2Settings, creds: R2Creds): {
     head: (key) => aws.fetch(url(key), { method: 'HEAD' }),
     get: (key) => aws.fetch(url(key), { method: 'GET' }),
     put: (key, body, contentType) => aws.fetch(url(key), { method: 'PUT', body, headers: contentType ? { 'content-type': contentType } : {} }),
+    del: (key) => aws.fetch(url(key), { method: 'DELETE' }),
     list: (prefix, max = 1000) => aws.fetch(`${base}?list-type=2&max-keys=${max}&prefix=${encodeURIComponent(prefix)}`, { method: 'GET' })
   }
 }

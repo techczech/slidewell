@@ -14,6 +14,7 @@ import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest
 import { convertPptxToOutline } from './convert'
 import { slugify } from './outline'
 import { testR2, type R2Settings, type R2Creds } from './r2'
+import { pickStore, keyForPath, fetchFromR2, syncDirToR2, type StoreName } from './storage'
 
 const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
 
@@ -37,6 +38,7 @@ type Config = {
   convertOcrByDefault?: boolean // initial state of the convert OCR toggle
   othersArchiveRoot?: string // the Others' Library store (Scenario A) — other people's decks, kept separate
   r2?: { accountId?: string; endpoint?: string; bucket?: string; prefix?: string; accessKeyIdEnc?: string; secretEnc?: string } // R2 backend (creds safeStorage-encrypted)
+  storage?: Partial<Record<'archive' | 'others' | 'well', { backend?: 'local' | 'r2' }>> // per-store backend (spec 2026-06-24)
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -193,22 +195,47 @@ function within(root: string, target: string): boolean {
 function withinAny(roots: string[], target: string): boolean {
   return roots.some((r) => within(r, target))
 }
-/** Decode a swarchive://f/<b64> URL back to a guarded absolute path, or null. */
-function resolveSwUrl(url: string): string | null {
+/** Decode a swarchive://f/<b64> URL to a guarded absolute path (may not exist locally), or null. */
+function decodeSwUrlPath(url: string): string | null {
   try {
     const b64 = new URL(url).pathname.replace(/^\/+/, '')
     const abs = decodeB64Url(b64)
-    return withinAny(allowedRoots(), abs) && existsSync(abs) ? abs : null
+    return withinAny(allowedRoots(), abs) ? abs : null
   } catch {
     return null
   }
 }
+/** Guarded absolute path that exists locally now, or null (used by copy/reveal which need a real file). */
+function resolveSwUrl(url: string): string | null {
+  const abs = decodeSwUrlPath(url)
+  return abs && existsSync(abs) ? abs : null
+}
+
+// Per-store backend (spec 2026-06-24): which store a path is in, and its backend.
+function storageRoots(): Partial<Record<StoreName, string>> {
+  return { archive: archiveRoot(), others: othersArchiveRootResolved(), well: wellRootResolved() }
+}
+function storeBackend(store: StoreName): 'local' | 'r2' {
+  return readConfig().storage?.[store]?.backend === 'r2' ? 'r2' : 'local'
+}
+// Serve a swarchive path: local file if present; else, for an R2-backed store, fetch it from R2 into
+// the local store dir (which doubles as the cache) and serve that. Never deletes anything.
+async function serveLocalOrR2(abs: string): Promise<string | null> {
+  if (existsSync(abs)) return abs
+  const s = pickStore(storageRoots(), abs)
+  if (!s || storeBackend(s.store) !== 'r2') return null
+  const creds = r2Creds()
+  if (!creds) return null
+  const ok = await fetchFromR2(r2Settings(), creds, keyForPath(r2Settings().prefix, s.store, s.root, abs), abs)
+  return ok ? abs : null
+}
 
 app.whenReady().then(() => {
-  protocol.handle('swarchive', (request) => {
-    const abs = resolveSwUrl(request.url)
-    if (!abs) return new Response('not found', { status: 404 })
-    return net.fetch(pathToFileURL(abs).toString())
+  protocol.handle('swarchive', async (request) => {
+    const abs = decodeSwUrlPath(request.url)
+    const served = abs ? await serveLocalOrR2(abs) : null
+    if (!served) return new Response('not found', { status: 404 })
+    return net.fetch(pathToFileURL(served).toString())
   })
 
   // --- IPC: the typed contract lives in src/preload/index.ts ---
@@ -670,6 +697,26 @@ app.whenReady().then(() => {
     const creds = r2Creds()
     if (!creds) return { ok: false, error: 'No credentials saved' }
     return testR2(r2Settings(), creds)
+  })
+  // Per-store backend (Local | R2) + a media sync (upload) to R2.
+  ipcMain.handle('settings:get-storage', () => ({
+    archive: storeBackend('archive'),
+    others: storeBackend('others'),
+    well: storeBackend('well')
+  }))
+  ipcMain.handle('settings:set-store-backend', (_e, store: StoreName, backend: 'local' | 'r2') => {
+    const s = { ...(readConfig().storage ?? {}) }
+    s[store] = { ...(s[store] ?? {}), backend: backend === 'r2' ? 'r2' : 'local' }
+    writeConfig({ storage: s })
+    return { ok: true }
+  })
+  ipcMain.handle('settings:sync-store', async (_e, store: StoreName) => {
+    const creds = r2Creds()
+    if (!creds) return { ok: false, error: 'No R2 credentials saved' }
+    const root = storageRoots()[store]
+    if (!root) return { ok: false, error: 'store root not set' }
+    const res = await syncDirToR2(r2Settings(), creds, r2Settings().prefix, store, root)
+    return { ok: res.failed === 0, ...res }
   })
 
   // --- Others' Library (Scenario A, ADR-0031): a separate store for other people's decks ---
