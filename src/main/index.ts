@@ -644,13 +644,27 @@ app.whenReady().then(() => {
     if (patch.endpoint !== undefined) r.endpoint = patch.endpoint.trim()
     if (patch.bucket !== undefined) r.bucket = patch.bucket.trim()
     if (patch.prefix !== undefined) r.prefix = patch.prefix.trim()
-    // Secret is write-only: only update creds when both are supplied; encrypt at rest.
-    if (patch.accessKeyId && patch.secretAccessKey && safeStorage.isEncryptionAvailable()) {
-      r.accessKeyIdEnc = safeStorage.encryptString(patch.accessKeyId).toString('base64')
-      r.secretEnc = safeStorage.encryptString(patch.secretAccessKey).toString('base64')
+    // Secret is write-only: only update creds when both are supplied; encrypt at rest. Report the
+    // truth so the UI can't show a false "saved" (the earlier bug) — and so we can diagnose.
+    const gotKeys = Boolean(patch.accessKeyId && patch.secretAccessKey)
+    const encAvailable = safeStorage.isEncryptionAvailable()
+    let savedCreds = false
+    let error: string | undefined
+    if (gotKeys) {
+      if (!encAvailable) {
+        error = 'OS keychain (safeStorage) unavailable'
+      } else {
+        try {
+          r.accessKeyIdEnc = safeStorage.encryptString(patch.accessKeyId as string).toString('base64')
+          r.secretEnc = safeStorage.encryptString(patch.secretAccessKey as string).toString('base64')
+          savedCreds = true
+        } catch (e) {
+          error = (e as Error).message
+        }
+      }
     }
     writeConfig({ r2: r })
-    return { ok: true }
+    return { ok: true, gotKeys, encAvailable, savedCreds, error }
   })
   ipcMain.handle('settings:test-r2', async () => {
     const creds = r2Creds()
