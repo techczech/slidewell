@@ -1351,10 +1351,18 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
     setReqUrl(d.requirementsUrl)
   }, [])
   const saveR2 = useCallback(async () => {
-    await window.sw.settings.setR2({ accountId: r2.accountId, endpoint: r2.endpoint, bucket: r2.bucket, prefix: r2.prefix, ...(r2key && r2secret ? { accessKeyId: r2key, secretAccessKey: r2secret } : {}) })
-    setR2key('')
-    setR2secret('')
-    setR2status('Saved.')
+    const res = await window.sw.settings.setR2({ accountId: r2.accountId, endpoint: r2.endpoint, bucket: r2.bucket, prefix: r2.prefix, ...(r2key && r2secret ? { accessKeyId: r2key, secretAccessKey: r2secret } : {}) })
+    if (res.savedCreds) {
+      setR2status('✓ Saved — credentials stored in your keychain.')
+      setR2key('')
+      setR2secret('')
+    } else if (!res.gotKeys) {
+      setR2status('Settings saved, but no credentials entered — paste BOTH the access key and the secret, then Save.')
+    } else if (!res.encAvailable) {
+      setR2status('✕ Could not store credentials — OS keychain unavailable on this build.')
+    } else {
+      setR2status(`✕ Could not store credentials: ${res.error ?? 'keychain error'}`)
+    }
     setR2(await window.sw.settings.getR2())
   }, [r2, r2key, r2secret])
   const testR2 = useCallback(async () => {
