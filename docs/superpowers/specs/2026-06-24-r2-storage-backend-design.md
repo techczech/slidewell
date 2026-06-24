@@ -27,6 +27,10 @@ Today every store is local-only; the `swarchive://` read path serves local files
 - Not removing `ppt-archive`'s existing content-addressed `media/<sha>` handout objects (different consumer; left as-is).
 - Conversions output stays a throwaway local save.
 
+## Considered & set aside: Cloudflare D1 for the index
+
+D1 (managed serverless SQLite, already in use on this account) could host the search index — making an R2-backed store *fully* cloud and elegantly solving the well's multi-writer problem (one cloud DB, no versioned-backup). **Rejected for v1** because: (1) **no offline search** — D1 is queried over HTTP, so search fails with no network (unacceptable on the work laptop); (2) **latency** — several queries per search × HTTP round-trips; (3) a **query-layer rewrite** (today it shells local `sqlite3`) + an **export→D1 import** step (Core A writes local SQLite); (4) D1's authorizer blocks `temp`/`ATTACH` (confirmed `SQLITE_AUTH`), so it's a restricted SQLite. Decisive point: the Pro/mini keep **full local copies**, so the index is local regardless — D1 saves them nothing. **Future option** if true multi-writer well editing or fully-thin clients are wanted (likely D1 for `well.db` only, archive index staying local/offline).
+
 ## Architecture
 
 ### Config (`userData/config.json`)
