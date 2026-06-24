@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage, safeStorage } from 'electron'
 import sharp from 'sharp'
 import { join, basename } from 'path'
 import { homedir, tmpdir } from 'os'
@@ -13,6 +13,7 @@ import { scanTriageSource, listTriage, triageCounts, setTriageDecision, VIDEO_GA
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
 import { convertPptxToOutline } from './convert'
 import { slugify } from './outline'
+import { testR2, type R2Settings, type R2Creds } from './r2'
 
 const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
 
@@ -35,6 +36,7 @@ type Config = {
   conversionsRoot?: string // default destination for throwaway PPTX→Outline conversions
   convertOcrByDefault?: boolean // initial state of the convert OCR toggle
   othersArchiveRoot?: string // the Others' Library store (Scenario A) — other people's decks, kept separate
+  r2?: { accountId?: string; endpoint?: string; bucket?: string; prefix?: string; accessKeyIdEnc?: string; secretEnc?: string } // R2 backend (creds safeStorage-encrypted)
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -81,6 +83,25 @@ function othersArchiveRootResolved(): string {
 }
 function othersArchiveAvailable(): boolean {
   return existsSync(join(othersArchiveRootResolved(), 'registry'))
+}
+
+// R2 backend config (ADR-0032 / spec 2026-06-24). Non-secret settings live in config.json; the
+// access key + secret are safeStorage-encrypted (OS keychain), never returned to the renderer.
+function r2Settings(): R2Settings {
+  const r = readConfig().r2 ?? {}
+  return { accountId: r.accountId ?? '', endpoint: r.endpoint, bucket: r.bucket || 'ppt-archive-media', prefix: r.prefix || 'slidewell' }
+}
+function r2Creds(): R2Creds | null {
+  const r = readConfig().r2 ?? {}
+  if (!r.accessKeyIdEnc || !r.secretEnc || !safeStorage.isEncryptionAvailable()) return null
+  try {
+    return {
+      accessKeyId: safeStorage.decryptString(Buffer.from(r.accessKeyIdEnc, 'base64')),
+      secretAccessKey: safeStorage.decryptString(Buffer.from(r.secretEnc, 'base64'))
+    }
+  } catch {
+    return null
+  }
 }
 
 // TalkWeaver's vault — its images are indexed in place (the vault owns them). Auto-detect from
@@ -610,6 +631,31 @@ app.whenReady().then(() => {
     } catch {
       return null
     }
+  })
+
+  // --- R2 backend (spec 2026-06-24): config + credentials (safeStorage) + connection test ---
+  ipcMain.handle('settings:get-r2', () => {
+    const s = r2Settings()
+    return { accountId: s.accountId, endpoint: s.endpoint ?? '', bucket: s.bucket, prefix: s.prefix, hasCreds: Boolean(r2Creds()) }
+  })
+  ipcMain.handle('settings:set-r2', (_e, patch: { accountId?: string; endpoint?: string; bucket?: string; prefix?: string; accessKeyId?: string; secretAccessKey?: string }) => {
+    const r = { ...(readConfig().r2 ?? {}) }
+    if (patch.accountId !== undefined) r.accountId = patch.accountId.trim()
+    if (patch.endpoint !== undefined) r.endpoint = patch.endpoint.trim()
+    if (patch.bucket !== undefined) r.bucket = patch.bucket.trim()
+    if (patch.prefix !== undefined) r.prefix = patch.prefix.trim()
+    // Secret is write-only: only update creds when both are supplied; encrypt at rest.
+    if (patch.accessKeyId && patch.secretAccessKey && safeStorage.isEncryptionAvailable()) {
+      r.accessKeyIdEnc = safeStorage.encryptString(patch.accessKeyId).toString('base64')
+      r.secretEnc = safeStorage.encryptString(patch.secretAccessKey).toString('base64')
+    }
+    writeConfig({ r2: r })
+    return { ok: true }
+  })
+  ipcMain.handle('settings:test-r2', async () => {
+    const creds = r2Creds()
+    if (!creds) return { ok: false, error: 'No credentials saved' }
+    return testR2(r2Settings(), creds)
   })
 
   // --- Others' Library (Scenario A, ADR-0031): a separate store for other people's decks ---
