@@ -181,6 +181,12 @@ const api = {
     // Others' Library (Scenario A): pick its separate store folder, or purge it wholesale.
     chooseOthersFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-others-folder'),
     clearOthersLibrary: (): Promise<{ ok: boolean; cancelled?: boolean }> => ipcRenderer.invoke('settings:clear-others-library'),
+    // R2 cloud backend (spec 2026-06-24): read non-secret config + whether creds are saved; save
+    // config/creds (secret is write-only — never returned); test the connection.
+    getR2: (): Promise<{ accountId: string; endpoint: string; bucket: string; prefix: string; hasCreds: boolean }> => ipcRenderer.invoke('settings:get-r2'),
+    setR2: (patch: { accountId?: string; endpoint?: string; bucket?: string; prefix?: string; accessKeyId?: string; secretAccessKey?: string }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('settings:set-r2', patch),
+    testR2: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('settings:test-r2'),
     // Detected status of external tools (engine, OCR, ffmpeg, LibreOffice…) + the Requirements URL.
     dependencies: (): Promise<{ requirementsUrl: string; deps: Dependency[] }> => ipcRenderer.invoke('settings:dependencies')
   },
