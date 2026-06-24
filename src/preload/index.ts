@@ -184,7 +184,7 @@ const api = {
     // R2 cloud backend (spec 2026-06-24): read non-secret config + whether creds are saved; save
     // config/creds (secret is write-only — never returned); test the connection.
     getR2: (): Promise<{ accountId: string; endpoint: string; bucket: string; prefix: string; hasCreds: boolean }> => ipcRenderer.invoke('settings:get-r2'),
-    setR2: (patch: { accountId?: string; endpoint?: string; bucket?: string; prefix?: string; accessKeyId?: string; secretAccessKey?: string }): Promise<{ ok: boolean }> =>
+    setR2: (patch: { accountId?: string; endpoint?: string; bucket?: string; prefix?: string; accessKeyId?: string; secretAccessKey?: string }): Promise<{ ok: boolean; gotKeys: boolean; encAvailable: boolean; savedCreds: boolean; error?: string }> =>
       ipcRenderer.invoke('settings:set-r2', patch),
     testR2: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('settings:test-r2'),
     // Detected status of external tools (engine, OCR, ffmpeg, LibreOffice…) + the Requirements URL.
