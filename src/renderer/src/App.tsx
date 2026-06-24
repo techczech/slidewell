@@ -1340,15 +1340,27 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
   const [r2key, setR2key] = useState('')
   const [r2secret, setR2secret] = useState('')
   const [r2status, setR2status] = useState('')
+  const [storage, setStorage] = useState<{ archive: 'local' | 'r2'; others: 'local' | 'r2'; well: 'local' | 'r2' }>({ archive: 'local', others: 'local', well: 'local' })
+  const [syncStatus, setSyncStatus] = useState('')
 
   const load = useCallback(async () => {
     const p = await window.sw.settings.getPaths()
     setPaths({ archiveRoot: p.archiveRoot, wellRoot: p.wellRoot, vaultRoot: p.vaultRoot, screenshotRoot: p.screenshotRoot, conversionsRoot: p.conversionsRoot, othersArchiveRoot: p.othersArchiveRoot })
     setConvertOcr(p.convertOcrDefault)
     setR2(await window.sw.settings.getR2())
+    setStorage(await window.sw.settings.getStorage())
     const d = await window.sw.settings.dependencies()
     setDeps(d.deps)
     setReqUrl(d.requirementsUrl)
+  }, [])
+  const setBackend = useCallback(async (store: 'archive' | 'others' | 'well', backend: 'local' | 'r2') => {
+    await window.sw.settings.setStoreBackend(store, backend)
+    setStorage(await window.sw.settings.getStorage())
+  }, [])
+  const syncStore = useCallback(async (store: 'archive' | 'others' | 'well') => {
+    setSyncStatus(`Syncing ${store} → R2…`)
+    const r = await window.sw.settings.syncStore(store)
+    setSyncStatus(r.ok ? `✓ ${store}: ${r.uploaded ?? 0} uploaded, ${r.skipped ?? 0} already there` : `✕ ${store}: ${r.error ?? `${r.failed ?? 0} failed`}`)
   }, [])
   const saveR2 = useCallback(async () => {
     const res = await window.sw.settings.setR2({ accountId: r2.accountId, endpoint: r2.endpoint, bucket: r2.bucket, prefix: r2.prefix, ...(r2key && r2secret ? { accessKeyId: r2key, secretAccessKey: r2secret } : {}) })
@@ -1510,6 +1522,34 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
             <button className="copyref" onClick={() => void saveR2()}>Save</button>
             <button className="copyref" onClick={() => void testR2()}>Test connection</button>
           </div>
+        </div>
+
+        <div className="settings-section">Per-store backend</div>
+        <div className="settings-rows">
+          {(['archive', 'others', 'well'] as const).map((store) => (
+            <div className="settings-row" key={store}>
+              <div className="settings-row-main">
+                <div className="settings-row-label">{store === 'archive' ? 'Archive' : store === 'others' ? 'Others’ Library' : 'Well'}</div>
+                <div className="settings-row-detail"><i>{storage[store] === 'r2' ? 'Media canonical in R2; the local folder caches it (fetched on demand).' : 'Local files only.'}</i></div>
+              </div>
+              <div className="scope" role="tablist" aria-label={`${store} backend`}>
+                <button className={storage[store] === 'local' ? 'scope-tab active' : 'scope-tab'} onClick={() => void setBackend(store, 'local')}>Local</button>
+                <button className={storage[store] === 'r2' ? 'scope-tab active' : 'scope-tab'} onClick={() => void setBackend(store, 'r2')}>R2</button>
+              </div>
+              {storage[store] === 'r2' && (
+                <button className="copyref" disabled={!r2.hasCreds} title={r2.hasCreds ? 'Upload this store’s media to R2' : 'Save R2 credentials first'} onClick={() => void syncStore(store)}>
+                  Sync to R2
+                </button>
+              )}
+            </div>
+          ))}
+          {syncStatus && (
+            <div className="settings-row">
+              <div className="settings-row-main">
+                <div className="settings-row-detail">{syncStatus}</div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="settings-section">

@@ -187,6 +187,10 @@ const api = {
     setR2: (patch: { accountId?: string; endpoint?: string; bucket?: string; prefix?: string; accessKeyId?: string; secretAccessKey?: string }): Promise<{ ok: boolean; gotKeys: boolean; encAvailable: boolean; savedCreds: boolean; error?: string }> =>
       ipcRenderer.invoke('settings:set-r2', patch),
     testR2: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('settings:test-r2'),
+    // Per-store backend (Local | R2) + media sync to R2 (spec 2026-06-24).
+    getStorage: (): Promise<{ archive: 'local' | 'r2'; others: 'local' | 'r2'; well: 'local' | 'r2' }> => ipcRenderer.invoke('settings:get-storage'),
+    setStoreBackend: (store: 'archive' | 'others' | 'well', backend: 'local' | 'r2'): Promise<{ ok: boolean }> => ipcRenderer.invoke('settings:set-store-backend', store, backend),
+    syncStore: (store: 'archive' | 'others' | 'well'): Promise<{ ok: boolean; uploaded?: number; skipped?: number; failed?: number; error?: string }> => ipcRenderer.invoke('settings:sync-store', store),
     // Detected status of external tools (engine, OCR, ffmpeg, LibreOffice…) + the Requirements URL.
     dependencies: (): Promise<{ requirementsUrl: string; deps: Dependency[] }> => ipcRenderer.invoke('settings:dependencies')
   },
