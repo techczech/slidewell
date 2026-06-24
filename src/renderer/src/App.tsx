@@ -1336,14 +1336,31 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
   const [convertOcr, setConvertOcr] = useState(false)
   const [deps, setDeps] = useState<Dependency[]>([])
   const [reqUrl, setReqUrl] = useState('https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md')
+  const [r2, setR2] = useState<{ accountId: string; endpoint: string; bucket: string; prefix: string; hasCreds: boolean }>({ accountId: '', endpoint: '', bucket: 'ppt-archive-media', prefix: 'slidewell', hasCreds: false })
+  const [r2key, setR2key] = useState('')
+  const [r2secret, setR2secret] = useState('')
+  const [r2status, setR2status] = useState('')
 
   const load = useCallback(async () => {
     const p = await window.sw.settings.getPaths()
     setPaths({ archiveRoot: p.archiveRoot, wellRoot: p.wellRoot, vaultRoot: p.vaultRoot, screenshotRoot: p.screenshotRoot, conversionsRoot: p.conversionsRoot, othersArchiveRoot: p.othersArchiveRoot })
     setConvertOcr(p.convertOcrDefault)
+    setR2(await window.sw.settings.getR2())
     const d = await window.sw.settings.dependencies()
     setDeps(d.deps)
     setReqUrl(d.requirementsUrl)
+  }, [])
+  const saveR2 = useCallback(async () => {
+    await window.sw.settings.setR2({ accountId: r2.accountId, endpoint: r2.endpoint, bucket: r2.bucket, prefix: r2.prefix, ...(r2key && r2secret ? { accessKeyId: r2key, secretAccessKey: r2secret } : {}) })
+    setR2key('')
+    setR2secret('')
+    setR2status('Saved.')
+    setR2(await window.sw.settings.getR2())
+  }, [r2, r2key, r2secret])
+  const testR2 = useCallback(async () => {
+    setR2status('Testing…')
+    const r = await window.sw.settings.testR2()
+    setR2status(r.ok ? '✓ Connected' : `✕ ${r.error ?? 'failed'}`)
   }, [])
   useEffect(() => {
     void load()
@@ -1441,6 +1458,49 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
               />{' '}
               {convertOcr ? 'On' : 'Off'}
             </label>
+          </div>
+        </div>
+
+        <div className="settings-section">R2 (cloud storage)</div>
+        <div className="settings-rows">
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">Account ID</div>
+              <input className="search-input" value={r2.accountId} placeholder="Cloudflare account id" onChange={(e) => setR2({ ...r2, accountId: e.target.value })} />
+            </div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">Bucket</div>
+              <input className="search-input" value={r2.bucket} placeholder="ppt-archive-media" onChange={(e) => setR2({ ...r2, bucket: e.target.value })} />
+            </div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">Key prefix</div>
+              <input className="search-input" value={r2.prefix} placeholder="slidewell" onChange={(e) => setR2({ ...r2, prefix: e.target.value })} />
+            </div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">Endpoint (optional)</div>
+              <input className="search-input" value={r2.endpoint} placeholder={r2.accountId ? `https://${r2.accountId}.r2.cloudflarestorage.com` : 'derived from account id'} onChange={(e) => setR2({ ...r2, endpoint: e.target.value })} />
+            </div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">S3 access key{r2.hasCreds ? ' · saved' : ''}</div>
+              <div className="settings-row-detail"><i>Write-only; stored encrypted in your OS keychain. Leave blank to keep the saved one.</i></div>
+              <input className="search-input" value={r2key} placeholder={r2.hasCreds ? '•••••••• (saved)' : 'access key id'} onChange={(e) => setR2key(e.target.value)} />
+              <input className="search-input" type="password" value={r2secret} placeholder="secret access key" onChange={(e) => setR2secret(e.target.value)} />
+            </div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-detail">{r2status || 'Private bucket; SlideWell signs requests (SigV4).'}</div>
+            </div>
+            <button className="copyref" onClick={() => void saveR2()}>Save</button>
+            <button className="copyref" onClick={() => void testR2()}>Test connection</button>
           </div>
         </div>
 
