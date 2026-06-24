@@ -44,7 +44,7 @@ export function installMock(): void {
       chooseOthersFolder: async () => null,
       clearOthersLibrary: async () => ({ ok: false }),
       getR2: async () => ({ accountId: '', endpoint: '', bucket: 'ppt-archive-media', prefix: 'slidewell', hasCreds: false }),
-      setR2: async () => ({ ok: true }),
+      setR2: async () => ({ ok: true, gotKeys: false, encAvailable: false, savedCreds: false }),
       testR2: async () => ({ ok: false, error: 'mock' }),
       dependencies: async () => ({ requirementsUrl: '', deps: [] })
     },
