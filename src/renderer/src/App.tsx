@@ -680,7 +680,13 @@ export default function App(): JSX.Element {
           <div className="results-head">loading…</div>
         ) : clusters.length === 0 ? (
           filters.scope === 'well' ? (
-            <Empty title="Your well is empty." sub="Stash a screenshot via the Raycast hotkey, or it fills automatically from images you use in TalkWeaver." />
+            filters.type === 'slides' ? (
+              <Empty title="The well holds images, not slides." sub="Switch Type to “Images” to browse your well (screenshots + images you’ve used in TalkWeaver)." />
+            ) : filters.library === 'others' ? (
+              <Empty title="The well is your own content." sub="Set Library to “Mine” or “All” — “Others” hides the well." />
+            ) : (
+              <Empty title="Your well is empty." sub="Stash a screenshot via the Raycast hotkey, or it fills automatically from images you use in TalkWeaver." />
+            )
           ) : (
             <Empty title={debounced ? `No matches for “${debounced}”.` : 'No slides match these filters.'} sub="Try a different term or widen the filters." />
           )
