@@ -1530,20 +1530,23 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
           </div>
         </div>
 
-        <div className="settings-section">Per-store backend</div>
+        <div className="settings-section">Per-store storage</div>
+        <p className="settings-note">
+          <b>Local</b> = files on this machine only. <b>Local + R2 backup</b> = the full copy stays here (primary, offline) <i>and</i> is mirrored to R2 (press Sync) so another machine can fetch it. <i>(A bounded “R2 cache” mode for space-tight machines comes with the eviction step.)</i>
+        </p>
         <div className="settings-rows">
           {(['archive', 'others', 'well'] as const).map((store) => (
             <div className="settings-row" key={store}>
               <div className="settings-row-main">
                 <div className="settings-row-label">{store === 'archive' ? 'Archive' : store === 'others' ? 'Others’ Library' : 'Well'}</div>
-                <div className="settings-row-detail"><i>{storage[store] === 'r2' ? 'Media canonical in R2; the local folder caches it (fetched on demand).' : 'Local files only.'}</i></div>
+                <div className="settings-row-detail"><i>{storage[store] === 'r2' ? 'Full copy stays here; mirrored to R2 — Sync to push, then a remote machine can fetch it.' : 'Local files only — not backed up to R2.'}</i></div>
               </div>
-              <div className="scope" role="tablist" aria-label={`${store} backend`}>
+              <div className="scope" role="tablist" aria-label={`${store} storage`}>
                 <button className={storage[store] === 'local' ? 'scope-tab active' : 'scope-tab'} onClick={() => void setBackend(store, 'local')}>Local</button>
-                <button className={storage[store] === 'r2' ? 'scope-tab active' : 'scope-tab'} onClick={() => void setBackend(store, 'r2')}>R2</button>
+                <button className={storage[store] === 'r2' ? 'scope-tab active' : 'scope-tab'} onClick={() => void setBackend(store, 'r2')}>Local + R2 backup</button>
               </div>
               {storage[store] === 'r2' && (
-                <button className="copyref" disabled={!r2.hasCreds} title={r2.hasCreds ? 'Upload this store’s media to R2' : 'Save R2 credentials first'} onClick={() => void syncStore(store)}>
+                <button className="copyref" disabled={!r2.hasCreds} title={r2.hasCreds ? 'Upload this store’s media to R2 now' : 'Save R2 credentials first'} onClick={() => void syncStore(store)}>
                   Sync to R2
                 </button>
               )}
