@@ -9,7 +9,7 @@ import { resolve as resolvePath, sep as pathSep } from 'path'
 import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
 import { loadDeckMeta, categoryList, invalidateDeckMeta, type DeckMetaIndex } from './deckmeta'
 import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, ingestScreenshot, findFfmpeg, type WellRow } from './well'
-import { scanTriageSource, listTriage, triageCounts, setTriageDecision, VIDEO_GATE_BYTES, type TriageRow } from './triage'
+import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow } from './triage'
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
 import { convertPptxToOutline } from './convert'
 import { slugify } from './outline'
@@ -623,7 +623,7 @@ app.whenReady().then(() => {
   ipcMain.handle('triage:list', async (_e, q: string, state: string, sort?: string, limit?: number, offset?: number) => {
     const src = screenshotRootResolved()
     const wellR = wellRootResolved()
-    const empty = { items: [], counts: { undecided: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }
+    const empty = { items: [], counts: { undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }
     if (!src) return empty
     try {
       const s = sort === 'date-desc' || sort === 'date-asc' ? sort : 'scanned'
@@ -636,13 +636,22 @@ app.whenReady().then(() => {
       return empty
     }
   })
-  ipcMain.handle('triage:decide', async (_e, hash: string, action: 'include' | 'exclude' | 'reset', force?: boolean) => {
+  ipcMain.handle('triage:decide', async (_e, hash: string, action: 'select' | 'exclude' | 'reset', force?: boolean) => {
     const src = screenshotRootResolved()
     if (!src) return { state: 'undecided' }
     try {
       return await setTriageDecision(archiveRoot(), wellRootResolved(), src, hash, action, Boolean(force))
     } catch {
       return { state: 'undecided' }
+    }
+  })
+  ipcMain.handle('triage:import-selected', async (_e, forceHashes?: string[]) => {
+    const src = screenshotRootResolved()
+    if (!src) return { imported: 0, skipped: 0, gated: 0 }
+    try {
+      return await importSelectedTriage(archiveRoot(), wellRootResolved(), src, Array.isArray(forceHashes) ? forceHashes : [])
+    } catch {
+      return { imported: 0, skipped: 0, gated: 0 }
     }
   })
   // Paste-to-include: read an image off the clipboard and ingest it straight into the well (the paste

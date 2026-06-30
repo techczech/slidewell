@@ -79,7 +79,7 @@ export type TriageItem = {
   kind: 'image' | 'video'
   filename: string
   ext: string
-  state: 'undecided' | 'included' | 'excluded'
+  state: 'undecided' | 'selected' | 'included' | 'excluded'
   offline: boolean // OneDrive online-only placeholder — not downloaded, so not read/thumbnailed
   mtime: number // file modified time (epoch ms) — capture time, for sort/group by date
   date: string // YYYY-MM-DD derived from mtime
@@ -89,7 +89,7 @@ export type TriageItem = {
   thumbUrl: string | null
   mediaUrl: string | null // video source file (for inline playback); null for images
 }
-export type TriageCounts = { undecided: number; included: number; excluded: number; total: number }
+export type TriageCounts = { undecided: number; selected: number; included: number; excluded: number; total: number }
 export type DeckInfo = { id: string; title: string; date: string | null }
 export type DeckCard = {
   id: string
@@ -204,8 +204,10 @@ const api = {
       limit?: number,
       offset?: number
     ): Promise<{ items: TriageItem[]; counts: TriageCounts; hasMore: boolean }> => ipcRenderer.invoke('triage:list', query, state, sort, limit, offset),
-    decide: (hash: string, action: 'include' | 'exclude' | 'reset', force?: boolean): Promise<{ state: string; wellId?: string; gated?: boolean; sizeMB?: number }> =>
+    decide: (hash: string, action: 'select' | 'exclude' | 'reset', force?: boolean): Promise<{ state: string }> =>
       ipcRenderer.invoke('triage:decide', hash, action, force),
+    importSelected: (forceHashes?: string[]): Promise<{ imported: number; skipped: number; gated: number }> =>
+      ipcRenderer.invoke('triage:import-selected', forceHashes ?? []),
     // Paste-to-include: ingest the clipboard image straight into the well. Returns the new id or null.
     paste: (): Promise<{ id: string } | null> => ipcRenderer.invoke('well:add-from-clipboard'),
     // Stream scan progress; returns an unsubscribe function.
