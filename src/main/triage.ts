@@ -249,11 +249,6 @@ export async function triageCounts(wellRoot: string): Promise<TriageCounts> {
   return tallyTriageStates(rows)
 }
 
-async function rowByHash(wellRoot: string, hash: string): Promise<{ kind: string; rel_path: string } | null> {
-  const r = await query<{ kind: string; rel_path: string }>(triageDb(wellRoot), 'SELECT kind, rel_path FROM triage_fts WHERE hash = ? LIMIT 1', [hash])
-  return r[0] ?? null
-}
-
 /**
  * Apply a triage decision. select → stage the item (no ingest, no copy — promoted later by
  * importSelectedTriage); exclude → remember the hash only; reset → forget the decision.
@@ -295,8 +290,8 @@ export async function importSelectedTriage(
   await ensureTriage(wellRoot)
   const db = triageDb(wellRoot)
   // GROUP BY hash: decisions are keyed by content hash, but triage_fts is keyed by path, so a hash
-  // with duplicate files JOINs to multiple rows. One row per hash (like the old rowByHash LIMIT 1)
-  // avoids ingesting the same selected item once per duplicate.
+  // with duplicate files JOINs to multiple rows. One row per hash avoids ingesting the same selected
+  // item once per duplicate.
   const staged = await query<{ hash: string; kind: string; rel_path: string; offline: string }>(
     db,
     `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline
@@ -315,6 +310,7 @@ export async function importSelectedTriage(
   })
   const plan = planSelectedImport(enriched, forceHashes, VIDEO_GATE_BYTES)
   let imported = 0
+  let failed = 0
   for (const hash of plan.toImport) {
     const row = enriched.find((e) => e.hash === hash)
     if (!row) continue
@@ -322,7 +318,10 @@ export async function importSelectedTriage(
     if (res?.id) {
       await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)', [hash, 'included', new Date().toISOString(), res.id])
       imported++
+    } else {
+      console.error(`[triage] import failed for ${row.abs} — ingest returned no id; left staged`)
+      failed++
     }
   }
-  return { imported, skipped: plan.skipped.length, gated: plan.gated.length }
+  return { imported, skipped: plan.skipped.length + failed, gated: plan.gated.length }
 }
