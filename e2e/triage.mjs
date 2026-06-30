@@ -80,6 +80,7 @@ try {
   await win.evaluate((h) => window.sw.triage.decide(h, 'select'), all0[1].hash)
   result.selectedCount = (await win.evaluate(() => window.sw.triage.list('', 'selected'))).counts.selected
   const { readdirSync, existsSync } = await import('node:fs')
+  // 'images' subdir confirmed from well.ts (ingestScreenshot writes <well>/images/<slug>--<id>.<ext>)
   const wellImages = join(wellRoot, 'images')
   result.wellEmptyBeforeImport = !existsSync(wellImages) || readdirSync(wellImages).length === 0
 
@@ -90,6 +91,7 @@ try {
   const after = await win.evaluate(() => window.sw.triage.list('', 'all'))
   result.excludedCount = after.counts.excluded // two.png + dup.png (shared content hash)
   result.undecidedCount = after.counts.undecided
+  result.includedBeforeImport = after.counts.included
 
   // import all staged items → one.png is promoted to the well; dup.png/two.png hash is excluded so skipped
   const imp = await win.evaluate(() => window.sw.triage.importSelected([]))
@@ -113,7 +115,8 @@ try {
     result.cardsRendered === 3 &&
     result.cardHeightOk &&
     result.groupCols === 6 &&
-    result.selectedCount >= 2 &&
+    result.selectedCount === 3 &&
+    result.includedBeforeImport === 0 &&
     result.wellEmptyBeforeImport &&
     result.excludedCount === 2 &&
     result.undecidedCount === 0 &&
