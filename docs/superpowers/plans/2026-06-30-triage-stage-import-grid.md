@@ -242,20 +242,24 @@ export async function importSelectedTriage(
 ): Promise<{ imported: number; skipped: number; gated: number }> {
   await ensureTriage(wellRoot)
   const db = triageDb(wellRoot)
-  const staged = await query<{ hash: string; kind: string; rel_path: string }>(
+  // GROUP BY hash: decisions are keyed by content hash, but triage_fts is keyed by path, so a hash
+  // with duplicate files JOINs to multiple rows. One row per hash (like the old rowByHash LIMIT 1)
+  // avoids ingesting the same selected item once per duplicate.
+  const staged = await query<{ hash: string; kind: string; rel_path: string; offline: string }>(
     db,
-    `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path
+    `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline
      FROM triage_fts JOIN triage_decisions d ON d.hash = triage_fts.hash
-     WHERE d.state = 'selected'`,
+     WHERE d.state = 'selected'
+     GROUP BY triage_fts.hash`,
     []
   )
   const enriched = staged.map((s) => {
     const abs = join(sourceRoot, s.rel_path)
     const missing = !existsSync(abs)
     const sizeBytes = missing ? 0 : statSync(abs).size
-    // offline (OneDrive placeholder) ≈ a file with zero allocated blocks; reuse statSync's size==0
-    // heuristic already used at scan time — a missing/empty source can't be ingested either way.
-    return { hash: s.hash, kind: s.kind, offline: false, missing, sizeBytes, abs }
+    // offline = OneDrive online-only placeholder (stored as '1' at scan time). It can't be ingested
+    // (no local bytes), so it is skipped — a keyboard-select bypasses the card's offline-disabled button.
+    return { hash: s.hash, kind: s.kind, offline: s.offline === '1', missing, sizeBytes, abs }
   })
   const plan = planSelectedImport(enriched, forceHashes, VIDEO_GATE_BYTES)
   let imported = 0
