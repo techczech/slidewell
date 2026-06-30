@@ -921,10 +921,18 @@ function groupByDateList(items: TriageItem[]): Array<[string, TriageItem[]]> {
 function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onChanged: () => void; onToast: (m: string) => void }): JSX.Element {
   const [root, setRoot] = useState<string | null | undefined>(undefined) // undefined = loading, null = unset
   const [items, setItems] = useState<TriageItem[]>([])
-  const [counts, setCounts] = useState<TriageCounts>({ undecided: 0, included: 0, excluded: 0, total: 0 })
+  const [counts, setCounts] = useState<TriageCounts>({ undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 })
+  const [cols, setCols] = useState<number>(() => {
+    const n = Number(localStorage.getItem('sw.triage.cols'))
+    return n >= 2 && n <= 6 ? n : 6
+  })
+  useEffect(() => { localStorage.setItem('sw.triage.cols', String(cols)) }, [cols])
+  // fewer columns → taller tiles, so the preview genuinely grows
+  const THUMB_H: Record<number, number> = { 2: 320, 3: 260, 4: 210, 5: 175, 6: 150 }
+  const gridVars = { ['--triage-cols']: cols, ['--triage-thumb-h']: `${THUMB_H[cols] ?? 150}px` } as React.CSSProperties
   const [q, setQ] = useState('')
   const [debq, setDebq] = useState('')
-  const [stateFilter, setStateFilter] = useState<'undecided' | 'included' | 'excluded' | 'all'>('undecided')
+  const [stateFilter, setStateFilter] = useState<'undecided' | 'selected' | 'excluded' | 'all'>('undecided')
   const [sort, setSort] = useState<'scanned' | 'date-desc' | 'date-asc'>('scanned')
   const [groupByDate, setGroupByDate] = useState(false)
   const [scanning, setScanning] = useState(false)
@@ -1007,30 +1015,16 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
   }, [refresh])
 
   const decide = useCallback(
-    async (item: TriageItem, action: 'include' | 'exclude' | 'reset') => {
-      if (action === 'include' && item.offline) {
-        onToast('Not downloaded — open it in OneDrive first')
-        return
-      }
-      let force = false
-      if (action === 'include' && item.large) {
-        if (!window.confirm(`“${item.filename}” is ${item.sizeMB} MB — over the 20 MB video gate. Include it anyway?`)) return
-        force = true
-      }
-      const r = await window.sw.triage.decide(item.hash, action, force)
-      if (r.gated) {
-        onToast(`Gated at 20 MB (${r.sizeMB} MB)`)
-        return
-      }
+    async (item: TriageItem, action: 'select' | 'exclude' | 'reset') => {
+      const r = await window.sw.triage.decide(item.hash, action)
       const newState = (r.state as TriageItem['state']) || 'undecided'
-      // update the card in place (don't refetch) so a just-selected item stays visible to unselect,
-      // and the grid doesn't reshuffle under you while you work through it
       setItems((prev) => prev.map((it) => (it.hash === item.hash ? { ...it, state: newState } : it)))
       setCounts((c) => {
         if (item.state === newState) return c
         const next = { ...c }
         const bump = (k: TriageItem['state'], d: number): void => {
-          if (k === 'included') next.included += d
+          if (k === 'selected') next.selected += d
+          else if (k === 'included') next.included += d
           else if (k === 'excluded') next.excluded += d
           else next.undecided += d
         }
@@ -1038,11 +1032,25 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
         bump(newState, 1)
         return next
       })
-      onToast(action === 'include' ? 'Selected → added to the well' : action === 'exclude' ? 'Excluded' : 'Unselected')
+      onToast(action === 'select' ? 'Selected' : action === 'exclude' ? 'Excluded' : 'Unselected')
       onChanged()
     },
     [onChanged, onToast]
   )
+
+  const importSelected = useCallback(async () => {
+    // staged large videos need an explicit confirm each (rare); only those currently in view can be
+    // confirmed — others are reported as "over gate" and stay staged until imported from the Selected tab
+    const forceHashes: string[] = []
+    for (const v of items.filter((it) => it.state === 'selected' && it.kind === 'video' && it.large)) {
+      if (window.confirm(`"${v.filename}" is ${v.sizeMB} MB — over the 20 MB video gate. Import it anyway?`)) forceHashes.push(v.hash)
+    }
+    const r = await window.sw.triage.importSelected(forceHashes)
+    const extra = [r.skipped ? `${r.skipped} skipped` : '', r.gated ? `${r.gated} over gate` : ''].filter(Boolean).join(' · ')
+    onToast(`Imported ${r.imported} → well${extra ? ` · ${extra}` : ''}`)
+    await refresh()
+    onChanged()
+  }, [items, refresh, onChanged, onToast])
 
   const paste = useCallback(async () => {
     const r = await window.sw.triage.paste()
@@ -1078,17 +1086,12 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
         return
       }
       if (preview) {
-        if (e.key === ' ' || e.key === 'i' || e.key === 'I') {
-          e.preventDefault()
-          void decide(preview, 'include')
-          setPreview(null)
-        } else if (e.key === 'x' || e.key === 'X') {
-          e.preventDefault()
-          void decide(preview, 'exclude')
-          setPreview(null)
-        } else if (e.key === 'u' || e.key === 'U') {
-          e.preventDefault()
-          void decide(preview, 'reset')
+        if (e.key === ' ' || e.key === 's' || e.key === 'S' || e.key === 'i' || e.key === 'I') {
+          e.preventDefault(); void decide(preview, 'select'); setPreview(null)
+        } else if (e.key === 'x' || e.key === 'X' || e.key === 'u' || e.key === 'U') {
+          e.preventDefault(); void decide(preview, 'reset'); setPreview(null)
+        } else if (e.key === 'e' || e.key === 'E') {
+          e.preventDefault(); void decide(preview, 'exclude'); setPreview(null)
         }
         return
       }
@@ -1102,25 +1105,20 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
         setSel((s) => Math.max(s - 1, 0))
       } else if (e.key === 'ArrowDown') {
         e.preventDefault()
-        setSel((s) => Math.min((s < 0 ? 0 : s) + 6, items.length - 1)) // a row is 6 columns
+        setSel((s) => Math.min((s < 0 ? 0 : s) + cols, items.length - 1))
       } else if (e.key === 'ArrowUp') {
         e.preventDefault()
-        setSel((s) => Math.max((s < 0 ? 0 : s) - 6, 0))
+        setSel((s) => Math.max((s < 0 ? 0 : s) - cols, 0))
       } else if (e.key === 'Enter' && cur) {
-        e.preventDefault()
-        setPreview(cur)
+        e.preventDefault(); setPreview(cur)
       } else if (e.key === ' ' && cur) {
-        e.preventDefault()
-        void decide(cur, 'include') // Space = select (keep)
-      } else if ((e.key === 'i' || e.key === 'I') && cur) {
-        e.preventDefault()
-        void decide(cur, 'include')
-      } else if ((e.key === 'x' || e.key === 'X') && cur) {
-        e.preventDefault()
-        void decide(cur, 'exclude')
-      } else if ((e.key === 'u' || e.key === 'U') && cur) {
-        e.preventDefault()
-        void decide(cur, 'reset') // U = unselect
+        e.preventDefault(); void decide(cur, cur.state === 'selected' ? 'reset' : 'select') // Space toggles
+      } else if ((e.key === 's' || e.key === 'S' || e.key === 'i' || e.key === 'I') && cur) {
+        e.preventDefault(); void decide(cur, 'select')
+      } else if ((e.key === 'x' || e.key === 'X' || e.key === 'u' || e.key === 'U') && cur) {
+        e.preventDefault(); void decide(cur, 'reset') // X = unselect → undecided
+      } else if ((e.key === 'e' || e.key === 'E') && cur) {
+        e.preventDefault(); void decide(cur, 'exclude')
       } else if (e.key === '[') {
         e.preventDefault()
         setPage((p) => Math.max(0, p - 1))
@@ -1136,7 +1134,7 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [items, sel, preview, hasMore, decide, paste, onClose])
+  }, [items, sel, preview, hasMore, decide, paste, onClose, cols, importSelected])
 
   return (
     <>
@@ -1150,6 +1148,9 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
               </span>
             )}
             <div className="triage-head-actions">
+              <button className="primary-btn" onClick={() => void importSelected()} disabled={counts.selected === 0} title="Import all selected screenshots into the well">
+                ⤓ Import {counts.selected} → well
+              </button>
               <button className="tb-btn" onClick={() => void paste()} title="Paste an image from the clipboard (⌘V)">
                 ⎘ Paste
               </button>
@@ -1180,12 +1181,12 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
                 <input
                   ref={searchRef}
                   className="search-input"
-                  placeholder="Search text in screenshots…   /  focus · Space select · U unselect · X exclude · ⌘Y full · [ ] page"
+                  placeholder="Search text in screenshots…   /  focus · S select · X unselect · E exclude · Space toggle · ⌘Y full · [ ] page"
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
                 />
                 <div className="scope" role="tablist" aria-label="Triage state">
-                  {(['undecided', 'included', 'excluded', 'all'] as const).map((s) => (
+                  {(['undecided', 'selected', 'excluded', 'all'] as const).map((s) => (
                     <button key={s} role="tab" aria-selected={stateFilter === s} className={stateFilter === s ? 'scope-tab active' : 'scope-tab'} onClick={() => setStateFilter(s)}>
                       {s[0].toUpperCase() + s.slice(1)}
                       {s !== 'all' ? ` ${counts[s]}` : ''}
@@ -1197,6 +1198,11 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
                   <option value="date-desc">Date — newest</option>
                   <option value="date-asc">Date — oldest</option>
                 </select>
+                <div className="triage-cols" role="group" aria-label="Grid size">
+                  {[2, 3, 4, 5, 6].map((n) => (
+                    <button key={n} className={cols === n ? 'active' : ''} onClick={() => setCols(n)} title={`${n} columns`}>{n}</button>
+                  ))}
+                </div>
                 <label className="toggle" title="Group by capture date">
                   <input type="checkbox" checked={groupByDate} onChange={(e) => setGroupByDate(e.target.checked)} /> Group by date
                 </label>
@@ -1213,7 +1219,7 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
                   )}
                 </div>
               ) : groupByDate ? (
-                <div className="triage-scroll">
+                <div className="triage-scroll" style={gridVars}>
                   {groupByDateList(items).map(([date, group]) => (
                     <div className="triage-group" key={date || 'unknown'}>
                       <div className="triage-group-head">
@@ -1229,7 +1235,7 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
                   ))}
                 </div>
               ) : (
-                <div className="triage-grid triage-scroll">
+                <div className="triage-grid triage-scroll" style={gridVars}>
                   {items.map((it, i) => (
                     <TriageCard key={it.relPath} item={it} selected={i === sel} onSelect={() => setSel(i)} onOpen={() => setPreview(it)} onDecide={(a) => void decide(it, a)} />
                   ))}
@@ -1275,9 +1281,9 @@ function TriageCard({
   selected: boolean
   onSelect: () => void
   onOpen: () => void
-  onDecide: (a: 'include' | 'exclude' | 'reset') => void
+  onDecide: (a: 'select' | 'exclude' | 'reset') => void
 }): JSX.Element {
-  const badge = item.state === 'included' ? '✓' : item.state === 'excluded' ? '✗' : ''
+  const badge = item.state === 'included' ? '✓' : item.state === 'selected' ? '✓' : item.state === 'excluded' ? '✗' : ''
   return (
     <div className={`triage-card state-${item.state}${selected ? ' selected' : ''}${item.offline ? ' offline' : ''}`} onClick={onSelect} onDoubleClick={onOpen}>
       <div className="triage-thumb" onClick={(e) => { e.stopPropagation(); onOpen() }} title={item.offline ? 'Not downloaded from OneDrive yet' : 'Open preview'}>
@@ -1297,21 +1303,21 @@ function TriageCard({
         {item.snippet && <div className="triage-snip">{item.snippet}</div>}
       </div>
       <div className="triage-actions">
-        {item.state !== 'included' && (
-          <button className="ti-inc" disabled={item.offline} title={item.offline ? 'Download it in OneDrive first' : 'Select / keep (Space)'} onClick={(e) => { e.stopPropagation(); onDecide('include') }}>Select</button>
+        {item.state !== 'selected' && item.state !== 'included' && (
+          <button className="ti-inc" disabled={item.offline} title={item.offline ? 'Download it in OneDrive first' : 'Select (S / Space)'} onClick={(e) => { e.stopPropagation(); onDecide('select') }}>Select</button>
         )}
         {item.state !== 'excluded' && (
-          <button className="ti-exc" title="Exclude (X)" onClick={(e) => { e.stopPropagation(); onDecide('exclude') }}>Exclude</button>
+          <button className="ti-exc" title="Exclude (E)" onClick={(e) => { e.stopPropagation(); onDecide('exclude') }}>Exclude</button>
         )}
-        {item.state !== 'undecided' && (
-          <button className="ti-rst" title="Unselect (U)" onClick={(e) => { e.stopPropagation(); onDecide('reset') }}>Unselect</button>
+        {item.state !== 'undecided' && item.state !== 'included' && (
+          <button className="ti-rst" title="Unselect (X)" onClick={(e) => { e.stopPropagation(); onDecide('reset') }}>Unselect</button>
         )}
       </div>
     </div>
   )
 }
 
-function TriagePreview({ item, onClose, onDecide }: { item: TriageItem; onClose: () => void; onDecide: (a: 'include' | 'exclude' | 'reset') => void }): JSX.Element {
+function TriagePreview({ item, onClose, onDecide }: { item: TriageItem; onClose: () => void; onDecide: (a: 'select' | 'exclude' | 'reset') => void }): JSX.Element {
   return (
     <div className="overlay triage-preview-overlay" onClick={onClose}>
       <div className="lightbox" onClick={(e) => e.stopPropagation()}>
@@ -1327,9 +1333,9 @@ function TriagePreview({ item, onClose, onDecide }: { item: TriageItem; onClose:
         <div className="lb-bar">
           <div className="lb-title">{item.filename}</div>
           <div className="lb-meta">{[item.kind, item.kind === 'video' ? `${item.sizeMB} MB` : '', `state: ${item.state}`].filter(Boolean).join(' · ')}</div>
-          <button className="ti-inc" onClick={() => onDecide('include')}>Select (Space)</button>
-          <button className="ti-exc" onClick={() => onDecide('exclude')}>Exclude (X)</button>
-          {item.state !== 'undecided' && <button className="copyref" onClick={() => onDecide('reset')}>Unselect (U)</button>}
+          <button className="ti-inc" onClick={() => onDecide('select')}>Select (Space)</button>
+          <button className="ti-exc" onClick={() => onDecide('exclude')}>Exclude (E)</button>
+          {item.state !== 'undecided' && item.state !== 'included' && <button className="copyref" onClick={() => onDecide('reset')}>Unselect (X)</button>}
           <button className="copyref" onClick={onClose}>close ✕</button>
         </div>
       </div>
