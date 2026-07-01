@@ -559,7 +559,7 @@ export default function App(): JSX.Element {
                 role="tab"
                 aria-selected={filters.scope === s}
                 className={filters.scope === s ? 'scope-tab active' : 'scope-tab'}
-                onClick={() => patch({ scope: s })}
+                onClick={() => patch(s === 'well' && filters.type === 'slides' ? { scope: s, type: 'images' } : { scope: s })}
               >
                 {s === 'all' ? 'All' : s === 'archive' ? 'Archive' : 'Well'}
               </button>
@@ -1088,10 +1088,10 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
       if (preview) {
         if (e.key === ' ' || e.key === 's' || e.key === 'S' || e.key === 'i' || e.key === 'I') {
           e.preventDefault(); void decide(preview, 'select'); setPreview(null)
-        } else if (e.key === 'x' || e.key === 'X' || e.key === 'u' || e.key === 'U') {
-          e.preventDefault(); void decide(preview, 'reset'); setPreview(null)
-        } else if (e.key === 'e' || e.key === 'E') {
+        } else if (e.key === 'x' || e.key === 'X' || e.key === 'e' || e.key === 'E') {
           e.preventDefault(); void decide(preview, 'exclude'); setPreview(null)
+        } else if (e.key === 'u' || e.key === 'U') {
+          e.preventDefault(); void decide(preview, 'reset'); setPreview(null)
         }
         return
       }
@@ -1112,13 +1112,20 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
       } else if (e.key === 'Enter' && cur) {
         e.preventDefault(); setPreview(cur)
       } else if (e.key === ' ' && cur) {
-        e.preventDefault(); void decide(cur, cur.state === 'selected' ? 'reset' : 'select') // Space toggles
+        // Space toggles: select if not selected (then advance), else unselect (stay)
+        e.preventDefault()
+        if (cur.state === 'selected') {
+          void decide(cur, 'reset')
+        } else {
+          void decide(cur, 'select')
+          setSel((s) => Math.min(s + 1, items.length - 1))
+        }
       } else if ((e.key === 's' || e.key === 'S' || e.key === 'i' || e.key === 'I') && cur) {
-        e.preventDefault(); void decide(cur, 'select')
-      } else if ((e.key === 'x' || e.key === 'X' || e.key === 'u' || e.key === 'U') && cur) {
-        e.preventDefault(); void decide(cur, 'reset') // X = unselect → undecided
-      } else if ((e.key === 'e' || e.key === 'E') && cur) {
-        e.preventDefault(); void decide(cur, 'exclude')
+        e.preventDefault(); void decide(cur, 'select'); setSel((s) => Math.min(s + 1, items.length - 1)) // select → advance
+      } else if ((e.key === 'x' || e.key === 'X' || e.key === 'e' || e.key === 'E') && cur) {
+        e.preventDefault(); void decide(cur, 'exclude'); setSel((s) => Math.min(s + 1, items.length - 1)) // X = exclude → advance
+      } else if ((e.key === 'u' || e.key === 'U') && cur) {
+        e.preventDefault(); void decide(cur, 'reset') // U = unselect → undecided, stay
       } else if (e.key === '[') {
         e.preventDefault()
         setPage((p) => Math.max(0, p - 1))
@@ -1181,7 +1188,7 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
                 <input
                   ref={searchRef}
                   className="search-input"
-                  placeholder="Search text in screenshots…   /  focus · S select · X unselect · E exclude · Space toggle · ⌘Y full · [ ] page"
+                  placeholder="Search text in screenshots…   /  focus · S select · X exclude · U unselect · Space toggle · ⌘Y full · [ ] page"
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
                 />
@@ -1307,10 +1314,10 @@ function TriageCard({
           <button className="ti-inc" disabled={item.offline} title={item.offline ? 'Download it in OneDrive first' : 'Select (S / Space)'} onClick={(e) => { e.stopPropagation(); onDecide('select') }}>Select</button>
         )}
         {item.state !== 'excluded' && (
-          <button className="ti-exc" title="Exclude (E)" onClick={(e) => { e.stopPropagation(); onDecide('exclude') }}>Exclude</button>
+          <button className="ti-exc" title="Exclude (X)" onClick={(e) => { e.stopPropagation(); onDecide('exclude') }}>Exclude</button>
         )}
         {item.state !== 'undecided' && item.state !== 'included' && (
-          <button className="ti-rst" title="Unselect (X)" onClick={(e) => { e.stopPropagation(); onDecide('reset') }}>Unselect</button>
+          <button className="ti-rst" title="Unselect (U)" onClick={(e) => { e.stopPropagation(); onDecide('reset') }}>Unselect</button>
         )}
       </div>
     </div>
@@ -1334,8 +1341,8 @@ function TriagePreview({ item, onClose, onDecide }: { item: TriageItem; onClose:
           <div className="lb-title">{item.filename}</div>
           <div className="lb-meta">{[item.kind, item.kind === 'video' ? `${item.sizeMB} MB` : '', `state: ${item.state}`].filter(Boolean).join(' · ')}</div>
           <button className="ti-inc" onClick={() => onDecide('select')}>Select (Space)</button>
-          <button className="ti-exc" onClick={() => onDecide('exclude')}>Exclude (E)</button>
-          {item.state !== 'undecided' && item.state !== 'included' && <button className="copyref" onClick={() => onDecide('reset')}>Unselect (X)</button>}
+          <button className="ti-exc" onClick={() => onDecide('exclude')}>Exclude (X)</button>
+          {item.state !== 'undecided' && item.state !== 'included' && <button className="copyref" onClick={() => onDecide('reset')}>Unselect (U)</button>}
           <button className="copyref" onClick={onClose}>close ✕</button>
         </div>
       </div>
