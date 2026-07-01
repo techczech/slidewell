@@ -14,6 +14,7 @@ import { createReadStream, existsSync, mkdirSync, readdirSync, statSync } from '
 import { join, relative, extname } from 'node:path'
 import { query, run, safeFtsQuery } from './sqlite'
 import { ocrImage, ingestScreenshot, ingestVideo, makePoster } from './well'
+import { tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'heic', 'heif', 'tiff', 'tif', 'bmp'])
 const VIDEO_EXT = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv'])
@@ -235,44 +236,31 @@ export async function listTriage(wellRoot: string, raw: string, state: string, s
   return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} ${where} ${useDate ? dateOrder : 'ORDER BY triage_fts.scanned_at DESC'} LIMIT ? OFFSET ?`, [limit, offset])
 }
 
-export async function triageCounts(wellRoot: string): Promise<{ undecided: number; included: number; excluded: number; total: number }> {
+export async function triageCounts(wellRoot: string): Promise<TriageCounts> {
   const db = triageDb(wellRoot)
-  const out = { undecided: 0, included: 0, excluded: 0, total: 0 }
-  if (!existsSync(db)) return out
+  const empty: TriageCounts = { undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 }
+  if (!existsSync(db)) return empty
   const rows = await query<{ state: string; n: number }>(
     db,
     `SELECT COALESCE(d.state, 'undecided') AS state, COUNT(*) AS n
      FROM triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash GROUP BY state`,
     []
   )
-  for (const r of rows) {
-    const n = Number(r.n)
-    out.total += n
-    if (r.state === 'included') out.included = n
-    else if (r.state === 'excluded') out.excluded = n
-    else out.undecided += n
-  }
-  return out
-}
-
-async function rowByHash(wellRoot: string, hash: string): Promise<{ kind: string; rel_path: string } | null> {
-  const r = await query<{ kind: string; rel_path: string }>(triageDb(wellRoot), 'SELECT kind, rel_path FROM triage_fts WHERE hash = ? LIMIT 1', [hash])
-  return r[0] ?? null
+  return tallyTriageStates(rows)
 }
 
 /**
- * Apply a triage decision. include → promote the file into the well (copy + enrich) and remember the
- * resulting well id; exclude → remember the hash only; reset → forget the decision. For a video over
- * the 20 MB gate, include without force returns { gated: true } and copies nothing.
+ * Apply a triage decision. select → stage the item (no ingest, no copy — promoted later by
+ * importSelectedTriage); exclude → remember the hash only; reset → forget the decision.
  */
 export async function setTriageDecision(
-  archiveRoot: string,
+  _archiveRoot: string,
   wellRoot: string,
-  sourceRoot: string,
+  _sourceRoot: string,
   hash: string,
-  action: 'include' | 'exclude' | 'reset',
-  force = false
-): Promise<{ state: string; wellId?: string; gated?: boolean; sizeMB?: number }> {
+  action: 'select' | 'exclude' | 'reset',
+  _force = false
+): Promise<{ state: string }> {
   await ensureTriage(wellRoot)
   const db = triageDb(wellRoot)
   if (action === 'reset') {
@@ -283,21 +271,57 @@ export async function setTriageDecision(
     await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, NULL)', [hash, 'excluded', new Date().toISOString()])
     return { state: 'excluded' }
   }
-  // include
-  const row = await rowByHash(wellRoot, hash)
-  if (!row) return { state: 'undecided' }
-  const abs = join(sourceRoot, row.rel_path)
-  if (!existsSync(abs)) return { state: 'undecided' }
-  let wellId: string | undefined
-  if (row.kind === 'video') {
-    const size = statSync(abs).size
-    if (size > VIDEO_GATE_BYTES && !force) return { state: 'undecided', gated: true, sizeMB: Math.round(size / (1024 * 1024)) }
-    const res = await ingestVideo(archiveRoot, wellRoot, abs)
-    wellId = res?.id
-  } else {
-    const res = await ingestScreenshot(archiveRoot, wellRoot, abs, 'screenshot')
-    wellId = res?.id
+  // select = stage only; nothing reaches the well until importSelectedTriage runs
+  await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, NULL)', [hash, 'selected', new Date().toISOString()])
+  return { state: 'selected' }
+}
+
+/**
+ * Promote every staged (state='selected') item into the well. Offline/missing files are skipped; a
+ * video over the 20 MB gate is skipped unless its hash is in forceHashes. Imported items move to
+ * state='included' with their new well id. Idempotent: a second run finds nothing still 'selected'.
+ */
+export async function importSelectedTriage(
+  archiveRoot: string,
+  wellRoot: string,
+  sourceRoot: string,
+  forceHashes: string[] = []
+): Promise<{ imported: number; skipped: number; gated: number }> {
+  await ensureTriage(wellRoot)
+  const db = triageDb(wellRoot)
+  // GROUP BY hash: decisions are keyed by content hash, but triage_fts is keyed by path, so a hash
+  // with duplicate files JOINs to multiple rows. One row per hash avoids ingesting the same selected
+  // item once per duplicate.
+  const staged = await query<{ hash: string; kind: string; rel_path: string; offline: string }>(
+    db,
+    `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline
+     FROM triage_fts JOIN triage_decisions d ON d.hash = triage_fts.hash
+     WHERE d.state = 'selected'
+     GROUP BY triage_fts.hash`,
+    []
+  )
+  const enriched = staged.map((s) => {
+    const abs = join(sourceRoot, s.rel_path)
+    const missing = !existsSync(abs)
+    const sizeBytes = missing ? 0 : statSync(abs).size
+    // offline = OneDrive online-only placeholder (stored as '1' at scan time). It can't be ingested
+    // (no local bytes), so it is skipped — a keyboard-select bypasses the card's offline-disabled button.
+    return { hash: s.hash, kind: s.kind, offline: s.offline === '1', missing, sizeBytes, abs }
+  })
+  const plan = planSelectedImport(enriched, forceHashes, VIDEO_GATE_BYTES)
+  let imported = 0
+  let failed = 0
+  for (const hash of plan.toImport) {
+    const row = enriched.find((e) => e.hash === hash)
+    if (!row) continue
+    const res = row.kind === 'video' ? await ingestVideo(archiveRoot, wellRoot, row.abs) : await ingestScreenshot(archiveRoot, wellRoot, row.abs, 'screenshot')
+    if (res?.id) {
+      await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)', [hash, 'included', new Date().toISOString(), res.id])
+      imported++
+    } else {
+      console.error(`[triage] import failed for ${row.abs} — ingest returned no id; left staged`)
+      failed++
+    }
   }
-  await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)', [hash, 'included', new Date().toISOString(), wellId || ''])
-  return { state: 'included', wellId }
+  return { imported, skipped: plan.skipped.length + failed, gated: plan.gated.length }
 }
