@@ -1,6 +1,6 @@
-// Isolated triage e2e (ADR-0029). Runs the real scan → list → include flow through the app's IPC,
-// but against throwaway dirs (temp userData + temp well + a fixture source folder), so it never
-// touches the user's real well/config. Run: `node e2e/triage.mjs` (after `npm run build`).
+// Isolated triage e2e (ADR-0029). Runs the real scan → list → select → importSelected flow through
+// the app's IPC, against throwaway dirs (temp userData + temp well + a fixture source folder), so it
+// never touches the user's real well/config. Run: `node e2e/triage.mjs` (after `npm run build`).
 import { _electron as electron } from 'playwright'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
@@ -74,19 +74,30 @@ try {
   await win.locator('.triage-controls .toggle input').uncheck()
   await win.waitForTimeout(300)
 
-  // include the UNIQUE-content file → exactly one item becomes included
-  const oneItem = all0.find((i) => i.filename === 'one.png')
-  const dec = await win.evaluate((h) => window.sw.triage.decide(h, 'include'), oneItem.hash)
-  result.includeState = dec.state
-  result.wellId = Boolean(dec.wellId)
+  // stage two items via select — NOTHING should reach the well yet (stage-then-import flow)
+  // all0 is sorted date-desc: all0[0]=one.png (2024), all0[1]=dup.png (2022), all0[2]=two.png (2020)
+  await win.evaluate((h) => window.sw.triage.decide(h, 'select'), all0[0].hash)
+  await win.evaluate((h) => window.sw.triage.decide(h, 'select'), all0[1].hash)
+  result.selectedCount = (await win.evaluate(() => window.sw.triage.list('', 'selected'))).counts.selected
+  const { readdirSync, existsSync } = await import('node:fs')
+  // 'images' subdir confirmed from well.ts (ingestScreenshot writes <well>/images/<slug>--<id>.<ext>)
+  const wellImages = join(wellRoot, 'images')
+  result.wellEmptyBeforeImport = !existsSync(wellImages) || readdirSync(wellImages).length === 0
 
   // exclude one of the DUPLICATES → both byte-identical files share the hash-keyed decision
+  // (this overrides the 'selected' state for that hash, leaving only one.png staged)
   const twoItem = all0.find((i) => i.filename === 'two.png')
   await win.evaluate((h) => window.sw.triage.decide(h, 'exclude'), twoItem.hash)
   const after = await win.evaluate(() => window.sw.triage.list('', 'all'))
-  result.includedCount = after.counts.included // one.png
   result.excludedCount = after.counts.excluded // two.png + dup.png (shared content hash)
   result.undecidedCount = after.counts.undecided
+  result.includedBeforeImport = after.counts.included
+
+  // import all staged items → one.png is promoted to the well; dup.png/two.png hash is excluded so skipped
+  const imp = await win.evaluate(() => window.sw.triage.importSelected([]))
+  result.imported = imp.imported
+  result.wellHasImagesAfterImport = existsSync(wellImages) && readdirSync(wellImages).length >= 1
+  result.includedAfterImport = (await win.evaluate(() => window.sw.triage.list('', 'all'))).counts.included
 
   // date sort: newest-first vs oldest-first must flip, and every item carries a YYYY-MM-DD date
   const desc = await win.evaluate(() => window.sw.triage.list('', 'all', 'date-desc'))
@@ -104,11 +115,14 @@ try {
     result.cardsRendered === 3 &&
     result.cardHeightOk &&
     result.groupCols === 6 &&
-    result.includeState === 'included' &&
-    result.wellId &&
-    result.includedCount === 1 &&
+    result.selectedCount === 3 &&
+    result.includedBeforeImport === 0 &&
+    result.wellEmptyBeforeImport &&
     result.excludedCount === 2 &&
     result.undecidedCount === 0 &&
+    result.imported >= 1 &&
+    result.wellHasImagesAfterImport &&
+    result.includedAfterImport >= 1 &&
     result.datesOk &&
     result.dateSortFlips
 } catch (e) {
