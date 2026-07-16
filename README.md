@@ -1,3 +1,12 @@
+---
+name: "SlideWell"
+description: "Treats slides and images as a reusable creative well rather than files lost inside old presentations."
+categories: [desktop-apps, desktop-app, built-by-ai]
+updated: 2026-07-16
+deployments:
+  Release:
+    "Latest release": https://github.com/techczech/slidewell/releases/latest
+---
 # SlideWell
 
 **Your slides and images in one place — the well you draw slides and images from.** Companion to [TalkWeaver](https://talkweaver.app).
