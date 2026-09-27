@@ -41,6 +41,8 @@ export function installMock(): void {
       chooseScreenshotFolder: async () => null,
       chooseConversionsFolder: async () => null,
       setConvertOcr: async (on: boolean) => on,
+      getOwnerNames: async () => ({ names: ['Mock User'], isDefault: true }),
+      setOwnerNames: async (names: string[]) => ({ names, isDefault: names.length === 0 }),
       chooseOthersFolder: async () => null,
       clearOthersLibrary: async () => ({ ok: false }),
       getR2: async () => ({ accountId: '', endpoint: '', bucket: 'ppt-archive-media', prefix: 'slidewell', hasCreds: false }),

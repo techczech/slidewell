@@ -1361,8 +1361,14 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
   const [r2status, setR2status] = useState('')
   const [storage, setStorage] = useState<{ archive: 'local' | 'r2'; others: 'local' | 'r2'; well: 'local' | 'r2' }>({ archive: 'local', others: 'local', well: 'local' })
   const [syncStatus, setSyncStatus] = useState('')
+  const [owners, setOwners] = useState('')
+  const [ownersDefault, setOwnersDefault] = useState(true)
+  const [ownersStatus, setOwnersStatus] = useState('')
 
   const load = useCallback(async () => {
+    const o = await window.sw.settings.getOwnerNames()
+    setOwners(o.names.join(', '))
+    setOwnersDefault(o.isDefault)
     const p = await window.sw.settings.getPaths()
     setPaths({ archiveRoot: p.archiveRoot, wellRoot: p.wellRoot, vaultRoot: p.vaultRoot, screenshotRoot: p.screenshotRoot, conversionsRoot: p.conversionsRoot, othersArchiveRoot: p.othersArchiveRoot })
     setConvertOcr(p.convertOcrDefault)
@@ -1430,6 +1436,14 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
       onChanged()
     }
   }
+  const saveOwners = async (): Promise<void> => {
+    const names = owners.split(/[,;\n]/).map((n) => n.trim()).filter(Boolean)
+    const r = await window.sw.settings.setOwnerNames(names)
+    setOwners(r.names.join(', '))
+    setOwnersDefault(r.isDefault)
+    setOwnersStatus(r.isDefault ? '✓ Reset to your Mac account name.' : '✓ Saved.')
+    onChanged()
+  }
   const clearOthers = async (): Promise<void> => {
     const r = await window.sw.settings.clearOthersLibrary()
     if (r.ok) {
@@ -1476,6 +1490,20 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
               <div className="settings-row-detail"><i>Delete everything imported into the Others’ Library. Your own archive is never touched.</i></div>
             </div>
             <button className="copyref" onClick={() => void clearOthers()}>Clear library…</button>
+          </div>
+        </div>
+
+        <div className="settings-section">My decks</div>
+        <div className="settings-rows">
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">Your names as PPTX author{ownersDefault ? ' · from your Mac account' : ''}</div>
+              <div className="settings-row-detail">
+                <i>{ownersStatus || 'Comma-separated. A deck counts as yours (Owner: My decks) when its author contains any of these names or their words; accents and case are ignored. Clear the field and Save to go back to your Mac account name.'}</i>
+              </div>
+              <input className="search-input" value={owners} placeholder="e.g. Jane Smith, jsmith" onChange={(e) => setOwners(e.target.value)} />
+            </div>
+            <button className="copyref" onClick={() => void saveOwners()}>Save</button>
           </div>
         </div>
 

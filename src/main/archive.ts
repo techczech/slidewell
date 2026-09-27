@@ -12,7 +12,7 @@
  */
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { loadDeckMeta, categoryMatches, deckMatchesSubstring, type DeckMetaIndex } from './deckmeta'
 import { computeStats, type StatsDeck, type Stats } from './stats'
 import {
@@ -124,12 +124,74 @@ function imagesDb(root: string): string {
   return join(root, 'registry', 'images.db')
 }
 
-/** Absolute path to a slide's render WebP (renders/slide_NNNN.webp, NNNN = order+1). */
+/**
+ * Slide renders (ppt-archive tools/renders): one WebP per PDF page, renders/slide_NNNN.webp with
+ * NNNN = the 1-based PAGE number, plus renders.json mapping each extracted slide's `slide_order`
+ * to its page. The extractor numbers slides from 1, so page == slide_order for almost every deck —
+ * but a few older extractions number from 0, so the manifest (the extractor's own pairing) wins.
+ */
+interface RenderManifest {
+  renders?: Array<{ slide_order?: number; page?: number; render?: string | null }>
+}
+const manifestMemo = new Map<string, { mtimeMs: number; byOrder: Map<number, string | null> }>()
+
+function renderManifest(root: string, presentationId: string): Map<number, string | null> | null {
+  const mp = join(root, 'extracted', presentationId, 'renders.json')
+  let mtimeMs: number
+  try {
+    mtimeMs = statSync(mp).mtimeMs
+  } catch {
+    manifestMemo.delete(mp)
+    return null
+  }
+  const hit = manifestMemo.get(mp)
+  if (hit && hit.mtimeMs === mtimeMs) return hit.byOrder
+  const byOrder = new Map<number, string | null>()
+  try {
+    const m = JSON.parse(readFileSync(mp, 'utf8')) as RenderManifest
+    for (const e of m.renders ?? []) {
+      if (typeof e.slide_order !== 'number') continue
+      const rel = typeof e.render === 'string' && e.render && !e.render.split(/[\\/]/).includes('..') ? e.render : null
+      byOrder.set(e.slide_order, rel)
+    }
+  } catch {
+    return null
+  }
+  manifestMemo.set(mp, { mtimeMs, byOrder })
+  return byOrder
+}
+
+/** Absolute path to render PAGE n (1-based: page 1 = the title slide), or null when not rendered. */
+export function renderPagePath(root: string, presentationId: string, page: number | null): string | null {
+  if (page === null || page === undefined || !presentationId || !Number.isInteger(page) || page < 1) return null
+  const p = join(root, 'extracted', presentationId, 'renders', `slide_${String(page).padStart(4, '0')}.webp`)
+  return existsSync(p) ? p : null
+}
+
+/** Absolute path to the render of the slide with this extractor `slide_order`, or null. */
 export function renderPath(root: string, presentationId: string, slideOrder: number | null): string | null {
   if (slideOrder === null || slideOrder === undefined || !presentationId) return null
-  const nnnn = String(slideOrder + 1).padStart(4, '0')
-  const p = join(root, 'extracted', presentationId, 'renders', `slide_${nnnn}.webp`)
-  return existsSync(p) ? p : null
+  const byOrder = renderManifest(root, presentationId)
+  if (byOrder && byOrder.has(slideOrder)) {
+    const rel = byOrder.get(slideOrder)
+    if (!rel) return null
+    const p = join(root, 'extracted', presentationId, rel)
+    return existsSync(p) ? p : null
+  }
+  // No manifest (or this order isn't in it): the extractor's convention, page == slide_order.
+  return renderPagePath(root, presentationId, slideOrder)
+}
+
+/**
+ * The presentation.json node for one slide: the one whose `order` equals slideOrder (the extractor's
+ * numbering, usually from 1); falls back to positional indexing only for nodes without `order`.
+ */
+function slideNode(slides: unknown[], slideOrder: number | null): unknown {
+  if (slideOrder !== null && slideOrder !== undefined) {
+    const byOrder = slides.find((s) => (s as { order?: unknown } | null)?.order === slideOrder)
+    if (byOrder) return byOrder
+  }
+  return slides[slideOrder ?? 0] ?? slides[0]
 }
 
 /** Probe the content-addressed media-store for <sha>.<ext> across common extensions. */
@@ -263,7 +325,8 @@ export async function searchSlides(root: string, rawQuery: string, limit = 60, c
       slideOrder: r.slide_order ?? null,
       usedInDecks: 1,
       reference: r.slide_order === null ? `[use: ppt:${r.presentation_id}]` : `[use: ppt:${r.presentation_id}#${r.slide_order}]`,
-      renderAbsPath: renderPath(root, r.presentation_id || '', r.slide_order ?? null),
+      // OCR render rows carry slide_order = page - 1 (tools/renders), NOT the extractor's slide order.
+      renderAbsPath: isRender && r.slide_order !== null && r.slide_order !== undefined ? renderPagePath(root, r.presentation_id || '', r.slide_order + 1) : null,
       rank: r.rank
     })
   }
@@ -436,7 +499,7 @@ export function slideStructure(root: string, deck: string, slideOrder: number | 
   const slides: unknown[] = []
   for (const section of doc.sections ?? []) for (const sl of section.slides ?? []) slides.push(sl)
   if (slides.length === 0) return null
-  const node = slides[slideOrder ?? 0] ?? slides[0]
+  const node = slideNode(slides, slideOrder)
   return JSON.stringify(node, null, 2)
 }
 
@@ -452,7 +515,7 @@ export function slideImages(root: string, deck: string, slideOrder: number | nul
     const doc = JSON.parse(readFileSync(join(root, 'extracted', deck, 'presentation.json'), 'utf8')) as { sections?: Array<{ slides?: unknown[] }> }
     const slides: unknown[] = []
     for (const s of doc.sections ?? []) for (const sl of s.slides ?? []) slides.push(sl)
-    const node = slides[slideOrder ?? 0] ?? slides[0]
+    const node = slideNode(slides, slideOrder)
     if (!node) return []
     const srcs: string[] = []
     const walk = (o: unknown): void => {
@@ -572,7 +635,7 @@ export interface DeckCard {
   ownership: string
   author: string
   slideCount: number
-  coverAbsPath: string | null // render of slide 0 (the title slide)
+  coverAbsPath: string | null // render page 1 (the title slide)
 }
 
 async function slideCounts(root: string, contentOnly: boolean): Promise<Record<string, number>> {
@@ -614,7 +677,7 @@ export async function listDecks(root: string, cacheDir: string, filters: SearchF
         ownership: m.ownership,
         author: m.author || '',
         slideCount: counts[pid] ?? 0,
-        coverAbsPath: renderPath(root, pid, 0)
+        coverAbsPath: renderPagePath(root, pid, 1) // page 1 = the title slide, whatever the deck's order base
       }
     })
     .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))

@@ -10,6 +10,7 @@
  */
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { ownerMatcher, normaliseName, resolveOwnerNames, type OwnerMatcher } from './owners'
 
 export type Ownership = 'mine' | 'others' | 'unknown'
 
@@ -27,21 +28,41 @@ export interface DeckMeta {
 }
 export type DeckMetaIndex = Record<string, DeckMeta>
 
-// --- ownership (mirrors tools/ownership.py) ---
-function isMine(value: string | null | undefined): boolean {
-  if (!value) return false
-  const s = String(value).trim().toLowerCase()
-  if (!s) return false
-  if (s === 'dl') return true
-  return s.includes('dominik') || s.includes('lukes')
+// --- ownership ---
+// "Mine" = the deck's author (or last_modified_by) matches one of the owner names — a setting
+// (config.json `ownerNames`, default = the OS account's names; see owners.ts). Recomputed here from
+// the raw PPTX fields rather than trusting the pipeline's stamped `ownership`, which ppt-archive's
+// tools/ownership.py derives from hardcoded names; the stamp is used only when both fields are absent.
+let memo: { archiveRoot: string; index: DeckMetaIndex } | null = null // in-memory deck index
+let ownerNames: string[] | null = null
+let ownerKey = ''
+let isMine: OwnerMatcher = () => false
+
+function ensureOwners(): void {
+  if (ownerNames === null) setOwnerNames(resolveOwnerNames(undefined).names)
 }
-function resolveOwnership(meta: { ownership?: string; author?: string | null; last_modified_by?: string | null }): Ownership {
-  const stamped = meta.ownership
-  if (stamped === 'mine' || stamped === 'others' || stamped === 'unknown') return stamped
-  if (isMine(meta.author) || isMine(meta.last_modified_by)) return 'mine'
+
+/** Set the names whose decks count as "mine". A change drops the in-memory index (the on-disk cache is keyed by them too). */
+export function setOwnerNames(names: readonly string[]): void {
+  const key = JSON.stringify(names.map(normaliseName).filter(Boolean))
+  if (ownerNames !== null && key === ownerKey) return
+  ownerNames = [...names]
+  ownerKey = key
+  isMine = ownerMatcher(names)
+  memo = null
+}
+
+export function resolveOwnership(
+  meta: { ownership?: string; author?: string | null; last_modified_by?: string | null },
+  mine: OwnerMatcher
+): Ownership {
   const a = String(meta.author ?? '').trim()
   const l = String(meta.last_modified_by ?? '').trim()
-  if (!a && !l) return 'unknown'
+  if (!a && !l) {
+    const stamped = meta.ownership
+    return stamped === 'mine' || stamped === 'others' ? stamped : 'unknown'
+  }
+  if (mine(a) || mine(l)) return 'mine'
   return 'others'
 }
 
@@ -116,7 +137,7 @@ interface PMeta {
   last_modified_by?: string
   category?: string
 }
-const CACHE_VERSION = 3 // bumped: added author (carried through for display)
+const CACHE_VERSION = 4 // bumped: ownership recomputed from configurable owner names (cache keyed by them)
 const CACHE_FILENAME = 'deck-meta-cache.json'
 
 function extractedRoot(archiveRoot: string): string {
@@ -168,7 +189,7 @@ function scanDeckMeta(archiveRoot: string): { index: DeckMetaIndex; newestMtimeM
       modified: modified || null,
       filename: meta?.source_file?.trim() || `${id}.pptx`,
       sourcePath: meta?.source_path?.trim() || '',
-      ownership: resolveOwnership(meta ?? {}),
+      ownership: resolveOwnership(meta ?? {}, isMine),
       author: String(meta?.author ?? meta?.last_modified_by ?? '').trim(),
       category: resolveCategory(meta ?? {})
     }
@@ -196,7 +217,6 @@ function currentNewestMtime(archiveRoot: string): number {
   return newest
 }
 
-let memo: { archiveRoot: string; index: DeckMetaIndex } | null = null
 
 /**
  * Drop the cached deck index (in-memory memo + on-disk cache) so the next load rescans.
@@ -214,6 +234,7 @@ export function invalidateDeckMeta(cacheDir: string): void {
 
 /** Load the deck-meta index, cached on disk (mtime-invalidated) + in memory. */
 export function loadDeckMeta(archiveRoot: string, cacheDir: string): DeckMetaIndex {
+  ensureOwners()
   if (memo && memo.archiveRoot === archiveRoot) return memo.index
   const cachePath = join(cacheDir, CACHE_FILENAME)
   try {
@@ -221,9 +242,10 @@ export function loadDeckMeta(archiveRoot: string, cacheDir: string): DeckMetaInd
       version: number
       newestMtimeMs: number
       archiveRoot: string
+      owners?: string
       index: DeckMetaIndex
     }
-    if (cached.version === CACHE_VERSION && cached.archiveRoot === archiveRoot) {
+    if (cached.version === CACHE_VERSION && cached.archiveRoot === archiveRoot && cached.owners === ownerKey) {
       if (currentNewestMtime(archiveRoot) <= cached.newestMtimeMs) {
         memo = { archiveRoot, index: cached.index }
         return cached.index
@@ -237,7 +259,7 @@ export function loadDeckMeta(archiveRoot: string, cacheDir: string): DeckMetaInd
     mkdirSync(cacheDir, { recursive: true })
     writeFileSync(
       cachePath,
-      JSON.stringify({ version: CACHE_VERSION, newestMtimeMs: scanned.newestMtimeMs, archiveRoot, index: scanned.index }),
+      JSON.stringify({ version: CACHE_VERSION, newestMtimeMs: scanned.newestMtimeMs, archiveRoot, owners: ownerKey, index: scanned.index }),
       'utf8'
     )
   } catch {

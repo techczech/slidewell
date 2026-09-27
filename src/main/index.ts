@@ -7,7 +7,8 @@ import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
-import { loadDeckMeta, categoryList, invalidateDeckMeta, type DeckMetaIndex } from './deckmeta'
+import { loadDeckMeta, categoryList, invalidateDeckMeta, setOwnerNames, type DeckMetaIndex } from './deckmeta'
+import { resolveOwnerNames, cleanOwnerNames } from './owners'
 import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, ingestScreenshot, findFfmpeg, type WellRow } from './well'
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow } from './triage'
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
@@ -39,6 +40,7 @@ type Config = {
   othersArchiveRoot?: string // the Others' Library store (Scenario A) — other people's decks, kept separate
   r2?: { accountId?: string; endpoint?: string; bucket?: string; prefix?: string; accessKeyIdEnc?: string; secretEnc?: string } // R2 backend (creds safeStorage-encrypted)
   storage?: Partial<Record<'archive' | 'others' | 'well', { backend?: 'local' | 'r2' }>> // per-store backend (spec 2026-06-24)
+  ownerNames?: string[] // "My decks": authors that count as the user (unset → the OS account's names; owners.ts)
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -301,6 +303,7 @@ app.whenReady().then(() => {
   // Read-only search over Core A. Returns [] when the archive isn't present (UI degrades gracefully).
   // renderAbsPath is converted to a renderable swarchive:// URL here; the renderer never sees raw paths.
   const cacheDir = (): string => app.getPath('userData')
+  setOwnerNames(resolveOwnerNames(readConfig().ownerNames).names)
   // Which archive store holds this deck's extraction — mine first, else the Others' Library. Lets
   // inspect/context actions resolve a result to the right store without threading library everywhere.
   const rootForDeck = (deck: string): string => {
@@ -818,6 +821,15 @@ app.whenReady().then(() => {
   ipcMain.handle('settings:set-convert-ocr', (_e, on: boolean) => {
     writeConfig({ convertOcrByDefault: Boolean(on) })
     return Boolean(on)
+  })
+  // "My decks" owner names. Unset → computed from the OS account (never written until the user saves).
+  ipcMain.handle('settings:get-owner-names', () => resolveOwnerNames(readConfig().ownerNames))
+  ipcMain.handle('settings:set-owner-names', (_e, names: unknown) => {
+    const cleaned = cleanOwnerNames(names)
+    writeConfig({ ownerNames: cleaned.length > 0 ? cleaned : undefined }) // empty → back to the account default
+    const resolved = resolveOwnerNames(readConfig().ownerNames)
+    setOwnerNames(resolved.names) // ownership is part of the deck index → next load rescans
+    return resolved
   })
   // Step 1: pick the source .pptx — returns its path so the panel SHOWS it before converting.
   ipcMain.handle('convert:choose-source', async () => {

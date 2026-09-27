@@ -178,6 +178,10 @@ const api = {
     chooseConversionsFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-conversions-folder'),
     // Persist the default state of the convert OCR toggle.
     setConvertOcr: (on: boolean): Promise<boolean> => ipcRenderer.invoke('settings:set-convert-ocr', on),
+    // "My decks": the author names that count as the user (isDefault → computed from the OS account).
+    getOwnerNames: (): Promise<{ names: string[]; isDefault: boolean }> => ipcRenderer.invoke('settings:get-owner-names'),
+    // Save the list; an empty list reverts to the account default. Returns the effective names.
+    setOwnerNames: (names: string[]): Promise<{ names: string[]; isDefault: boolean }> => ipcRenderer.invoke('settings:set-owner-names', names),
     // Others' Library (Scenario A): pick its separate store folder, or purge it wholesale.
     chooseOthersFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-others-folder'),
     clearOthersLibrary: (): Promise<{ ok: boolean; cancelled?: boolean }> => ipcRenderer.invoke('settings:clear-others-library'),

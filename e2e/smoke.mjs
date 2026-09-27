@@ -1,10 +1,29 @@
 // Runtime smoke test: launch, default browse, search, filters (incl. searchable Category),
 // clustering, the per-result action menu (incl. "see in context"), and the lightbox.
 // Run: `node e2e/smoke.mjs` (after `npm run build`), or `npm run test:smoke`.
+//
+// Isolation: the app runs with a throwaway --user-data-dir AND a throwaway HOME (the app derives its
+// default archive/well/others folders and TalkWeaver's config from HOME), so it can never read or
+// write a real SlideWell profile. With no archive the run covers the shell only (archiveConnected:
+// false). To exercise the archive features, point SLIDEWELL_SMOKE_ARCHIVE at a Core A archive; the
+// app only reads it here (search/browse/stats; the import panel is opened but never run).
 import { _electron as electron } from 'playwright'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 const out = (o) => console.log(JSON.stringify(o))
-const app = await electron.launch({ args: ['.'] })
+const work = mkdtempSync(join(tmpdir(), 'sw-smoke-'))
+const userData = join(work, 'userData')
+const home = join(work, 'home')
+mkdirSync(userData, { recursive: true })
+mkdirSync(home, { recursive: true })
+const config = { wellRoot: join(work, 'well'), othersArchiveRoot: join(work, 'others-library') }
+if (process.env.SLIDEWELL_SMOKE_ARCHIVE) config.archiveRoot = process.env.SLIDEWELL_SMOKE_ARCHIVE
+writeFileSync(join(userData, 'config.json'), JSON.stringify(config), 'utf8')
+process.on('exit', () => rmSync(work, { recursive: true, force: true }))
+
+const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home } })
 try {
   const win = await app.firstWindow({ timeout: 20000 })
   await win.waitForLoadState('domcontentloaded')
