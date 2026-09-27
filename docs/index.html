@@ -61,7 +61,7 @@
     <h1>Slide<span class="mark">·</span>Well</h1>
     <p class="tagline">Every slide and image you've ever made — searchable, in one place, on your Mac.</p>
     <div class="btns">
-      <a class="btn primary" href="https://github.com/techczech/slidewell/releases">Download for Mac</a>
+      <a class="btn primary" href="https://github.com/techczech/slidewell/releases/latest/download/SlideWell-mac-arm64.dmg">Download for Mac</a>
       <a class="btn ghost" href="https://github.com/techczech/slidewell">View source</a>
     </div>
     <p class="note">macOS · open source (MIT) · your files never leave your computer.</p>
@@ -113,18 +113,16 @@
 
   <section>
     <h2>Get started</h2>
-    <p><strong>macOS:</strong> open the <code>.dmg</code> and drag <strong>SlideWell</strong> to Applications.
-       The app isn't notarised yet, so the first launch is blocked — right-click the app and choose
-       <strong>Open</strong>, then <strong>Open</strong> again at the prompt.
-       (Or in Terminal: <code>xattr -dr com.apple.quarantine "/Applications/SlideWell.app"</code>.)</p>
+    <p><strong>macOS (Apple Silicon):</strong> open the <code>.dmg</code> and drag <strong>SlideWell</strong> to Applications.
+       The app is signed and notarised by Apple, so it opens normally.</p>
     <p class="callout">
-      Early release: the download isn't code-signed or notarised yet, so macOS will warn you the
-      first time (that's the step above, not a problem with the app). It's built automatically and
-      still settling — if anything misbehaves, please
+      Search and PowerPoint import need the extraction engine, which is not public yet; browsing,
+      the image well and triage work without it. SlideWell is part of the
+      <a href="https://talkweaver.app/tools/slidewell">TalkWeaver family</a>. If anything misbehaves, please
       <a href="https://github.com/techczech/slidewell/issues">open an issue on GitHub</a>.
     </p>
     <div class="btns" style="justify-content:flex-start;margin-top:18px">
-      <a class="btn primary" href="https://github.com/techczech/slidewell/releases">Download for Mac</a>
+      <a class="btn primary" href="https://github.com/techczech/slidewell/releases/latest/download/SlideWell-mac-arm64.dmg">Download for Mac</a>
     </div>
   </section>
 
