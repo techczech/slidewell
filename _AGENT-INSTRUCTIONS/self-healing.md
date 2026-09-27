@@ -26,7 +26,7 @@ Default: rule edit. Lessons are the escape hatch, not the destination.
 
 ## Propagate
 
-- If the rule generalises beyond this repo: edit the source skill in `~/gitrepos/02_workskills/<name>/`.
+- If the rule generalises beyond this repo: edit the source skill in its own skills repository.
 - Append a dated paragraph to `<name>/HISTORY.md`: what / why / triggering repo.
 - If the skill has no `AGENTS.md` or `HISTORY.md` yet, create them now (lazy bootstrap).
 

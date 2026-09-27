@@ -1,34 +1,58 @@
 name: Release
 
-# Build + publish on a version tag (e.g. `git tag v0.1.0 && git push --tags`).
-# Produces a DRAFT GitHub Release with the macOS DMG attached; publish it by hand.
-# Not Apple-notarised (no paid Developer ID) — the app is ad-hoc only, so first launch
-# needs right-click → Open (the website explains this).
+# Build the macOS (Apple Silicon) app and upload it to a DRAFT GitHub Release.
+# Trigger by pushing a version tag that matches package.json, e.g.
+#   git tag v0.3.1 && git push origin v0.3.1
+# electron-builder uploads to a draft release for that version; review it, then publish.
+#
+# Stable artefact names (so releases/latest/download/<name> links keep working):
+#   SlideWell-mac-arm64.dmg
+#   SlideWell-mac-arm64.zip
+#
+# macOS only: SlideWell's OCR helper is macOS Vision, so no Windows build is made.
+#
+# macOS builds are code-signed with a Developer ID Application certificate and notarised by
+# Apple, so downloads open without the Gatekeeper warning. The certificate and notarisation
+# credentials are supplied as encrypted repository secrets (APPLE_DEVID_P12_BASE64,
+# APPLE_DEVID_P12_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID). Only tag pushes
+# by a maintainer trigger this; fork pull requests never receive the secrets.
 on:
   push:
-    tags: ["v*"]
-  workflow_dispatch:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: macos-latest # Apple Silicon runner → arm64 build
-    permissions:
-      contents: write
+  macos:
+    name: macOS (arm64)
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
-
-      - name: Install deps
+      - name: Install dependencies
         run: npm ci
-
+      - name: Test
+        run: npm test
       - name: Build renderer/main/preload
         run: npm run build
-
-      - name: Package DMG + publish draft release
+      - name: Package + publish (signed + notarised dmg, zip)
+        run: npx electron-builder --mac --arm64 --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --mac --publish always
+          # Developer ID code signing: electron-builder imports this .p12 into a temporary keychain
+          CSC_LINK: ${{ secrets.APPLE_DEVID_P12_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_DEVID_P12_PASSWORD }}
+          # Notarisation (activated by "notarize": true in package.json build.mac)
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}

@@ -19,6 +19,6 @@ First real capability: SlideWell now searches the Core A archive and shows resul
 - **Protocol fix**: `swarchive://` now carries the base64url path in the URL *path*, not the host (URL hosts are lowercased by spec, which corrupted case-sensitive base64url). Path-guarded to the archive root.
 - **UI**: debounced search → responsive results grid (16:9 render thumbnail, title, snippet, deck, "in N decks" badge, OCR tag, copy-ref). Scope tabs: All/Archive search the corpus; Well shows an empty-state (added images not built yet).
 
-**Verified** (`npm run test:smoke`, Playwright `_electron` against the real archive): launches, searches "dyslexia" → 60 results, top hit "Dyslexia simulation"; 55/60 render thumbnails load (the rest are render-less hits). Build clean (tsc + electron-vite).
+**Verified** (`npm run test:smoke`, Playwright `_electron` against the real archive): launches, searches "dyslexia" → 60 results, top hit a matching slide; 55/60 render thumbnails load (the rest are render-less hits). Build clean (tsc + electron-vite).
 
 Resolves the `read-path-over-core-a` backlog item. Next: import (PPTX → Core A extractor) and the image well.

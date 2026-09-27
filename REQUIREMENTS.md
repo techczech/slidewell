@@ -5,8 +5,7 @@ rendering, OCR, video). The app **degrades gracefully**: anything missing just d
 feature that needs it — the app still launches and everything else works. Settings → **Requirements**
 shows you, live, which of these are found on your machine.
 
-> macOS, Apple Silicon. The download isn't Apple-notarised yet, so on first launch right-click the
-> app → **Open** (or `xattr -dr com.apple.quarantine "/Applications/SlideWell.app"`).
+> macOS, Apple Silicon. Release downloads are signed with a Developer ID and notarised by Apple.
 
 ## What each tool is for
 

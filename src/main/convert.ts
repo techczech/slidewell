@@ -1,5 +1,5 @@
 /**
- * Sideband PPTX → Outline conversion (ADR-0026 scenario B / docs/superpowers/specs/2026-06-22…).
+ * Sideband PPTX → Outline conversion (ADR-0026 scenario B / design spec 2026-06-22, in git history).
  *
  * Throwaway by design: extract someone else's .pptx into a TEMP dir (never the archive store),
  * optionally OCR it sideband (a temp registry, read back), emit a mechanical Outline, copy the

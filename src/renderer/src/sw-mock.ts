@@ -24,9 +24,9 @@ export function installMock(): void {
     settings: {
       getPaths: async () => ({
         archiveRoot: null,
-        archiveDefault: '~/gitrepos/05_ppt-tools/ppt-archive',
+        archiveDefault: '~/ppt-archive',
         archiveAvailable: false,
-        wellRoot: '~/gitrepos/05_ppt-tools/ppt-archive/well',
+        wellRoot: '~/ppt-archive/well',
         vaultRoot: null,
         vaultAvailable: false,
         screenshotRoot: null,

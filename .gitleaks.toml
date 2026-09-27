@@ -1,0 +1,20 @@
+# Repo-scoped gitleaks config for the public SlideWell repository.
+# Default rules for secrets, plus rules that catch private material leaking into a public tree:
+# absolute home-folder paths and University of Oxford e-mail addresses.
+#
+# Deliberately regex-only, with NO `paths`: an allowlist carrying `paths` suppresses every finding
+# in those files, which would blind the scanner to a real secret committed there.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "private-home-path"
+description = "Absolute macOS home-folder path (names a local user)"
+regex = '''/Users/[A-Za-z0-9._-]+/'''
+keywords = ["/users/"]
+
+[[rules]]
+id = "oxford-email"
+description = "University of Oxford e-mail address"
+regex = '''[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)*ox\.ac\.uk'''
+keywords = ["ox.ac.uk"]

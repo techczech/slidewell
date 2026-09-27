@@ -13,7 +13,7 @@ deployments:
 
 SlideWell browses, searches, and reuses every slide and image you have: the whole legacy PowerPoint archive *and* a growing well of images you collect for later. TalkWeaver authors presentations; SlideWell is where their raw material lives and is found.
 
-**Website & downloads:** [talkweaver.app/slidewell](https://talkweaver.app/slidewell) · macOS · MIT.
+Part of the TalkWeaver family: [talkweaver.app/tools/slidewell](https://talkweaver.app/tools/slidewell) · macOS (Apple Silicon) · MIT.
 
 ## What it does
 
@@ -23,9 +23,16 @@ SlideWell browses, searches, and reuses every slide and image you have: the whol
 - **Holds an image well** — net-new screenshots and found images, organised by tags + search, never folders.
 - **Feeds TalkWeaver** — copy a slide's image (WebP), PNG, text, structure, or reference; see any slide in the context of its whole presentation. Keyboard-first (⌘K command palette), entirely local.
 
+## Install
+
+1. Download [`SlideWell-mac-arm64.dmg`](https://github.com/techczech/slidewell/releases/latest/download/SlideWell-mac-arm64.dmg) from the [latest release](https://github.com/techczech/slidewell/releases/latest) (Macs with Apple Silicon).
+2. Open the DMG and drag **SlideWell** to Applications.
+
+Release builds are signed with a Developer ID certificate and notarised by Apple, so SlideWell opens without a Gatekeeper warning. A ZIP of the app (`SlideWell-mac-arm64.zip`) is attached to each release as well. For the tools SlideWell uses for import, OCR and video, see [REQUIREMENTS.md](REQUIREMENTS.md).
+
 ## Status
 
-Early / soft launch. Downloads are built in CI and are **not Apple-notarised** — the first launch needs right-click → **Open** (or `xattr -dr com.apple.quarantine "/Applications/SlideWell.app"`). The app currently relies on a local engine — the `ppt-archive` Core A toolchain, the macOS Vision OCR helper, and `ffmpeg`; bundling these so it runs self-contained on any Mac is in progress. Direction layer (glossary + binding decisions) lives in [`presentation-system`](https://github.com/techczech/presentation-system) (ADR-0026/0029/0030, CONTEXT.md).
+Early / soft launch. The app currently relies on a local engine — the `ppt-archive` Core A toolchain, the macOS Vision OCR helper, and `ffmpeg`; bundling these so it runs self-contained on any Mac is in progress. The glossary and binding design decisions live in a separate design repository.
 
 ## Develop
 
@@ -36,7 +43,7 @@ npm run build        # typecheck + build main/preload/renderer
 npm run test:smoke   # Playwright _electron smoke test
 npm run test:triage  # isolated triage end-to-end
 npm run icon         # regenerate build/icon.icns
-npm run dist:mac     # package a DMG into release/
+npm run dist:mac     # package a DMG + ZIP into release/ (unsigned unless a Developer ID is available)
 ```
 
-Releases are cut by tagging — `git tag v0.1.0 && git push --tags` → `.github/workflows/release.yml` builds the DMG and opens a draft GitHub Release. Needs the `ppt-archive` store for real data; without it the app launches and reports "archive not connected" (point it at your folder in Settings).
+Releases are cut by tagging a version that matches `package.json` — `git tag v0.3.1 && git push origin v0.3.1` → `.github/workflows/release.yml` runs the tests, builds, signs with the Developer ID certificate, notarises, and uploads `SlideWell-mac-arm64.dmg` and `SlideWell-mac-arm64.zip` to a draft GitHub Release; review it, then publish. Needs the `ppt-archive` store for real data; without it the app launches and reports "archive not connected" (point it at your folder in Settings).

@@ -6,7 +6,7 @@ Electron desktop app for the slide & image archive — "the well". Companion to 
 
 ## Direction layer lives elsewhere
 
-Like TalkWeaver, SlideWell carries **no `CONTEXT.md` or `docs/adr/`** of its own. The glossary and binding ADRs are central in `~/gitrepos/05_ppt-tools/presentation-system/` (CONTEXT.md, docs/adr/, ROADMAP.md, CONTEXT-MAP.md). Read those before touching architecture. This repo holds only the **execution layer** (`_CHANGELOG/`, `_TASK-LOG/`, `_AGENT-INSTRUCTIONS/`) + code.
+Like TalkWeaver, SlideWell carries **no `CONTEXT.md` or `docs/adr/`** of its own. The glossary and binding ADRs are central in the separate (private) `presentation-system` repository (CONTEXT.md, docs/adr/, ROADMAP.md, CONTEXT-MAP.md). Read those before touching architecture. This repo holds only the **execution layer** (`_CHANGELOG/`, `_TASK-LOG/`, `_AGENT-INSTRUCTIONS/`) + code.
 
 ## First move
 
