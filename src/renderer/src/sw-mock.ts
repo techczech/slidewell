@@ -41,6 +41,10 @@ export function installMock(): void {
       chooseScreenshotFolder: async () => null,
       chooseConversionsFolder: async () => null,
       setConvertOcr: async (on: boolean) => on,
+      getDescribe: async () => ({ enabled: true, endpoint: 'http://localhost:1234/v1', model: '', pending: 0, running: false }),
+      setDescribe: async () => ({ enabled: true, endpoint: 'http://localhost:1234/v1', model: '' }),
+      testDescribe: async () => ({ ok: false, models: [], model: null, error: 'mock' }),
+      describeMissing: async () => ({ described: 0, failed: 0, skipped: 'mock' }),
       getOwnerNames: async () => ({ names: ['Mock User'], isDefault: true }),
       setOwnerNames: async (names: string[]) => ({ names, isDefault: names.length === 0 }),
       chooseOthersFolder: async () => null,
@@ -55,7 +59,7 @@ export function installMock(): void {
     },
     triage: {
       scan: async () => ({ ok: false, indexed: 0, total: 0, offline: 0 }),
-      list: async () => ({ items: [], counts: { undecided: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }),
+      list: async () => ({ items: [], counts: { undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }),
       decide: async () => ({ state: 'undecided' }),
       paste: async () => null,
       onProgress: () => () => {}

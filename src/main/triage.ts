@@ -146,6 +146,15 @@ export async function scanTriageSource(
   }
   onProgress?.(`found ${files.length} media files — reading…`)
 
+  // Forget files that have gone from the source (deleted screenshots would otherwise sit in
+  // Undecided forever with broken thumbnails). Decisions are keyed by hash and are kept.
+  const present = new Set(files.map((f) => f.rel))
+  const gone = [...seen.keys()].filter((rel) => !present.has(rel))
+  for (let k = 0; k < gone.length; k += 200) {
+    const chunk = gone.slice(k, k + 200)
+    await run(db, `DELETE FROM triage_fts WHERE rel_path IN (${chunk.map(() => '?').join(', ')})`, chunk)
+  }
+
   // Phase 1 — process new/changed files one at a time, committing + reporting per file.
   let indexed = 0
   let offlineN = 0
@@ -292,9 +301,10 @@ export async function importSelectedTriage(
   // GROUP BY hash: decisions are keyed by content hash, but triage_fts is keyed by path, so a hash
   // with duplicate files JOINs to multiple rows. One row per hash avoids ingesting the same selected
   // item once per duplicate.
-  const staged = await query<{ hash: string; kind: string; rel_path: string; offline: string }>(
+  const staged = await query<{ hash: string; kind: string; rel_path: string; offline: string; ocr_text: string }>(
     db,
-    `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline
+    `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline,
+            triage_fts.ocr_text AS ocr_text
      FROM triage_fts JOIN triage_decisions d ON d.hash = triage_fts.hash
      WHERE d.state = 'selected'
      GROUP BY triage_fts.hash`,
@@ -306,7 +316,7 @@ export async function importSelectedTriage(
     const sizeBytes = missing ? 0 : statSync(abs).size
     // offline = OneDrive online-only placeholder (stored as '1' at scan time). It can't be ingested
     // (no local bytes), so it is skipped — a keyboard-select bypasses the card's offline-disabled button.
-    return { hash: s.hash, kind: s.kind, offline: s.offline === '1', missing, sizeBytes, abs }
+    return { hash: s.hash, kind: s.kind, offline: s.offline === '1', missing, sizeBytes, abs, ocr: s.ocr_text || '' }
   })
   const plan = planSelectedImport(enriched, forceHashes, VIDEO_GATE_BYTES)
   let imported = 0
@@ -314,7 +324,7 @@ export async function importSelectedTriage(
   for (const hash of plan.toImport) {
     const row = enriched.find((e) => e.hash === hash)
     if (!row) continue
-    const res = row.kind === 'video' ? await ingestVideo(archiveRoot, wellRoot, row.abs) : await ingestScreenshot(archiveRoot, wellRoot, row.abs, 'screenshot')
+    const res = row.kind === 'video' ? await ingestVideo(archiveRoot, wellRoot, row.abs) : await ingestScreenshot(archiveRoot, wellRoot, row.abs, 'screenshot', row.ocr) // reuse the scan's OCR
     if (res?.id) {
       await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)', [hash, 'included', new Date().toISOString(), res.id])
       imported++
@@ -324,4 +334,19 @@ export async function importSelectedTriage(
     }
   }
   return { imported, skipped: plan.skipped.length + failed, gated: plan.gated.length }
+}
+
+/**
+ * Record that a source file was kept by another route (the Raycast "keep" command drops it into the
+ * well inbox). Keyed by the same 12-char content hash the scan uses, so a later triage pass of the
+ * screenshot folder shows it as already in the well instead of asking again.
+ */
+export async function markKeptInTriage(wellRoot: string, hash: string, wellId: string): Promise<void> {
+  await ensureTriage(wellRoot)
+  await run(triageDb(wellRoot), 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)', [
+    hash,
+    'included',
+    new Date().toISOString(),
+    wellId
+  ])
 }

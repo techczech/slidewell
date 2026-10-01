@@ -1364,6 +1364,8 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
   const [owners, setOwners] = useState('')
   const [ownersDefault, setOwnersDefault] = useState(true)
   const [ownersStatus, setOwnersStatus] = useState('')
+  const [desc, setDesc] = useState<{ enabled: boolean; endpoint: string; model: string; pending: number; running: boolean }>({ enabled: true, endpoint: '', model: '', pending: 0, running: false })
+  const [descStatus, setDescStatus] = useState('')
 
   const load = useCallback(async () => {
     const o = await window.sw.settings.getOwnerNames()
@@ -1372,6 +1374,7 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
     const p = await window.sw.settings.getPaths()
     setPaths({ archiveRoot: p.archiveRoot, wellRoot: p.wellRoot, vaultRoot: p.vaultRoot, screenshotRoot: p.screenshotRoot, conversionsRoot: p.conversionsRoot, othersArchiveRoot: p.othersArchiveRoot })
     setConvertOcr(p.convertOcrDefault)
+    setDesc(await window.sw.settings.getDescribe())
     setR2(await window.sw.settings.getR2())
     setStorage(await window.sw.settings.getStorage())
     const d = await window.sw.settings.dependencies()
@@ -1504,6 +1507,66 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
               <input className="search-input" value={owners} placeholder="e.g. Jane Smith, jsmith" onChange={(e) => setOwners(e.target.value)} />
             </div>
             <button className="copyref" onClick={() => void saveOwners()}>Save</button>
+          </div>
+        </div>
+
+        <div className="settings-section">Screenshot descriptions (local AI)</div>
+        <div className="settings-rows">
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">Describe kept screenshots with a local vision model</div>
+              <div className="settings-row-detail">
+                <i>{descStatus || `Adds a short description on top of OCR so diagrams, photos and UI are searchable. Images stay on this Mac. ${desc.pending} waiting${desc.running ? ' · running' : ''}.`}</i>
+              </div>
+            </div>
+            <label className="toggle" title="Describe new screenshots automatically">
+              <input
+                type="checkbox"
+                checked={desc.enabled}
+                onChange={(e) => {
+                  setDesc({ ...desc, enabled: e.target.checked })
+                  void window.sw.settings.setDescribe({ enabled: e.target.checked })
+                }}
+              />{' '}
+              {desc.enabled ? 'On' : 'Off'}
+            </label>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">Server (OpenAI-compatible)</div>
+              <div className="settings-row-detail"><i>LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1</i></div>
+              <input className="search-input" value={desc.endpoint} placeholder="http://localhost:1234/v1" onChange={(e) => setDesc({ ...desc, endpoint: e.target.value })} />
+            </div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">Model</div>
+              <div className="settings-row-detail"><i>Leave blank to use the server’s vision model automatically (e.g. a Qwen VL or Gemma 3 model).</i></div>
+              <input className="search-input" value={desc.model} placeholder="auto" onChange={(e) => setDesc({ ...desc, model: e.target.value })} />
+            </div>
+            <button
+              className="copyref"
+              onClick={async () => {
+                await window.sw.settings.setDescribe({ endpoint: desc.endpoint, model: desc.model })
+                setDescStatus('Testing…')
+                const t = await window.sw.settings.testDescribe()
+                setDescStatus(t.ok ? (t.model ? `Connected — will use ${t.model}.` : 'Connected, but no model is available.') : (t.error ?? 'Not reachable.'))
+              }}
+            >
+              Save &amp; test
+            </button>
+            <button
+              className="copyref"
+              disabled={desc.pending === 0 || !desc.enabled}
+              onClick={async () => {
+                setDescStatus(`Describing ${desc.pending} screenshot(s)…`)
+                const r = await window.sw.settings.describeMissing()
+                setDescStatus(r.skipped ? `Skipped: ${r.skipped}.` : `Described ${r.described}${r.failed ? `, ${r.failed} failed` : ''}.`)
+                setDesc(await window.sw.settings.getDescribe())
+              }}
+            >
+              Describe missing
+            </button>
           </div>
         </div>
 

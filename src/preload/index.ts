@@ -3,6 +3,8 @@ import type { Stats } from '../main/stats'
 
 export type { Stats } from '../main/stats'
 
+export type DescribeSettings = { enabled: boolean; endpoint: string; model: string }
+
 // One Image Node entity is shared with TalkWeaver (CONTEXT.md / ADR-0020, ADR-0026): a
 // content-addressed image + sidecar. In SlideWell it also carries provenance + notes. On disk
 // the file is named `{slug}--{id}.ext` (ADR-0026) so the store is discoverable without this app;
@@ -178,6 +180,11 @@ const api = {
     chooseConversionsFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-conversions-folder'),
     // Persist the default state of the convert OCR toggle.
     setConvertOcr: (on: boolean): Promise<boolean> => ipcRenderer.invoke('settings:set-convert-ocr', on),
+    // Local-LLM descriptions of well screenshots (OpenAI-compatible server: LM Studio, Ollama).
+    getDescribe: (): Promise<DescribeSettings & { pending: number; running: boolean }> => ipcRenderer.invoke('settings:get-describe'),
+    setDescribe: (patch: Partial<DescribeSettings>): Promise<DescribeSettings> => ipcRenderer.invoke('settings:set-describe', patch),
+    testDescribe: (): Promise<{ ok: boolean; models: string[]; model: string | null; error?: string }> => ipcRenderer.invoke('describe:test'),
+    describeMissing: (): Promise<{ described: number; failed: number; skipped: string | null }> => ipcRenderer.invoke('describe:run-missing'),
     // "My decks": the author names that count as the user (isDefault → computed from the OS account).
     getOwnerNames: (): Promise<{ names: string[]; isDefault: boolean }> => ipcRenderer.invoke('settings:get-owner-names'),
     // Save the list; an empty list reverts to the account default. Returns the effective names.

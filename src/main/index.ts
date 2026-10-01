@@ -9,7 +9,9 @@ import { resolve as resolvePath, sep as pathSep } from 'path'
 import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
 import { loadDeckMeta, categoryList, invalidateDeckMeta, setOwnerNames, type DeckMetaIndex } from './deckmeta'
 import { resolveOwnerNames, cleanOwnerNames } from './owners'
-import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, ingestScreenshot, findFfmpeg, type WellRow } from './well'
+import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, ingestScreenshot, findFfmpeg, listUndescribed, countUndescribed, saveDescription, type WellRow } from './well'
+import { createDescribeRunner, resolveDescribeSettings, setSidecarField, listModels, chooseModel, type DescribeSettings } from './describe'
+import { markKeptInTriage } from './triage'
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow } from './triage'
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
 import { convertPptxToOutline } from './convert'
@@ -42,6 +44,7 @@ type Config = {
   storage?: Partial<Record<'archive' | 'others' | 'well', { backend?: 'local' | 'r2' }>> // per-store backend (spec 2026-06-24)
   ownerNames?: string[] // "My decks": authors that count as the user (unset → the OS account's names; owners.ts)
   pythonPath?: string
+  describe?: Partial<DescribeSettings> // local-LLM image descriptions (describe.ts)
   windowBounds?: { width: number; height: number }
 }
 function configPath(): string {
@@ -82,6 +85,14 @@ function wellRootResolved(): string {
 // decks — built by the same engine (ppt-archive's tools/), never merged into the personal archive.
 // Default to a dedicated user folder; configurable in Settings; created on first import.
 const OTHERS_DEFAULT = join(homedir(), 'SlideWell', 'others-library')
+// Local-LLM descriptions of well screenshots (describe.ts). One runner per process: every ingest
+// path just calls describer.run(), which describes whatever is still undescribed, one at a time.
+const describer = createDescribeRunner({
+  settings: () => resolveDescribeSettings(readConfig().describe),
+  pending: () => listUndescribed(wellRootResolved()),
+  save: (id, d) => saveDescription(wellRootResolved(), id, d, setSidecarField)
+})
+
 function othersArchiveRootResolved(): string {
   return readConfig().othersArchiveRoot ?? OTHERS_DEFAULT
 }
@@ -323,7 +334,7 @@ app.whenReady().then(() => {
     return {
       kind: 'well-image',
       title: r.slug ? r.slug.replace(/-/g, ' ') : sourceLabel,
-      snippet: (r.ocr_text || r.notes || '').slice(0, 160),
+      snippet: (r.notes || r.ocr_text || '').slice(0, 160), // notes = local-LLM description for screenshots
       text: r.ocr_text || '',
       rank: 0,
       deck: r.source,
@@ -652,7 +663,9 @@ app.whenReady().then(() => {
     const src = screenshotRootResolved()
     if (!src) return { imported: 0, skipped: 0, gated: 0 }
     try {
-      return await importSelectedTriage(archiveRoot(), wellRootResolved(), src, Array.isArray(forceHashes) ? forceHashes : [])
+      const r = await importSelectedTriage(archiveRoot(), wellRootResolved(), src, Array.isArray(forceHashes) ? forceHashes : [])
+      void describer.run()
+      return r
     } catch {
       return { imported: 0, skipped: 0, gated: 0 }
     }
@@ -666,6 +679,7 @@ app.whenReady().then(() => {
     try {
       writeFileSync(tmp, img.toPNG())
       const res = await ingestScreenshot(archiveRoot(), wellRootResolved(), tmp, 'screenshot')
+      void describer.run()
       return res ? { id: res.id } : null
     } catch {
       return null
@@ -818,6 +832,31 @@ app.whenReady().then(() => {
     writeConfig({ conversionsRoot: r.filePaths[0] })
     return r.filePaths[0]
   })
+  // Local-LLM descriptions: settings, a connection test, and "describe what's missing now".
+  ipcMain.handle('settings:get-describe', async () => ({
+    ...resolveDescribeSettings(readConfig().describe),
+    pending: await countUndescribed(wellRootResolved()).catch(() => 0),
+    running: describer.running()
+  }))
+  ipcMain.handle('settings:set-describe', (_e, patch: Partial<DescribeSettings>) => {
+    const cur = readConfig().describe ?? {}
+    const next: Partial<DescribeSettings> = { ...cur }
+    if (typeof patch.enabled === 'boolean') next.enabled = patch.enabled
+    if (typeof patch.endpoint === 'string') next.endpoint = patch.endpoint.trim()
+    if (typeof patch.model === 'string') next.model = patch.model.trim()
+    writeConfig({ describe: next })
+    return resolveDescribeSettings(next)
+  })
+  ipcMain.handle('describe:test', async () => {
+    const s = resolveDescribeSettings(readConfig().describe)
+    try {
+      const models = await listModels(s.endpoint)
+      return { ok: true, models, model: s.model || chooseModel(models) }
+    } catch (e) {
+      return { ok: false, models: [], model: null, error: `No server at ${s.endpoint} (${(e as Error).message})` }
+    }
+  })
+  ipcMain.handle('describe:run-missing', () => describer.run())
   ipcMain.handle('settings:set-convert-ocr', (_e, on: boolean) => {
     writeConfig({ convertOcrByDefault: Boolean(on) })
     return Boolean(on)
@@ -961,22 +1000,38 @@ async function startWell(): Promise<void> {
   try {
     const root = wellRootResolved()
     await ensureWell(root)
-    await drainInbox(archiveRoot(), root)
+    // A file kept from Raycast is recorded as included in triage, so the folder scan won't offer it again.
+    const onKept = (srcHash: string, wellId: string): Promise<void> => markKeptInTriage(root, srcHash, wellId)
     const vr = detectVaultRoot()
     if (vr) void scanVault(archiveRoot(), root, vr)
     const inbox = join(root, '_inbox')
-    let busy = false
-    fsWatch(inbox, async () => {
-      if (busy) return
-      busy = true
+    // Drain loop: an event during a drain marks the inbox dirty so the running pass loops again
+    // (the old busy-flag dropped such files until the next launch); files still being written are
+    // deferred by drainInbox and retried shortly after.
+    let draining = false
+    let dirty = false
+    const kick = (delay = 400): void => {
+      if (draining) {
+        dirty = true
+        return
+      }
+      draining = true
       setTimeout(async () => {
+        let deferred = 0
         try {
-          await drainInbox(archiveRoot(), root)
+          do {
+            dirty = false
+            deferred = (await drainInbox(archiveRoot(), root, onKept)).deferred
+          } while (dirty)
         } finally {
-          busy = false
+          draining = false
         }
-      }, 400)
-    })
+        void describer.run()
+        if (deferred > 0) kick(2500)
+      }, delay)
+    }
+    fsWatch(inbox, () => kick())
+    kick(0)
   } catch {
     /* well unavailable (e.g. archive root missing) — search just shows no well results */
   }

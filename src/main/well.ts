@@ -9,7 +9,7 @@
  */
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, copyFileSync, createReadStream } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, copyFileSync, createReadStream, statSync } from 'node:fs'
 import { join, dirname, extname, basename } from 'node:path'
 import sharp from 'sharp'
 import { query, run, safeFtsQuery } from './sqlite'
@@ -95,7 +95,8 @@ export async function ingestScreenshot(
   archiveRoot: string,
   root: string,
   srcPath: string,
-  source = 'screenshot'
+  source = 'screenshot',
+  knownOcr = '' // OCR already done (e.g. by the triage scan) — skips a second Vision pass
 ): Promise<{ id: string; relPath: string } | null> {
   if (!existsSync(srcPath)) return null
   await ensureWell(root)
@@ -112,7 +113,7 @@ export async function ingestScreenshot(
     /* keep original */
   }
   const id = createHash('sha256').update(buf).digest('hex').slice(0, 7)
-  const text = await ocrImage(archiveRoot, srcPath)
+  const text = knownOcr || (await ocrImage(archiveRoot, srcPath))
   const slug = slugify(text, 'screenshot')
   const relPath = join('images', `${slug}--${id}.${ext}`)
   const dest = join(root, relPath)
@@ -147,13 +148,13 @@ export function makePoster(srcAbs: string, destAbs: string): Promise<boolean> {
   })
 }
 
-function hashFileStream(path: string): Promise<string> {
+function hashFileStream(path: string, len = 7): Promise<string> {
   return new Promise((resolve) => {
     const h = createHash('sha256')
     const s = createReadStream(path)
     s.on('data', (d) => h.update(d))
-    s.on('end', () => resolve(h.digest('hex').slice(0, 7)))
-    s.on('error', () => resolve(createHash('sha256').update(path).digest('hex').slice(0, 7)))
+    s.on('end', () => resolve(h.digest('hex').slice(0, len)))
+    s.on('error', () => resolve(createHash('sha256').update(path).digest('hex').slice(0, len)))
   })
 }
 
@@ -253,29 +254,83 @@ export async function scanVault(archiveRoot: string, root: string, vaultRoot: st
   return added
 }
 
+/**
+ * Owned screenshots that have no local-LLM description yet. The description lives in the FTS
+ * `notes` column (so it is searchable alongside OCR) and in the sidecar as `description:`; vault
+ * images are skipped because TalkWeaver owns their sidecar.
+ */
+export async function listUndescribed(root: string, limit = 500): Promise<Array<{ id: string; absPath: string; ocr: string }>> {
+  const db = wellDb(root)
+  if (!existsSync(db)) return []
+  const rows = await query<{ id: string; rel_path: string; ocr_text: string }>(
+    db,
+    `SELECT id, rel_path, ocr_text FROM well_fts WHERE root = 'well' AND source = 'screenshot' AND notes = '' ORDER BY added_at DESC LIMIT ?`,
+    [limit]
+  )
+  return rows.map((r) => ({ id: r.id, absPath: join(root, r.rel_path), ocr: r.ocr_text })).filter((r) => existsSync(r.absPath))
+}
+
+export async function countUndescribed(root: string): Promise<number> {
+  const db = wellDb(root)
+  if (!existsSync(db)) return 0
+  const r = await query<{ n: number }>(db, `SELECT COUNT(*) AS n FROM well_fts WHERE root = 'well' AND source = 'screenshot' AND notes = ''`, [])
+  return Number(r[0]?.n ?? 0)
+}
+
+/** Store a description: FTS notes (searchable) + sidecar `description:` (self-describing on disk, ADR-0026). */
+export async function saveDescription(root: string, id: string, description: string, setField: (yml: string, k: string, v: string) => string): Promise<void> {
+  const rows = await query<{ rel_path: string }>(wellDb(root), 'SELECT rel_path FROM well_fts WHERE id = ? LIMIT 1', [id])
+  if (!rows[0]) return
+  await run(wellDb(root), 'UPDATE well_fts SET notes = ? WHERE id = ?', [description, id])
+  const sidecar = join(root, rows[0].rel_path.replace(/\.[^.]+$/, '.yml'))
+  if (existsSync(sidecar)) writeFileSync(sidecar, setField(readFileSync(sidecar, 'utf8'), 'description', description), 'utf8')
+}
+
 /** Resolve a well row to an absolute file path (well store or vault). */
 export function wellAbsPath(root: string, vaultRoot: string | null, row: WellRow): string | null {
   if (row.root === 'vault') return vaultRoot ? join(vaultRoot, row.rel_path) : null
   return join(root, row.rel_path)
 }
 
-/** Process any files sitting in the inbox: ingest each, then remove the inbox copy. */
-export async function drainInbox(archiveRoot: string, root: string): Promise<number> {
+const INBOX_VIDEO_EXT = new Set(['mp4', 'mov', 'm4v', 'webm'])
+
+/**
+ * Process any files sitting in the inbox: ingest each (images → WebP + OCR, videos → copied +
+ * poster), then remove the inbox copy. `onKept` receives the ORIGINAL file's 12-char content hash
+ * (the key triage uses) so a file kept from Raycast is not offered again in a later triage pass.
+ * Dot-files are skipped: the Raycast command copies to `.name` and renames, so a half-written
+ * file is never picked up.
+ */
+export async function drainInbox(
+  archiveRoot: string,
+  root: string,
+  onKept?: (srcHash: string, wellId: string) => Promise<void>
+): Promise<{ kept: number; deferred: number }> {
   const inbox = join(root, '_inbox')
-  if (!existsSync(inbox)) return 0
+  if (!existsSync(inbox)) return { kept: 0, deferred: 0 }
   let n = 0
+  let deferred = 0
   for (const f of readdirSync(inbox)) {
     if (f.startsWith('.')) continue
     const p = join(inbox, f)
     try {
-      const res = await ingestScreenshot(archiveRoot, root, p, 'screenshot')
+      // A file dragged or copied in directly may still be being written: leave anything modified
+      // in the last 2 s for the caller's follow-up pass rather than ingest (and delete) a partial file.
+      if (Date.now() - statSync(p).mtimeMs < 2000) {
+        deferred++
+        continue
+      }
+      const srcHash = await hashFileStream(p, 12)
+      const isVideo = INBOX_VIDEO_EXT.has(extname(f).slice(1).toLowerCase())
+      const res = isVideo ? await ingestVideo(archiveRoot, root, p) : await ingestScreenshot(archiveRoot, root, p, 'screenshot')
       if (res) {
-        rmSync(p, { force: true }) // remove the inbox copy (the stored copy lives in images/)
+        if (onKept) await onKept(srcHash, res.id).catch(() => undefined)
+        rmSync(p, { force: true }) // remove the inbox copy (the stored copy lives in images/ or videos/)
         n++
       }
     } catch {
       /* leave it for next pass */
     }
   }
-  return n
+  return { kept: n, deferred }
 }
