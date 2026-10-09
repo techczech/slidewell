@@ -23,6 +23,7 @@ import { PictureSearchService, registerPictureSearchIpc, type PictureSearchSetti
 import { WebGpuEmbedder } from './picture-search/webgpu-embedder'
 import { electronEmbedHost, registerEmbedProtocol, EMBED_SCHEME } from './picture-search/electron-embed-host'
 import { modelDir as pictureModelDir } from './picture-search/model-store'
+import { SorterService, registerSorterIpc } from './sorter/service'
 import type { FetchLike } from './picture-search/model-store'
 
 const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
@@ -309,6 +310,18 @@ app.whenReady().then(() => {
   // picture IPC answers the main window only (never the hidden picture-search window)
   registerPictureSearchIpc(pictureSearch, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
   app.on('will-quit', () => pictureSearch?.dispose())
+
+  // --- screenshot sorter, local part (sorter/service.ts): proposals only, never decisions or moves ---
+  const pics = pictureSearch
+  const sorter = new SorterService({
+    wellRoot: wellRootResolved,
+    pictures: { modelReady: () => pics.modelReady(), ensureVectors: (items, opts) => pics.ensureVectors(items, opts) },
+    broadcast: (st) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('sorter:status', st)
+    }
+  })
+  registerSorterIpc(sorter, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+  app.on('will-quit', () => sorter.cancel())
 
   // --- IPC: the typed contract lives in src/preload/index.ts ---
   ipcMain.handle('archive:available', () => archiveAvailable())

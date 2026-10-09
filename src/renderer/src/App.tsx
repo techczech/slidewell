@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { nextPreviewIndex } from '../../main/triage-logic'
 import { PictureSearchSettings, PictureSearchStatusBar } from './PictureSearch'
+import { SorterSettings } from './SorterSettings'
 import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency, FromFilter, KindFilter, FromCounts } from '../../preload'
 
 type SortKey = 'date-desc' | 'date-asc' | 'title'
@@ -1558,6 +1559,7 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
         </div>
 
         <PictureSearchSettings />
+        <SorterSettings />
 
         <div className="settings-section">Folders</div>
         <div className="settings-rows">

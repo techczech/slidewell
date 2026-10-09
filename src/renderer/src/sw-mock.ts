@@ -28,6 +28,13 @@ export function installMock(): void {
       query: async () => ({ ok: false, results: [], error: 'not available in the browser preview' }),
       onStatus: () => () => undefined
     },
+    sorter: {
+      status: async () => ({ phase: 'idle' as const, done: 0, total: 0, message: '', error: null, modelReady: false, report: null, canRunUnattended: false, pending: { keep: 0, throwaway: 0, doubtful: 0, lastProposedAt: null } }),
+      train: async () => ({ ok: false, error: 'not available in the browser preview' }),
+      sort: async () => ({ ok: false, error: 'not available in the browser preview' }),
+      cancel: async () => undefined,
+      onStatus: () => () => undefined
+    },
     archive: {
       available: async () => false,
       search: async () => [],

@@ -1511,3 +1511,44 @@ body {
   color: var(--ink);
   cursor: pointer;
 }
+
+/* Screenshot sorter — Settings section (ticket 06), styled like Picture search above */
+.sorter-settings {
+  border-top: 1px solid var(--line, #e5e0d6);
+  padding-top: 0.8rem;
+}
+.sorter-settings .pic-note + .pic-note {
+  margin-top: 0.5rem;
+}
+.sorter-report {
+  margin: 0.8rem 0;
+}
+.sorter-report-head {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.4rem;
+}
+.sorter-table {
+  border-collapse: collapse;
+  margin-bottom: 0.6rem;
+  font-size: 0.9rem;
+}
+.sorter-table th,
+.sorter-table td {
+  padding: 0.3rem 0.9rem 0.3rem 0;
+  text-align: left;
+}
+.sorter-table thead th {
+  font-weight: 600;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.sorter-table td {
+  font-variant-numeric: tabular-nums;
+  font-size: 1.05rem;
+}
+.sorter-count {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-left: 0.2rem;
+}

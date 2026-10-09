@@ -1,0 +1,230 @@
+/**
+ * The screenshot sorter, local part, as one main-process service.
+ *
+ *   trainAndTest(): embed his labelled history (picture-search engine), hold back 20% of it, train
+ *     the classifier on the rest, write the accuracy report on the held-back sample, then train the
+ *     model it will use on all of it. Saves model + report (store.ts).
+ *   sortUndecided(): for every undecided screenshot in triage: rules + classifier → a proposal with
+ *     confidence and reason, recorded in sorter_proposals. Needs a trained model with a report.
+ *
+ * Sorting writes proposals only: it never moves, deletes or decides anything (binning is later
+ * work), and it never writes his triage decisions. Nothing here makes a network call.
+ */
+import { ipcMain } from 'electron'
+import type { IndexItem } from '../picture-search/vector-store'
+import { applyRules } from './rules'
+import { train, predictKeep, type Classifier } from './classifier'
+import { decide, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from './decide'
+import { accuracyReport, holdOutSplit, type AccuracyReport, type LabelledPrediction } from './accuracy'
+import { loadLabelled, loadUndecided, SorterStore, type ProposalRow, type Shot } from './store'
+
+export const HOLD_OUT_FRACTION = 0.2
+
+export type SorterReport = {
+  trainedAt: string
+  sorterVersion: string
+  thresholds: Thresholds
+  holdOutFraction: number
+  /** Labelled screenshots found / with a readable picture. */
+  labelled: { keep: number; throwaway: number }
+  usable: { keep: number; throwaway: number }
+  /** Kept screenshots embedded from the well's copy because the original is gone. */
+  keepFromWellCopy: number
+  /** The classifier tested on the held-back sample was trained on this many. */
+  trainedOn: { keep: number; throwaway: number }
+  l2: number
+  /** Rules + classifier on the held-back sample (the number that matters). */
+  heldBack: AccuracyReport
+  /** Rules alone on the same sample, for comparison. */
+  rulesOnly: AccuracyReport
+}
+
+export type SorterStatus = {
+  phase: 'idle' | 'embedding' | 'training' | 'sorting' | 'error'
+  done: number
+  total: number
+  message: string
+  error: string | null
+  modelReady: boolean
+  report: SorterReport | null
+  /** A held-back accuracy report exists, so sorting may run without him watching. */
+  canRunUnattended: boolean
+  pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
+}
+
+export type SorterDeps = {
+  wellRoot: () => string
+  pictures: {
+    modelReady: () => boolean
+    ensureVectors: (items: IndexItem[], opts: { signal?: AbortSignal; onEach?: (done: number, total: number) => void }) => Promise<Map<string, Float32Array>>
+  }
+  broadcast: (s: SorterStatus) => void
+  thresholds?: Thresholds
+}
+
+type Run = Pick<SorterStatus, 'phase' | 'done' | 'total' | 'message' | 'error'>
+
+export class SorterService {
+  private run: Run = { phase: 'idle', done: 0, total: 0, message: '', error: null }
+  private abort: AbortController | null = null
+  private lastPush = 0
+
+  constructor(private deps: SorterDeps) {}
+
+  private thresholds(): Thresholds {
+    return this.deps.thresholds ?? DEFAULT_THRESHOLDS
+  }
+
+  private withStore<T>(fn: (s: SorterStore) => T): T {
+    const s = new SorterStore(this.deps.wellRoot())
+    try {
+      return fn(s)
+    } finally {
+      s.close()
+    }
+  }
+
+  status(): SorterStatus {
+    const { report, pending } = this.withStore((s) => ({ report: s.latestModel<SorterReport>()?.report ?? null, pending: s.pendingCounts() }))
+    return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: Boolean(report), pending }
+  }
+
+  private set(patch: Partial<Run>, force = false): void {
+    this.run = { ...this.run, ...patch }
+    const now = Date.now()
+    if (!force && now - this.lastPush < 250) return
+    this.lastPush = now
+    this.deps.broadcast(this.status())
+  }
+
+  private busy(): boolean {
+    return this.run.phase === 'embedding' || this.run.phase === 'training' || this.run.phase === 'sorting'
+  }
+
+  cancel(): void {
+    this.abort?.abort()
+  }
+
+  private async vectorsFor(shots: Shot[], label: string, signal: AbortSignal): Promise<Map<string, Float32Array>> {
+    const items = shots.flatMap((s) => (s.image ? [s.image] : []))
+    this.set({ phase: 'embedding', done: 0, total: items.length, message: label }, true)
+    return this.deps.pictures.ensureVectors(items, { signal, onEach: (done, total) => this.set({ done, total }) })
+  }
+
+  /** Train on his history and report accuracy on a held-back 20%. Returns the report. */
+  async trainAndTest(): Promise<{ ok: boolean; report?: SorterReport; error?: string }> {
+    if (this.busy()) return { ok: false, error: 'the sorter is already running' }
+    if (!this.deps.pictures.modelReady()) return { ok: false, error: 'download the picture search model first (Settings › Picture search)' }
+    const ctl = new AbortController()
+    this.abort = ctl
+    try {
+      const shots = loadLabelled(this.deps.wellRoot())
+      const vectors = await this.vectorsFor(shots, 'reading pictures of your past choices', ctl.signal)
+      if (ctl.signal.aborted) throw new Error('cancelled')
+      this.set({ phase: 'training', message: 'learning from your past choices' }, true)
+      await new Promise((r) => setImmediate(r)) // let the status reach the window before the CPU-bound fit
+      const usable = shots.filter((s) => s.image && vectors.has(s.image.id))
+      const { train: trainSet, test } = holdOutSplit(
+        usable,
+        (s) => s.key,
+        (s) => s.truth ?? '',
+        HOLD_OUT_FRACTION
+      )
+      const toExamples = (xs: Shot[]): Array<{ vector: Float32Array; keep: boolean }> => xs.map((s) => ({ vector: vectors.get(s.image!.id)!, keep: s.truth === 'keep' }))
+      const held: Classifier = train(toExamples(trainSet))
+      const t = this.thresholds()
+      const both: LabelledPrediction[] = []
+      const rulesAlone: LabelledPrediction[] = []
+      for (const s of test) {
+        const rule = applyRules(s.facts)
+        both.push({ truth: s.truth!, proposal: decide(rule, predictKeep(held, vectors.get(s.image!.id)!), t).proposal })
+        rulesAlone.push({ truth: s.truth!, proposal: decide(rule, null, t).proposal })
+      }
+      // the model the sorter uses learns from all of his choices (the report measures the procedure)
+      const final = train(toExamples(usable))
+      const trainedAt = new Date().toISOString()
+      const count = (xs: Shot[]): { keep: number; throwaway: number } => ({ keep: xs.filter((s) => s.truth === 'keep').length, throwaway: xs.filter((s) => s.truth === 'throwaway').length })
+      const report: SorterReport = {
+        trainedAt,
+        sorterVersion: SORTER_VERSION,
+        thresholds: t,
+        holdOutFraction: HOLD_OUT_FRACTION,
+        labelled: count(shots),
+        usable: count(usable),
+        keepFromWellCopy: usable.filter((s) => s.fromWellCopy).length,
+        trainedOn: held.trainedOn,
+        l2: held.l2,
+        heldBack: accuracyReport(both),
+        rulesOnly: accuracyReport(rulesAlone)
+      }
+      this.withStore((s) => s.saveModel({ id: `model-${trainedAt}`, trainedAt, sorterVersion: SORTER_VERSION, model: final, report }))
+      this.set({ phase: 'idle', done: 0, total: 0, message: '', error: null }, true)
+      return { ok: true, report }
+    } catch (e) {
+      const msg = (e as Error)?.message ?? String(e)
+      this.set({ phase: ctl.signal.aborted ? 'idle' : 'error', message: '', error: ctl.signal.aborted ? null : msg }, true)
+      return { ok: false, error: msg }
+    } finally {
+      this.abort = null
+    }
+  }
+
+  /** Propose keep / throwaway / doubtful for every undecided screenshot. Writes proposals only. */
+  async sortUndecided(opts: { limit?: number } = {}): Promise<{ ok: boolean; sorted?: number; counts?: { keep: number; throwaway: number; doubtful: number }; error?: string }> {
+    if (this.busy()) return { ok: false, error: 'the sorter is already running' }
+    const rec = this.withStore((s) => s.latestModel<SorterReport>())
+    if (!rec) return { ok: false, error: 'train the sorter on your past choices first; it needs an accuracy report before it sorts' }
+    if (!this.deps.pictures.modelReady()) return { ok: false, error: 'download the picture search model first (Settings › Picture search)' }
+    const ctl = new AbortController()
+    this.abort = ctl
+    const counts = { keep: 0, throwaway: 0, doubtful: 0 }
+    let sorted = 0
+    try {
+      let shots = loadUndecided(this.deps.wellRoot())
+      if (opts.limit !== undefined) shots = shots.slice(0, Math.max(0, opts.limit))
+      const t = this.thresholds()
+      this.set({ phase: 'sorting', done: 0, total: shots.length, message: 'sorting undecided screenshots', error: null }, true)
+      const CHUNK = 25
+      for (let i = 0; i < shots.length && !ctl.signal.aborted; i += CHUNK) {
+        const chunk = shots.slice(i, i + CHUNK)
+        const items = chunk.flatMap((s) => (s.image ? [s.image] : []))
+        const vectors = await this.deps.pictures.ensureVectors(items, { signal: ctl.signal })
+        const rows: ProposalRow[] = []
+        for (const s of chunk) {
+          if (!s.hash) continue
+          const v = s.image ? vectors.get(s.image.id) : undefined
+          if (s.image && !v && ctl.signal.aborted) continue // not reached before cancel: no proposal
+          const rule = applyRules(s.facts)
+          const verdict = decide(rule, v ? predictKeep(rec.model, v) : null, t)
+          rows.push({ hash: s.hash, proposal: verdict.proposal, confidence: verdict.confidence, pKeep: verdict.pKeep, reason: verdict.reason, rule: rule?.rule ?? null })
+          counts[verdict.proposal]++
+        }
+        this.withStore((st) => st.writeProposals(rows, SORTER_VERSION, rec.id))
+        sorted += rows.length
+        this.set({ done: Math.min(shots.length, i + chunk.length) })
+      }
+      this.set({ phase: 'idle', done: 0, total: 0, message: '' }, true)
+      return { ok: true, sorted, counts }
+    } catch (e) {
+      const msg = (e as Error)?.message ?? String(e)
+      this.set({ phase: 'error', message: '', error: msg }, true)
+      return { ok: false, sorted, counts, error: msg }
+    } finally {
+      this.abort = null
+    }
+  }
+}
+
+/** IPC for Settings › Screenshot sorter. Types: src/preload/index.ts. */
+export function registerSorterIpc(svc: SorterService, allowed: (sender: Electron.WebContents) => boolean): void {
+  const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
+    ipcMain.handle(channel, (e, ...args) => {
+      if (!allowed(e.sender)) throw new Error(`${channel}: not allowed from this window`)
+      return fn(...args)
+    })
+  }
+  handle('sorter:status', () => svc.status())
+  handle('sorter:train', () => svc.trainAndTest())
+  handle('sorter:sort', (opts?: { limit?: number }) => svc.sortUndecided({ limit: typeof opts?.limit === 'number' ? opts.limit : undefined }))
+  handle('sorter:cancel', () => svc.cancel())
+}

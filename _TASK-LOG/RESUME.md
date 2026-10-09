@@ -1,12 +1,26 @@
 # SlideWell — RESUME (session entry point)
 
-**FOR ME.** Last updated 2026-06-23.
+**FOR ME.** Last updated 2026-10-09.
 
 ## State
 
 Electron + React + TS (electron-vite), mirrored from `talk-weaver`. Shipped (see `_CHANGELOG/INDEX.md`): search + full filter/cluster/lightbox surface, archive **Import** (Core A pipeline), the **well** + screenshot/video **Triage**, Stats, Settings + dependency detection. Newest: **Convert** — sideband throwaway PPTX→Outline (a distinct verb from Import; never catalogued into archive/vault; `origin: external` stamp). Direction layer in `presentation-system` (ADR-0026, CONTEXT.md, ROADMAP P7).
 
 **Convert internals** (2026-06-23): `src/main/outline.ts` (pure transform, 17 vitest tests in `test/`), `src/main/convert.ts` (sideband extract → optional OCR → emit), `convert:*` IPC + `conversionsRoot`/`convertOcrByDefault` settings, `⇄ Convert` titlebar panel. Verified end-to-end on a real third-party deck. **Unit tests now exist**: `npm test` (vitest). Note: repo `tsc --noEmit` is a no-op (root tsconfig `files:[]`); real type-check is `tsc -p tsconfig.node.json/--web` (baseline reds: `well.ts:108`, web `TS6307` preload→main/stats).
+
+## Screenshot sorter, local part (2026-10-09)
+
+Code: `src/main/sorter/` — `rules.ts` (app/window/OCR → lean + reason), `classifier.ts` (class-weighted L2 logistic regression on picture-search embeddings, L2 by 5-fold CV), `decide.ts` (log-odds combination + keep-bias thresholds → keep/throwaway/doubtful + reason), `accuracy.ts` (stratified 20% hold-out + report), `store.ts`, `service.ts`; Settings › Screenshot sorter (`SorterSettings.tsx`). Proposals only: `sorter_proposals` + `sorter_models` in triage.db (never `triage_decisions`); triage embeddings in picture-search.db, kind `triage`, id `triage:<hash>` (left out of search unless a query names the kind). No nightly schedule yet: Settings has "Sort undecided screenshots now", refused until a held-back report exists.
+
+**Accuracy on his real labelled history** (copy taken 2026-10-09 evening, `e2e/sorter.mjs`, sorter-local-1, thresholds throwaway ≥ 0.90 / keep ≥ 0.70; all e2e checks passed, no network request, his decisions unchanged):
+
+- Labelled: 251 kept (well screenshots, all triage `included`) and 156 binned (triage `excluded`); 251 + 154 have their picture on disk (7 kept pictures come from the well's re-encoded copy).
+- Held back 20% per label: **82** (51 kept, 31 binned); classifier trained on the other 323; L2 = 0.001, picked by 5-fold cross-validation on the training part only.
+- **Keep precision 93%** (13 of 14 proposed keeps were kept). **Throwaway precision: none proposed** (0 of 31 binned reached the band). **Doubtful 83%** (68 of 82). Kept proposed as throwaway: 0. Binned proposed as keep: 1.
+- Rules alone on the same 82: keep 75% (3 of 4), throwaway none, doubtful 95%.
+- Full sort of the copy: 8,337 undecided pictures → 1,628 keep, 0 throwaway, 6,709 doubtful (p(keep) never below 0.10).
+- Reading: the keep-bias holds and the classifier ranks well (held-back AUC ≈ 0.86), but its probabilities sit between about 0.1 and 0.8, so the 0.90 throwaway band is never reached. Moving the thresholds or calibrating the probabilities is a keep-bias decision for Dominik, not taken here.
+- Earlier copy (same day, before the triage index found the originals of most kept screenshots): keep 97% (35/36), throwaway 100% (1/1), doubtful 46% on 68. That run embedded 160 keeps from the well's re-encoded copies against binned originals; treat it as inflated by file format.
 
 ## Decided (2026-06-18 grill — presentation-system)
 
