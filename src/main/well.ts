@@ -230,15 +230,18 @@ export interface WellRow {
 }
 
 /** Search the well (FTS over ocr/tags/notes); empty query lists newest first. */
-export async function searchWell(root: string, raw: string, limit = 60): Promise<WellRow[]> {
+export async function searchWell(root: string, raw: string, limit = 60, onlyIds?: string[]): Promise<WellRow[]> {
   const db = wellDb(root)
   if (!existsSync(db)) return []
+  if (onlyIds && onlyIds.length === 0) return []
   const cols = 'id, slug, ext, rel_path, root, source, tags, notes, ocr_text, added_at'
+  const idIn = onlyIds ? ` AND id IN (${onlyIds.map(() => '?').join(',')})` : ''
+  const idParams = onlyIds ?? []
   if (raw && raw.trim().length >= 2) {
     const q = safeFtsQuery(raw)
-    return query<WellRow>(db, `SELECT ${cols} FROM well_fts WHERE well_fts MATCH ? ORDER BY rank LIMIT ?`, [q, limit])
+    return query<WellRow>(db, `SELECT ${cols} FROM well_fts WHERE well_fts MATCH ?${idIn} ORDER BY rank LIMIT ?`, [q, ...idParams, limit])
   }
-  return query<WellRow>(db, `SELECT ${cols} FROM well_fts ORDER BY added_at DESC LIMIT ?`, [limit])
+  return query<WellRow>(db, `SELECT ${cols} FROM well_fts WHERE 1=1${idIn} ORDER BY added_at DESC LIMIT ?`, [...idParams, limit])
 }
 
 /** Well rows by id (picture-search hits resolve to these). Unknown ids are simply absent. */

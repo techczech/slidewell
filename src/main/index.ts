@@ -19,6 +19,8 @@ import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSe
 import { cleanShotFolder } from './cleanshot-folder'
 import { createSourceWatcher } from './source-watcher'
 import { registerBacklogIpc } from './backlog-ipc'
+import { talkAbsPath, isVaultChangeRelevant } from './talk-usage'
+import { createTalkUsageService } from './talk-usage-service'
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
 import { convertPptxToOutline } from './convert'
 import { slugify } from './outline'
@@ -446,6 +448,8 @@ app.whenReady().then(() => {
       date: r.added_at || null,
       slideOrder: null,
       usedInDecks: 1,
+      usedInTalks: (talkUsage.usage().get(r.id) ?? []).length,
+      talkUses: talkUsage.usage().get(r.id) ?? [],
       reference: `![](img-${r.id})`,
       thumbUrl: swThumb(abs),
       library: 'mine',
@@ -525,7 +529,12 @@ app.whenReady().then(() => {
     // the well is the user's own — shown for Mine/All, not when searching Others only
     if (plan.well && includeMine) {
       try {
-        for (const r of await searchWell(wellRootResolved(), query, 60)) {
+        const wellRows = await searchWell(wellRootResolved(), query, 60)
+        // pictures talks use always get their chance, even past the first 60 words-matches
+        const seen = new Set(wellRows.map((r) => r.id))
+        const used = [...talkUsage.usage().keys()].slice(0, 900)
+        for (const r of await searchWell(wellRootResolved(), query, 60, used).catch(() => [] as WellRow[])) if (!seen.has(r.id)) wellRows.push(r)
+        for (const r of wellRows) {
           const w = wellToWire(r)
           out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
         }
@@ -773,11 +782,23 @@ app.whenReady().then(() => {
     return true
   })
 
+  // TalkWeaver registers no URL scheme and no document type, so the nearest thing to "open the talk"
+  // is showing its outline file in Finder. The path is vault-relative and must stay inside the vault.
+  ipcMain.handle('talks:reveal', (_e, relPath: string) => {
+    const vr = detectVaultRoot()
+    if (!vr || typeof relPath !== 'string') return false
+    const abs = talkAbsPath(vr, relPath)
+    if (!abs) return false
+    shell.showItemInFolder(abs)
+    return true
+  })
+
   // --- well / import paths ---
   ipcMain.handle('settings:choose-vault', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     writeConfig({ vaultRoot: r.filePaths[0] })
+    void talkUsage.sync()
     return r.filePaths[0]
   })
   // Re-scan the TalkWeaver vault for new images and index them; returns count added.
@@ -785,6 +806,9 @@ app.whenReady().then(() => {
     const vr = detectVaultRoot()
     if (!vr) return 0
     try {
+      // queued, not awaited: a switch waits for an in-flight talk scan, and image indexing need not
+      void talkUsage.sync()
+      void talkUsage.refresh()
       return await scanVault(archiveRoot(), wellRootResolved(), vr)
     } catch {
       return 0
@@ -1243,13 +1267,35 @@ app.whenReady().then(() => {
 
 // On launch: ensure the well exists, drain anything Raycast dropped while we were closed, index
 // new TalkWeaver vault images, and watch the inbox so future drops ingest live.
+// Which talks use which picture; filled from well.db at launch and refreshed by each talk scan.
+// Vault switches and scans run through one serial queue (talk-usage-service.ts); a failed scan keeps
+// the previous snapshot, and a well.db the containment check refuses keeps the feature off.
+const talkUsage = createTalkUsageService({
+  wellRoot: wellRootResolved,
+  vaultRoot: detectVaultRoot,
+  // only talk outlines, folders and pool images appearing or going; wait at most 30 s however busy the vault is
+  watch: (vault, onChange) => {
+    const w = createSourceWatcher(() => onChange(), 4000, 30000)
+    w.setSources([{ path: vault, recursive: true, accept: isVaultChangeRelevant }])
+    return w
+  },
+  notify: (r) => {
+    for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('talks:usage-changed', r)
+  },
+  log: (m) => console.warn(m)
+})
+
 async function startWell(): Promise<void> {
   try {
     const root = wellRootResolved()
     await ensureWell(root)
     await drainInbox(archiveRoot(), root)
     const vr = detectVaultRoot()
-    if (vr) void scanVault(archiveRoot(), root, vr).then((n) => n > 0 && pictureSearch?.poke(), () => undefined)
+    if (vr) {
+      void scanVault(archiveRoot(), root, vr).then((n) => n > 0 && pictureSearch?.poke(), () => undefined)
+    }
+    // read-only scan of the vault's talks on launch and whenever the vault changes
+    await talkUsage.sync()
     const inbox = join(root, '_inbox')
     let busy = false
     fsWatch(inbox, async () => {

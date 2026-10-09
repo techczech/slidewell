@@ -28,6 +28,9 @@ export type ImageNode = {
   thumbUrl: string
 }
 
+/** A talk that uses a picture: its title, its outline file (vault-relative) and the slide of its first use. */
+export type TalkUse = { title: string; relPath: string; slide: number | null }
+
 // Search result shapes (the main process resolves render paths to swarchive:// URLs).
 export type SlideResult = {
   kind: 'slide' | 'ocr-render' | 'ocr-image' | 'well-image' | 'archive-image'
@@ -42,6 +45,8 @@ export type SlideResult = {
   date: string | null
   slideOrder: number | null
   usedInDecks: number
+  usedInTalks?: number // TalkWeaver talks that use this picture (vault images only)
+  talkUses?: TalkUse[] // those talks, by title
   reference: string // `[use: ppt:<id>#<order>]`
   thumbUrl: string | null
   library?: 'mine' | 'others' // which archive store this came from (Others' Library = badged)
@@ -328,6 +333,14 @@ const api = {
     copyImagePng: (thumbUrl: string | null): Promise<boolean> => ipcRenderer.invoke('clipboard:copy-image-png', thumbUrl),
     // Reveal an image in Finder. Pass the hit's thumbUrl.
     reveal: (thumbUrl: string | null): Promise<boolean> => ipcRenderer.invoke('shell:reveal', thumbUrl),
+    // TalkWeaver registers no URL scheme, so "open in TalkWeaver" reveals the talk's file in Finder.
+    // A scan of the vault's talks finished (ok = false: it failed and the previous usage was kept).
+    onTalkUsageChanged: (cb: (r: { ok: boolean; reason: string }) => void): (() => void) => {
+      const handler = (_e: unknown, r: { ok: boolean; reason: string }): void => cb(r)
+      ipcRenderer.on('talks:usage-changed', handler)
+      return () => ipcRenderer.removeListener('talks:usage-changed', handler)
+    },
+    revealTalk: (relPath: string): Promise<boolean> => ipcRenderer.invoke('talks:reveal', relPath),
     // Re-scan the TalkWeaver vault for new images; returns count added.
     scanVault: (): Promise<number> => ipcRenderer.invoke('well:scan-vault'),
     // Delete every Others' Library deck matching the current query + filters, then rebuild its

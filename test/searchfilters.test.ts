@@ -38,12 +38,17 @@ describe('matchesFromKind and countFrom', () => {
     expect(rows.filter((r) => matchesFromKind(r, 'old-slides', 'all'))).toHaveLength(3)
     expect(rows.filter((r) => matchesFromKind(r, 'screenshots', 'all'))).toHaveLength(2)
     expect(rows.filter((r) => matchesFromKind(r, 'talks', 'all'))).toHaveLength(0)
+    expect([...rows, { ...shot(), usedInTalks: 2 }].filter((r) => matchesFromKind(r, 'talks', 'all'))).toHaveLength(1)
   })
   it('From and Kind combine', () => {
     expect(rows.filter((r) => matchesFromKind(r, 'screenshots', 'no-text'))).toHaveLength(1)
     expect(rows.filter((r) => matchesFromKind(r, 'old-slides', 'embedded'))).toHaveLength(0)
   })
-  it('counts per chip with the Kind applied; talks stays 0', () => {
+  it('a result used in talks counts under its bucket and under talks', () => {
+    const used = [{ ...shot(), usedInTalks: 1 }, shot(), oldImg()]
+    expect(countFrom(used, 'all')).toEqual({ all: 3, screenshots: 2, 'old-images': 1, 'old-slides': 0, talks: 1 })
+  })
+  it('counts per chip with the Kind applied; talks is 0 when nothing is used', () => {
     expect(countFrom(rows, 'all')).toEqual({ all: 7, screenshots: 2, 'old-images': 2, 'old-slides': 3, talks: 0 })
     expect(countFrom(rows, 'no-text')).toEqual({ all: 2, screenshots: 1, 'old-images': 1, 'old-slides': 0, talks: 0 })
     expect(countFrom(rows, 'embedded')).toEqual({ all: 2, screenshots: 0, 'old-images': 2, 'old-slides': 0, talks: 0 })
@@ -59,7 +64,7 @@ describe('planSources', () => {
     expect(planSources('slides', 'screenshots', 'all')).toEqual({ slides: false, archiveImages: false, well: true })
     expect(planSources('images', 'old-slides', 'all')).toEqual({ slides: true, archiveImages: false, well: false })
     expect(planSources('images', 'old-images', 'all')).toEqual({ slides: false, archiveImages: true, well: false })
-    expect(planSources('images', 'talks', 'all')).toEqual({ slides: false, archiveImages: false, well: false })
+    expect(planSources('images', 'talks', 'all')).toEqual({ slides: false, archiveImages: false, well: true })
   })
   it('Kind drops slides; Embedded drops the well', () => {
     expect(planSources('slides', 'all', 'no-text')).toEqual({ slides: false, archiveImages: true, well: true })

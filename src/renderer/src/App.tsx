@@ -23,7 +23,7 @@ const KIND_TABS: Array<{ value: KindFilter; label: string }> = [
 // A From chip also moves Type to a compatible value, so the chip never lands on an empty combination.
 function fromPatch(from: FromFilter): Partial<SearchFilters> {
   if (from === 'old-slides') return { from, type: 'slides', kind: 'all' }
-  if (from === 'screenshots' || from === 'old-images') return { from, type: 'images' }
+  if (from === 'screenshots' || from === 'old-images' || from === 'talks') return { from, type: 'images' }
   return { from }
 }
 // A Kind other than All concerns pictures only, so leave Presentations/slides-only views and any From chip it would empty.
@@ -31,7 +31,7 @@ function kindPatch(kind: KindFilter, f: SearchFilters): Partial<SearchFilters> {
   if (kind === 'all') return { kind }
   const p: Partial<SearchFilters> = { kind }
   if (f.type !== 'images') p.type = 'images'
-  if (f.from === 'old-slides' || f.from === 'talks' || (kind === 'embedded' && f.from === 'screenshots')) p.from = 'all'
+  if (f.from === 'old-slides' || (kind === 'embedded' && f.from === 'talks') || (kind === 'embedded' && f.from === 'screenshots')) p.from = 'all'
   return p
 }
 // The results count names what the Type chip shows: images, presentations, or slides (the default).
@@ -96,6 +96,8 @@ export default function App(): JSX.Element {
   const [showHelp, setShowHelp] = useState(false)
   const [stats, setStats] = useState<Stats | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
+  // a scan of the talks finished: counts, pills and the inspector follow the new usage
+  useEffect(() => window.sw.archive.onTalkUsageChanged((r) => { if (r.ok) setRefreshKey((k) => k + 1) }), [])
   // keyboard selection + inspector + command palette
   const [sel, setSel] = useState(-1)
   const [inspectorOpen, setInspectorOpen] = useState(false)
@@ -751,14 +753,14 @@ export default function App(): JSX.Element {
           <div className="chips" role="tablist" aria-label="From">
             {FROM_CHIPS.map((c) => {
               const n = fromCounts[c.value]
-              const disabled = c.value === 'talks'
+              const disabled = c.value === 'talks' && n === 0 && filters.from !== 'talks'
               return (
                 <button
                   key={c.value}
                   role="tab"
                   aria-selected={filters.from === c.value}
                   disabled={disabled}
-                  title={disabled ? 'Available once talks report which pictures they use' : undefined}
+                  title={disabled ? 'No picture in your talks matches this search' : undefined}
                   className={filters.from === c.value ? 'chip active' : 'chip'}
                   onClick={() => patch(fromPatch(c.value))}
                 >
@@ -2132,6 +2134,10 @@ function SearchableSelect({
   )
 }
 
+function talksLine(n: number): string {
+  return `used in ${n} talk${n === 1 ? '' : 's'}`
+}
+
 function clusterBadge(c: SlideClusterResult): string {
   if (c.size > 1) return `▸ ${c.size} near-identical in ${c.deckCount} presentation${c.deckCount === 1 ? '' : 's'}`
   if (c.representative.usedInDecks > 1) return `used in ${c.representative.usedInDecks} presentations`
@@ -2204,6 +2210,7 @@ function Card({
               {badge}
             </span>
           )}
+          {(h.usedInTalks ?? 0) > 0 && <span className="badge talks">{talksLine(h.usedInTalks ?? 0)}</span>}
         </div>
       </div>
     </div>
@@ -2739,6 +2746,18 @@ function SlideInspector({
           </div>
         ))}
         {!isSlide && hit.text && <div className="details-text">{hit.text}</div>}
+        {(hit.talkUses ?? []).length > 0 && (
+          <>
+            <div className="inspector-section">Used in</div>
+            <div className="used-in-box">
+              {(hit.talkUses ?? []).map((u) => (
+                <div className="used-in-row" key={u.relPath}>
+                  {u.title}{u.slide !== null ? ` (slide ${u.slide})` : ''} — <button className="link" title="TalkWeaver has no link to a single talk yet, so this shows the talk's file in Finder" onClick={() => void window.sw.archive.revealTalk(u.relPath)}>Show talk file ↗</button>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
         <MoreLikeThis hit={hit} onOpen={onOpenSimilar} />
         {siblings.length > 1 && (
           <>
