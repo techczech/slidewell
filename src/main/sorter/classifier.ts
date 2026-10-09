@@ -3,10 +3,15 @@
  * trained on his own keep / bin history. L2-regularised logistic regression on centred vectors,
  * class-weighted so the rarer label counts as much as the common one (the prior is 50/50, not his
  * history's mix). The regularisation strength is picked by k-fold cross-validation on the training
- * examples only. Deterministic: same examples in, same model out.
+ * examples only. The raw score is then calibrated (calibration.ts: Platt or isotonic, whichever has
+ * the lower cross-validated Brier score) on out-of-fold scores from the same folds, so p(keep) means
+ * what it says. Everything happens inside the examples passed to train(): a held-back sample stays
+ * out of fitting and calibration alike. Deterministic: same examples in, same model out.
  *
  * Pure: no Electron, no files. The model is plain JSON (stored by store.ts).
  */
+
+import { applyCalibration, chooseCalibration, type Calibration, type CalibrationCheck, type Scored } from './calibration'
 
 export type Example = { vector: Float32Array; keep: boolean }
 
@@ -19,12 +24,16 @@ export type Classifier = {
   bias: number
   l2: number
   trainedOn: { keep: number; throwaway: number }
+  /** Maps the raw log-odds to a calibrated p(keep); absent = uncalibrated. */
+  calibration?: Calibration
+  /** How the calibration was chosen (cross-validated Brier and reliability of both methods). */
+  calibrationCheck?: CalibrationCheck
 }
 
 /** Candidate L2 strengths for cross-validation. Wide on purpose: a pick at either end means the grid was too narrow. */
 export const L2_GRID = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1]
 
-export type TrainOptions = { l2?: number; epochs?: number; folds?: number; l2Grid?: number[] }
+export type TrainOptions = { l2?: number; epochs?: number; folds?: number; l2Grid?: number[]; calibrate?: boolean }
 
 const sigmoid = (z: number): number => (z >= 0 ? 1 / (1 + Math.exp(-z)) : Math.exp(z) / (1 + Math.exp(z)))
 
@@ -91,12 +100,17 @@ function fit(examples: Example[], dim: number, l2: number, epochs: number): Clas
   return { kind: 'logistic-v1', dim, mean: Array.from(mean), weights: Array.from(w), bias: b, l2, trainedOn: { keep: nKeep, throwaway: nThrow } }
 }
 
-/** Probability that this picture is one he would keep (0..1). */
-export function predictKeep(model: Classifier, v: Float32Array): number {
+/** The raw log-odds that he would keep this picture (before calibration). */
+export function rawScore(model: Classifier, v: Float32Array): number {
   if (v.length !== model.dim) throw new Error(`vector has ${v.length} values, model expects ${model.dim}`)
   let z = model.bias
   for (let i = 0; i < model.dim; i++) z += model.weights[i] * (v[i] - model.mean[i])
-  return sigmoid(z)
+  return z
+}
+
+/** Probability that this picture is one he would keep (0..1), calibrated when the model carries a calibration. */
+export function predictKeep(model: Classifier, v: Float32Array): number {
+  return applyCalibration(model.calibration, rawScore(model, v))
 }
 
 /** Class-weighted log loss of a model on examples (lower is better). */
@@ -105,7 +119,7 @@ function weightedLogLoss(model: Classifier, examples: Example[]): number {
   const nThrow = examples.length - nKeep
   let s = 0
   for (const e of examples) {
-    const p = Math.min(1 - 1e-6, Math.max(1e-6, predictKeep(model, e.vector)))
+    const p = Math.min(1 - 1e-6, Math.max(1e-6, applyCalibration(null, rawScore(model, e.vector))))
     s += e.keep ? -Math.log(p) / Math.max(1, nKeep) : -Math.log(1 - p) / Math.max(1, nThrow)
   }
   return s / 2
@@ -125,7 +139,8 @@ function folds(examples: Example[], k: number): Example[][] {
 
 /**
  * Train on labelled examples. Without `l2`, picks it from `l2Grid` by k-fold cross-validation
- * (class-weighted log loss), then fits on every example. Needs at least one of each label.
+ * (class-weighted log loss). Unless `calibrate: false`, calibrates on the out-of-fold scores of the
+ * chosen l2. Then fits on every example. Needs at least one of each label.
  */
 export function train(examples: Example[], opts: TrainOptions = {}): Classifier {
   if (examples.length === 0) throw new Error('no training examples')
@@ -134,23 +149,35 @@ export function train(examples: Example[], opts: TrainOptions = {}): Classifier 
   const nKeep = examples.filter((e) => e.keep).length
   if (nKeep === 0 || nKeep === examples.length) throw new Error('training needs both kept and binned screenshots')
   const epochs = opts.epochs ?? 300
+  const k = Math.max(2, Math.min(opts.folds ?? 5, nKeep, examples.length - nKeep))
+  const parts = folds(examples, k)
+  const foldModels = (l2: number): Array<Classifier | null> =>
+    parts.map((test, f) => {
+      const trainPart = parts.flatMap((p, j) => (j === f ? [] : p))
+      return test.length && trainPart.some((e) => e.keep) && trainPart.some((e) => !e.keep) ? fit(trainPart, dim, l2, epochs) : null
+    })
   let l2 = opts.l2
+  let bestFolds: Array<Classifier | null> | null = null
   if (l2 === undefined) {
-    const k = Math.max(2, Math.min(opts.folds ?? 5, nKeep, examples.length - nKeep))
-    const parts = folds(examples, k)
     let best = Infinity
     for (const cand of opts.l2Grid ?? L2_GRID) {
-      let loss = 0
-      for (let f = 0; f < k; f++) {
-        const trainPart = parts.flatMap((p, j) => (j === f ? [] : p))
-        if (!trainPart.some((e) => e.keep) || !trainPart.some((e) => !e.keep) || parts[f].length === 0) continue
-        loss += weightedLogLoss(fit(trainPart, dim, cand, epochs), parts[f])
-      }
+      const ms = foldModels(cand)
+      const loss = ms.reduce((s, m, f) => s + (m ? weightedLogLoss(m, parts[f]) : 0), 0)
       if (loss < best) {
         best = loss
         l2 = cand
+        bestFolds = ms
       }
     }
   }
-  return fit(examples, dim, l2 ?? 1e-2, epochs)
+  const chosenL2 = l2 ?? 1e-2
+  const model = fit(examples, dim, chosenL2, epochs)
+  if (opts.calibrate === false) return model
+  const ms = bestFolds ?? foldModels(chosenL2)
+  const oof: Scored[] = []
+  ms.forEach((m, f) => {
+    if (m) for (const e of parts[f]) oof.push({ z: rawScore(m, e.vector), keep: e.keep })
+  })
+  const { calibration, check } = chooseCalibration(oof, k)
+  return { ...model, calibration, calibrationCheck: check }
 }

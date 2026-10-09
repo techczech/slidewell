@@ -86,6 +86,7 @@ export function SorterSettings(): JSX.Element {
           </table>
           <div className="pic-note">
             {a.keptProposedThrowaway === 0 ? 'No screenshot you kept was proposed as throwaway.' : `${n(a.keptProposedThrowaway)} screenshot${a.keptProposedThrowaway === 1 ? '' : 's'} you kept would have been proposed as throwaway.`} Throwaway needs {pct(rep.thresholds.throwaway)} certainty; keep needs {pct(rep.thresholds.keep)}.
+            {rep.calibration ? ` Certainty is calibrated on your past choices (${rep.calibration.chosen === 'platt' ? 'Platt scaling' : 'isotonic regression'}).` : ''}
           </div>
         </div>
       ) : (

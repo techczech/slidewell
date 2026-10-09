@@ -13,7 +13,8 @@
 import { ipcMain } from 'electron'
 import type { IndexItem } from '../picture-search/vector-store'
 import { applyRules } from './rules'
-import { train, predictKeep, type Classifier } from './classifier'
+import { train, predictKeep, type Classifier, type Example } from './classifier'
+import { auc, brier, reliabilityTable, type CalibrationCheck, type ReliabilityRow } from './calibration'
 import { decide, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from './decide'
 import { accuracyReport, holdOutSplit, type AccuracyReport, type LabelledPrediction } from './accuracy'
 import { loadLabelled, loadUndecided, SorterStore, type ProposalRow, type Shot } from './store'
@@ -33,6 +34,10 @@ export type SorterReport = {
   /** The classifier tested on the held-back sample was trained on this many. */
   trainedOn: { keep: number; throwaway: number }
   l2: number
+  /** Calibration chosen inside the training split (cross-validated Brier + reliability of both methods). */
+  calibration: CalibrationCheck | null
+  /** The calibrated classifier alone on the held-back sample. */
+  heldBackClassifier: { auc: number | null; brier: number; reliability: ReliabilityRow[] }
   /** Rules + classifier on the held-back sample (the number that matters). */
   heldBack: AccuracyReport
   /** Rules alone on the same sample, for comparison. */
@@ -60,6 +65,8 @@ export type SorterDeps = {
   }
   broadcast: (s: SorterStatus) => void
   thresholds?: Thresholds
+  /** Runs classifier training; the app passes a worker thread so the main process never blocks. */
+  train?: (examples: Example[]) => Promise<Classifier>
 }
 
 type Run = Pick<SorterStatus, 'phase' | 'done' | 'total' | 'message' | 'error'>
@@ -122,7 +129,6 @@ export class SorterService {
       const vectors = await this.vectorsFor(shots, 'reading pictures of your past choices', ctl.signal)
       if (ctl.signal.aborted) throw new Error('cancelled')
       this.set({ phase: 'training', message: 'learning from your past choices' }, true)
-      await new Promise((r) => setImmediate(r)) // let the status reach the window before the CPU-bound fit
       const usable = shots.filter((s) => s.image && vectors.has(s.image.id))
       const { train: trainSet, test } = holdOutSplit(
         usable,
@@ -131,17 +137,21 @@ export class SorterService {
         HOLD_OUT_FRACTION
       )
       const toExamples = (xs: Shot[]): Array<{ vector: Float32Array; keep: boolean }> => xs.map((s) => ({ vector: vectors.get(s.image!.id)!, keep: s.truth === 'keep' }))
-      const held: Classifier = train(toExamples(trainSet))
+      const fitModel = this.deps.train ?? (async (xs: Example[]) => train(xs))
+      const held: Classifier = await fitModel(toExamples(trainSet))
       const t = this.thresholds()
       const both: LabelledPrediction[] = []
       const rulesAlone: LabelledPrediction[] = []
+      const scored: Array<{ p: number; keep: boolean }> = []
       for (const s of test) {
         const rule = applyRules(s.facts)
-        both.push({ truth: s.truth!, proposal: decide(rule, predictKeep(held, vectors.get(s.image!.id)!), t).proposal })
+        const p = predictKeep(held, vectors.get(s.image!.id)!)
+        scored.push({ p, keep: s.truth === 'keep' })
+        both.push({ truth: s.truth!, proposal: decide(rule, p, t).proposal })
         rulesAlone.push({ truth: s.truth!, proposal: decide(rule, null, t).proposal })
       }
       // the model the sorter uses learns from all of his choices (the report measures the procedure)
-      const final = train(toExamples(usable))
+      const final = await fitModel(toExamples(usable))
       const trainedAt = new Date().toISOString()
       const count = (xs: Shot[]): { keep: number; throwaway: number } => ({ keep: xs.filter((s) => s.truth === 'keep').length, throwaway: xs.filter((s) => s.truth === 'throwaway').length })
       const report: SorterReport = {
@@ -154,6 +164,8 @@ export class SorterService {
         keepFromWellCopy: usable.filter((s) => s.fromWellCopy).length,
         trainedOn: held.trainedOn,
         l2: held.l2,
+        calibration: held.calibrationCheck ?? null,
+        heldBackClassifier: { auc: auc(scored), brier: brier(scored), reliability: reliabilityTable(scored.map((x) => ({ pThrow: 1 - x.p, binned: !x.keep }))) },
         heldBack: accuracyReport(both),
         rulesOnly: accuracyReport(rulesAlone)
       }

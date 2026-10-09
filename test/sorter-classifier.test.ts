@@ -33,12 +33,13 @@ describe('sorter classifier: train / predict', () => {
     expect(right / fresh.length).toBeGreaterThan(0.9)
   })
 
-  it('class weighting: a 3:1 history does not bias an in-between picture towards keep', () => {
+  it('class weighting: a 3:1 history does not bias the raw score of an in-between picture towards keep', () => {
+    const raw = train(data, { epochs: 200, calibrate: false })
     const mid = new Float32Array(DIM)
     mid[0] = 1
     mid[1] = 0.125
     mid[2] = 0.125
-    expect(Math.abs(predictKeep(model, normalise(mid)) - 0.5)).toBeLessThan(0.15)
+    expect(Math.abs(predictKeep(raw, normalise(mid)) - 0.5)).toBeLessThan(0.15)
   })
 
   it('is deterministic and serialisable', () => {
@@ -47,6 +48,8 @@ describe('sorter classifier: train / predict', () => {
     const round = JSON.parse(JSON.stringify(model))
     expect(predictKeep(round, data[0].vector)).toBeCloseTo(predictKeep(model, data[0].vector), 12)
     expect(model.trainedOn).toEqual({ keep: 60, throwaway: 20 })
+    expect(model.calibration?.method).toMatch(/platt|isotonic/)
+    expect(model.calibrationCheck?.chosen).toBe(model.calibration?.method)
   })
 
   it('refuses training without both labels, and vectors of the wrong length', () => {

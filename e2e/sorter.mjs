@@ -111,8 +111,28 @@ try {
   } else console.log('SKIP sorting-refused check: the scratch copy already has a report (SLIDEWELL_SORTER_RECOPY=0)')
 
   const t0 = Date.now()
-  const trained = await win.evaluate(() => window.sw.sorter.train())
+  // start training, then keep asking the main process for a reply: training runs in a worker thread,
+  // so the main process should answer quickly throughout (the fit itself is CPU-bound for seconds)
+  await win.evaluate(() => {
+    window.__train = window.sw.sorter.train().then((r) => (window.__trained = r))
+  })
+  let trained = null
+  let maxMainMs = 0
+  let trainingSamples = 0
+  while (!trained) {
+    const a = Date.now()
+    const phase = await app.evaluate(() => 'ok').then(() => win.evaluate(() => window.sw.sorter.status().then((s) => s.phase)))
+    const ms = Date.now() - a
+    if (phase === 'training') {
+      trainingSamples++
+      maxMainMs = Math.max(maxMainMs, ms)
+    }
+    trained = await win.evaluate(() => window.__trained ?? null)
+    if (!trained) await sleep(50)
+  }
   out('train seconds', Math.round((Date.now() - t0) / 1000))
+  out('main process during training', { samples: trainingSamples, slowestReplyMs: maxMainMs })
+  check('main process stays responsive while training (slowest reply < 500 ms)', trainingSamples > 0 && maxMainMs < 500, `${trainingSamples} samples, slowest ${maxMainMs} ms`)
   check('training finished', trained.ok, trained.error)
   const rep = trained.report
   out('report', rep)
@@ -121,6 +141,9 @@ try {
     const sum = a.keep.proposed + a.throwaway.proposed + a.doubtful.count
     check('held-back sample is 20% of each label (rounded up)', a.truth.keep === Math.ceil(rep.usable.keep * 0.2) && a.truth.throwaway === Math.ceil(rep.usable.throwaway * 0.2), JSON.stringify({ truth: a.truth, usable: rep.usable }))
     check('every held-back screenshot got a proposal', sum === a.sample)
+    check('calibration chosen inside the training split and reported', Boolean(rep.calibration?.chosen) && rep.heldBackClassifier?.auc !== undefined, JSON.stringify(rep.calibration?.brier))
+    const tp = a.throwaway.precision
+    console.log(tp === null ? 'NOTE throwaway precision at the threshold: nothing proposed' : tp < 0.95 ? `NOTE throwaway precision ${tp.toFixed(3)} is BELOW 0.95` : `NOTE throwaway precision ${tp.toFixed(3)} meets 0.95`)
   }
 
   const t1 = Date.now()

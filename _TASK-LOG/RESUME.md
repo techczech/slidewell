@@ -10,17 +10,28 @@ Electron + React + TS (electron-vite), mirrored from `talk-weaver`. Shipped (see
 
 ## Screenshot sorter, local part (2026-10-09)
 
-Code: `src/main/sorter/` — `rules.ts` (app/window/OCR → lean + reason), `classifier.ts` (class-weighted L2 logistic regression on picture-search embeddings, L2 by 5-fold CV), `decide.ts` (log-odds combination + keep-bias thresholds → keep/throwaway/doubtful + reason), `accuracy.ts` (stratified 20% hold-out + report), `store.ts`, `service.ts`; Settings › Screenshot sorter (`SorterSettings.tsx`). Proposals only: `sorter_proposals` + `sorter_models` in triage.db (never `triage_decisions`); triage embeddings in picture-search.db, kind `triage`, id `triage:<hash>` (left out of search unless a query names the kind). No nightly schedule yet: Settings has "Sort undecided screenshots now", refused until a held-back report exists.
+Code: `src/main/sorter/` — `rules.ts` (app/window/OCR → lean + reason), `classifier.ts` (class-weighted L2 logistic regression on picture-search embeddings, L2 by 5-fold CV; trained in a worker thread), `calibration.ts` (Platt vs isotonic on out-of-fold scores, the lower cross-validated Brier wins), `decide.ts` (log-odds combination + keep-bias thresholds → keep/throwaway/doubtful + reason), `accuracy.ts` (stratified 20% hold-out + report), `store.ts`, `service.ts`; Settings › Screenshot sorter (`SorterSettings.tsx`). Proposals only: `sorter_proposals` + `sorter_models` in triage.db (never `triage_decisions`); triage embeddings in picture-search.db, kind `triage`, id `triage:<hash>` (left out of search unless a query names the kind). No nightly schedule yet: Settings has "Sort undecided screenshots now", refused until a held-back report exists.
 
-**Accuracy on his real labelled history** (copy taken 2026-10-09 evening, `e2e/sorter.mjs`, sorter-local-1, thresholds throwaway ≥ 0.90 / keep ≥ 0.70; all e2e checks passed, no network request, his decisions unchanged):
+**Accuracy on his real labelled history** (calibrated, copy taken 2026-10-09 evening, `e2e/sorter.mjs`, sorter-local-1, thresholds unchanged: throwaway ≥ 0.90 (floor 0.85), keep ≥ 0.70; all e2e checks passed, no network request, his decisions unchanged):
 
-- Labelled: 251 kept (well screenshots, all triage `included`) and 156 binned (triage `excluded`); 251 + 154 have their picture on disk (7 kept pictures come from the well's re-encoded copy).
-- Held back 20% per label: **82** (51 kept, 31 binned); classifier trained on the other 323; L2 = 0.001, picked by 5-fold cross-validation on the training part only.
-- **Keep precision 93%** (13 of 14 proposed keeps were kept). **Throwaway precision: none proposed** (0 of 31 binned reached the band). **Doubtful 83%** (68 of 82). Kept proposed as throwaway: 0. Binned proposed as keep: 1.
+- Labelled: 251 kept (well screenshots, all triage `included`) and 156 binned (triage `excluded`); 251 + 154 have their picture on disk.
+- Held back 20% per label: **82** (51 kept, 31 binned). Fitting and calibration use only the other 323 (L2 = 0.001 and the calibrator both chosen by 5-fold CV inside that split).
+- Calibration, cross-validated Brier inside the training split: raw 0.210, Platt 0.196, **isotonic 0.189 (chosen)**.
+- **Throwaway precision 100%** (6 of 6 proposed throwaways were binned). **Keep precision 85%** (39 of 46). **Doubtful 37%** (30 of 82). Kept proposed as throwaway: 0. Binned proposed as keep: 7.
+- Calibrated classifier alone on the held-back 82: AUC 0.857, Brier 0.141. Reliability of p(throwaway):
+
+  | p(throwaway) | n | mean predicted | share binned |
+  |---|---|---|---|
+  | 0.1–0.3 | 45 | 0.22 | 0.13 |
+  | 0.3–0.5 | 7 | 0.39 | 0.29 |
+  | 0.5–0.7 | 11 | 0.58 | 0.55 |
+  | 0.7–0.9 | 13 | 0.75 | 0.85 |
+  | 0.9–1.0 | 6 | 0.97 | 1.00 |
+
 - Rules alone on the same 82: keep 75% (3 of 4), throwaway none, doubtful 95%.
-- Full sort of the copy: 8,337 undecided pictures → 1,628 keep, 0 throwaway, 6,709 doubtful (p(keep) never below 0.10).
-- Reading: the keep-bias holds and the classifier ranks well (held-back AUC ≈ 0.86), but its probabilities sit between about 0.1 and 0.8, so the 0.90 throwaway band is never reached. Moving the thresholds or calibrating the probabilities is a keep-bias decision for Dominik, not taken here.
-- Earlier copy (same day, before the triage index found the originals of most kept screenshots): keep 97% (35/36), throwaway 100% (1/1), doubtful 46% on 68. That run embedded 160 keeps from the well's re-encoded copies against binned originals; treat it as inflated by file format.
+- Full sort of the copy: 11,928 undecided pictures → 7,849 keep, 200 throwaway, 3,879 doubtful.
+- Caveat: throwaway precision rests on 6 held-back proposals; the doubtful band shrank because calibration lets more pictures reach keep, at the cost of 7 binned screenshots proposed as keep (a keep error, which the keep-bias accepts).
+- Before calibration the same sample gave keep 93% (13/14), throwaway none proposed, doubtful 83%. An earlier copy that embedded most kept pictures from the well's re-encoded copies looked better than it was (file format); disregard it.
 
 ## Decided (2026-06-18 grill — presentation-system)
 
