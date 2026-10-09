@@ -46,6 +46,7 @@ export function installMock(): void {
       copyImage: async () => false,
       copyImagePng: async () => false,
       reveal: async () => false,
+      revealTalk: async () => false,
       scanVault: async () => 0,
       deleteOthersMatching: async () => ({ ok: false })
     },

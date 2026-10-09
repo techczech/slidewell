@@ -18,6 +18,7 @@ import { ensureWell, drainInbox, scanVault, searchWell, wellByIds, wellAbsPath, 
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow } from './triage'
 import { cleanShotFolder } from './cleanshot-folder'
 import { createSourceWatcher } from './source-watcher'
+import { ensureUsageTable, loadUsage, scanTalkUsage, talkAbsPath, type UsageMap } from './talk-usage'
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
 import { convertPptxToOutline } from './convert'
 import { slugify } from './outline'
@@ -410,6 +411,8 @@ app.whenReady().then(() => {
       date: r.added_at || null,
       slideOrder: null,
       usedInDecks: 1,
+      usedInTalks: (talkUsage.get(r.id) ?? []).length,
+      talkUses: talkUsage.get(r.id) ?? [],
       reference: `![](img-${r.id})`,
       thumbUrl: swThumb(abs),
       library: 'mine',
@@ -489,7 +492,12 @@ app.whenReady().then(() => {
     // the well is the user's own — shown for Mine/All, not when searching Others only
     if (plan.well && includeMine) {
       try {
-        for (const r of await searchWell(wellRootResolved(), query, 60)) {
+        const wellRows = await searchWell(wellRootResolved(), query, 60)
+        // pictures talks use always get their chance, even past the first 60 words-matches
+        const seen = new Set(wellRows.map((r) => r.id))
+        const used = [...talkUsage.keys()].slice(0, 900)
+        for (const r of await searchWell(wellRootResolved(), query, 60, used).catch(() => [] as WellRow[])) if (!seen.has(r.id)) wellRows.push(r)
+        for (const r of wellRows) {
           const w = wellToWire(r)
           out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
         }
@@ -737,6 +745,17 @@ app.whenReady().then(() => {
     return true
   })
 
+  // TalkWeaver registers no URL scheme and no document type, so the nearest thing to "open the talk"
+  // is showing its outline file in Finder. The path is vault-relative and must stay inside the vault.
+  ipcMain.handle('talks:reveal', (_e, relPath: string) => {
+    const vr = detectVaultRoot()
+    if (!vr || typeof relPath !== 'string') return false
+    const abs = talkAbsPath(vr, relPath)
+    if (!abs) return false
+    shell.showItemInFolder(abs)
+    return true
+  })
+
   // --- well / import paths ---
   ipcMain.handle('settings:choose-vault', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
@@ -749,6 +768,7 @@ app.whenReady().then(() => {
     const vr = detectVaultRoot()
     if (!vr) return 0
     try {
+      void refreshTalkUsage(wellRootResolved(), vr)
       return await scanVault(archiveRoot(), wellRootResolved(), vr)
     } catch {
       return 0
@@ -1199,13 +1219,31 @@ app.whenReady().then(() => {
 
 // On launch: ensure the well exists, drain anything Raycast dropped while we were closed, index
 // new TalkWeaver vault images, and watch the inbox so future drops ingest live.
+// Which talks use which picture; filled from well.db at launch and refreshed by each talk scan.
+let talkUsage: UsageMap = new Map()
+async function refreshTalkUsage(root: string, vr: string): Promise<void> {
+  try {
+    await scanTalkUsage(root, vr)
+    talkUsage = await loadUsage(root)
+  } catch {
+    /* keep the last known usage */
+  }
+}
+
 async function startWell(): Promise<void> {
   try {
     const root = wellRootResolved()
     await ensureWell(root)
+    await ensureUsageTable(root)
+    talkUsage = await loadUsage(root)
     await drainInbox(archiveRoot(), root)
     const vr = detectVaultRoot()
-    if (vr) void scanVault(archiveRoot(), root, vr).then((n) => n > 0 && pictureSearch?.poke(), () => undefined)
+    if (vr) {
+      void scanVault(archiveRoot(), root, vr).then((n) => n > 0 && pictureSearch?.poke(), () => undefined)
+      // read-only scan of the vault's talks on launch and whenever the vault changes
+      void refreshTalkUsage(root, vr)
+      createSourceWatcher(() => void refreshTalkUsage(root, vr), 4000).setSources([{ path: vr, recursive: true }])
+    }
     const inbox = join(root, '_inbox')
     let busy = false
     fsWatch(inbox, async () => {
