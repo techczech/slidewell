@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { nextPreviewIndex } from '../../main/triage-logic'
 import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency } from '../../preload'
 
 type SortKey = 'date-desc' | 'date-asc' | 'title'
@@ -1038,6 +1039,22 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
     [onChanged, onToast]
   )
 
+  // Lightbox decision: record it, then show the next card (unselect stays; last card stays). The
+  // preview stays open; the grid selection follows so closing lands on the card last viewed.
+  const decideInPreview = useCallback(
+    (action: 'select' | 'exclude' | 'reset') => {
+      if (!preview) return
+      void decide(preview, action)
+      const idx = items.findIndex((it) => it.relPath === preview.relPath)
+      const n = nextPreviewIndex(idx, items.length, action)
+      if (n >= 0) {
+        setPreview(items[n])
+        setSel(n)
+      }
+    },
+    [preview, items, decide]
+  )
+
   const importSelected = useCallback(async () => {
     // staged large videos need an explicit confirm each (rare); only those currently in view can be
     // confirmed — others are reported as "over gate" and stay staged until imported from the Selected tab
@@ -1087,11 +1104,11 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
       }
       if (preview) {
         if (e.key === ' ' || e.key === 's' || e.key === 'S' || e.key === 'i' || e.key === 'I') {
-          e.preventDefault(); void decide(preview, 'select'); setPreview(null)
+          e.preventDefault(); decideInPreview('select')
         } else if (e.key === 'x' || e.key === 'X' || e.key === 'e' || e.key === 'E') {
-          e.preventDefault(); void decide(preview, 'exclude'); setPreview(null)
+          e.preventDefault(); decideInPreview('exclude')
         } else if (e.key === 'u' || e.key === 'U') {
-          e.preventDefault(); void decide(preview, 'reset'); setPreview(null)
+          e.preventDefault(); decideInPreview('reset')
         }
         return
       }
@@ -1141,7 +1158,7 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [items, sel, preview, hasMore, decide, paste, onClose, cols, importSelected])
+  }, [items, sel, preview, hasMore, decide, decideInPreview, paste, onClose, cols, importSelected])
 
   return (
     <>
@@ -1265,12 +1282,9 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
       </div>
       {preview && (
         <TriagePreview
-          item={preview}
+          item={items.find((it) => it.relPath === preview.relPath) ?? preview}
           onClose={() => setPreview(null)}
-          onDecide={(a) => {
-            void decide(preview, a)
-            setPreview(null)
-          }}
+          onDecide={decideInPreview}
         />
       )}
     </>

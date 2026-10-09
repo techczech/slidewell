@@ -7,13 +7,17 @@ export type TriageState = 'undecided' | 'selected' | 'included' | 'excluded'
 
 export type TriageCounts = { undecided: number; selected: number; included: number; excluded: number; total: number }
 
-/** Bucket a `GROUP BY state` result. An unknown/NULL state counts as undecided. */
-export function tallyTriageStates(rows: { state: string; n: number }[]): TriageCounts {
+/**
+ * Bucket a `GROUP BY state` result. An unknown/NULL state counts as undecided. `hashes` (distinct
+ * content hashes in the bucket) is optional: when given, the *selected* count uses it, because
+ * triage_fts is keyed by path but import ingests one item per hash — duplicates must count once.
+ */
+export function tallyTriageStates(rows: { state: string; n: number; hashes?: number }[]): TriageCounts {
   const out: TriageCounts = { undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 }
   for (const r of rows) {
     const n = Number(r.n)
     out.total += n
-    if (r.state === 'selected') out.selected += n
+    if (r.state === 'selected') out.selected += r.hashes === undefined ? n : Number(r.hashes)
     else if (r.state === 'included') out.included += n
     else if (r.state === 'excluded') out.excluded += n
     else out.undecided += n
@@ -42,4 +46,15 @@ export function planSelectedImport(
     else toImport.push(it.hash)
   }
   return { toImport, skipped, gated }
+}
+
+/**
+ * Where the lightbox goes after a decision. select/exclude advance to the next card (stay on the
+ * last one); reset (unselect) stays on the same card. Returns the new index.
+ */
+export function nextPreviewIndex(index: number, length: number, action: 'select' | 'exclude' | 'reset'): number {
+  if (length <= 0) return -1
+  const last = length - 1
+  if (action === 'reset') return Math.min(Math.max(index, 0), last)
+  return Math.min(Math.max(index, 0) + 1, last)
 }

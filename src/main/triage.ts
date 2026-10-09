@@ -240,9 +240,9 @@ export async function triageCounts(wellRoot: string): Promise<TriageCounts> {
   const db = triageDb(wellRoot)
   const empty: TriageCounts = { undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 }
   if (!existsSync(db)) return empty
-  const rows = await query<{ state: string; n: number }>(
+  const rows = await query<{ state: string; n: number; hashes: number }>(
     db,
-    `SELECT COALESCE(d.state, 'undecided') AS state, COUNT(*) AS n
+    `SELECT COALESCE(d.state, 'undecided') AS state, COUNT(*) AS n, COUNT(DISTINCT triage_fts.hash) AS hashes
      FROM triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash GROUP BY state`,
     []
   )

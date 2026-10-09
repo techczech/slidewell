@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { tallyTriageStates, planSelectedImport } from '../src/main/triage-logic'
+import { tallyTriageStates, planSelectedImport, nextPreviewIndex } from '../src/main/triage-logic'
 
 describe('tallyTriageStates', () => {
   it('buckets every state and sums total (selected is NOT folded into undecided)', () => {
@@ -75,5 +75,30 @@ describe('planSelectedImport', () => {
     )
     expect(r.toImport).toEqual(['g'])
     expect(r.gated).toEqual([])
+  })
+})
+
+describe('selected count is unique hashes', () => {
+  it('two selected paths sharing one hash count as 1', () => {
+    const out = tallyTriageStates([
+      { state: 'selected', n: 2, hashes: 1 },
+      { state: 'undecided', n: 3, hashes: 3 }
+    ])
+    expect(out.selected).toBe(1)
+    expect(out.total).toBe(5)
+  })
+})
+
+describe('nextPreviewIndex', () => {
+  it('select/exclude advance; last card stays', () => {
+    expect(nextPreviewIndex(0, 3, 'select')).toBe(1)
+    expect(nextPreviewIndex(1, 3, 'exclude')).toBe(2)
+    expect(nextPreviewIndex(2, 3, 'select')).toBe(2)
+  })
+  it('reset stays on the same card', () => {
+    expect(nextPreviewIndex(1, 3, 'reset')).toBe(1)
+  })
+  it('empty list gives -1', () => {
+    expect(nextPreviewIndex(0, 0, 'select')).toBe(-1)
   })
 })

@@ -115,7 +115,7 @@ try {
     result.cardsRendered === 3 &&
     result.cardHeightOk &&
     result.groupCols === 6 &&
-    result.selectedCount === 3 &&
+    result.selectedCount === 2 && // unique hashes: one.png + (dup.png|two.png share a hash)
     result.includedBeforeImport === 0 &&
     result.wellEmptyBeforeImport &&
     result.excludedCount === 2 &&

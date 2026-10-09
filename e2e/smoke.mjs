@@ -236,6 +236,12 @@ try {
     statsOk = (await win.locator('.stats-modal .statbar-row').count()) > 0
   }
 
+  if (!archiveConnected) {
+    // No ppt-archive store here: only the shell loaded, so the feature checks did not run. Report SKIPPED, never pass.
+    out({ launched: true, title, archiveConnected, pass: null, skipped: true, reason: 'archive not connected' })
+    await app.close()
+    process.exit(0)
+  }
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
