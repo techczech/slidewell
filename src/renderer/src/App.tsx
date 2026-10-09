@@ -30,7 +30,14 @@ function kindPatch(kind: KindFilter, f: SearchFilters): Partial<SearchFilters> {
   if (f.from === 'old-slides' || f.from === 'talks' || (kind === 'embedded' && f.from === 'screenshots')) p.from = 'all'
   return p
 }
-const NO_COUNTS: FromCounts = { all: 0, screenshots: 0, 'old-images': 0, 'old-slides': 0, talks: 0 }
+// The results count names what the Type chip shows: images, presentations, or slides (the default).
+function countNoun(type: SearchFilters['type'], n: number): string {
+  if (type === 'images') return n === 1 ? 'image' : 'images'
+  if (type === 'decks') return n === 1 ? 'presentation' : 'presentations'
+  return n === 1 ? 'slide' : 'slides'
+}
+
+const NO_COUNTS: FromCounts ={ all: 0, screenshots: 0, 'old-images': 0, 'old-slides': 0, talks: 0 }
 
 const DEFAULT_FILTERS: SearchFilters = { owner: 'mine', era: 'all', category: '', deck: '', role: 'content', cluster: true, from: 'all', kind: 'all', type: 'slides', library: 'mine' }
 
@@ -763,7 +770,7 @@ export default function App(): JSX.Element {
               <div className="results-head">
                 {debounced
                   ? `${clusters.length} result${clusters.length === 1 ? '' : 's'} for “${debounced}”`
-                  : `${clusters.length} slide${clusters.length === 1 ? '' : 's'}`}
+                  : `${clusters.length} ${countNoun(filters.type, clusters.length)}`}
                 {groupByDeck ? ` · ${view.groups?.length ?? 0} presentation${(view.groups?.length ?? 0) === 1 ? '' : 's'}` : ''}
                 {filters.cluster ? ' · near-identical grouped' : ''}
               </div>
@@ -1084,23 +1091,13 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
       const r = await window.sw.triage.decide(item.hash, action)
       const newState = (r.state as TriageItem['state']) || 'undecided'
       setItems((prev) => prev.map((it) => (it.hash === item.hash ? { ...it, state: newState } : it)))
-      setCounts((c) => {
-        if (item.state === newState) return c
-        const next = { ...c }
-        const bump = (k: TriageItem['state'], d: number): void => {
-          if (k === 'selected') next.selected += d
-          else if (k === 'included') next.included += d
-          else if (k === 'excluded') next.excluded += d
-          else next.undecided += d
-        }
-        bump(item.state, -1)
-        bump(newState, 1)
-        return next
-      })
+      // Counts come from the main process: it counts DISTINCT hashes per bucket, so two files with
+      // identical content are one selection. Adjusting ±1 per path here overcounted that case.
+      await refresh()
       onToast(action === 'select' ? 'Selected' : action === 'exclude' ? 'Excluded' : 'Unselected')
       onChanged()
     },
-    [onChanged, onToast]
+    [onChanged, onToast, refresh]
   )
 
   // Lightbox decision: record it, then show the next card (unselect stays; last card stays). The
