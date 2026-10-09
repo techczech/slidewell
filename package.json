@@ -66,6 +66,7 @@
     "@codemirror/state": "^6.5.0",
     "@codemirror/view": "^6.36.1",
     "@electron/rebuild": "^4.0.4",
+    "@huggingface/transformers": "4.3.0",
     "@types/node": "^22.10.0",
     "@types/react": "^18.3.23",
     "@types/react-dom": "^18.3.7",
@@ -81,7 +82,9 @@
     "vitest": "^3.2.6"
   },
   "dependencies": {
+    "@huggingface/tokenizers": "0.2.0",
     "aws4fetch": "^1.0.20",
+    "onnxruntime-web": "1.30.0",
     "sharp": "^0.34.5"
   }
 }

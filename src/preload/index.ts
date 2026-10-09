@@ -128,7 +128,51 @@ export type DeckDetail = {
   slideCount: number
 }
 
+// Picture search (ticket 03). Same shapes as src/main/picture-search/service.ts, kept here so the web
+// project needs no main-process file.
+export type PictureIndexProgress = {
+  phase: 'idle' | 'indexing' | 'paused' | 'done' | 'error'
+  done: number
+  total: number
+  failed: number
+  secondsLeft: number | null
+  error?: string
+}
+export type PictureSearchStatus = {
+  model: 'absent' | 'partial' | 'downloading' | 'ready'
+  modelBytes: number
+  download: { receivedBytes: number; totalBytes: number } | null
+  error: string | null
+  includeWell: boolean
+  paused: boolean
+  index: PictureIndexProgress
+  text: string // status-bar words, '' when nothing to show
+  coverage: number // % of images with meaning results so far
+  estimate: { slides: number; wellImages: number; text: string } | null
+}
+// ids: `slide:<presentation id>#<slide order>` or `well:<well id>`; score = cosine similarity.
+export type PictureQuery = { text: string } | { imageId: string }
+export type PictureScored = { id: string; score: number }
+
 const api = {
+  // Picture search: model download/delete, background indexing, query by text or by image id.
+  picture: {
+    status: (): Promise<PictureSearchStatus> => ipcRenderer.invoke('picture:status'),
+    estimate: (): Promise<PictureSearchStatus['estimate']> => ipcRenderer.invoke('picture:estimate'),
+    download: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('picture:download'),
+    cancelDownload: (): Promise<void> => ipcRenderer.invoke('picture:cancel-download'),
+    deleteModel: (): Promise<void> => ipcRenderer.invoke('picture:delete-model'),
+    pause: (): Promise<void> => ipcRenderer.invoke('picture:pause'),
+    resume: (): Promise<void> => ipcRenderer.invoke('picture:resume'),
+    setIncludeWell: (on: boolean): Promise<void> => ipcRenderer.invoke('picture:set-include-well', on),
+    query: (q: PictureQuery, opts?: { limit?: number; kinds?: Array<'slide' | 'well-image'> }): Promise<{ ok: boolean; results: PictureScored[]; error?: string }> =>
+      ipcRenderer.invoke('picture:query', q, opts),
+    onStatus: (cb: (s: PictureSearchStatus) => void): (() => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, s: PictureSearchStatus): void => cb(s)
+      ipcRenderer.on('picture:status', handler)
+      return () => ipcRenderer.removeListener('picture:status', handler)
+    }
+  },
   archive: {
     // Is the Core A (ppt-archive) extraction store present?
     available: (): Promise<boolean> => ipcRenderer.invoke('archive:available'),

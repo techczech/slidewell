@@ -18,7 +18,9 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
-          index: resolve(__dirname, 'src/preload/index.ts')
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          // the hidden picture-search window (src/main/picture-search/webgpu-embedder.ts)
+          embedder: resolve(__dirname, 'src/preload/embedder.ts')
         }
       }
     }
