@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync, statSync, lstatSync, symlinkSync, cpSync, renameSync, writeFileSync, realpathSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync, statSync, lstatSync, symlinkSync, cpSync, renameSync, writeFileSync, realpathSync, existsSync, linkSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { findTalkFiles, scanTalkUsage, loadUsage, groupUsage, talkAbsPath, checkWellDb, readPool, isTalkOutlinePath, isVaultChangeRelevant } from '../src/main/talk-usage'
@@ -47,11 +47,12 @@ describe('path rules', () => {
   it('watches outlines and folders, not caches or other files', () => {
     expect(isVaultChangeRelevant('a/b-outline.md')).toBe(true)
     expect(isVaultChangeRelevant('some-folder')).toBe(true)
-    for (const no of ['cache/x', 'cache', '_assets', 'node_modules/x/y.js', 'a/notes.md', '.git/index']) expect(isVaultChangeRelevant(no, 'rename')).toBe(false)
+    for (const no of ['cache/x', 'cache', 'node_modules/x/y.js', 'a/notes.md', '.git/index']) expect(isVaultChangeRelevant(no, 'rename')).toBe(false)
   })
   it('watches top-level pool images appearing or going, not rewrites, subfolders or other pool churn', () => {
     expect(isVaultChangeRelevant('_assets/img-aaaaaaa.webp', 'rename')).toBe(true)
     expect(isVaultChangeRelevant('_assets/img-aaaaaaa.webp', 'change')).toBe(false)
+    expect(isVaultChangeRelevant('_assets', 'rename')).toBe(true) // the pool entry replaced or re-pointed
     for (const no of ['_assets/sub/img-aaaaaaa.webp', '_assets/thumbs/img-aaaaaaa.webp', '_assets/other.png', '_assets/.img-aaaaaaa.webp', 'x/_assets/img-aaaaaaa.webp']) expect(isVaultChangeRelevant(no, 'rename')).toBe(false)
   })
 })
@@ -163,6 +164,32 @@ describe('scanTalkUsage', () => {
     symlinkSync(join(other, 'well.db'), join(well2, 'well.db'))
     expect(await scanTalkUsage(well2, vault)).toMatchObject({ reason: 'db-refused' })
     expect(fingerprint(vault)).toBe(before)
+  })
+
+  it('refuses a hard-linked well.db, whose data could also be a file inside the vault', async () => {
+    const vault = vaultCopy()
+    const inVault = join(vault, 'linked.db')
+    writeFileSync(inVault, '')
+    const before = fingerprint(vault)
+    const well = fresh('well')
+    linkSync(inVault, join(well, 'well.db'))
+    expect(checkWellDb(well, vault)).toEqual({ ok: false, reason: 'well.db has more than one hard link' })
+    expect(await scanTalkUsage(well, vault)).toMatchObject({ status: 'kept', reason: 'db-refused' })
+    expect(readFileSync(inVault, 'utf8')).toBe('')
+    expect(fingerprint(vault)).toBe(before)
+  })
+
+  it('a stale snapshot for vault A is ignored while vault B is current, and served again for A', async () => {
+    const A = vaultCopy()
+    const B = vaultCopy()
+    const well = fresh('well')
+    expect((await scanTalkUsage(well, A)).status).toBe('ok') // e.g. a superseded scan that still committed
+    expect((await loadUsage(well, B)).size).toBe(0)
+    expect((await loadUsage(well, A)).size).toBe(7)
+    // the tag is the real path: A reached through a symlink is still A
+    const alias = join(fresh('alias'), 'a')
+    symlinkSync(A, alias)
+    expect((await loadUsage(well, alias)).size).toBe(7)
   })
 
   it('refuses when the vault or the well folder cannot be resolved', () => {

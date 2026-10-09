@@ -168,8 +168,37 @@ describe('extractTalkRefs: a slide number is kept only when it is certain (else 
     // compiler: a@2 c@4
     expect(nums('---\ntriggers: 2col\n---\n## A\n![](img-aaaaaaa)\n## B\n### c\nx\n### d\ny\n## E\n![](img-ccccccc)\n')).toEqual(['a@2', 'c@0'])
   })
+  const fixture = (name: string): string => readFileSync(join(__dirname, 'fixtures', name), 'utf8')
+  it('a role in talk-wide triggers makes every number unknown', () => {
+    // compiler: a@1 b@2 (every slide is an opening, so no title slide)
+    expect(nums(fixture('triggers-role-outline.md'))).toEqual(['a@0', 'b@0'])
+  })
+  it('a fold token inside a fence under a heading with children counts like an unfenced one', () => {
+    // compiler: a@2 c@4 (container-fold resolution reads the fenced {image-grid})
+    expect(nums(fixture('fenced-fold-outline.md'))).toEqual(['a@2', 'b@0', 'c@0'])
+  })
   it('one image on several unknown slides is one reference', () => {
     expect(nums('## B {image-grid}\n### c\n![](img-aaaaaaa)\n### d\n## E\n![](img-aaaaaaa)\n')).toEqual(['a@0'])
+  })
+})
+
+describe('extractTalkRefs: {compare} keeps only its first two child groups', () => {
+  const ids = (md: string): string[] => extractTalkRefs(md).refs.map((r) => r.id[0])
+  it('drops the third group and the compare heading\'s own lines, as the compiler does', () => {
+    // compiler: a and b on the compare slide, d after it; 0 (own lines) and c are not drawn
+    expect(ids(readFileSync(join(__dirname, 'fixtures', 'compare-abc-outline.md'), 'utf8'))).toEqual(['a', 'b', 'd'])
+  })
+  it('a half keeps what a {columns} half merges in, not what sits under an ordinary half', () => {
+    // compiler: a, b and 2 drawn; 1 (under half A) and c (third group) not
+    expect(ids('## Versus {compare}\n### A\n![](img-aaaaaaa)\n#### A1\n![](img-1111111)\n### B {2col}\n#### B1\n![](img-bbbbbbb)\n#### B2\n![](img-2222222)\n### C\n![](img-ccccccc)\n')).toEqual(['a', 'b', '2'])
+  })
+  it('a later layout token undoes the compare: every group is its own slide', () => {
+    // compiler: a@3 b@4 c@5
+    expect(ids('## Versus {compare}\n{list}\n### A\n![](img-aaaaaaa)\n### B\n![](img-bbbbbbb)\n### C\n![](img-ccccccc)\n')).toEqual(['a', 'b', 'c'])
+  })
+  it('a compare with one group, or with {cards=grid}, folds differently and drops nothing', () => {
+    expect(ids('## V {compare}\n### A\n![](img-aaaaaaa)\n')).toEqual(['a'])
+    expect(ids('## V {compare cards=grid}\n### A\n![](img-aaaaaaa)\n### B\n![](img-bbbbbbb)\n### C\n![](img-ccccccc)\n')).toEqual(['a', 'b', 'c'])
   })
 })
 

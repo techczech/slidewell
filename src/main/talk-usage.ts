@@ -45,7 +45,8 @@ export type WellDbCheck = { ok: true; file: string } | { ok: false; reason: stri
  * The one containment check for every writable open of well.db on the talk-usage path. Returns the
  * file to open (inside the REAL well folder) only when all of these hold:
  *  - the vault and the well folder both resolve to real paths (no answer means no write);
- *  - well.db is not a symlink, dangling or not (lstat; the write also opens with -nofollow);
+ *  - well.db is not a symlink, dangling or not (lstat; the write also opens with -nofollow), and
+ *    has no second hard link (st_nlink 1), so its data cannot also be a file inside the vault;
  *  - the real well folder is neither the real vault root nor inside it.
  */
 export function checkWellDb(wellRoot: string, vaultRoot: string): WellDbCheck {
@@ -56,13 +57,21 @@ export function checkWellDb(wellRoot: string, vaultRoot: string): WellDbCheck {
   if (inside(w, v)) return { ok: false, reason: 'the well folder is inside the vault' }
   const file = join(w, 'well.db')
   try {
-    if (lstatSync(file).isSymbolicLink()) return { ok: false, reason: 'well.db is a symbolic link' }
+    const st = lstatSync(file)
+    if (st.isSymbolicLink()) return { ok: false, reason: 'well.db is a symbolic link' }
+    // a hard link shares its data with another path, which may be inside the vault
+    if (st.nlink > 1) return { ok: false, reason: 'well.db has more than one hard link' }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return { ok: false, reason: 'well.db could not be checked' }
   }
   return { ok: true, file }
 }
 
+// Contract for every reader of these tables (SlideWell's loadUsage, and TalkWeaver later): the rows
+// are valid ONLY for the vault named by talk_usage_meta.vault_root. A reader must compare that value
+// with the real path (symlinks resolved) of the vault it is showing, and ignore all rows when they
+// differ. A scan for a vault that has since been switched away from can still commit (it may have
+// been waiting on a lock); the tag is what keeps its snapshot from being shown for another vault.
 const SCHEMA = `CREATE TABLE IF NOT EXISTS talk_image_use (
   image_id TEXT NOT NULL, talk_rel_path TEXT NOT NULL, talk_title TEXT NOT NULL,
   slide INTEGER NOT NULL DEFAULT 0, scanned_at TEXT NOT NULL,
@@ -83,11 +92,14 @@ export function isTalkOutlinePath(rel: string): boolean {
 
 /**
  * Should a change at this vault-relative path trigger a rescan? A talk outline, a folder (which may
- * hold or lose talks), or a pool image `_assets/img-*` appearing or going (`event` 'rename'; a
- * rewrite of an existing pool file, 'change', does not alter pool membership).
+ * hold or lose talks), a pool image `_assets/img-*` appearing or going (`event` 'rename'; a
+ * rewrite of an existing pool file, 'change', does not alter pool membership), or the `_assets`
+ * entry itself renamed or replaced.
  */
 export function isVaultChangeRelevant(rel: string, event?: string): boolean {
   if (isTalkOutlinePath(rel)) return true
+  // the pool entry itself renamed or replaced (a symlinked `_assets` re-pointed, a folder swapped in)
+  if (rel === '_assets') return event === undefined || event === 'rename'
   if (/^_assets[\\/]img-[^\\/]+$/.test(rel)) return event === undefined || event === 'rename'
   const parts = rel.split(/[\\/]/)
   if (parts.some((p) => p.startsWith('.') || SKIP_DIRS.has(p))) return false
@@ -198,15 +210,18 @@ export function groupUsage(rows: Array<{ image_id: string; talk_rel_path: string
   return out
 }
 
-/** The stored snapshot, but only when it describes `vaultRoot` (otherwise empty). */
+/** The stored snapshot, but only when its vault_root tag is `vaultRoot`'s real path (otherwise empty; see the reader contract at SCHEMA). */
 export async function loadUsage(root: string, vaultRoot: string | null): Promise<UsageMap> {
   if (!existsSync(dbPath(root)) || !vaultRoot) return new Map()
   const v = real(vaultRoot)
   if (!v) return new Map()
   try {
-    const meta = await query<{ value: string }>(dbPath(root), "SELECT value FROM talk_usage_meta WHERE key = 'vault_root'")
-    if (meta[0]?.value !== v) return new Map()
-    return groupUsage(await query(dbPath(root), 'SELECT image_id, talk_rel_path, talk_title, slide FROM talk_image_use'))
+    // one statement, so the tag check and the rows come from the same committed snapshot
+    return groupUsage(await query(
+      dbPath(root),
+      "SELECT image_id, talk_rel_path, talk_title, slide FROM talk_image_use WHERE (SELECT value FROM talk_usage_meta WHERE key = 'vault_root') = ?",
+      [v]
+    ))
   } catch {
     return new Map() // tables not created yet
   }

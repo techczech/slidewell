@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
 import { isVaultChangeRelevant } from '../src/main/talk-usage'
 import { join } from 'node:path'
 import { createSourceWatcher } from '../src/main/source-watcher'
@@ -55,6 +55,24 @@ describe('createSourceWatcher', () => {
     rmSync(join(vault, '_assets', 'img-aaaaaaa.webp'))
     await sleep(700)
     expect(fired).toBe(2)
+    w.close()
+  })
+
+  it('with the vault filter: re-pointing a symlinked pool triggers', async () => {
+    const vault = join(dir, 'vault-link')
+    mkdirSync(join(dir, 'pool-1'), { recursive: true })
+    mkdirSync(join(dir, 'pool-2'), { recursive: true })
+    mkdirSync(vault, { recursive: true })
+    symlinkSync(join(dir, 'pool-1'), join(vault, '_assets'))
+    let fired = 0
+    const w = createSourceWatcher(() => { fired++ }, 150, 2000)
+    w.setSources([{ path: vault, recursive: true, accept: isVaultChangeRelevant }])
+    await sleep(600)
+    fired = 0
+    rmSync(join(vault, '_assets'))
+    symlinkSync(join(dir, 'pool-2'), join(vault, '_assets'))
+    await sleep(700)
+    expect(fired).toBe(1)
     w.close()
   })
 })

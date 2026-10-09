@@ -157,6 +157,55 @@ function tokenKind(tok: string): 'fold' | 'split' | null {
   if (key === 'layout') return FOLD_LAYOUTS.has(value) ? 'fold' : SPLIT_LAYOUTS.has(value) ? 'split' : null
   return FOLD_KEYS.has(key) ? 'fold' : SPLIT_KEYS.has(key) ? 'split' : null
 }
+/** Bare words that resolve to some `layout` (trigger-dictionary.generated.mjs); only `compare` matters here, but any other layout word overrides it. */
+const LAYOUT_WORDS = new Set([
+  'statement', 'list', 'cards', 'chart', 'closing', 'code', 'columns', 'compare', 'conceptmap', 'contrast', 'copy-visual',
+  'cta-screenshots', 'cycle', 'equation', 'flow', 'grid', 'iconrow', 'icon-row', 'image-claim', 'image-grid', 'imagegrid',
+  'image-quote', 'imagequote', 'links', 'list-visual', 'media', 'mindmap', 'orgchart', 'process', 'agenda', 'pyramid', 'quote',
+  'sigmoid', 'smartart', 'stats', 'steps', 'stairs', 'stmt-list', 'stmtlist', 'system-map', 'table', 'timeline',
+  'timeline-visual', 'timetable', 'title', 'trace'
+])
+type FoldAttrs = { layout?: string; carousel?: string; cards?: string; cols?: string }
+/** Fold the tokens into the attrs that decide a container fold, last one wins (parseHeadingAttrs). */
+function applyFoldAttrs(a: FoldAttrs, toks: string[], allowLayout = true): void {
+  for (const tok of toks) {
+    const eq = tok.indexOf('=')
+    const colon = tok.indexOf(':')
+    const cut = eq > 0 ? eq : colon > 0 && /^[\w-]+$/.test(tok.slice(0, colon)) ? colon : -1
+    let key: string
+    let value: string
+    if (cut > 0) { key = tok.slice(0, cut); value = tok.slice(cut + 1) }
+    else if (!/^[\w-]+$/.test(tok)) continue
+    else if (LAYOUT_WORDS.has(tok)) { key = 'layout'; value = tok }
+    else if (tok === 'carousel') { key = 'carousel'; value = 'true' }
+    else if (tok === '2col' || tok === '3col') { key = 'cols'; value = tok[0] }
+    else { key = tok; value = 'true' } // unknown bare word: recorded as a flag
+    if (key === 'layout' && !allowLayout) continue // frontmatter triggers may not set a layout
+    if (key === 'layout' || key === 'carousel' || key === 'cards' || key === 'cols') a[key] = value
+  }
+}
+/**
+ * Does this heading fold its children as {compare}? foldChildLayoutNodes (08-source-adapters.mjs:1876-1937)
+ * tries carousel, static cards (grid/rows), image-grid, contrast and columns first; compare (layout
+ * compare, two or more children) keeps only the first two children's own content (_compareHalves).
+ */
+function foldsAsCompare(a: FoldAttrs, children: number): boolean {
+  if (a.layout !== 'compare' || children < 2) return false
+  if (a.carousel === 'true') return false
+  if (a.cards === 'grid' || a.cards === 'rows') return false
+  if (a.cols !== undefined && a.cols !== 'true') return false
+  return true
+}
+/** Does this heading fold as {columns}, merging its children's lines into its own (same order of checks)? */
+function foldsAsColumns(a: FoldAttrs, children: number): boolean {
+  if (children < 2) return false
+  if (a.carousel === 'true') return false
+  if (a.cards === 'grid' || a.cards === 'rows') return false
+  if (a.layout === 'image-grid') return false
+  if (a.layout === 'contrast' && children <= 3) return false
+  return a.layout === 'columns' || (a.cols !== undefined && a.cols !== 'true')
+}
+
 // A quote (`>` or a paragraph starting with a double quote, quoteFromQuotedParagraph, 02-triggers-layout.mjs:664)
 // or a `**Timeline:**` block splits only when it is the slide's single block
 // (quoteBlockOnQuoteSlide, quote-layout.mjs:430; timelineContinuationParts, timeline-layout.mjs:126).
@@ -207,7 +256,12 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
   // not: it can be folded into the quote as its attribution, foldQuoteAttribution)
   const otherBlock: boolean[] = []
   // talk-wide trigger defaults apply to every slide (deckTriggerDefaults, 08-source-adapters.mjs:595)
-  const defaults = tokensIn([(meta['triggers'] ?? '').replace(/[{}]/g, ' ')]).map(tokenKind)
+  const triggerDefaults = tokensIn([(meta['triggers'] ?? '').replace(/[{}]/g, ' ')])
+  const defaults = triggerDefaults.map(tokenKind)
+  // a role in talk-wide triggers applies to every slide (attrs = { ...deckTriggerDefaults, ... }): not modelled
+  if (roleIn(triggerDefaults) !== undefined) unsure(1)
+  const foldAttrs: FoldAttrs[] = [] // per slide: the attrs container-fold resolution reads (resolvedNodeAttrs, fences included)
+  const slideLayout: Array<string | undefined> = [] // per slide: the layout the slide renders with (fences excluded)
   const noteTokens = (k: number, toks: string[]): void => {
     for (const kind of toks.map(tokenKind)) {
       if (kind === 'fold') fold[k] = true
@@ -222,7 +276,18 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    if (fence) { if (fenceCloses(line, fence)) fence = null; continue }
+    if (fence) {
+      if (fenceCloses(line, fence)) { fence = null; continue }
+      // container-fold resolution reads Trigger-shaped lines even inside fences (resolvedNodeAttrs,
+      // 08-source-adapters.mjs:1787-1810); the slide's own attrs (role, splits) do not
+      const ft = line.trim()
+      if (slide > 0 && !inNotes && TRIGGER_LINE.test(ft)) {
+        const toks = tokensIn(triggerGroups(ft))
+        if (toks.some((x) => tokenKind(x) === 'fold')) fold[slide] = true
+        applyFoldAttrs(foldAttrs[slide], toks)
+      }
+      continue
+    }
     const open = fenceOpen(line)
     if (open) { if (slide > 0 && !inNotes) otherBlock[slide] = true; fence = open; continue }
     let m: RegExpMatchArray | null
@@ -237,6 +302,10 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
       const toks = tokensIn(headingGroups(m[2]))
       roles[slide] = roleIn(toks)
       noteTokens(slide, toks)
+      foldAttrs[slide] = {}
+      applyFoldAttrs(foldAttrs[slide], triggerDefaults, false)
+      applyFoldAttrs(foldAttrs[slide], toks)
+      slideLayout[slide] = foldAttrs[slide].layout
       continue
     }
     const t = line.trim()
@@ -250,6 +319,10 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
       const r = roleIn(toks)
       if (r !== undefined) roles[slide] = r
       noteTokens(slide, toks)
+      applyFoldAttrs(foldAttrs[slide], toks)
+      const own: FoldAttrs = { layout: slideLayout[slide] }
+      applyFoldAttrs(own, toks)
+      slideLayout[slide] = own.layout
       continue
     }
     if (TIMELINE_START.test(t)) splitMarker[slide] = true
@@ -264,6 +337,37 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
     if (!seen.has(key)) { seen.add(key); found.push({ id: c.id, slideIdx: slide, via: c.via }) }
   }
 
+  // parents by heading depth (a deeper heading nests under the nearest shallower one, gaps tolerated)
+  const parent: number[] = []
+  const stack: number[] = []
+  for (let k = 1; k <= slide; k++) {
+    while (stack.length && levels[stack[stack.length - 1]] >= levels[k]) stack.pop()
+    parent[k] = stack.length ? stack[stack.length - 1] : 0
+    stack.push(k)
+  }
+  const kidsOf = (k: number): number[] => {
+    const kids: number[] = []
+    for (let j = k + 1; j <= slide && levels[j] > levels[k]; j++) if (parent[j] === k) kids.push(j)
+    return kids
+  }
+  // the slides whose lines end up in k's own lines: k, plus (when k folds as columns) its children's
+  const merged = (k: number): number[] => {
+    const kids = kidsOf(k)
+    return foldsAsColumns(foldAttrs[k] ?? {}, kids.length) ? [k, ...kids.flatMap(merged)] : [k]
+  }
+  // slides whose content a {compare} fold discards: everything below the compare heading except
+  // the lines of its first two children (_compareHalves, 08-source-adapters.mjs:1925-1937); and when
+  // the slide renders as compare, its own lines too (blocks = the two halves only, 1150-1161). When
+  // the fold and the rendered layout disagree (a {compare} only inside a fence), the halves and the
+  // heading's own lines are kept: whether they render is not modelled.
+  const discarded = new Set<number>()
+  for (let k = 1; k <= slide; k++) {
+    const kids = kidsOf(k)
+    if (!foldsAsCompare(foldAttrs[k] ?? {}, kids.length)) continue
+    const halves = new Set([...merged(kids[0]), ...merged(kids[1])])
+    if (slideLayout[k] === 'compare') discarded.add(k)
+    for (let j = k + 1; j <= slide && levels[j] > levels[k]; j++) if (!halves.has(j)) discarded.add(j)
+  }
   for (let k = 1; k <= slide; k++) {
     const hasChildren = k < slide && levels[k + 1] > levels[k]
     const folds = fold[k] || defaults.includes('fold')
@@ -284,6 +388,7 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
   const refs: ImageRef[] = []
   const kept = new Set<string>()
   for (const f of found) {
+    if (discarded.has(f.slideIdx)) continue
     const slide = f.slideIdx < uncertainFrom ? f.slideIdx + offset : 0 // 0 = not certain
     const key = `${f.id}@${slide}`
     if (!kept.has(key)) { kept.add(key); refs.push({ id: f.id, slide, via: f.via }) }
