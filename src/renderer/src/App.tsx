@@ -3,6 +3,7 @@ import { nextPreviewIndex } from '../../main/triage-logic'
 import { PictureSearchSettings, PictureSearchStatusBar, usePictureStatus } from './PictureSearch'
 import { BacklogImportSettings } from './BacklogImport'
 import { SorterSettings } from './SorterSettings'
+import { ReviewScreen } from './Review'
 import { RELATED_SHOWN, relatedFold } from './match-fold'
 import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency, FromFilter, KindFilter, FromCounts, MatchMode, MoreLikeThisResult } from '../../preload'
 
@@ -94,6 +95,9 @@ export default function App(): JSX.Element {
   const [showTriage, setShowTriage] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
+  // Search | Review (locked frames 1 and 2); the Review tab carries how many need a look
+  const [appView, setAppView] = useState<'search' | 'review'>('search')
+  const [reviewCount, setReviewCount] = useState(0)
   const [stats, setStats] = useState<Stats | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
   // a scan of the talks finished: counts, pills and the inspector follow the new usage
@@ -397,7 +401,7 @@ export default function App(): JSX.Element {
       setSel(best >= 0 ? best : dir > 0 ? navCount - 1 : 0)
     }
     const onKey = (e: KeyboardEvent): void => {
-      if (showTriage || showSettings) return // these panels own the keyboard while open
+      if (showTriage || showSettings || appView === 'review') return // these own the keyboard while open
       const el = document.activeElement as HTMLElement | null
       const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
       const cmd = e.metaKey || e.ctrlKey
@@ -548,7 +552,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navCount, sel, activeItem, runAction, activateCurrent, paletteOpen, lightbox, deckMode, inspectorOpen, showHelp, showStats, showImport, showConvert, showTriage, showSettings, deckFilter, filters, openStats])
+  }, [navCount, sel, activeItem, runAction, activateCurrent, paletteOpen, lightbox, deckMode, inspectorOpen, showHelp, showStats, showImport, showConvert, showTriage, showSettings, deckFilter, filters, openStats, appView])
 
   // when inspecting a deck, fetch its full metadata (re-fetches as selection moves)
   useEffect(() => {
@@ -575,13 +579,24 @@ export default function App(): JSX.Element {
     }
   }
 
+  useEffect(() => {
+    void window.sw.review.overview({ queue: 0, sample: 0 }).then((o) => setReviewCount(o.needALook)).catch(() => undefined)
+  }, [refreshKey])
+
   return (
-    <div className={inspectorOpen ? 'app has-sidebar' : 'app'} onClick={() => menu && setMenu(null)}>
+    <div className={inspectorOpen && appView === 'search' ? 'app has-sidebar' : 'app'} onClick={() => menu && setMenu(null)}>
       <header className="titlebar">
         <span className="wordmark">
           Slide<span className="well">Well</span>
         </span>
-        <span className="tagline">the well — your slides &amp; images in one place</span>
+        <div className="scope view-switch" role="tablist" aria-label="View">
+          <button role="tab" aria-selected={appView === 'search'} className={appView === 'search' ? 'scope-tab active' : 'scope-tab'} onClick={() => setAppView('search')}>
+            Search
+          </button>
+          <button role="tab" aria-selected={appView === 'review'} className={appView === 'review' ? 'scope-tab active' : 'scope-tab'} onClick={() => setAppView('review')}>
+            Review {reviewCount > 0 && <span className="rv-tab-n">{reviewCount}</span>}
+          </button>
+        </div>
         <div className="titlebar-actions">
           <button
             className="tb-btn"
@@ -615,6 +630,8 @@ export default function App(): JSX.Element {
         </div>
       </header>
 
+      {appView === 'review' && <ReviewScreen onCount={setReviewCount} onToast={setToast} />}
+      {appView === 'search' && (<>
       <div className="searchbar">
         <input
           ref={searchRef}
@@ -945,6 +962,7 @@ export default function App(): JSX.Element {
           </>
         )}
       </main>
+      </>)}
 
       <footer className="statusbar">
         {archiveOk === null ? (
@@ -1016,7 +1034,7 @@ export default function App(): JSX.Element {
         />
       )}
 
-      {inspectorOpen &&
+      {inspectorOpen && appView === 'search' &&
         (deckMode
           ? selectedDeck && (
               <DeckSidebar
@@ -1214,6 +1232,11 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
   const decide = useCallback(
     async (item: TriageItem, action: 'select' | 'exclude' | 'reset') => {
       const r = await window.sw.triage.decide(item.hash, action)
+      if (r.refused) {
+        onToast(r.refused)
+        await refresh()
+        return
+      }
       const newState = (r.state as TriageItem['state']) || 'undecided'
       setItems((prev) => prev.map((it) => (it.hash === item.hash ? { ...it, state: newState } : it)))
       // Counts come from the main process: it counts DISTINCT hashes per bucket, so two files with
@@ -1491,6 +1514,8 @@ function TriageCard({
   onDecide: (a: 'select' | 'exclude' | 'reset') => void
 }): JSX.Element {
   const badge = item.state === 'included' ? '✓' : item.state === 'selected' ? '✓' : item.state === 'excluded' ? '✗' : ''
+  // review pile (ticket 08): a throwaway stays findable here, labelled, until it reaches the Bin
+  const throwaway = item.pile === 'throwaway' ? `throwaway · bin in ${item.binInDays === 1 ? '1 day' : `${item.binInDays ?? 30} days`}` : ''
   return (
     <div className={`triage-card state-${item.state}${selected ? ' selected' : ''}${item.offline ? ' offline' : ''}`} onClick={onSelect} onDoubleClick={onOpen}>
       <div className="triage-thumb" onClick={(e) => { e.stopPropagation(); onOpen() }} title={item.offline ? 'Not downloaded from OneDrive yet' : 'Open preview'}>
@@ -1504,6 +1529,7 @@ function TriageCard({
         {item.kind === 'video' && !item.offline && <span className="triage-play">▶</span>}
         {item.kind === 'video' && <span className={item.large ? 'triage-size large' : 'triage-size'}>{item.sizeMB} MB{item.large ? ' ⚠' : ''}</span>}
         {badge && <span className={`triage-badge ${item.state}`}>{badge}</span>}
+        {throwaway && <span className="triage-throwaway">{throwaway}</span>}
       </div>
       <div className="triage-meta">
         <div className="triage-name" title={item.filename}>{item.filename}</div>
@@ -2883,6 +2909,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }): JSX.Element {
     ['G', 'Group by presentation'],
     ['C', 'Cluster near-identical'],
     ['S · O', 'Stats · Import'],
+    ['Review', 'Review tab — K keep · T throwaway · ↓ skip · ⌘Z undo · both piles: arrows · Tab · Esc'],
     ['⛏ Triage', 'Triage (toolbar) — Space select · U unselect · X exclude · ⌘Y full · sort/group by date'],
     ['Esc', 'Close / back'],
     ['?', 'This help']

@@ -118,7 +118,49 @@ export type TriageItem = {
   takenAt: string | null // local time parsed from a screenshot file name (YYYY-MM-DDTHH:MM:SS)
   app: string | null // source app parsed from a CleanShot name
   windowTitle: string | null // window title parsed from a CleanShot name
+  pile?: ReviewPile | null // review pile when the sorter made a proposal (a throwaway shows 'bin in N days')
+  binInDays?: number | null
 }
+// Review screen (ticket 08): one screenshot the sorter proposed something for, as a card.
+export type ReviewPile = 'doubtful' | 'kept' | 'throwaway' | 'bin'
+export type ReviewCard = {
+  hash: string // triage content hash (the decision key)
+  filename: string
+  app: string | null
+  windowTitle: string | null
+  takenAt: string | null
+  reason: string // the sorter's reason, in words
+  confidence: number
+  proposal: 'keep' | 'throwaway' | 'doubtful'
+  pile: ReviewPile
+  by: 'you' | 'sorter' // his decision, or a proposal he has not overridden
+  binInDays: number | null // Throwaway only: whole days before it moves to the Bin
+  thumbUrl: string | null
+  offline: boolean
+}
+export type ReviewOverview = {
+  needALook: number
+  confident: { kept: number; throwaway: number } // proposals he has not overridden
+  lastSortedAt: string | null
+  queue: ReviewCard[] // the doubtful queue, newest first
+  confidentSample: ReviewCard[]
+  canUndo: boolean
+}
+export type ReviewPiles = {
+  needALook: number
+  confidentTotal: number
+  lastSortedAt: string | null
+  kept: { total: number; items: ReviewCard[]; next: string | null } // next: cursor for review.page
+  throwaway: { total: number; items: ReviewCard[]; next: string | null }
+  bin: { total: number; items: ReviewCard[]; next: string | null; token: string } // token: Empty Bin acts only on this set
+  canUndo: boolean
+}
+export type ReviewActResult = { ok: boolean; hash: string; message: string; pile?: ReviewPile }
+export type ReviewUndoResult = { ok: boolean; hash?: string; message: string }
+// changed: Bin items that changed between his confirm and the write (rescued, re-decided) and were left alone
+export type EmptyBinResult = { ok: boolean; emptied: number; changed: number; message: string }
+// keyset paging: `next` is an opaque cursor (null = no more); pass it to review.page
+export type ReviewPage = { total: number; items: ReviewCard[]; next: string | null }
 export type TriageCounts = { undecided: number; selected: number; included: number; excluded: number; total: number }
 export type DeckInfo = { id: string; title: string; date: string | null }
 export type DeckCard = {
@@ -407,7 +449,8 @@ const api = {
       limit?: number,
       offset?: number
     ): Promise<{ items: TriageItem[]; counts: TriageCounts; hasMore: boolean }> => ipcRenderer.invoke('triage:list', query, state, sort, limit, offset),
-    decide: (hash: string, action: 'select' | 'exclude' | 'reset', force?: boolean): Promise<{ state: string }> =>
+    // refused: the item was emptied from the Bin (permanent); nothing changed
+    decide: (hash: string, action: 'select' | 'exclude' | 'reset', force?: boolean): Promise<{ state: string; refused?: string }> =>
       ipcRenderer.invoke('triage:decide', hash, action, force),
     importSelected: (forceHashes?: string[]): Promise<{ imported: number; skipped: number; gated: number }> =>
       ipcRenderer.invoke('triage:import-selected', forceHashes ?? []),
@@ -425,6 +468,17 @@ const api = {
       ipcRenderer.on('triage:progress', handler)
       return () => ipcRenderer.removeListener('triage:progress', handler)
     }
+  },
+  // Review screen (ticket 08). act/undo/emptyBin write his decisions; nothing here deletes or moves any
+  // file. emptyBin needs the token of the Bin he confirmed and only hides those items for good.
+  review: {
+    overview: (opts?: { queue?: number; sample?: number }): Promise<ReviewOverview> => ipcRenderer.invoke('review:overview', opts ?? {}),
+    piles: (opts?: { kept?: number; throwaway?: number; bin?: number }): Promise<ReviewPiles> => ipcRenderer.invoke('review:piles', opts ?? {}),
+    // the page after a cursor (keyset; no cap on how far)
+    page: (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number): Promise<ReviewPage> => ipcRenderer.invoke('review:page', pile, after, limit),
+    act: (hash: string, action: 'keep' | 'throwaway' | 'rescue'): Promise<ReviewActResult> => ipcRenderer.invoke('review:act', hash, action),
+    undo: (): Promise<ReviewUndoResult> => ipcRenderer.invoke('review:undo'),
+    emptyBin: (token: string): Promise<EmptyBinResult> => ipcRenderer.invoke('review:empty-bin', token)
   },
   // One-off backlog import (ticket 13). dryRun writes nothing; run needs the id of the plan just shown.
   backlog: {

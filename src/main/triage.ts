@@ -13,10 +13,13 @@ import { createHash } from 'node:crypto'
 import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs'
 import { join, relative, extname, basename } from 'node:path'
 import { query, run, safeFtsQuery } from './sqlite'
-import { ocrImage, ingestScreenshot, ingestVideo, makePoster } from './well'
+import { ocrImage, ingestScreenshot, ingestVideo, makePoster, recordWellSource } from './well'
 import { tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
 import { parseScreenshotName } from './screenshot-name'
 import { walk } from './scan-walk'
+import { DatabaseSync } from 'node:sqlite'
+import { pileOf, type ProposalLabel } from './review/piles'
+import { hiddenFromLists } from './review/store'
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'heic', 'heif', 'tiff', 'tif', 'bmp'])
 const VIDEO_EXT = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv'])
@@ -225,6 +228,11 @@ export interface TriageRow {
   ocr_text: string
   state: string
   well_id: string | null
+  decided_at?: string | null
+  // the sorter's proposal for this item, when it made one (review piles, ticket 08)
+  proposal?: string | null
+  proposed_at?: string | null
+  throwaway_since?: string | null
 }
 
 const LIST_COLS =
@@ -232,21 +240,38 @@ const LIST_COLS =
 
 export type TriageSort = 'scanned' | 'date-desc' | 'date-asc'
 
-/** Browse/search the triage index. sort: scanned (default) | date-desc | date-asc (by file mtime). */
-export async function listTriage(wellRoot: string, raw: string, state: string, sort: TriageSort = 'scanned', limit = 150, offset = 0): Promise<TriageRow[]> {
+async function hasProposals(db: string): Promise<boolean> {
+  const r = await query<{ n: number }>(db, "SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'sorter_proposals'", [])
+  if (!r[0] || Number(r[0].n) === 0) return false
+  // the review columns arrive with the sorter store's migration; an older table lacks them
+  const cols = await query<{ name: string }>(db, "SELECT name FROM pragma_table_info('sorter_proposals')", [])
+  return cols.some((c) => c.name === 'throwaway_since')
+}
+
+/**
+ * Browse/search the triage index. sort: scanned (default) | date-desc | date-asc (by file mtime).
+ *
+ * Review piles (ticket 08): an emptied item is gone, and an item in the review's Bin is no longer
+ * findable. Which items those are comes from the review's pure clock (piles.ts via hiddenFromLists),
+ * never a second date rule here; an unreadable or missing date keeps an item in Throwaway, listed.
+ */
+export async function listTriage(wellRoot: string, raw: string, state: string, sort: TriageSort = 'scanned', limit = 150, offset = 0, now = Date.now()): Promise<TriageRow[]> {
   const db = triageDb(wellRoot)
   if (!existsSync(db)) return []
-  const stateClause = state && state !== 'all' ? `COALESCE(d.state, 'undecided') = '${state.replace(/[^a-z]/g, '')}'` : ''
-  const join = 'triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash'
+  const withProposals = await hasProposals(db)
+  const hidden = [...hiddenFromLists(wellRoot, now)]
+  const conds = ["COALESCE(d.state, 'undecided') != 'emptied'"]
+  if (hidden.length) conds.push(`triage_fts.hash NOT IN (${hidden.map(() => '?').join(',')})`)
+  if (state && state !== 'all') conds.push(`COALESCE(d.state, 'undecided') = '${state.replace(/[^a-z]/g, '')}'`)
+  const join = `triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash${withProposals ? ' LEFT JOIN sorter_proposals p ON p.hash = triage_fts.hash' : ''}`
+  const cols = LIST_COLS + (withProposals ? ', d.decided_at, p.proposal, p.proposed_at, p.throwaway_since' : ', d.decided_at, NULL AS proposal, NULL AS proposed_at, NULL AS throwaway_since')
   const dateOrder = `ORDER BY CAST(triage_fts.mtime AS INTEGER) ${sort === 'date-asc' ? 'ASC' : 'DESC'}`
   const useDate = sort === 'date-asc' || sort === 'date-desc'
   if (raw && raw.trim().length >= 2) {
     const q = safeFtsQuery(raw)
-    const where = `triage_fts MATCH ?${stateClause ? ` AND ${stateClause}` : ''}`
-    return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} WHERE ${where} ${useDate ? dateOrder : 'ORDER BY rank'} LIMIT ? OFFSET ?`, [q, limit, offset])
+    return query<TriageRow>(db, `SELECT ${cols} FROM ${join} WHERE triage_fts MATCH ? AND ${conds.join(' AND ')} ${useDate ? dateOrder : 'ORDER BY rank'} LIMIT ? OFFSET ?`, [q, ...hidden, limit, offset])
   }
-  const where = stateClause ? `WHERE ${stateClause}` : ''
-  return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} ${where} ${useDate ? dateOrder : 'ORDER BY triage_fts.scanned_at DESC'} LIMIT ? OFFSET ?`, [limit, offset])
+  return query<TriageRow>(db, `SELECT ${cols} FROM ${join} WHERE ${conds.join(' AND ')} ${useDate ? dateOrder : 'ORDER BY triage_fts.scanned_at DESC'} LIMIT ? OFFSET ?`, [...hidden, limit, offset])
 }
 
 export async function triageCounts(wellRoot: string): Promise<TriageCounts> {
@@ -256,7 +281,8 @@ export async function triageCounts(wellRoot: string): Promise<TriageCounts> {
   const rows = await query<{ state: string; n: number; hashes: number }>(
     db,
     `SELECT COALESCE(d.state, 'undecided') AS state, COUNT(*) AS n, COUNT(DISTINCT triage_fts.hash) AS hashes
-     FROM triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash GROUP BY state`,
+     FROM triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash
+     WHERE COALESCE(d.state, 'undecided') != 'emptied' GROUP BY state`,
     []
   )
   return tallyTriageStates(rows)
@@ -273,35 +299,130 @@ export async function setTriageDecision(
   hash: string,
   action: 'select' | 'exclude' | 'reset',
   _force = false
-): Promise<{ state: string }> {
+): Promise<{ state: string; refused?: string }> {
   await ensureTriage(wellRoot)
   const db = triageDb(wellRoot)
+  // An 'emptied' marker (Empty Bin) is permanent: every write below is conditioned on it in SQL, so
+  // neither reset nor a new decision can remove it, even if the item was emptied a moment ago.
   if (action === 'reset') {
-    await run(db, 'DELETE FROM triage_decisions WHERE hash = ?', [hash])
-    return { state: 'undecided' }
+    await run(db, "DELETE FROM triage_decisions WHERE hash = ? AND state != 'emptied'", [hash])
+  } else {
+    const state = action === 'exclude' ? 'excluded' : 'selected' // select = stage only; importSelectedTriage promotes
+    await run(
+      db,
+      `INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, NULL)
+       ON CONFLICT(hash) DO UPDATE SET state = excluded.state, decided_at = excluded.decided_at, well_id = NULL WHERE triage_decisions.state != 'emptied'`,
+      [hash, state, new Date().toISOString()]
+    )
   }
-  if (action === 'exclude') {
-    await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, NULL)', [hash, 'excluded', new Date().toISOString()])
-    return { state: 'excluded' }
-  }
-  // select = stage only; nothing reaches the well until importSelectedTriage runs
-  await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, NULL)', [hash, 'selected', new Date().toISOString()])
-  return { state: 'selected' }
+  const now = await query<{ state: string }>(db, 'SELECT state FROM triage_decisions WHERE hash = ?', [hash])
+  if (now[0]?.state === 'emptied') return { state: 'emptied', refused: 'This screenshot was emptied from the Bin; it stays hidden for good and cannot be changed.' }
+  return { state: now[0]?.state ?? 'undecided' }
+}
+
+export type TriageDecisionRow = { state: string; decidedAt: string | null; wellId: string | null }
+
+/** His decision for one content hash, exactly as stored (null = undecided). */
+export async function getTriageDecision(wellRoot: string, hash: string): Promise<TriageDecisionRow | null> {
+  const db = triageDb(wellRoot)
+  if (!existsSync(db)) return null
+  await ensureTriage(wellRoot)
+  const r = await query<{ state: string; decided_at: string | null; well_id: string | null }>(db, 'SELECT state, decided_at, well_id FROM triage_decisions WHERE hash = ?', [hash])
+  return r[0] ? { state: r[0].state, decidedAt: r[0].decided_at ?? null, wellId: r[0].well_id ?? null } : null
 }
 
 /**
- * Promote every staged (state='selected') item into the well. Offline/missing files are skipped; a
- * video over the 20 MB gate is skipped unless its hash is in forceHashes. Imported items move to
- * state='included' with their new well id. Idempotent: a second run finds nothing still 'selected'.
+ * Write one decision exactly (review keep/throwaway, undo restoring the prior row, Empty Bin's
+ * 'emptied' marker), or forget it with null. The review screen writes his choices through here,
+ * the same table the Triage panel uses; the sorter never calls it.
  */
-export async function importSelectedTriage(
+export async function putTriageDecision(wellRoot: string, hash: string, row: TriageDecisionRow | null): Promise<void> {
+  await ensureTriage(wellRoot)
+  const db = triageDb(wellRoot)
+  // never over an 'emptied' marker (permanent)
+  if (!row) {
+    await run(db, "DELETE FROM triage_decisions WHERE hash = ? AND state != 'emptied'", [hash])
+    return
+  }
+  await run(
+    db,
+    `INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)
+     ON CONFLICT(hash) DO UPDATE SET state = excluded.state, decided_at = excluded.decided_at, well_id = excluded.well_id WHERE triage_decisions.state != 'emptied'`,
+    [hash, row.state, row.decidedAt, row.wellId]
+  )
+}
+
+/** One Bin item as Empty Bin saw it: his decision at that moment (null = none). */
+export type BinSnapshot = { hash: string; decision: TriageDecisionRow | null }
+
+/**
+ * Empty Bin's only write: the permanent 'emptied' marker, in one transaction. Each row is written
+ * only if the item is still in the Bin at write time — his decision unchanged since the snapshot and
+ * the 30-day clock (piles.ts) still run out. Anything that changed meanwhile (rescued, re-decided in
+ * Triage) is left alone and reported. No file is touched; the well id is kept so a kept-then-binned
+ * item's well record stays hidden rather than deleted.
+ */
+export function writeEmptiedMarkers(wellRoot: string, snapshot: BinSnapshot[], now: number): { emptied: string[]; changed: string[] } {
+  const out = { emptied: [] as string[], changed: [] as string[] }
+  if (!snapshot.length) return out
+  const db = new DatabaseSync(triageDb(wellRoot))
+  try {
+    db.exec('PRAGMA busy_timeout=5000;')
+    db.exec('CREATE TABLE IF NOT EXISTS triage_decisions (hash TEXT PRIMARY KEY, state TEXT NOT NULL, decided_at TEXT, well_id TEXT)')
+    const hasSince = (db.prepare("SELECT name FROM pragma_table_info('sorter_proposals')").all() as Array<{ name: string }>).some((c) => c.name === 'throwaway_since')
+    const getD = db.prepare('SELECT state, decided_at, well_id FROM triage_decisions WHERE hash = ?')
+    const getP = db.prepare(`SELECT proposal, proposed_at, ${hasSince ? 'throwaway_since' : 'NULL AS throwaway_since'} FROM sorter_proposals WHERE hash = ?`)
+    const put = db.prepare('INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)')
+    const at = new Date(now).toISOString()
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const s of snapshot) {
+        const d = getD.get(s.hash) as { state: string; decided_at: string | null; well_id: string | null } | undefined
+        const was = s.decision
+        const same = !d ? !was : Boolean(was) && d.state === was!.state && (d.decided_at ?? null) === was!.decidedAt && (d.well_id ?? null) === was!.wellId
+        const p = getP.get(s.hash) as { proposal: ProposalLabel; proposed_at: string | null; throwaway_since: string | null } | undefined
+        const stillBin =
+          same && p && pileOf({ proposal: p.proposal, proposedAt: p.proposed_at, throwawaySince: p.throwaway_since, decision: d ? { state: d.state, decidedAt: d.decided_at } : null }, now).pile === 'bin'
+        if (!stillBin) {
+          out.changed.push(s.hash)
+          continue
+        }
+        put.run(s.hash, 'emptied', at, d?.well_id ?? null)
+        out.emptied.push(s.hash)
+      }
+      db.exec('COMMIT')
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+  } finally {
+    db.close()
+  }
+  return out
+}
+
+export type PromoteResult = {
+  imported: Array<{ hash: string; wellId: string; relPath: string; created: boolean }>
+  skipped: number
+  gated: number
+}
+
+/**
+ * Promote staged (state='selected') items into the well — all of them, or only `onlyHashes`.
+ * Offline/missing files are skipped; a video over the 20 MB gate is skipped unless its hash is in
+ * forceHashes. Imported items move to state='included' with their new well id; the rest stay staged.
+ */
+export async function promoteTriageHashes(
   archiveRoot: string,
   wellRoot: string,
   sourceRoot: string,
+  onlyHashes: string[] | null,
   forceHashes: string[] = []
-): Promise<{ imported: number; skipped: number; gated: number }> {
+): Promise<PromoteResult> {
   await ensureTriage(wellRoot)
   const db = triageDb(wellRoot)
+  if (onlyHashes && onlyHashes.length === 0) return { imported: [], skipped: 0, gated: 0 }
+  const only = onlyHashes ? ` AND triage_fts.hash IN (${onlyHashes.map(() => '?').join(',')})` : ''
   // GROUP BY hash: decisions are keyed by content hash, but triage_fts is keyed by path, so a hash
   // with duplicate files JOINs to multiple rows. One row per hash avoids ingesting the same selected
   // item once per duplicate.
@@ -309,9 +430,9 @@ export async function importSelectedTriage(
     db,
     `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline, triage_fts.source AS source
      FROM triage_fts JOIN triage_decisions d ON d.hash = triage_fts.hash
-     WHERE d.state = 'selected'
+     WHERE d.state = 'selected'${only}
      GROUP BY triage_fts.hash`,
-    []
+    onlyHashes ?? []
   )
   const enriched = staged.map((s) => {
     const abs = join(s.source || sourceRoot, s.rel_path)
@@ -322,19 +443,51 @@ export async function importSelectedTriage(
     return { hash: s.hash, kind: s.kind, offline: s.offline === '1', missing, sizeBytes, abs }
   })
   const plan = planSelectedImport(enriched, forceHashes, VIDEO_GATE_BYTES)
-  let imported = 0
+  const imported: PromoteResult['imported'] = []
   let failed = 0
   for (const hash of plan.toImport) {
     const row = enriched.find((e) => e.hash === hash)
     if (!row) continue
     const res = row.kind === 'video' ? await ingestVideo(archiveRoot, wellRoot, row.abs) : await ingestScreenshot(archiveRoot, wellRoot, row.abs, 'screenshot')
     if (res?.id) {
-      await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)', [hash, 'included', new Date().toISOString(), res.id])
-      imported++
+      // Link this well copy to its triage decision key only when that key is the hash ingest computed
+      // from the bytes it actually imported. A stale scan hash (file replaced since its scan) would
+      // otherwise let emptying the old content hide this different content. Ingest has already
+      // recorded the real hash either way.
+      const matches = res.sourceHash === hash
+      if (matches) await recordWellSource(wellRoot, res.id, hash)
+      else console.error(`[triage] ${row.abs}: scanned as ${hash} but imported as ${res.sourceHash || 'unknown'} — the file changed since its scan; not linked to the old hash`)
+      // Ingest is async: the item may have been emptied from the Bin meanwhile. Like every other
+      // decision write, this one never replaces an 'emptied' marker; such an item counts as skipped
+      // (its well copy, if one was just made, is hidden by content identity — well.ts hiddenWellIds).
+      await run(
+        db,
+        `INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, 'included', ?, ?)
+         ON CONFLICT(hash) DO UPDATE SET state = excluded.state, decided_at = excluded.decided_at, well_id = excluded.well_id WHERE triage_decisions.state != 'emptied'`,
+        // the decision names the well copy only when its key is the imported content; otherwise no well id
+        [hash, new Date().toISOString(), matches ? res.id : null]
+      )
+      const now = await query<{ state: string }>(db, 'SELECT state FROM triage_decisions WHERE hash = ?', [hash])
+      if (now[0]?.state === 'included') imported.push({ hash, wellId: res.id, relPath: res.relPath, created: res.created })
+      else failed++
     } else {
       console.error(`[triage] import failed for ${row.abs} — ingest returned no id; left staged`)
       failed++
     }
   }
   return { imported, skipped: plan.skipped.length + failed, gated: plan.gated.length }
+}
+
+/**
+ * Promote every staged (state='selected') item into the well (the Triage panel's Import). Idempotent:
+ * a second run finds nothing still 'selected'.
+ */
+export async function importSelectedTriage(
+  archiveRoot: string,
+  wellRoot: string,
+  sourceRoot: string,
+  forceHashes: string[] = []
+): Promise<{ imported: number; skipped: number; gated: number }> {
+  const r = await promoteTriageHashes(archiveRoot, wellRoot, sourceRoot, null, forceHashes)
+  return { imported: r.imported.length, skipped: r.skipped, gated: r.gated }
 }
