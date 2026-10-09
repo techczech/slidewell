@@ -149,10 +149,18 @@ describe('speed', () => {
       for (let k = 0; k < 768; k++) v[k] /= n
       return { id: `i${i}`, vector: v }
     })
-    const t0 = performance.now()
+    // Warm up once, then time five runs and assert on the median. A single timing is
+    // too noisy under parallel test-file load; the median keeps the bounded-work intent.
     groupLookAlikes(items)
-    const ms = performance.now() - t0
-    console.log(`grouped 200 x 768-d in ${ms.toFixed(1)} ms`)
-    expect(ms).toBeLessThan(50)
+    const times: number[] = []
+    for (let r = 0; r < 5; r++) {
+      const t0 = performance.now()
+      groupLookAlikes(items)
+      times.push(performance.now() - t0)
+    }
+    times.sort((a, b) => a - b)
+    const median = times[2]
+    console.log(`grouped 200 x 768-d, median of 5 in ${median.toFixed(1)} ms`)
+    expect(median).toBeLessThan(50)
   })
 })
