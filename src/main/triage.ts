@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto'
 import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs'
 import { join, relative, extname, basename } from 'node:path'
 import { query, run, safeFtsQuery } from './sqlite'
-import { ocrImage, ingestScreenshot, ingestVideo, makePoster } from './well'
+import { ocrImage, ingestScreenshot, ingestVideo, makePoster, recordWellSource } from './well'
 import { tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
 import { parseScreenshotName } from './screenshot-name'
 import { walk } from './scan-walk'
@@ -450,8 +450,20 @@ export async function promoteTriageHashes(
     if (!row) continue
     const res = row.kind === 'video' ? await ingestVideo(archiveRoot, wellRoot, row.abs) : await ingestScreenshot(archiveRoot, wellRoot, row.abs, 'screenshot')
     if (res?.id) {
-      await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)', [hash, 'included', new Date().toISOString(), res.id])
-      imported.push({ hash, wellId: res.id, relPath: res.relPath, created: res.created })
+      // the link from this well copy to its triage decision key, before anything else can change
+      await recordWellSource(wellRoot, res.id, hash)
+      // Ingest is async: the item may have been emptied from the Bin meanwhile. Like every other
+      // decision write, this one never replaces an 'emptied' marker; such an item counts as skipped
+      // (its well copy, if one was just made, is hidden by content identity — well.ts hiddenWellIds).
+      await run(
+        db,
+        `INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, 'included', ?, ?)
+         ON CONFLICT(hash) DO UPDATE SET state = excluded.state, decided_at = excluded.decided_at, well_id = excluded.well_id WHERE triage_decisions.state != 'emptied'`,
+        [hash, new Date().toISOString(), res.id]
+      )
+      const now = await query<{ state: string }>(db, 'SELECT state FROM triage_decisions WHERE hash = ?', [hash])
+      if (now[0]?.state === 'included') imported.push({ hash, wellId: res.id, relPath: res.relPath, created: res.created })
+      else failed++
     } else {
       console.error(`[triage] import failed for ${row.abs} — ingest returned no id; left staged`)
       failed++

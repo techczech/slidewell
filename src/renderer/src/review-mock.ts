@@ -1,7 +1,7 @@
 // In-memory review data for the browser preview and the review UI test (e2e/review-ui.mjs). Uses the
 // real pile state machine (src/main/review/piles.ts), so the piles, the 30-day clock, rescue, undo and
 // Empty Bin behave as in the app; only storage and the well are pretend. Never used in the packaged app.
-import { binToken, pileOf, planAction, summarise, type PileView, type ProposalLabel, type ReviewAction } from '../../main/review/piles'
+import { binToken, keysetPage, pileKey, pileOf, planAction, summarise, type PileView, type ProposalLabel, type ReviewAction } from '../../main/review/piles'
 import type { ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewActResult, ReviewUndoResult, EmptyBinResult, SwApi } from '../../preload'
 
 type MockItem = {
@@ -85,9 +85,11 @@ export function reviewMock(): SwApi['review'] {
     const s = summarise(live().map((i) => ({ view: view(i), proposal: i.proposal, decided: Boolean(i.decision) })))
     return { needALook: s.needALook, kept: s.confidentKept, throwaway: s.confidentThrowaway }
   }
-  const ordered = (p: 'kept' | 'throwaway' | 'bin'): MockItem[] => {
-    const xs = live().filter((i) => view(i).pile === p)
-    return p === 'throwaway' ? xs.sort((a, b) => (view(b).binInDays ?? 0) - (view(a).binInDays ?? 0) || newest(a, b)) : xs.sort(newest)
+  const of = (p: 'kept' | 'throwaway' | 'bin'): MockItem[] => live().filter((i) => view(i).pile === p)
+  const keyOf = (i: MockItem) => pileKey(view(i).pile, view(i).binInDays, Date.parse(i.takenAt) || 0, i.hash)
+  const pageOf = (p: 'kept' | 'throwaway' | 'bin', after: string | null, limit: number) => {
+    const pg = keysetPage(of(p), keyOf, after, Math.min(limit, 500))
+    return { total: pg.total, items: pg.items.map(card), next: pg.next }
   }
   const lastSortedAt = (): string | null => items.reduce<string | null>((m, i) => (!m || i.proposedAt > m ? i.proposedAt : m), null)
   return {
@@ -105,27 +107,17 @@ export function reviewMock(): SwApi['review'] {
     },
     piles: async (opts?: { kept?: number; throwaway?: number; bin?: number }): Promise<ReviewPiles> => {
       const h = head()
-      const all = live()
-      void all
-      const kept = ordered('kept')
-      const toss = ordered('throwaway')
-      const bin = ordered('bin')
       return {
         needALook: h.needALook,
         confidentTotal: h.kept + h.throwaway,
         lastSortedAt: lastSortedAt(),
-        kept: { total: kept.length, items: kept.slice(0, opts?.kept ?? 60).map(card) },
-        throwaway: { total: toss.length, items: toss.slice(0, opts?.throwaway ?? 60).map(card) },
-        bin: { total: bin.length, items: bin.slice(0, opts?.bin ?? 60).map(card), token: binToken(bin.map((i) => i.hash)) },
+        kept: pageOf('kept', null, opts?.kept ?? 60),
+        throwaway: pageOf('throwaway', null, opts?.throwaway ?? 60),
+        bin: { ...pageOf('bin', null, opts?.bin ?? 60), token: binToken(of('bin').map((i) => i.hash)) },
         canUndo: undo.length > 0
       }
     },
-    page: async (pile: 'kept' | 'throwaway' | 'bin', offset: number, limit?: number): Promise<ReviewPage> => {
-      const xs = ordered(pile)
-      const items = xs.slice(offset, offset + Math.min(limit ?? 60, 500)).map(card)
-      const next = offset + items.length
-      return { total: xs.length, offset, items, nextOffset: next < xs.length ? next : null }
-    },
+    page: async (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number): Promise<ReviewPage> => pageOf(pile, after, limit ?? 60),
     act: async (hash: string, action: ReviewAction): Promise<ReviewActResult> => {
       const it = items.find((i) => i.hash === hash)
       if (!it) return { ok: false, hash, message: 'This screenshot is no longer in review.' }

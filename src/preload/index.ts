@@ -143,16 +143,17 @@ export type ReviewPiles = {
   needALook: number
   confidentTotal: number
   lastSortedAt: string | null
-  kept: { total: number; items: ReviewCard[] }
-  throwaway: { total: number; items: ReviewCard[] }
-  bin: { total: number; items: ReviewCard[]; token: string } // token: Empty Bin acts only on this set
+  kept: { total: number; items: ReviewCard[]; next: string | null } // next: cursor for review.page
+  throwaway: { total: number; items: ReviewCard[]; next: string | null }
+  bin: { total: number; items: ReviewCard[]; next: string | null; token: string } // token: Empty Bin acts only on this set
   canUndo: boolean
 }
 export type ReviewActResult = { ok: boolean; hash: string; message: string; pile?: ReviewPile }
 export type ReviewUndoResult = { ok: boolean; hash?: string; message: string }
 // changed: Bin items that changed between his confirm and the write (rescued, re-decided) and were left alone
 export type EmptyBinResult = { ok: boolean; emptied: number; changed: number; message: string }
-export type ReviewPage = { total: number; offset: number; items: ReviewCard[]; nextOffset: number | null }
+// keyset paging: `next` is an opaque cursor (null = no more); pass it to review.page
+export type ReviewPage = { total: number; items: ReviewCard[]; next: string | null }
 export type TriageCounts = { undecided: number; selected: number; included: number; excluded: number; total: number }
 export type DeckInfo = { id: string; title: string; date: string | null }
 export type DeckCard = {
@@ -458,8 +459,8 @@ const api = {
   review: {
     overview: (opts?: { queue?: number; sample?: number }): Promise<ReviewOverview> => ipcRenderer.invoke('review:overview', opts ?? {}),
     piles: (opts?: { kept?: number; throwaway?: number; bin?: number }): Promise<ReviewPiles> => ipcRenderer.invoke('review:piles', opts ?? {}),
-    // any further page of one pile, by offset (no cap on how far)
-    page: (pile: 'kept' | 'throwaway' | 'bin', offset: number, limit?: number): Promise<ReviewPage> => ipcRenderer.invoke('review:page', pile, offset, limit),
+    // the page after a cursor (keyset; no cap on how far)
+    page: (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number): Promise<ReviewPage> => ipcRenderer.invoke('review:page', pile, after, limit),
     act: (hash: string, action: 'keep' | 'throwaway' | 'rescue'): Promise<ReviewActResult> => ipcRenderer.invoke('review:act', hash, action),
     undo: (): Promise<ReviewUndoResult> => ipcRenderer.invoke('review:undo'),
     emptyBin: (token: string): Promise<EmptyBinResult> => ipcRenderer.invoke('review:empty-bin', token)

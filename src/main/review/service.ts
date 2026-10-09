@@ -16,8 +16,8 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ReviewActResult, ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewUndoResult, EmptyBinResult } from '../../preload'
-import { binToken, pileOf, planAction, summarise, BIN_AFTER_DAYS, type PileView, type ReviewAction } from './piles'
-import { newestFirst, readReviewRows, type ReviewRow } from './store'
+import { binToken, keysetPage, pileKey, pileOf, planAction, summarise, BIN_AFTER_DAYS, type PileKey, type PileView, type ReviewAction } from './piles'
+import { newestFirst, readReviewRows, timeOf, type ReviewRow } from './store'
 import { putTriageDecision, promoteTriageHashes, writeEmptiedMarkers, type PromoteResult, type TriageDecisionRow } from '../triage'
 import { SorterStore } from '../sorter/store'
 
@@ -132,41 +132,39 @@ export class ReviewService {
     })
   }
 
-  /** One pile in order: kept newest first; throwaway most days left first; bin newest first. */
-  private pile(items: Item[], p: 'kept' | 'throwaway' | 'bin'): Item[] {
-    const xs = items.filter((i) => i.view.pile === p)
-    if (p === 'throwaway') return xs.sort((a, b) => (b.view.binInDays ?? 0) - (a.view.binInDays ?? 0) || newestFirst(a.row, b.row) || a.row.hash.localeCompare(b.row.hash))
-    return xs.sort((a, b) => newestFirst(a.row, b.row) || a.row.hash.localeCompare(b.row.hash))
+  private pileItems(items: Item[], p: 'kept' | 'throwaway' | 'bin'): Item[] {
+    return items.filter((i) => i.view.pile === p)
   }
 
-  /** First page of each pile plus totals. More pages: page(). */
+  private key = (i: Item): PileKey => pileKey(i.view.pile, i.view.binInDays, timeOf(i.row), i.row.hash)
+
+  /** First page of each pile plus totals and the cursor for the next page. More pages: page(). */
   piles(opts: { kept?: number; throwaway?: number; bin?: number } = {}): Promise<ReviewPiles> {
     return this.serial(() => {
       const items = this.items()
       const h = this.head(items)
-      const kept = this.pile(items, 'kept')
-      const toss = this.pile(items, 'throwaway')
-      const bin = this.pile(items, 'bin')
+      const first = (p: 'kept' | 'throwaway' | 'bin', n?: number): { total: number; items: ReviewCard[]; next: string | null } => {
+        const pg = keysetPage(this.pileItems(items, p), this.key, null, pageSize(n))
+        return { total: pg.total, items: pg.items.map((i) => this.card(i)), next: pg.next }
+      }
+      const bin = this.pileItems(items, 'bin')
       return {
         needALook: h.needALook,
         confidentTotal: h.kept + h.throwaway,
         lastSortedAt: h.lastSortedAt,
-        kept: { total: kept.length, items: kept.slice(0, pageSize(opts.kept)).map((i) => this.card(i)) },
-        throwaway: { total: toss.length, items: toss.slice(0, pageSize(opts.throwaway)).map((i) => this.card(i)) },
-        bin: { total: bin.length, items: bin.slice(0, pageSize(opts.bin)).map((i) => this.card(i)), token: binToken(bin.map((i) => i.row.hash)) },
+        kept: first('kept', opts.kept),
+        throwaway: first('throwaway', opts.throwaway),
+        bin: { ...first('bin', opts.bin), token: binToken(bin.map((i) => i.row.hash)) },
         canUndo: this.undoStack.length > 0
       }
     })
   }
 
-  /** Any page of one pile by offset: no cap on how far he can page. */
-  page(pile: 'kept' | 'throwaway' | 'bin', offset: number, limit?: number): Promise<ReviewPage> {
+  /** The page after `after` (a cursor from piles() or an earlier page): keyset, no cap on how far. */
+  page(pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number): Promise<ReviewPage> {
     return this.serial(() => {
-      const xs = this.pile(this.items(), pile)
-      const from = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0
-      const items = xs.slice(from, from + pageSize(limit)).map((i) => this.card(i))
-      const next = from + items.length
-      return { total: xs.length, offset: from, items, nextOffset: next < xs.length ? next : null }
+      const pg = keysetPage(this.pileItems(this.items(), pile), this.key, after, pageSize(limit))
+      return { total: pg.total, items: pg.items.map((i) => this.card(i)), next: pg.next }
     })
   }
 

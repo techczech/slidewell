@@ -116,11 +116,15 @@ export function readReviewRows(wellRoot: string): ReviewRow[] {
   }
 }
 
-/** Newest first: the time in the file name, else the file's modified time. */
+/** When the screenshot was taken: the time in the file name, else the file's modified time (0 = unknown). */
+export function timeOf(r: ReviewRow): number {
+  const t = r.file?.takenAt ? Date.parse(r.file.takenAt) : r.file?.mtime ?? 0
+  return Number.isFinite(t) ? t : 0
+}
+
+/** Newest first. */
 export function newestFirst(a: ReviewRow, b: ReviewRow): number {
-  const ta = a.file?.takenAt ? Date.parse(a.file.takenAt) : a.file?.mtime ?? 0
-  const tb = b.file?.takenAt ? Date.parse(b.file.takenAt) : b.file?.mtime ?? 0
-  return (tb || 0) - (ta || 0)
+  return timeOf(b) - timeOf(a)
 }
 
 /**

@@ -31,7 +31,36 @@ export async function ensureWell(root: string): Promise<void> {
        root UNINDEXED, source UNINDEXED, tags, notes, ocr_text, added_at UNINDEXED
      )`
   )
+  await ensureWellSources(root)
 }
+
+/**
+ * Content identity of well items (ticket 08). well_sources links a well id to the content hash of the
+ * file it was made from: sha256 of the source bytes, first 12 hex characters — the same hash triage
+ * uses as its decision key. Every ingest records it. Rows from before this table are backfilled by
+ * joining through triage_decisions.well_id (what ingest already recorded); the source hash cannot be
+ * recomputed from a well copy, which is re-encoded. Regular table beside the FTS index.
+ */
+const sourcesReady = new Set<string>()
+async function ensureWellSources(root: string): Promise<void> {
+  if (sourcesReady.has(root)) return
+  const db = wellDb(root)
+  await run(db, 'CREATE TABLE IF NOT EXISTS well_sources (well_id TEXT NOT NULL, source_hash TEXT NOT NULL, PRIMARY KEY (well_id, source_hash))')
+  const tdb = join(root, 'triage.db')
+  if (existsSync(tdb)) {
+    await run(db, "ATTACH ? AS t; INSERT OR IGNORE INTO well_sources (well_id, source_hash) SELECT well_id, hash FROM t.triage_decisions WHERE well_id IS NOT NULL AND well_id != ''; DETACH t", [tdb]).catch(
+      () => undefined // no decisions table yet
+    )
+  }
+  sourcesReady.add(root)
+}
+
+/** Link a well id to a source content hash (ingest; and Triage promote, with its decision key). */
+export async function recordWellSource(root: string, wellId: string, sourceHash: string): Promise<void> {
+  await ensureWellSources(root)
+  await run(wellDb(root), 'INSERT OR IGNORE INTO well_sources (well_id, source_hash) VALUES (?, ?)', [wellId, sourceHash])
+}
+const recordSource = recordWellSource
 
 function ocrBin(archiveRoot: string): { cmd: string; pre: string[] } {
   const bin = join(archiveRoot, 'tools', 'ocr', 'vision_ocr')
@@ -100,6 +129,7 @@ export async function ingestScreenshot(
   if (!existsSync(srcPath)) return null
   await ensureWell(root)
   const orig = readFileSync(srcPath)
+  const sourceHash = createHash('sha256').update(orig).digest('hex').slice(0, 12)
   let buf = orig
   let ext = (extname(srcPath).slice(1) || 'png').toLowerCase()
   try {
@@ -128,6 +158,7 @@ export async function ingestScreenshot(
     )
   }
   await upsert(root, { id, slug, ext, relPath, storeRoot: 'well', source, tags: '', notes: '', ocr: text })
+  await recordSource(root, id, sourceHash)
   return { id, relPath, created }
 }
 
@@ -153,8 +184,8 @@ function hashFileStream(path: string): Promise<string> {
     const h = createHash('sha256')
     const s = createReadStream(path)
     s.on('data', (d) => h.update(d))
-    s.on('end', () => resolve(h.digest('hex').slice(0, 7)))
-    s.on('error', () => resolve(createHash('sha256').update(path).digest('hex').slice(0, 7)))
+    s.on('end', () => resolve(h.digest('hex')))
+    s.on('error', () => resolve(''))
   })
 }
 
@@ -169,7 +200,8 @@ export async function ingestVideo(archiveRoot: string, root: string, srcPath: st
   await ensureWell(root)
   mkdirSync(join(root, 'videos'), { recursive: true })
   const ext = (extname(srcPath).slice(1) || 'mp4').toLowerCase()
-  const id = await hashFileStream(srcPath)
+  const full = await hashFileStream(srcPath)
+  const id = full ? full.slice(0, 7) : createHash('sha256').update(srcPath).digest('hex').slice(0, 7)
   const slug = slugify(basename(srcPath).replace(/\.[^.]+$/, ''), 'video')
   const relPath = join('videos', `${slug}--${id}.${ext}`)
   const dest = join(root, relPath)
@@ -185,6 +217,7 @@ export async function ingestVideo(archiveRoot: string, root: string, srcPath: st
       'utf8'
     )
   }
+  if (full) await recordSource(root, id, full.slice(0, 12))
   return { id, relPath, created }
 }
 
@@ -232,18 +265,34 @@ export interface WellRow {
 }
 
 /**
- * Well ids kept and later emptied from the review's Bin (ticket 08): their records stay, hidden from
- * every well listing. Nothing is deleted. Read from triage.db beside well.db.
+ * Well ids hidden because their content was emptied from the review's Bin (ticket 08). Hidden by
+ * content identity: any well row whose source content hash (well_sources) has an 'emptied' decision,
+ * plus any well id an emptied marker names. Nothing is deleted; the rows stay, hidden from every well
+ * listing (searchWell, wellByIds — which every picture-search resolve path goes through).
+ *
+ * picture-search.db still holds vectors for emptied items (`well:<id>`, `triage:<hash>`); SlideWell's
+ * resolve drops them here. Other readers of that store (TalkWeaver later) must filter by the emptied
+ * markers in triage.db themselves.
  */
 async function hiddenWellIds(root: string): Promise<string[]> {
   const tdb = join(root, 'triage.db')
-  if (!existsSync(tdb)) return []
+  if (!existsSync(tdb) || !existsSync(wellDb(root))) return []
+  let emptied: Array<{ hash: string; well_id: string | null }>
   try {
-    const r = await query<{ well_id: string }>(tdb, "SELECT well_id FROM triage_decisions WHERE state = 'emptied' AND well_id IS NOT NULL", [])
-    return r.map((x) => x.well_id)
+    emptied = await query<{ hash: string; well_id: string | null }>(tdb, "SELECT hash, well_id FROM triage_decisions WHERE state = 'emptied'", [])
   } catch {
     return [] // no decisions table yet
   }
+  if (!emptied.length) return []
+  await ensureWellSources(root)
+  const ids = new Set(emptied.map((e) => e.well_id).filter((x): x is string => Boolean(x)))
+  const hashes = emptied.map((e) => e.hash)
+  for (let i = 0; i < hashes.length; i += 400) {
+    const chunk = hashes.slice(i, i + 400)
+    const r = await query<{ well_id: string }>(wellDb(root), `SELECT well_id FROM well_sources WHERE source_hash IN (${chunk.map(() => '?').join(',')})`, chunk)
+    for (const x of r) ids.add(x.well_id)
+  }
+  return [...ids]
 }
 
 /** Search the well (FTS over ocr/tags/notes); empty query lists newest first. */

@@ -125,3 +125,42 @@ export function binToken(hashes: string[]): string {
   }
   return `${hashes.length}-${h1.toString(16)}${h2.toString(16)}`
 }
+
+/**
+ * Keyset paging (stable order). Each item's key: [throwaway: −days left, else 0; −time; hash] in
+ * ascending order, i.e. most days left first, then newest first, then by hash. A page is "the next
+ * `limit` items after the last key seen", so an item inserted or moved between pages may appear or
+ * move, but an unchanged item is never repeated or skipped.
+ */
+export type PileKey = [number, number, string]
+
+export function pileKey(pile: Pile, binInDays: number | null, timeMs: number, hash: string): PileKey {
+  return [pile === 'throwaway' ? -(binInDays ?? 0) : 0, -(Number.isFinite(timeMs) ? timeMs : 0), hash]
+}
+
+export function compareKeys(a: PileKey, b: PileKey): number {
+  return a[0] - b[0] || a[1] - b[1] || (a[2] < b[2] ? -1 : a[2] > b[2] ? 1 : 0)
+}
+
+export function encodeCursor(k: PileKey): string {
+  return JSON.stringify(k)
+}
+
+export function decodeCursor(s: string | null | undefined): PileKey | null {
+  if (!s) return null
+  try {
+    const k = JSON.parse(s)
+    return Array.isArray(k) && k.length === 3 && typeof k[0] === 'number' && typeof k[1] === 'number' && typeof k[2] === 'string' ? (k as PileKey) : null
+  } catch {
+    return null
+  }
+}
+
+/** Sort by key and return the page after `after` (an encoded key; null = from the start). */
+export function keysetPage<T>(items: T[], keyOf: (t: T) => PileKey, after: string | null, limit: number): { total: number; items: T[]; next: string | null } {
+  const keyed = items.map((t) => ({ t, k: keyOf(t) })).sort((a, b) => compareKeys(a.k, b.k))
+  const cur = decodeCursor(after)
+  const rest = cur ? keyed.filter((x) => compareKeys(x.k, cur) > 0) : keyed
+  const page = rest.slice(0, limit)
+  return { total: keyed.length, items: page.map((x) => x.t), next: rest.length > page.length && page.length ? encodeCursor(page[page.length - 1].k) : null }
+}

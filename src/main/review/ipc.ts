@@ -19,9 +19,9 @@ export function registerReviewIpc(svc: ReviewService, allowed: (sender: Electron
     if (typeof hash !== 'string' || !HASH.test(hash) || typeof action !== 'string' || !ACTIONS.has(action)) throw new Error('review:act: bad arguments')
     return svc.act(hash, action as 'keep' | 'throwaway' | 'rescue')
   })
-  handle('review:page', (pile: unknown, offset: unknown, limit: unknown) => {
+  handle('review:page', (pile: unknown, after: unknown, limit: unknown) => {
     if (pile !== 'kept' && pile !== 'throwaway' && pile !== 'bin') throw new Error('review:page: bad pile')
-    return svc.page(pile, typeof offset === 'number' ? offset : 0, typeof limit === 'number' ? limit : undefined)
+    return svc.page(pile, typeof after === 'string' && after.length < 400 ? after : null, typeof limit === 'number' ? limit : undefined)
   })
   handle('review:undo', () => svc.undo())
   handle('review:empty-bin', (token: unknown) => svc.emptyBin(typeof token === 'string' ? token : ''))

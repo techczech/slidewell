@@ -9,7 +9,7 @@ import { ReviewService } from '../src/main/review/service'
 import { guardedHandle } from '../src/main/ipc-guard'
 import { wellByIds, searchWell } from '../src/main/well'
 import { SorterStore, loadUndecided } from '../src/main/sorter/store'
-import { listTriage, triageCounts, putTriageDecision, setTriageDecision, writeEmptiedMarkers } from '../src/main/triage'
+import { listTriage, triageCounts, putTriageDecision, setTriageDecision, writeEmptiedMarkers, promoteTriageHashes } from '../src/main/triage'
 
 const DAY = 86_400_000
 const T0 = Date.parse('2026-10-09T08:00:00Z')
@@ -307,11 +307,11 @@ describe('review: more than 500 items', () => {
     expect(piles.bin.total).toBe(600)
     expect(piles.bin.items.length).toBe(60)
     const seen = new Set(piles.bin.items.map((c) => c.hash))
-    let next: number | null = piles.bin.items.length
+    let next: string | null = piles.bin.next
     while (next !== null) {
       const pg = await svc.page('bin', next, 500)
       pg.items.forEach((c) => seen.add(c.hash))
-      next = pg.nextOffset
+      next = pg.next
     }
     expect(seen.size).toBe(600)
     expect([...seen].sort()).toEqual(extra.sort())
@@ -328,13 +328,109 @@ describe('review: more than 500 items', () => {
     db.exec('COMMIT')
     db.close()
     let got = 0
-    let next: number | null = 0
-    while (next !== null) {
+    let next: string | null = null
+    do {
       const pg = await svc.page('kept', next, 500)
       got += pg.items.length
-      next = pg.nextOffset
-    }
+      next = pg.next
+    } while (next !== null)
     expect(got).toBe(701)
+  })
+})
+
+describe('review: keyset paging is stable between pages', () => {
+  it('an insert before and after the cursor and a rescue between pages: no duplicate, no unchanged item skipped', async () => {
+    const original = addBinItems(10) // hb0000..hb0009; same clock, no file times, so ordered by hash
+    clock = T0 + DAY
+    const first = await svc.page('bin', null, 4)
+    expect(first.items.map((c) => c.hash)).toEqual(original.slice(0, 4))
+    // between pages: one new item sorts before the cursor, one after; one already-seen item is rescued
+    const db = new DatabaseSync(join(well, 'triage.db'))
+    const old = new Date(T0 - 40 * DAY).toISOString()
+    const put = db.prepare("INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, sorter_version, proposed_at, throwaway_since) VALUES (?, 'throwaway', 0.95, 0.05, 'old', 'test', ?, ?)")
+    put.run('hb0001a', old, old)
+    put.run('hb0005a', old, old)
+    db.close()
+    await svc.act('hb0000', 'rescue')
+    const seen = first.items.map((c) => c.hash)
+    let next = first.next
+    while (next) {
+      const pg = await svc.page('bin', next, 4)
+      seen.push(...pg.items.map((c) => c.hash))
+      next = pg.next
+    }
+    expect(new Set(seen).size).toBe(seen.length) // never a duplicate
+    for (const h of original) expect(seen).toContain(h) // no unchanged item skipped
+    expect(seen).toContain('hb0005a') // a new item after the cursor appears
+    // (hb0001a, inserted before the cursor, appears on the next fresh load)
+  })
+})
+
+describe('Triage import and the emptied marker', () => {
+  it('an item emptied while its ingest runs stays emptied; the import reports it skipped', async () => {
+    // the stand-in OCR runs mid-ingest; here it plays Empty Bin landing at that moment
+    const slow = join(work, 'archive-race')
+    mkdirSync(join(slow, 'tools', 'ocr'), { recursive: true })
+    writeFileSync(
+      join(slow, 'tools', 'ocr', 'vision_ocr'),
+      `#!/bin/sh\n/usr/bin/sqlite3 '${join(well, 'triage.db')}' "UPDATE triage_decisions SET state = 'emptied' WHERE hash = 'hd1'"\necho '{"text":""}'\n`
+    )
+    chmodSync(join(slow, 'tools', 'ocr', 'vision_ocr'), 0o755)
+    await putTriageDecision(well, 'hd1', { state: 'selected', decidedAt: new Date(T0).toISOString(), wellId: null })
+    const r = await promoteTriageHashes(slow, well, src, ['hd1'])
+    expect(r.imported).toEqual([])
+    expect(r.skipped).toBe(1)
+    expect(decision('hd1')?.state).toBe('emptied')
+    // the copy ingest made is hidden by content identity, not deleted
+    const ids = wellRows().map((w) => w.id)
+    expect(ids.length).toBe(1)
+    expect(await wellByIds(well, ids)).toEqual([])
+    expect(await searchWell(well, '', 60)).toEqual([])
+  })
+})
+
+describe('hidden by content identity, whatever happened to the well id', () => {
+  it('ingest records the content hash of the source file (the same hash triage keys decisions by)', async () => {
+    await svc.act('hd1', 'keep')
+    const wellId = decision('hd1')!.well_id!
+    const content = createHash('sha256').update(readFileSync(join(src, 'doubt1.png'))).digest('hex').slice(0, 12)
+    const db = new DatabaseSync(join(well, 'well.db'), { readOnly: true })
+    const links = db.prepare('SELECT source_hash FROM well_sources WHERE well_id = ?').all(wellId) as Array<{ source_hash: string }>
+    db.close()
+    expect(links.map((l) => l.source_hash).sort()).toEqual([content, 'hd1'].sort())
+  })
+
+  const hiddenEverywhere = async (wellId: string): Promise<void> => {
+    expect(wellRows().map((w) => w.id)).toContain(wellId) // the record stays
+    expect(await wellByIds(well, [wellId])).toEqual([]) // picture-search resolve path
+    expect((await searchWell(well, '', 60)).map((r) => r.id)).not.toContain(wellId)
+    expect((await searchWell(well, 'scratch ocr', 60)).map((r) => r.id)).not.toContain(wellId)
+  }
+
+  it('Keep, then Triage exclude (drops the well id), then emptied: hidden from search and picture search', async () => {
+    await svc.act('hd1', 'keep')
+    const wellId = decision('hd1')!.well_id!
+    await setTriageDecision(archive, well, src, 'hd1', 'exclude')
+    expect(decision('hd1')).toMatchObject({ state: 'excluded', well_id: null })
+    clock = Date.now() + 31 * DAY
+    const r = await svc.emptyBin((await svc.piles()).bin.token)
+    expect(r.ok).toBe(true)
+    expect(decision('hd1')).toMatchObject({ state: 'emptied', well_id: null })
+    await hiddenEverywhere(wellId)
+  })
+
+  it('Keep, Undo Keep, then throw away, then emptied: hidden from search and picture search', async () => {
+    await svc.act('hd1', 'keep')
+    const wellId = decision('hd1')!.well_id!
+    await svc.undo()
+    expect(decision('hd1')).toBeUndefined()
+    expect((await wellByIds(well, [wellId])).length).toBe(1) // visible while not emptied
+    await svc.act('hd1', 'throwaway')
+    expect(decision('hd1')).toMatchObject({ state: 'excluded', well_id: null })
+    clock = T0 + 30 * DAY
+    await svc.emptyBin((await svc.piles()).bin.token)
+    expect(decision('hd1')?.state).toBe('emptied')
+    await hiddenEverywhere(wellId)
   })
 })
 

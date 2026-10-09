@@ -7,13 +7,18 @@ import type { ReviewCard, ReviewOverview, ReviewPiles } from '../../preload'
 type PileName = 'kept' | 'throwaway' | 'bin'
 const PAGE = 60
 
-/** Page through one pile until `want` items (or all of them) are in hand. No cap. */
-async function fetchUpTo(pile: PileName, first: ReviewCard[], total: number, want: number): Promise<ReviewCard[]> {
-  let items = first
-  while (items.length < Math.min(want, total)) {
-    const pg = await window.sw.review.page(pile, items.length, 500)
-    if (!pg.items.length) break
-    items = items.concat(pg.items)
+/**
+ * Page through one pile (keyset cursors) until `want` items are in hand or the pile ends. No cap.
+ * Pages are joined by hash, so an item that moved between pages is never shown twice.
+ */
+async function fetchUpTo(pile: PileName, first: ReviewCard[], next: string | null, want: number): Promise<ReviewCard[]> {
+  const seen = new Set(first.map((c) => c.hash))
+  const items = [...first]
+  let cursor = next
+  while (items.length < want && cursor) {
+    const pg = await window.sw.review.page(pile, cursor, 500)
+    for (const c of pg.items) if (!seen.has(c.hash)) (seen.add(c.hash), items.push(c))
+    cursor = pg.next
   }
   return items
 }
@@ -90,7 +95,7 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
     if (mode === 'piles') {
       const p = await window.sw.review.piles({ kept: PAGE, throwaway: PAGE, bin: PAGE })
       const [kept, throwaway, bin] = await Promise.all(
-        (['kept', 'throwaway', 'bin'] as const).map((k) => fetchUpTo(k, p[k].items, p[k].total, shown[k]))
+        (['kept', 'throwaway', 'bin'] as const).map((k) => fetchUpTo(k, p[k].items, p[k].next, shown[k]))
       )
       setPiles({ ...p, kept: { ...p.kept, items: kept }, throwaway: { ...p.throwaway, items: throwaway }, bin: { ...p.bin, items: bin } })
     }
