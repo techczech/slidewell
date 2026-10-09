@@ -27,6 +27,11 @@ import type { FetchLike } from './picture-search/model-store'
 
 const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
 
+// Test-only: SLIDEWELL_E2E_HIDDEN=1 keeps automated runs in the background (no window shown, no
+// Dock icon, nothing takes focus). Honoured only when set to exactly '1'; unset changes nothing.
+const E2E_HIDDEN = process.env['SLIDEWELL_E2E_HIDDEN'] === '1'
+if (E2E_HIDDEN && process.platform === 'darwin') app.dock?.hide()
+
 // Custom schemes must be registered as privileged BEFORE app ready so the renderer treats them
 // as standard secure schemes (CSP img-src matching, no mixed-content blocking). SlideWell mirrors
 // TalkWeaver's tw* schemes with sw*: swasset (the well's owned assets), swthumb (generated
@@ -194,10 +199,13 @@ function createWindow(): BrowserWindow {
     minHeight: 600,
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#f7f3ea',
+    // hidden test runs: never shown, but still painted and not throttled, so screenshots render
+    ...(E2E_HIDDEN ? { show: false, paintWhenInitiallyHidden: true } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
-      sandbox: false
+      sandbox: false,
+      ...(E2E_HIDDEN ? { backgroundThrottling: false } : {})
     }
   })
 

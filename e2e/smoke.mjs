@@ -23,7 +23,8 @@ if (process.env.SLIDEWELL_SMOKE_ARCHIVE) config.archiveRoot = process.env.SLIDEW
 writeFileSync(join(userData, 'config.json'), JSON.stringify(config), 'utf8')
 process.on('exit', () => rmSync(work, { recursive: true, force: true }))
 
-const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home } })
+// SLIDEWELL_E2E_HIDDEN: runs in the background — no window shown, no Dock icon, no focus taken
+const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home, SLIDEWELL_E2E_HIDDEN: '1' } })
 try {
   const win = await app.firstWindow({ timeout: 20000 })
   await win.waitForLoadState('domcontentloaded')

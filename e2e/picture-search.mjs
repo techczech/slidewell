@@ -52,7 +52,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const FILTERS = { owner: 'all', era: 'all', category: '', deck: '', role: 'content', cluster: true, from: 'all', kind: 'all', type: 'slides', library: 'mine' }
 
 async function launch() {
-  const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home } })
+  // SLIDEWELL_E2E_HIDDEN: no window is shown and nothing takes focus (screenshots still render)
+  const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home, SLIDEWELL_E2E_HIDDEN: '1' } })
   // Record every http(s) request the app makes from here on (net.fetch goes through this session).
   await app.evaluate(({ session }) => {
     globalThis.__requests = []
@@ -68,14 +69,24 @@ async function launch() {
     if (!win) await sleep(100)
   }
   if (!win) throw new Error('main window did not open')
+  currentApp = app
   await win.waitForLoadState('domcontentloaded')
   return { app, win }
 }
 const status = (win) => win.evaluate(() => window.sw.picture.status())
+// hidden run: no window visible or focused, ever (sampled at each checkpoint and on every status poll)
+let windowShown = null
+async function noteVisibility(app) {
+  const ws = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map((w) => ({ url: w.webContents.getURL().slice(0, 40), visible: w.isVisible(), focused: w.isFocused() }))).catch(() => [])
+  const bad = ws.find((w) => w.visible || w.focused)
+  if (bad && !windowShown) windowShown = bad
+}
 const requests = (app) => app.evaluate(() => globalThis.__requests)
+let currentApp = null
 async function waitFor(win, pred, timeoutMs, label) {
   const t0 = Date.now()
   for (;;) {
+    if (currentApp) await noteVisibility(currentApp)
     const st = await status(win)
     if (pred(st)) return st
     if (Date.now() - t0 > timeoutMs) throw new Error(`timed out waiting for ${label}: ${JSON.stringify(st)}`)
@@ -242,6 +253,7 @@ try {
 } finally {
   await app.close()
 }
+check('no window shown or focused during the run', windowShown === null, JSON.stringify(windowShown))
 out('screenshots', screens)
 console.log(failed ? 'PICTURE SEARCH E2E: FAILED' : 'PICTURE SEARCH E2E: PASSED')
 process.exit(failed ? 1 : 0)
