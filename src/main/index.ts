@@ -18,6 +18,7 @@ import { ensureWell, drainInbox, scanVault, searchWell, wellByIds, wellAbsPath, 
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow } from './triage'
 import { cleanShotFolder } from './cleanshot-folder'
 import { createSourceWatcher } from './source-watcher'
+import { registerBacklogIpc } from './backlog-ipc'
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
 import { convertPptxToOutline } from './convert'
 import { slugify } from './outline'
@@ -859,6 +860,14 @@ app.whenReady().then(() => {
   refreshWatchers = (): void => watcher.setSources(triageSources().map((s) => ({ path: s.path, recursive: !s.namedOnly })))
   refreshWatchers()
   app.on('will-quit', () => watcher.close())
+  // One-off backlog import (Desktop + CleanShot history → the Triage source folder). After a run,
+  // one explicit scan; the import itself never waits on watcher events from the (OneDrive) folder.
+  registerBacklogIpc({
+    watchedFolder: screenshotRootResolved,
+    stateDir: () => join(app.getPath('userData'), 'backlog-import'),
+    isMainWindow: (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents),
+    afterRun: () => void scanAllSources().then(() => mainWindow?.webContents.send('triage:changed'))
+  })
   ipcMain.handle('triage:list', async (_e, q: string, state: string, sort?: string, limit?: number, offset?: number) => {
     const src = triageSources()[0]?.path ?? null
     const wellR = wellRootResolved()

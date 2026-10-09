@@ -151,6 +151,48 @@ export type PictureIndexProgress = {
   secondsLeft: number | null
   error?: string
 }
+// Backlog import (ticket 13): the dry-run view (counts, sizes, examples — never the file list), the
+// result of a real run, and CleanShot's export setting. Mirrors main/backlog-plan.ts + backlog-import.ts.
+export type BacklogSourceSummary = { count: number; bytes: number; examples: string[] }
+export type BacklogPlanView =
+  | {
+      ok: true
+      date: string
+      watchedFolder: string
+      desktopDir: string
+      cleanshotDir: string | null
+      summary: {
+        desktop: BacklogSourceSummary
+        cleanshot: BacklogSourceSummary
+        recopy: number
+        done: number
+        unverifiedOnlineOnly: number
+        onlineOnly: number
+        nameTaken: number
+        totalBytes: number
+        skipped: { cleanshotProjects: number; cleanshotOther: number; empty: number; notRegular: number }
+        leftoverStaged: number
+      }
+    }
+  | { ok: false; reason: 'no-watched-folder' | 'watched-folder-overlaps'; detail: string }
+export type BacklogRunResult = {
+  ok: boolean
+  cancelled: boolean
+  copied: number
+  reused: number
+  alreadyDone: number
+  unverifiedOnlineOnly: number
+  onlineOnly: number
+  notRegular: number
+  gone: number
+  failed: number
+  desktopWithCopy: number
+  logPath: string
+  errors: string[]
+}
+export type BacklogProgress = { done: number; total: number; name: string }
+export type CleanShotSetting = { current: string | null; target: string; command: string; matches: boolean }
+
 export type PictureSearchStatus = {
   model: 'absent' | 'partial' | 'downloading' | 'ready'
   modelBytes: number
@@ -306,6 +348,22 @@ const api = {
       const handler = (_e: Electron.IpcRendererEvent, line: string): void => cb(line)
       ipcRenderer.on('triage:progress', handler)
       return () => ipcRenderer.removeListener('triage:progress', handler)
+    }
+  },
+  // One-off backlog import (ticket 13). dryRun writes nothing; run needs the id of the plan just shown.
+  backlog: {
+    dryRun: (): Promise<{ id: string; plan: BacklogPlanView } | null> => ipcRenderer.invoke('backlog:dry-run'),
+    run: (planId: string): Promise<{ result?: BacklogRunResult; refused?: string } | null> => ipcRenderer.invoke('backlog:run', planId),
+    cancel: (): Promise<boolean> => ipcRenderer.invoke('backlog:cancel'),
+    showLogs: (): Promise<boolean> => ipcRenderer.invoke('backlog:show-logs'),
+    cleanShotSetting: (): Promise<CleanShotSetting | null> => ipcRenderer.invoke('backlog:cleanshot-setting'),
+    // Changes CleanShot's export folder to the watched folder. Only ever called from a click.
+    // `shown` = the exact folder the user saw; main refuses if it is no longer the watched folder.
+    setCleanShot: (shown: string): Promise<(CleanShotSetting & { ok: boolean; refused?: undefined }) | { refused: string } | null> => ipcRenderer.invoke('backlog:set-cleanshot', shown),
+    onProgress: (cb: (p: BacklogProgress) => void): (() => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, p: BacklogProgress): void => cb(p)
+      ipcRenderer.on('backlog:progress', handler)
+      return () => ipcRenderer.removeListener('backlog:progress', handler)
     }
   },
   shell: {

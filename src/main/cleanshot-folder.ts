@@ -35,3 +35,45 @@ export async function cleanShotFolder(read: DefaultsReader = readCleanShotExport
   const p = normaliseExportPath(await read().catch(() => null))
   return p && exists(p) ? p : null
 }
+
+// ---- Changing CleanShot's export folder (backlog import, ticket 13): only on the user's click. ----
+
+/** Writes CleanShot's export path. Injectable: tests and previews pass a fake and never touch the real setting. */
+export type DefaultsWriter = (path: string) => Promise<boolean>
+
+/** Exact argv for `defaults` (no shell). */
+export function exportPathWriteArgs(path: string): string[] {
+  return ['write', 'pl.maketheweb.cleanshotx', 'exportPath', '-string', path]
+}
+
+/** The same command as the user would type it in Terminal; shown before the click. */
+export function exportPathCommand(path: string): string {
+  return `defaults ${exportPathWriteArgs(path)
+    .map((a) => (/^[\w./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`))
+    .join(' ')}`
+}
+
+export const writeCleanShotExportPath: DefaultsWriter = (path) =>
+  new Promise((resolve) => {
+    execFile('defaults', exportPathWriteArgs(path), { timeout: 3000 }, (err) => resolve(!err))
+  })
+
+export type CleanShotSetting = { current: string | null; target: string; command: string; matches: boolean }
+
+export async function cleanShotSetting(target: string, read: DefaultsReader = readCleanShotExportPath): Promise<CleanShotSetting> {
+  const current = normaliseExportPath(await read().catch(() => null))
+  const t = normaliseExportPath(target) ?? target
+  return { current, target: t, command: exportPathCommand(t), matches: current === t }
+}
+
+/** Point CleanShot at `target`, then read the setting back to confirm. */
+export async function setCleanShotExportPath(
+  target: string,
+  write: DefaultsWriter = writeCleanShotExportPath,
+  read: DefaultsReader = readCleanShotExportPath
+): Promise<CleanShotSetting & { ok: boolean }> {
+  const t = normaliseExportPath(target) ?? target
+  const wrote = await write(t).catch(() => false)
+  const after = await cleanShotSetting(t, read)
+  return { ...after, ok: wrote && after.matches }
+}

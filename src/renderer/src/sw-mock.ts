@@ -93,6 +93,15 @@ export function installMock(): void {
       onProgress: () => () => {},
       onChanged: () => () => {}
     },
+    backlog: {
+      dryRun: async () => ({ id: 'mock', plan: { ok: false as const, reason: 'no-watched-folder' as const, detail: 'not available in the browser preview' } }),
+      run: async () => ({ refused: 'not available in the browser preview' }),
+      cancel: async () => false,
+      showLogs: async () => false,
+      cleanShotSetting: async () => null,
+      setCleanShot: async () => null,
+      onProgress: () => () => undefined
+    },
     shell: {
       openPath: async () => false,
       openExternal: async () => false
