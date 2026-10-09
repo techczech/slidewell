@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { nextPreviewIndex } from '../../main/triage-logic'
 import { PictureSearchSettings, PictureSearchStatusBar, usePictureStatus } from './PictureSearch'
 import { BacklogImportSettings } from './BacklogImport'
+import { SorterSettings } from './SorterSettings'
 import { RELATED_SHOWN, relatedFold } from './match-fold'
 import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency, FromFilter, KindFilter, FromCounts, MatchMode, MoreLikeThisResult } from '../../preload'
 
@@ -1678,6 +1679,7 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
         </div>
 
         <PictureSearchSettings />
+        <SorterSettings />
 
         <div className="settings-section">Folders</div>
         <div className="settings-rows">

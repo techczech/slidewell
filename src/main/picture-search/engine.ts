@@ -29,6 +29,9 @@ export type WriteResult = 'stored' | 'stale'
 export type PictureQuery = { text: string } | { imageId: string }
 export type QueryOptions = { limit?: number; kinds?: ItemKind[] }
 
+/** What a query ranks when it names no kinds: triage screenshots (sorter input) only on request. */
+export const SEARCH_KINDS: ItemKind[] = ['slide', 'well-image']
+
 export function normalise(v: Float32Array): Float32Array {
   let s = 0
   for (let i = 0; i < v.length; i++) s += v[i] * v[i]
@@ -83,14 +86,14 @@ export class PictureSearchEngine {
     if ('imageId' in q) {
       const self = this.vectors().get(q.imageId) ?? this.store.get(q.imageId)
       if (!self) throw new NotIndexedError(`no picture-search vector for ${q.imageId}`)
-      return rank(self.vector, this.vectors().values(), limit, q.imageId, opts.kinds)
+      return rank(self.vector, this.vectors().values(), limit, q.imageId, opts.kinds ?? SEARCH_KINDS)
     }
     const text = q.text.trim()
     if (!text) return []
     const e = this.embedder()
     if (!e) throw new Error('picture search model is not ready')
     const qv = await e.embedText(text)
-    return rank(qv, this.vectors().values(), limit, undefined, opts.kinds)
+    return rank(qv, this.vectors().values(), limit, undefined, opts.kinds ?? SEARCH_KINDS)
   }
 
   /** Embed one image and store its vector (the indexer's unit of work). A refused write is 'stale'. */

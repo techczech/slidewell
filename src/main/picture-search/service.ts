@@ -12,7 +12,7 @@ import { PictureSearchEngine, UnreadableImageError, type Embedder, type PictureQ
 import { Indexer } from './indexer'
 import { coveragePercent, estimateText, statusText, type IndexProgress } from './progress'
 import { archiveRenders, wellImages } from './sources'
-import { STORE_FILE, VectorStore } from './vector-store'
+import { STORE_FILE, VectorStore, type IndexItem } from './vector-store'
 import { ImageEnumerator } from './enumeration'
 
 export type PictureSearchSettings = { includeWell?: boolean; paused?: boolean }
@@ -242,6 +242,47 @@ export class PictureSearchService {
     this.images.invalidate()
     this.estimateCache = null
     this.poke()
+  }
+
+  /** The model is on disk and verified (nothing else can embed). */
+  modelReady(): boolean {
+    return modelState(this.dir()) === 'ready'
+  }
+
+  /**
+   * Vectors for the given images (the sorter's seam onto the engine). An image already handled at
+   * the same path, size and mtime is read from the store; any other is embedded and stored through
+   * the engine's embedAndStore. Unreadable images are recorded as failures and left out of the map;
+   * any other error (the engine failed) is thrown. Stops between images when `signal` aborts.
+   */
+  async ensureVectors(items: IndexItem[], opts: { signal?: AbortSignal; onEach?: (done: number, total: number) => void } = {}): Promise<Map<string, Float32Array>> {
+    if (!this.modelReady()) throw new Error('picture search model is not ready')
+    const store = this.openStore()
+    const engine = this.openEngine()
+    const handled = store.fingerprints()
+    const out = new Map<string, Float32Array>()
+    let done = 0
+    for (const item of items) {
+      if (opts.signal?.aborted) break
+      const fp = handled.get(item.id)
+      const same = fp && fp.path === item.path && fp.size === item.size && fp.mtimeMs === Math.round(item.mtimeMs)
+      const stored = same ? store.get(item.id) : null
+      if (stored) out.set(item.id, stored.vector)
+      else if (!same) {
+        try {
+          if ((await engine.embedAndStore(item)) === 'stored') {
+            const v = store.get(item.id)
+            if (v) out.set(item.id, v.vector)
+          }
+        } catch (e) {
+          if (!(e instanceof UnreadableImageError)) throw e
+          store.putFailure(item, (e as Error).message)
+          engine.forget(item.id)
+        }
+      }
+      opts.onEach?.(++done, items.length)
+    }
+    return out
   }
 
   /** The main-process query: text → ranked ids, or a stored image id → similar ids. Scores are cosines. */

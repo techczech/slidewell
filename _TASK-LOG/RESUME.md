@@ -1,12 +1,39 @@
 # SlideWell — RESUME (session entry point)
 
-**FOR ME.** Last updated 2026-06-23.
+**FOR ME.** Last updated 2026-10-09.
 
 ## State
 
 Electron + React + TS (electron-vite), mirrored from `talk-weaver`. Shipped (see `_CHANGELOG/INDEX.md`): search + full filter/cluster/lightbox surface, archive **Import** (Core A pipeline), the **well** + screenshot/video **Triage**, Stats, Settings + dependency detection. Newest: **Convert** — sideband throwaway PPTX→Outline (a distinct verb from Import; never catalogued into archive/vault; `origin: external` stamp). Direction layer in `presentation-system` (ADR-0026, CONTEXT.md, ROADMAP P7).
 
 **Convert internals** (2026-06-23): `src/main/outline.ts` (pure transform, 17 vitest tests in `test/`), `src/main/convert.ts` (sideband extract → optional OCR → emit), `convert:*` IPC + `conversionsRoot`/`convertOcrByDefault` settings, `⇄ Convert` titlebar panel. Verified end-to-end on a real third-party deck. **Unit tests now exist**: `npm test` (vitest). Note: repo `tsc --noEmit` is a no-op (root tsconfig `files:[]`); real type-check is `tsc -p tsconfig.node.json/--web` (baseline reds: `well.ts:108`, web `TS6307` preload→main/stats).
+
+## Screenshot sorter, local part (2026-10-09)
+
+Code: `src/main/sorter/` — `rules.ts` (app/window/OCR → lean + reason), `classifier.ts` (class-weighted L2 logistic regression on picture-search embeddings, L2 by 5-fold CV; trained in a worker thread), `calibration.ts` (Platt vs isotonic on out-of-fold scores, the lower cross-validated Brier wins), `groups.ts` (related screenshots kept together in the split and the folds), `decide.ts` (log-odds combination + keep-bias thresholds → keep/throwaway/doubtful + reason), `accuracy.ts` (stratified 20% hold-out + report), `store.ts`, `service.ts`; Settings › Screenshot sorter (`SorterSettings.tsx`). Proposals only: `sorter_proposals` + `sorter_models` in triage.db (never `triage_decisions`); triage embeddings in picture-search.db, kind `triage`, id `triage:<hash>` (left out of search unless a query names the kind). No nightly schedule yet: Settings has "Sort undecided screenshots now", refused until a model trained under the current sorter version has a held-back report with at least 20 items and 5 of each label; training fails with "not enough independent examples to calibrate" when fewer than 3 folds or 20 out-of-fold scores (5 per label) are usable. Grouping and fitting run in a worker thread.
+
+**Accuracy on his real labelled history** (calibrated, near-duplicates grouped; copy taken 2026-10-09 night, `e2e/sorter.mjs`, sorter-local-2, thresholds unchanged: throwaway ≥ 0.90 (floor 0.85), keep ≥ 0.70; all e2e checks passed, no network request, his decisions unchanged). **Accuracy is measured on a held-back fifth; the model in use was then retrained on all his choices**, its calibration again from out-of-fold scores (group k-fold over all data, never in-sample).
+
+- Labelled: 251 kept and 156 binned; 251 + 154 have their picture on disk.
+- Grouping before the split (cosine ≥ 0.95, or same app + window title within 5 minutes; connected components): **373 groups, largest 4**. The app/window rule never fires on this history (no screenshot carries an app or window title yet); all links are near-copies.
+- Held back, whole groups, about 20% per label: **82** (51 kept, 31 binned); fitting and calibration use only the other 323 (L2 = 0.001 and the calibrator chosen by group 5-fold CV inside that split).
+- Calibration, cross-validated Brier inside the training split: raw 0.198, **Platt 0.187 (chosen)**, isotonic 0.190 (ties pooled before pool-adjacent-violators).
+- **Throwaway precision 100%** (2 of 2). **Keep precision 80%** (32 of 40). **Doubtful 49%** (40 of 82). Kept proposed as throwaway: 0. Binned proposed as keep: 8.
+- Calibrated classifier alone on the held-back 82: AUC 0.843, Brier 0.153. Reliability of p(throwaway):
+
+  | p(throwaway) | n | mean predicted | share binned |
+  |---|---|---|---|
+  | 0.0–0.1 | 4 | 0.09 | 0.00 |
+  | 0.1–0.3 | 33 | 0.19 | 0.18 |
+  | 0.3–0.5 | 20 | 0.39 | 0.25 |
+  | 0.5–0.7 | 16 | 0.60 | 0.69 |
+  | 0.7–0.9 | 7 | 0.79 | 1.00 |
+  | 0.9–1.0 | 2 | 0.92 | 1.00 |
+
+- Rules alone on the same 82: keep 67% (4 of 6), throwaway none, doubtful 93%.
+- Full sort of the copy: 11,928 undecided pictures → 7,235 keep, 464 throwaway, 4,229 doubtful.
+- Caveat: throwaway precision rests on 2 held-back proposals, too few to confirm the 0.95 bar either way.
+- An earlier copy that embedded most kept pictures from the well's re-encoded copies looked better than it was (file format); disregard it.
 
 ## Decided (2026-06-18 grill — presentation-system)
 

@@ -28,6 +28,9 @@ import { PictureSearchService, registerPictureSearchIpc, type PictureSearchSetti
 import { WebGpuEmbedder } from './picture-search/webgpu-embedder'
 import { electronEmbedHost, registerEmbedProtocol, EMBED_SCHEME } from './picture-search/electron-embed-host'
 import { modelDir as pictureModelDir } from './picture-search/model-store'
+import { SorterService, registerSorterIpc } from './sorter/service'
+import createTrainWorker from './sorter/train-worker?nodeWorker'
+import type { Job, JobResult } from './sorter/jobs'
 import type { FetchLike } from './picture-search/model-store'
 
 const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
@@ -314,6 +317,38 @@ app.whenReady().then(() => {
   // picture IPC answers the main window only (never the hidden picture-search window)
   registerPictureSearchIpc(pictureSearch, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
   app.on('will-quit', () => pictureSearch?.dispose())
+
+  // --- screenshot sorter, local part (sorter/service.ts): proposals only, never decisions or moves ---
+  const pics = pictureSearch
+  const sorter = new SorterService({
+    wellRoot: wellRootResolved,
+    pictures: { modelReady: () => pics.modelReady(), ensureVectors: (items, opts) => pics.ensureVectors(items, opts) },
+    // grouping and fitting run in a worker thread (sorter/train-worker.ts); the main process stays responsive
+    runJob: <J extends Job>(job: J, signal: AbortSignal) =>
+      new Promise<JobResult<J>>((resolve, reject) => {
+        if (signal.aborted) return reject(new Error('cancelled'))
+        const w = createTrainWorker({ workerData: job })
+        let settled = false
+        const finish = (fn: () => void): void => {
+          if (settled) return
+          settled = true
+          signal.removeEventListener('abort', onAbort)
+          fn()
+          void w.terminate()
+        }
+        // Stop terminates the worker at once; nothing it computed is used
+        const onAbort = (): void => finish(() => reject(new Error('cancelled')))
+        signal.addEventListener('abort', onAbort)
+        w.once('message', (m: { result?: JobResult<J>; error?: string }) => finish(() => (m.result ? resolve(m.result) : reject(new Error(m.error ?? 'training failed')))))
+        w.once('error', (e) => finish(() => reject(e)))
+        w.once('exit', (code) => finish(() => reject(new Error(`training worker stopped (${code})`))))
+      }),
+    broadcast: (st) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('sorter:status', st)
+    }
+  })
+  registerSorterIpc(sorter, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+  app.on('will-quit', () => sorter.cancel())
 
   // --- IPC: the typed contract lives in src/preload/index.ts ---
   ipcMain.handle('archive:available', () => archiveAvailable())

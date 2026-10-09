@@ -10,7 +10,9 @@
  *           file_size, file_mtime_ms, embedded_at, vector BLOB)
  *   failures(id TEXT PRIMARY KEY, path, file_size, file_mtime_ms, error, failed_at)
  * `vector` is `dim` float32 values, little-endian, L2-normalised: cosine similarity = dot product.
- * ids: `slide:<presentation_id>#<slide_order>` for archive slide renders, `well:<id>` for well images.
+ * ids: `slide:<presentation_id>#<slide_order>` for archive slide renders, `well:<id>` for well images,
+ * `triage:<hash>` for screenshots in triage (kind 'triage', keyed by the triage content hash; written
+ * by the sorter, not the background indexer, and left out of search unless a query asks for it).
  */
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync, realpathSync } from 'node:fs'
@@ -19,7 +21,7 @@ import { dirname, sep } from 'node:path'
 export const STORE_FILE = 'picture-search.db'
 export const SCHEMA_VERSION = '1'
 
-export type ItemKind = 'slide' | 'well-image'
+export type ItemKind = 'slide' | 'well-image' | 'triage'
 
 /** One image the indexer should embed (a slide render or a well image). */
 export type IndexItem = {
@@ -61,6 +63,9 @@ export function slideId(presentationId: string, slideOrder: number): string {
 }
 export function wellImageId(wellId: string): string {
   return `well:${wellId}`
+}
+export function triageImageId(hash: string): string {
+  return `triage:${hash}`
 }
 
 function toBlob(v: Float32Array): Uint8Array {

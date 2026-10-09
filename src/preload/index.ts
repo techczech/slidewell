@@ -209,6 +209,54 @@ export type PictureSearchStatus = {
 export type PictureQuery = { text: string } | { imageId: string }
 export type PictureScored = { id: string; score: number }
 
+// Screenshot sorter, local part (ticket 06). Same shapes as src/main/sorter/{accuracy,service}.ts.
+export type SorterPrecisionLine = { proposed: number; correct: number; precision: number | null }
+export type SorterAccuracy = {
+  sample: number
+  truth: { keep: number; throwaway: number }
+  keep: SorterPrecisionLine
+  throwaway: SorterPrecisionLine
+  doubtful: { count: number; share: number }
+  keptProposedThrowaway: number
+  binnedProposedKeep: number
+}
+// One band of predicted p(throwaway): how many, mean prediction, share he actually binned.
+export type SorterReliabilityRow = { from: number; to: number; n: number; meanPredicted: number | null; observed: number | null }
+export type SorterReport = {
+  trainedAt: string
+  sorterVersion: string
+  thresholds: { throwaway: number; keep: number }
+  holdOutFraction: number
+  labelled: { keep: number; throwaway: number }
+  usable: { keep: number; throwaway: number }
+  keepFromWellCopy: number
+  grouping: { groups: number; largest: number; cosine: number; minutes: number }
+  enoughToMeasure: boolean
+  trainedOn: { keep: number; throwaway: number }
+  l2: number
+  calibration: {
+    chosen: 'platt' | 'isotonic'
+    brier: { raw: number; platt: number; isotonic: number }
+    reliability: { platt: SorterReliabilityRow[]; isotonic: SorterReliabilityRow[] }
+  } | null
+  heldBackClassifier: { auc: number | null; brier: number; reliability: SorterReliabilityRow[] }
+  heldBack: SorterAccuracy
+  rulesOnly: SorterAccuracy
+}
+export type SorterStatus = {
+  phase: 'idle' | 'embedding' | 'training' | 'sorting' | 'error'
+  done: number
+  total: number
+  message: string
+  error: string | null
+  modelReady: boolean
+  report: SorterReport | null
+  canRunUnattended: boolean
+  retrainNeeded: boolean
+  minHeldBack: { total: number; perLabel: number }
+  pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
+}
+
 const api = {
   // Picture search: model download/delete, background indexing, query by text or by image id.
   picture: {
@@ -227,6 +275,19 @@ const api = {
       const handler = (_e: Electron.IpcRendererEvent, s: PictureSearchStatus): void => cb(s)
       ipcRenderer.on('picture:status', handler)
       return () => ipcRenderer.removeListener('picture:status', handler)
+    }
+  },
+  // Screenshot sorter: train + accuracy report on his past choices; propose keep/throwaway/doubtful for undecided screenshots.
+  sorter: {
+    status: (): Promise<SorterStatus> => ipcRenderer.invoke('sorter:status'),
+    train: (): Promise<{ ok: boolean; cancelled?: boolean; report?: SorterReport; error?: string }> => ipcRenderer.invoke('sorter:train'),
+    sort: (opts?: { limit?: number }): Promise<{ ok: boolean; sorted?: number; counts?: { keep: number; throwaway: number; doubtful: number }; error?: string }> =>
+      ipcRenderer.invoke('sorter:sort', opts),
+    cancel: (): Promise<void> => ipcRenderer.invoke('sorter:cancel'),
+    onStatus: (cb: (s: SorterStatus) => void): (() => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, s: SorterStatus): void => cb(s)
+      ipcRenderer.on('sorter:status', handler)
+      return () => ipcRenderer.removeListener('sorter:status', handler)
     }
   },
   archive: {
