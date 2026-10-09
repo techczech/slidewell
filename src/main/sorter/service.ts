@@ -16,7 +16,8 @@ import { applyRules } from './rules'
 import { train, predictKeep, type Classifier, type Example } from './classifier'
 import { auc, brier, reliabilityTable, type CalibrationCheck, type ReliabilityRow } from './calibration'
 import { decide, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from './decide'
-import { accuracyReport, holdOutSplit, type AccuracyReport, type LabelledPrediction } from './accuracy'
+import { accuracyReport, enoughToMeasure, holdOutSplit, MIN_HELD_BACK, type AccuracyReport, type LabelledPrediction } from './accuracy'
+import { groupRelated } from './groups'
 import { loadLabelled, loadUndecided, SorterStore, type ProposalRow, type Shot } from './store'
 
 export const HOLD_OUT_FRACTION = 0.2
@@ -31,6 +32,10 @@ export type SorterReport = {
   usable: { keep: number; throwaway: number }
   /** Kept screenshots embedded from the well's copy because the original is gone. */
   keepFromWellCopy: number
+  /** Related screenshots grouped before splitting (cosine ≥ 0.95, or same app + window within 5 min). */
+  grouping: { groups: number; largest: number; cosine: number; minutes: number }
+  /** The held-back sample is big enough (MIN_HELD_BACK) for the sorter to run unattended. */
+  enoughToMeasure: boolean
   /** The classifier tested on the held-back sample was trained on this many. */
   trainedOn: { keep: number; throwaway: number }
   l2: number
@@ -52,8 +57,10 @@ export type SorterStatus = {
   error: string | null
   modelReady: boolean
   report: SorterReport | null
-  /** A held-back accuracy report exists, so sorting may run without him watching. */
+  /** A held-back report with enough items of each label exists, so sorting may run without him watching. */
   canRunUnattended: boolean
+  /** The least held-back evidence needed (shown in Settings when there is not enough yet). */
+  minHeldBack: { total: number; perLabel: number }
   pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
 }
 
@@ -65,8 +72,11 @@ export type SorterDeps = {
   }
   broadcast: (s: SorterStatus) => void
   thresholds?: Thresholds
-  /** Runs classifier training; the app passes a worker thread so the main process never blocks. */
-  train?: (examples: Example[]) => Promise<Classifier>
+  /**
+   * Runs classifier training; the app passes a worker thread so the main process never blocks.
+   * When `signal` aborts, the run must stop (terminate the worker) and reject.
+   */
+  train?: (examples: Example[], signal: AbortSignal) => Promise<Classifier>
 }
 
 type Run = Pick<SorterStatus, 'phase' | 'done' | 'total' | 'message' | 'error'>
@@ -93,7 +103,7 @@ export class SorterService {
 
   status(): SorterStatus {
     const { report, pending } = this.withStore((s) => ({ report: s.latestModel<SorterReport>()?.report ?? null, pending: s.pendingCounts() }))
-    return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: Boolean(report), pending }
+    return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: enoughToMeasure(report?.heldBack), minHeldBack: MIN_HELD_BACK, pending }
   }
 
   private set(patch: Partial<Run>, force = false): void {
@@ -119,7 +129,7 @@ export class SorterService {
   }
 
   /** Train on his history and report accuracy on a held-back 20%. Returns the report. */
-  async trainAndTest(): Promise<{ ok: boolean; report?: SorterReport; error?: string }> {
+  async trainAndTest(): Promise<{ ok: boolean; cancelled?: boolean; report?: SorterReport; error?: string }> {
     if (this.busy()) return { ok: false, error: 'the sorter is already running' }
     if (!this.deps.pictures.modelReady()) return { ok: false, error: 'download the picture search model first (Settings › Picture search)' }
     const ctl = new AbortController()
@@ -130,15 +140,23 @@ export class SorterService {
       if (ctl.signal.aborted) throw new Error('cancelled')
       this.set({ phase: 'training', message: 'learning from your past choices' }, true)
       const usable = shots.filter((s) => s.image && vectors.has(s.image.id))
+      // related screenshots stay together: on one side of the split and in one fold
+      const grouping = groupRelated(usable.map((s) => ({ id: s.key, vector: vectors.get(s.image!.id)!, app: s.facts.app, windowTitle: s.facts.windowTitle, takenAt: s.takenAt })))
+      const groupOf = (s: Shot): string => grouping.groupOf.get(s.key) ?? s.key
       const { train: trainSet, test } = holdOutSplit(
         usable,
         (s) => s.key,
         (s) => s.truth ?? '',
-        HOLD_OUT_FRACTION
+        HOLD_OUT_FRACTION,
+        groupOf
       )
-      const toExamples = (xs: Shot[]): Array<{ vector: Float32Array; keep: boolean }> => xs.map((s) => ({ vector: vectors.get(s.image!.id)!, keep: s.truth === 'keep' }))
-      const fitModel = this.deps.train ?? (async (xs: Example[]) => train(xs))
+      const toExamples = (xs: Shot[]): Example[] => xs.map((s) => ({ vector: vectors.get(s.image!.id)!, keep: s.truth === 'keep', group: groupOf(s) }))
+      const fitModel = (xs: Example[]): Promise<Classifier> => {
+        if (ctl.signal.aborted) throw new Error('cancelled')
+        return this.deps.train ? this.deps.train(xs, ctl.signal) : Promise.resolve(train(xs))
+      }
       const held: Classifier = await fitModel(toExamples(trainSet))
+      if (ctl.signal.aborted) throw new Error('cancelled')
       const t = this.thresholds()
       const both: LabelledPrediction[] = []
       const rulesAlone: LabelledPrediction[] = []
@@ -150,8 +168,10 @@ export class SorterService {
         both.push({ truth: s.truth!, proposal: decide(rule, p, t).proposal })
         rulesAlone.push({ truth: s.truth!, proposal: decide(rule, null, t).proposal })
       }
-      // the model the sorter uses learns from all of his choices (the report measures the procedure)
+      // the report measures the procedure on the held-back fifth; the model in use is then retrained on
+      // all of his choices, its calibration again from out-of-fold (group k-fold) scores, never in-sample
       const final = await fitModel(toExamples(usable))
+      if (ctl.signal.aborted) throw new Error('cancelled')
       const trainedAt = new Date().toISOString()
       const count = (xs: Shot[]): { keep: number; throwaway: number } => ({ keep: xs.filter((s) => s.truth === 'keep').length, throwaway: xs.filter((s) => s.truth === 'throwaway').length })
       const report: SorterReport = {
@@ -162,6 +182,8 @@ export class SorterService {
         labelled: count(shots),
         usable: count(usable),
         keepFromWellCopy: usable.filter((s) => s.fromWellCopy).length,
+        grouping: { groups: grouping.groups, largest: grouping.largest, cosine: 0.95, minutes: 5 },
+        enoughToMeasure: false,
         trainedOn: held.trainedOn,
         l2: held.l2,
         calibration: held.calibrationCheck ?? null,
@@ -169,13 +191,15 @@ export class SorterService {
         heldBack: accuracyReport(both),
         rulesOnly: accuracyReport(rulesAlone)
       }
+      report.enoughToMeasure = enoughToMeasure(report.heldBack)
+      if (ctl.signal.aborted) throw new Error('cancelled') // last check before anything is saved
       this.withStore((s) => s.saveModel({ id: `model-${trainedAt}`, trainedAt, sorterVersion: SORTER_VERSION, model: final, report }))
       this.set({ phase: 'idle', done: 0, total: 0, message: '', error: null }, true)
       return { ok: true, report }
     } catch (e) {
       const msg = (e as Error)?.message ?? String(e)
       this.set({ phase: ctl.signal.aborted ? 'idle' : 'error', message: '', error: ctl.signal.aborted ? null : msg }, true)
-      return { ok: false, error: msg }
+      return ctl.signal.aborted ? { ok: false, cancelled: true, error: 'cancelled' } : { ok: false, error: msg }
     } finally {
       this.abort = null
     }
@@ -186,6 +210,7 @@ export class SorterService {
     if (this.busy()) return { ok: false, error: 'the sorter is already running' }
     const rec = this.withStore((s) => s.latestModel<SorterReport>())
     if (!rec) return { ok: false, error: 'train the sorter on your past choices first; it needs an accuracy report before it sorts' }
+    if (!enoughToMeasure(rec.report.heldBack)) return { ok: false, error: 'not enough of your past choices to measure accuracy yet' }
     if (!this.deps.pictures.modelReady()) return { ok: false, error: 'download the picture search model first (Settings › Picture search)' }
     const ctl = new AbortController()
     this.abort = ctl

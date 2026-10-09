@@ -139,12 +139,31 @@ try {
   if (rep) {
     const a = rep.heldBack
     const sum = a.keep.proposed + a.throwaway.proposed + a.doubtful.count
-    check('held-back sample is 20% of each label (rounded up)', a.truth.keep === Math.ceil(rep.usable.keep * 0.2) && a.truth.throwaway === Math.ceil(rep.usable.throwaway * 0.2), JSON.stringify({ truth: a.truth, usable: rep.usable }))
+    const target = (n) => Math.ceil(n * 0.2)
+    check(
+      'held-back sample: whole groups, at most 20% of each label, and at least 80% of that',
+      a.truth.keep <= target(rep.usable.keep) && a.truth.throwaway <= target(rep.usable.throwaway) && a.truth.keep >= 0.8 * target(rep.usable.keep) && a.truth.throwaway >= 0.8 * target(rep.usable.throwaway),
+      JSON.stringify({ truth: a.truth, usable: rep.usable, grouping: rep.grouping })
+    )
+    check('enough held-back evidence to sort unattended', rep.enoughToMeasure === true)
     check('every held-back screenshot got a proposal', sum === a.sample)
     check('calibration chosen inside the training split and reported', Boolean(rep.calibration?.chosen) && rep.heldBackClassifier?.auc !== undefined, JSON.stringify(rep.calibration?.brier))
     const tp = a.throwaway.precision
     console.log(tp === null ? 'NOTE throwaway precision at the threshold: nothing proposed' : tp < 0.95 ? `NOTE throwaway precision ${tp.toFixed(3)} is BELOW 0.95` : `NOTE throwaway precision ${tp.toFixed(3)} meets 0.95`)
   }
+
+  // Stop during training: the worker is terminated, the run returns cancelled, nothing is saved
+  const modelsBefore = readDb('SELECT COUNT(*) AS n FROM sorter_models')[0].n
+  await win.evaluate(() => {
+    window.__stopRun = window.sw.sorter.train().then((r) => (window.__stopped = r))
+  })
+  for (let i = 0; i < 600; i++) {
+    if ((await win.evaluate(() => window.sw.sorter.status().then((s) => s.phase))) === 'training') break
+    await sleep(20)
+  }
+  await win.evaluate(() => window.sw.sorter.cancel())
+  const stopped = await win.evaluate(() => window.__stopRun.then(() => window.__stopped))
+  check('Stop during training returns cancelled and saves nothing', stopped.cancelled === true && readDb('SELECT COUNT(*) AS n FROM sorter_models')[0].n === modelsBefore, JSON.stringify(stopped))
 
   const t1 = Date.now()
   const sorted = await win.evaluate((lim) => window.sw.sorter.sort(lim === null ? {} : { limit: lim }), limit ?? null)

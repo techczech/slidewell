@@ -41,6 +41,18 @@ describe('calibration methods', () => {
     }
   })
 
+  it('ties are pooled before pool-adjacent-violators: the prediction at a knot does not depend on order', () => {
+    const throwaways: Scored[] = Array.from({ length: 9 }, () => ({ z: 0, keep: false }))
+    const keeps: Scored[] = Array.from({ length: 9 }, () => ({ z: 0, keep: true }))
+    expect(applyCalibration(fitIsotonic([...throwaways, ...keeps]), 0)).toBe(0.5)
+    expect(applyCalibration(fitIsotonic([...keeps, ...throwaways]), 0)).toBe(0.5)
+    // shuffled ties among other scores: same fit whatever the order
+    const mixed: Scored[] = [...throwaways, ...keeps, { z: -2, keep: false }, { z: 2, keep: true }, { z: 1, keep: false }, { z: 1, keep: true }]
+    const a = fitIsotonic(mixed)
+    const b = fitIsotonic([...mixed].reverse())
+    expect(b).toEqual(a)
+  })
+
   it('chooseCalibration beats the raw score on Brier and reports both methods', () => {
     const { calibration, check } = chooseCalibration(xs)
     expect(check.brier.platt).toBeLessThan(check.brier.raw)

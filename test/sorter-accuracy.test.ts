@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { accuracyReport, holdOutSplit, type LabelledPrediction } from '../src/main/sorter/accuracy'
+import { accuracyReport, enoughToMeasure, holdOutSplit, type LabelledPrediction } from '../src/main/sorter/accuracy'
 
 const rows = (truth: 'keep' | 'throwaway', proposal: LabelledPrediction['proposal'], n: number): LabelledPrediction[] => Array.from({ length: n }, () => ({ truth, proposal }))
 
@@ -47,5 +47,41 @@ describe('hold-out split', () => {
     const a = split(items).test.map((x) => x.id).sort()
     const b = split([...items].reverse()).test.map((x) => x.id).sort()
     expect(b).toEqual(a)
+  })
+})
+
+describe('hold-out split with groups', () => {
+  it('a group of related screenshots is never split between training and the held-back sample', () => {
+    const items = [
+      ...Array.from({ length: 40 }, (_, i) => ({ id: `k${i}`, label: 'keep', group: i < 8 ? 'burst' : `k${i}` })),
+      ...Array.from({ length: 20 }, (_, i) => ({ id: `t${i}`, label: 'throwaway', group: i < 4 ? 'tburst' : `t${i}` }))
+    ]
+    const { train, test } = holdOutSplit(
+      items,
+      (x) => x.id,
+      (x) => x.label,
+      0.2,
+      (x) => x.group
+    )
+    for (const g of ['burst', 'tburst']) {
+      const inTest = test.filter((x) => x.group === g).length
+      expect(inTest === 0 || train.every((x) => x.group !== g)).toBe(true)
+    }
+    expect(test.filter((x) => x.label === 'keep').length).toBeLessThanOrEqual(8)
+    expect(test.filter((x) => x.label === 'throwaway').length).toBeLessThanOrEqual(4)
+    expect(test.length).toBeGreaterThan(0)
+    expect(train.length + test.length).toBe(items.length)
+  })
+})
+
+describe('enough held-back evidence to run unattended', () => {
+  const rep = (keep: number, bin: number) => accuracyReport([...rows('keep', 'keep', keep), ...rows('throwaway', 'doubtful', bin)])
+  it('needs at least 20 held back with 5 of each label', () => {
+    expect(enoughToMeasure(rep(15, 5))).toBe(true)
+    expect(enoughToMeasure(rep(14, 5))).toBe(false) // 19 in all
+    expect(enoughToMeasure(rep(30, 4))).toBe(false) // too few binned
+    expect(enoughToMeasure(rep(4, 30))).toBe(false) // too few kept
+    expect(enoughToMeasure(accuracyReport([]))).toBe(false) // an empty report
+    expect(enoughToMeasure(null)).toBe(false)
   })
 })

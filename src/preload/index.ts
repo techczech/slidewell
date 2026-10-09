@@ -175,6 +175,8 @@ export type SorterReport = {
   labelled: { keep: number; throwaway: number }
   usable: { keep: number; throwaway: number }
   keepFromWellCopy: number
+  grouping: { groups: number; largest: number; cosine: number; minutes: number }
+  enoughToMeasure: boolean
   trainedOn: { keep: number; throwaway: number }
   l2: number
   calibration: {
@@ -195,6 +197,7 @@ export type SorterStatus = {
   modelReady: boolean
   report: SorterReport | null
   canRunUnattended: boolean
+  minHeldBack: { total: number; perLabel: number }
   pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
 }
 
@@ -220,7 +223,7 @@ const api = {
   // Screenshot sorter: train + accuracy report on his past choices; propose keep/throwaway/doubtful for undecided screenshots.
   sorter: {
     status: (): Promise<SorterStatus> => ipcRenderer.invoke('sorter:status'),
-    train: (): Promise<{ ok: boolean; report?: SorterReport; error?: string }> => ipcRenderer.invoke('sorter:train'),
+    train: (): Promise<{ ok: boolean; cancelled?: boolean; report?: SorterReport; error?: string }> => ipcRenderer.invoke('sorter:train'),
     sort: (opts?: { limit?: number }): Promise<{ ok: boolean; sorted?: number; counts?: { keep: number; throwaway: number; doubtful: number }; error?: string }> =>
       ipcRenderer.invoke('sorter:sort', opts),
     cancel: (): Promise<void> => ipcRenderer.invoke('sorter:cancel'),

@@ -46,7 +46,7 @@ export function SorterSettings(): JSX.Element {
   const trainNow = useCallback(async () => {
     setResult(null)
     const r = await window.sw.sorter.train()
-    if (!r.ok && r.error) setResult(r.error) // on success the pushed status carries the new report
+    if (!r.ok && r.error && !r.cancelled) setResult(r.error) // on success the pushed status carries the new report
   }, [])
   const sortNow = useCallback(async () => {
     setResult(null)
@@ -68,7 +68,7 @@ export function SorterSettings(): JSX.Element {
       {a && rep ? (
         <div className="sorter-report">
           <div className="sorter-report-head">
-            Tested on {n(a.sample)} of your past choices it had not seen ({n(a.truth.keep)} kept, {n(a.truth.throwaway)} binned) · {day(rep.trainedAt)}
+            Accuracy measured on a held-back fifth of your past choices ({n(a.sample)}: {n(a.truth.keep)} kept, {n(a.truth.throwaway)} binned); the model in use was then retrained on all your choices · {day(rep.trainedAt)}
           </div>
           <table className="sorter-table">
             <thead>
@@ -91,6 +91,12 @@ export function SorterSettings(): JSX.Element {
         </div>
       ) : (
         <div className="pic-note">Not trained yet. Training reads your past choices, holds back a fifth of them, and tests itself on those before it sorts anything.</div>
+      )}
+
+      {rep && !st.canRunUnattended && (
+        <div className="pic-note sorter-not-enough">
+          Not enough of your past choices to measure accuracy yet: it needs at least {st.minHeldBack.total} held back, with {st.minHeldBack.perLabel} kept and {st.minHeldBack.perLabel} binned. Sorting stays off until then.
+        </div>
       )}
 
       <div className="pic-actions">

@@ -319,16 +319,24 @@ app.whenReady().then(() => {
     wellRoot: wellRootResolved,
     pictures: { modelReady: () => pics.modelReady(), ensureVectors: (items, opts) => pics.ensureVectors(items, opts) },
     // training runs in a worker thread (sorter/train-worker.ts); the main process stays responsive
-    train: (examples: Example[]) =>
+    train: (examples: Example[], signal: AbortSignal) =>
       new Promise<Classifier>((resolve, reject) => {
+        if (signal.aborted) return reject(new Error('cancelled'))
         const w = createTrainWorker({ workerData: { examples } })
-        w.once('message', (m: { model?: Classifier; error?: string }) => {
-          if (m.model) resolve(m.model)
-          else reject(new Error(m.error ?? 'training failed'))
+        let settled = false
+        const finish = (fn: () => void): void => {
+          if (settled) return
+          settled = true
+          signal.removeEventListener('abort', onAbort)
+          fn()
           void w.terminate()
-        })
-        w.once('error', reject)
-        w.once('exit', (code) => code !== 0 && reject(new Error(`training worker stopped (${code})`)))
+        }
+        // Stop terminates the worker at once; nothing it computed is used
+        const onAbort = (): void => finish(() => reject(new Error('cancelled')))
+        signal.addEventListener('abort', onAbort)
+        w.once('message', (m: { model?: Classifier; error?: string }) => finish(() => (m.model ? resolve(m.model) : reject(new Error(m.error ?? 'training failed')))))
+        w.once('error', (e) => finish(() => reject(e)))
+        w.once('exit', (code) => finish(() => reject(new Error(`training worker stopped (${code})`))))
       }),
     broadcast: (st) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('sorter:status', st)

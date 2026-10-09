@@ -13,7 +13,10 @@
 
 import { applyCalibration, chooseCalibration, type Calibration, type CalibrationCheck, type Scored } from './calibration'
 
-export type Example = { vector: Float32Array; keep: boolean }
+import { groupKFold } from './groups'
+
+/** `group`: related screenshots share one (groups.ts); a group never straddles two folds. */
+export type Example = { vector: Float32Array; keep: boolean; group?: string }
 
 export type Classifier = {
   kind: 'logistic-v1'
@@ -125,16 +128,9 @@ function weightedLogLoss(model: Classifier, examples: Example[]): number {
   return s / 2
 }
 
-/** Interleaved, label-stratified folds (deterministic). */
+/** Label-stratified group folds (deterministic). */
 function folds(examples: Example[], k: number): Example[][] {
-  const out: Example[][] = Array.from({ length: k }, () => [])
-  let ik = 0
-  let it = 0
-  for (const e of examples) {
-    if (e.keep) out[ik++ % k].push(e)
-    else out[it++ % k].push(e)
-  }
-  return out
+  return groupKFold(examples, k)
 }
 
 /**
@@ -176,7 +172,7 @@ export function train(examples: Example[], opts: TrainOptions = {}): Classifier 
   const ms = bestFolds ?? foldModels(chosenL2)
   const oof: Scored[] = []
   ms.forEach((m, f) => {
-    if (m) for (const e of parts[f]) oof.push({ z: rawScore(m, e.vector), keep: e.keep })
+    if (m) for (const e of parts[f]) oof.push({ z: rawScore(m, e.vector), keep: e.keep, group: e.group })
   })
   const { calibration, check } = chooseCalibration(oof, k)
   return { ...model, calibration, calibrationCheck: check }

@@ -10,7 +10,9 @@
  */
 
 /** One out-of-fold score: raw log-odds of keep, and whether he kept it. */
-export type Scored = { z: number; keep: boolean }
+import { groupKFold } from './groups'
+
+export type Scored = { z: number; keep: boolean; group?: string }
 
 export type Calibration = { method: 'platt'; a: number; b: number } | { method: 'isotonic'; zs: number[]; ps: number[] }
 
@@ -80,13 +82,23 @@ export function fitPlatt(xs: Scored[]): Calibration {
   return { method: 'platt', a, b }
 }
 
-/** Isotonic regression (pool adjacent violators) of keep on z. */
+/**
+ * Isotonic regression (pool adjacent violators) of keep on z. Identical scores are first pooled into
+ * one weighted block, so the fit (and the prediction at a knot) does not depend on input order.
+ */
 export function fitIsotonic(xs: Scored[]): Calibration {
-  const sorted = [...xs].sort((p, q) => p.z - q.z)
   type Block = { sumZ: number; kept: number; n: number }
+  const ties = new Map<number, Block>()
+  for (const x of xs) {
+    const b = ties.get(x.z) ?? { sumZ: 0, kept: 0, n: 0 }
+    b.sumZ += x.z
+    b.kept += x.keep ? 1 : 0
+    b.n += 1
+    ties.set(x.z, b)
+  }
   const blocks: Block[] = []
-  for (const x of sorted) {
-    blocks.push({ sumZ: x.z, kept: x.keep ? 1 : 0, n: 1 })
+  for (const [, t] of [...ties].sort((p, q) => p[0] - q[0])) {
+    blocks.push({ ...t })
     while (blocks.length > 1) {
       const b = blocks[blocks.length - 1]
       const a = blocks[blocks.length - 2]
@@ -156,14 +168,9 @@ export function auc(xs: Array<{ p: number; keep: boolean }>): number | null {
   return s / (pos.length * neg.length)
 }
 
-/** Interleaved, label-stratified folds over out-of-fold scores (deterministic). */
+/** Label-stratified group folds over out-of-fold scores, spread across the score range (deterministic). */
 function foldsOf(xs: Scored[], k: number): Scored[][] {
-  const out: Scored[][] = Array.from({ length: k }, () => [])
-  const ordered = [...xs].sort((p, q) => p.z - q.z)
-  let ik = 0
-  let it = 0
-  for (const x of ordered) out[(x.keep ? ik++ : it++) % k].push(x)
-  return out
+  return groupKFold([...xs].sort((p, q) => p.z - q.z), k)
 }
 
 /**

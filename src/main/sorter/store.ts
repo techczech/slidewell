@@ -33,6 +33,8 @@ export type Shot = {
   hash: string | null
   truth?: Truth
   facts: ShotFacts
+  /** Local time from the file name ('YYYY-MM-DDTHH:MM:SS'), '' when unknown (for grouping bursts). */
+  takenAt: string
   image: IndexItem | null
   /** A kept screenshot whose original is gone; the well's own (re-encoded) copy is embedded instead. */
   fromWellCopy: boolean
@@ -44,7 +46,7 @@ export type ModelRecord<R> = { id: string; trainedAt: string; sorterVersion: str
 
 export type PendingCounts = { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
 
-type TriageJoinRow = { hash: string; source: string | null; rel_path: string | null; filename: string | null; app: string | null; window_title: string | null; ocr_text: string | null; state?: string; well_id?: string | null }
+type TriageJoinRow = { hash: string; taken_at?: string | null; source: string | null; rel_path: string | null; filename: string | null; app: string | null; window_title: string | null; ocr_text: string | null; state?: string; well_id?: string | null }
 
 /** A local file we may read: present, non-empty, and not an online-only placeholder (never fetch). */
 function localFile(p: string): { size: number; mtimeMs: number } | null {
@@ -94,7 +96,7 @@ function byHash(rows: TriageJoinRow[]): Map<string, { row: TriageJoinRow; image:
   return out
 }
 
-const TRIAGE_COLS = 'f.source, f.rel_path, f.filename, f.app, f.window_title, f.ocr_text'
+const TRIAGE_COLS = 'f.taken_at, f.source, f.rel_path, f.filename, f.app, f.window_title, f.ocr_text'
 
 /**
  * His labelled history. keep = every screenshot in the well (source 'screenshot') plus triage
@@ -141,12 +143,12 @@ export function loadLabelled(wellRoot: string): Shot[] {
           fromWellCopy = true
         }
       }
-      out.push({ key: hash ? `h:${hash}` : `w:${w.id}`, hash, truth: 'keep', facts: factsOf(g?.row, w.ocr_text ?? ''), image, fromWellCopy })
+      out.push({ key: hash ? `h:${hash}` : `w:${w.id}`, hash, truth: 'keep', facts: factsOf(g?.row, w.ocr_text ?? ''), takenAt: g?.row.taken_at ?? '', image, fromWellCopy })
     }
     for (const [hash, g] of groups) {
       if (usedHashes.has(hash)) continue
-      if (g.row.state === 'included') out.push({ key: `h:${hash}`, hash, truth: 'keep', facts: factsOf(g.row), image: g.image, fromWellCopy: false })
-      else if (g.row.state === 'excluded') out.push({ key: `h:${hash}`, hash, truth: 'throwaway', facts: factsOf(g.row), image: g.image, fromWellCopy: false })
+      if (g.row.state === 'included') out.push({ key: `h:${hash}`, hash, truth: 'keep', facts: factsOf(g.row), takenAt: g.row.taken_at ?? '', image: g.image, fromWellCopy: false })
+      else if (g.row.state === 'excluded') out.push({ key: `h:${hash}`, hash, truth: 'throwaway', facts: factsOf(g.row), takenAt: g.row.taken_at ?? '', image: g.image, fromWellCopy: false })
     }
     return out
   } finally {
@@ -169,7 +171,7 @@ export function loadUndecided(wellRoot: string): Shot[] {
          WHERE f.kind = 'image' AND f.offline = '0' ${decisions ? 'AND d.hash IS NULL' : ''}`
       )
       .all() as TriageJoinRow[]
-    return [...byHash(rows)].map(([hash, g]) => ({ key: `h:${hash}`, hash, facts: factsOf(g.row), image: g.image, fromWellCopy: false }))
+    return [...byHash(rows)].map(([hash, g]) => ({ key: `h:${hash}`, hash, facts: factsOf(g.row), takenAt: g.row.taken_at ?? '', image: g.image, fromWellCopy: false }))
   } finally {
     tdb.close()
   }
