@@ -74,6 +74,45 @@ describe('model download (verify, resume, delete)', () => {
     expect(modelState(dir, files)).not.toBe('ready')
   })
 
+  it('promotes a .part that is already complete without asking for a Range past the end', async () => {
+    mkdirSync(join(dir, 'onnx'), { recursive: true })
+    writeFileSync(join(dir, 'onnx/model.onnx_data.part'), B)
+    const log: string[] = []
+    await downloadModel(dir, fakeFetch(log), { files, urlFor: (p) => p })
+    expect(log).toEqual(['tokenizer.json']) // no request at all for the complete file
+    expect(modelState(dir, files)).toBe('ready')
+  })
+
+  it('stops a stream that runs past the pinned size before the extra bytes reach the disk', async () => {
+    let written = 0
+    const endless: FetchLike = async () => ({
+      ok: true,
+      status: 200,
+      body: new ReadableStream<Uint8Array>({
+        pull(c) {
+          written += 64
+          c.enqueue(new Uint8Array(64))
+        }
+      })
+    })
+    await expect(downloadModel(dir, endless, { files, urlFor: (p) => p })).rejects.toThrow(/ran past/)
+    expect(written).toBeLessThan(A.length + 200) // it stopped pulling right after the limit
+    expect(existsSync(join(dir, 'tokenizer.json.part'))).toBe(false)
+    expect(existsSync(join(dir, 'tokenizer.json'))).toBe(false)
+  })
+
+  it('a cancel during verification never writes the ready marker', async () => {
+    mkdirSync(join(dir, 'onnx'), { recursive: true })
+    writeFileSync(join(dir, 'tokenizer.json'), A)
+    writeFileSync(join(dir, 'onnx/model.onnx_data'), B)
+    const ctl = new AbortController()
+    const run = downloadModel(dir, fakeFetch([]), { files, urlFor: (p) => p, signal: ctl.signal })
+    ctl.abort() // all files are complete, so this lands while they are being hashed
+    await expect(run).rejects.toThrow(/cancelled/)
+    expect(existsSync(join(dir, 'verified.json'))).toBe(false)
+    expect(modelState(dir, files)).not.toBe('ready')
+  })
+
   it('pins one Hugging Face revision for the fp16 text + vision files only', () => {
     expect(MODEL_FILES.some((f) => f.path.includes('audio'))).toBe(false)
     expect(MODEL_FILES.every((f) => /^[0-9a-f]{64}$/.test(f.sha256))).toBe(true)

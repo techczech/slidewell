@@ -49,7 +49,7 @@ export class PictureSearchService {
   private engine: PictureSearchEngine | null = null
   private embedder: ReturnType<PictureSearchDeps['makeEmbedder']> | null = null
   private indexer: Indexer
-  private archiveCache: IndexItem[] | null = null
+  private archiveCache: { root: string | null; items: IndexItem[] } | null = null
   private estimateCache: PictureSearchStatus['estimate'] = null
   private downloading: AbortController | null = null
   private download: PictureSearchStatus['download'] = null
@@ -63,7 +63,10 @@ export class PictureSearchService {
       failedCount: () => this.openStore().failedCount(),
       embed: (item) => this.openEngine().embedAndStore(item),
       isItemFailure: (e) => e instanceof UnreadableImageError,
-      recordFailure: (item, err) => this.openStore().putFailure(item, err),
+      recordFailure: (item, err) => {
+        this.openStore().putFailure(item, err)
+        this.engine?.forget(item.id)
+      },
       onProgress: () => this.push(true),
       onIdle: () => void this.embedder?.releaseVision?.().catch(() => undefined)
     })
@@ -104,9 +107,10 @@ export class PictureSearchService {
 
   private async enumerate(): Promise<IndexItem[]> {
     const root = this.deps.archiveRoot()
-    if (!this.archiveCache) this.archiveCache = root ? await archiveRenders(root) : []
+    // keyed by root: pointing Settings at another archive folder enumerates that one
+    if (!this.archiveCache || this.archiveCache.root !== root) this.archiveCache = { root, items: root ? await archiveRenders(root) : [] }
     const well = this.includeWell() ? await wellImages(this.deps.wellRoot(), this.deps.vaultRoot()) : []
-    return [...well, ...this.archiveCache]
+    return [...well, ...this.archiveCache.items]
   }
 
   status(): PictureSearchStatus {
@@ -170,6 +174,7 @@ export class PictureSearchService {
           this.push()
         }
       })
+      if (ctl.signal.aborted) throw new Error('download cancelled') // cancelled at the last moment: do not switch on
       this.downloading = null
       this.deps.saveSettings({ paused: false })
       this.push(true)
@@ -244,16 +249,22 @@ export class PictureSearchService {
 }
 
 /** IPC for Settings, the status bar and (ticket 04) the search surface. Types: src/preload/index.ts. */
-export function registerPictureSearchIpc(svc: PictureSearchService): void {
-  ipcMain.handle('picture:status', () => svc.status())
-  ipcMain.handle('picture:estimate', () => svc.estimate())
-  ipcMain.handle('picture:download', () => svc.downloadModel())
-  ipcMain.handle('picture:cancel-download', () => svc.cancelDownload())
-  ipcMain.handle('picture:delete-model', () => svc.deleteModel())
-  ipcMain.handle('picture:pause', () => svc.pause())
-  ipcMain.handle('picture:resume', () => svc.resume())
-  ipcMain.handle('picture:set-include-well', (_e, on: boolean) => svc.setIncludeWell(Boolean(on)))
-  ipcMain.handle('picture:query', async (_e, q: PictureQuery, opts?: QueryOptions) => {
+export function registerPictureSearchIpc(svc: PictureSearchService, allowed: (sender: Electron.WebContents) => boolean): void {
+  const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
+    ipcMain.handle(channel, (e, ...args) => {
+      if (!allowed(e.sender)) throw new Error(`${channel}: not allowed from this window`)
+      return fn(...args)
+    })
+  }
+  handle('picture:status', () => svc.status())
+  handle('picture:estimate', () => svc.estimate())
+  handle('picture:download', () => svc.downloadModel())
+  handle('picture:cancel-download', () => svc.cancelDownload())
+  handle('picture:delete-model', () => svc.deleteModel())
+  handle('picture:pause', () => svc.pause())
+  handle('picture:resume', () => svc.resume())
+  handle('picture:set-include-well', (on: boolean) => svc.setIncludeWell(Boolean(on)))
+  handle('picture:query', async (q: PictureQuery, opts?: QueryOptions) => {
     try {
       return { ok: true, results: await svc.pictureQuery(q, opts) }
     } catch (e) {

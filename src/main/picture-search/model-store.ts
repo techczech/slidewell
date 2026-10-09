@@ -56,19 +56,38 @@ export function bytesOnDisk(dir: string, files: readonly ModelFile[] = MODEL_FIL
   return n
 }
 
-function hashFile(p: string, h = createHash('sha256')): Promise<ReturnType<typeof createHash>> {
+function hashFile(p: string, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
+    const h = createHash('sha256')
     const s = createReadStream(p)
+    const onAbort = (): void => {
+      s.destroy()
+      reject(new Error('download cancelled'))
+    }
+    if (signal?.aborted) return onAbort()
+    signal?.addEventListener('abort', onAbort, { once: true })
     s.on('data', (d) => h.update(d))
-    s.on('end', () => resolve(h))
-    s.on('error', reject)
+    s.on('end', () => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve(h.digest('hex'))
+    })
+    s.on('error', (e) => {
+      signal?.removeEventListener('abort', onAbort)
+      reject(e)
+    })
   })
+}
+
+const cancelled = (signal?: AbortSignal): void => {
+  if (signal?.aborted) throw new Error('download cancelled')
 }
 
 /**
  * Download every missing file, verify each against its pinned sha256 + size, then write the marker.
  * Resumes `.part` files. A file whose bytes do not match is deleted and the download fails, so a bad
- * or tampered file never becomes `ready`. Throws on abort, HTTP error or mismatch.
+ * or tampered file never becomes `ready`. Throws on abort, HTTP error or mismatch. The abort signal is
+ * honoured through verification too, and a stream that runs past a file's pinned size is cut off
+ * before the extra bytes reach the disk.
  */
 export async function downloadModel(
   dir: string,
@@ -85,6 +104,7 @@ export async function downloadModel(
   report('')
 
   for (const f of files) {
+    cancelled(opts.signal)
     const dest = join(dir, f.path)
     if (sizeOf(dest) === f.size) continue // complete from an earlier run; verified below
     mkdirSync(dirname(dest), { recursive: true })
@@ -94,6 +114,12 @@ export async function downloadModel(
       rmSync(part, { force: true })
       received -= have
       have = 0
+    }
+    if (have === f.size) {
+      // fully downloaded before an interruption: promote it locally (a Range request would get 416);
+      // the hash check below still decides whether it is kept
+      renameSync(part, dest)
+      continue
     }
     const headers: Record<string, string> = have > 0 ? { Range: `bytes=${have}-` } : {}
     const res = await fetchImpl(urlFor(f.path), { headers, signal: opts.signal })
@@ -105,19 +131,31 @@ export async function downloadModel(
       have = 0
     }
     const fd = openSync(part, have > 0 ? 'a' : 'w')
+    let onDisk = have
+    const reader = res.body.getReader()
     try {
-      const reader = res.body.getReader()
       for (;;) {
-        if (opts.signal?.aborted) throw new Error('download cancelled')
+        cancelled(opts.signal)
         const { done, value } = await reader.read()
         if (done) break
         if (!value || value.byteLength === 0) continue
+        if (onDisk + value.byteLength > f.size) {
+          closeSync(fd)
+          rmSync(part, { force: true })
+          void reader.cancel().catch(() => undefined)
+          throw new Error(`download of ${f.path} ran past its expected ${f.size} bytes; stopped`)
+        }
         writeSync(fd, value)
+        onDisk += value.byteLength
         received += value.byteLength
         report(f.path)
       }
     } finally {
-      closeSync(fd)
+      try {
+        closeSync(fd)
+      } catch {
+        /* already closed after an oversize stream */
+      }
     }
     if (sizeOf(part) !== f.size) {
       const got = sizeOf(part)
@@ -130,12 +168,13 @@ export async function downloadModel(
   // Verify every file against its pinned hash (complete files from an earlier run included).
   for (const f of files) {
     const p = join(dir, f.path)
-    const digest = (await hashFile(p)).digest('hex')
+    const digest = await hashFile(p, opts.signal)
     if (digest !== f.sha256 || sizeOf(p) !== f.size) {
       rmSync(p, { force: true })
       throw new Error(`${f.path} failed verification (sha256 ${digest.slice(0, 12)}…, expected ${f.sha256.slice(0, 12)}…); it was deleted`)
     }
   }
+  cancelled(opts.signal) // cancelled during verification: never mark the model ready
   writeFileSync(join(dir, MARKER), JSON.stringify({ revision: opts.revision ?? MODEL_REVISION, files: files.map((f) => ({ path: f.path, sha256: f.sha256 })), verifiedAt: new Date().toISOString() }, null, 2))
 }
 

@@ -61,7 +61,13 @@ async function launch() {
       cb({})
     })
   })
-  const win = await app.firstWindow({ timeout: 30000 })
+  // the main window, not the hidden picture-search window (swembed://), which may open first
+  let win = null
+  for (let i = 0; i < 300 && !win; i++) {
+    win = app.windows().find((w) => !w.url().startsWith('swembed:') && w.url() !== 'about:blank') ?? null
+    if (!win) await sleep(100)
+  }
+  if (!win) throw new Error('main window did not open')
   await win.waitForLoadState('domcontentloaded')
   return { app, win }
 }
@@ -145,7 +151,8 @@ try {
   await waitFor(win, (s) => s.index.phase === 'indexing' && s.index.done >= 5, 120000, 'indexing under way')
   await win.locator('button.copyref', { hasText: 'close' }).click()
   out('status bar while indexing', await statusBar(win))
-  out('word search ms during indexing (median of 5)', await wordSearchMs(win))
+  results.busyMs = await wordSearchMs(win)
+  out('word search ms during indexing (median of 5)', results.busyMs)
   await win.screenshot({ path: join(screens, 'S3-status-indexing.png') })
   await win.locator('.statusbar .pic-btn', { hasText: 'Pause' }).click()
   const paused = await waitFor(win, (s) => s.index.phase === 'paused', 15000, 'paused')
@@ -190,7 +197,10 @@ try {
   out('final', `${done.index.done} / ${done.index.total}, failed ${done.index.failed}, vectors ${rows.length}`)
   check('all sample images indexed', done.index.done === done.index.total && rows.length + done.index.failed === done.index.total)
   check('nothing embedded twice across restarts', reembedded === 0, `${reembedded} re-embedded`)
-  out('word search ms idle (median of 5)', await wordSearchMs(win))
+  const idleMs = await wordSearchMs(win)
+  out('word search ms idle (median of 5)', idleMs)
+  // word search must stay responsive while indexing: under 250 ms and within 10× the idle time
+  check('word search responsive during indexing', results.busyMs <= 250 && results.busyMs <= 10 * Math.max(1, idleMs), `${results.busyMs} ms busy vs ${idleMs} ms idle`)
 
   // a new well image arrives (dropped into the well inbox) → embedded without a restart
   const someRender = (() => {

@@ -67,6 +67,22 @@ describe('picture-search engine (embed text, embed image, nearest neighbours)', 
     expect(Array.from(v)).toEqual(Array.from(vec('beach')))
   })
 
+  it('an image that changes into something unreadable loses its old vector (store and memory)', async () => {
+    const engine = new PictureSearchEngine(store, () => fake)
+    await seed(engine)
+    expect((await engine.pictureQuery({ text: 'beach' }, { limit: 1 }))[0].id).toBe('slide:Seals#4')
+    const changed = { ...item(slideId('Seals', 4), '/Volumes/Data/beach.webp'), size: 99, mtimeMs: 2 }
+    store.putFailure(changed, 'cannot read image')
+    engine.forget(changed.id)
+    expect(store.get(changed.id)).toBeNull()
+    expect(store.fingerprints().get(changed.id)).toEqual({ size: 99, mtimeMs: 2 })
+    expect((await engine.pictureQuery({ text: 'beach' })).some((r) => r.id === changed.id)).toBe(false)
+    // once readable again (changed again), it is embedded and the failure cleared
+    await engine.embedAndStore({ ...changed, size: 100, mtimeMs: 3 })
+    expect(store.failedCount()).toBe(0)
+    expect(store.get(changed.id)).not.toBeNull()
+  })
+
   it('rank keeps the true top-k under partial selection', () => {
     const q = normalise(Float32Array.from([1, 0]))
     const items = Array.from({ length: 50 }, (_, i) => ({ id: `i${i}`, kind: 'slide' as const, vector: normalise(Float32Array.from([i, 50 - i])) }))

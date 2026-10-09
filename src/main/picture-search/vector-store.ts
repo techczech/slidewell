@@ -130,6 +130,8 @@ export class VectorStore {
            error = excluded.error, failed_at = excluded.failed_at`
       )
       .run(item.id, item.path, item.size, Math.round(item.mtimeMs), error.slice(0, 500), new Date().toISOString())
+    // the file changed into something unreadable: its old vector must not keep ranking
+    this.db.prepare('DELETE FROM vectors WHERE id = ?').run(item.id)
   }
 
   get(id: string): StoredVector | null {

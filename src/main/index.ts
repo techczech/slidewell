@@ -20,7 +20,9 @@ import { slugify } from './outline'
 import { testR2, type R2Settings, type R2Creds } from './r2'
 import { pickStore, keyForPath, fetchFromR2, syncDirToR2, type StoreName } from './storage'
 import { PictureSearchService, registerPictureSearchIpc, type PictureSearchSettings } from './picture-search/service'
-import { WebGpuEmbedder, registerEmbedProtocol, EMBED_SCHEME } from './picture-search/webgpu-embedder'
+import { WebGpuEmbedder } from './picture-search/webgpu-embedder'
+import { electronEmbedHost, registerEmbedProtocol, EMBED_SCHEME } from './picture-search/electron-embed-host'
+import { modelDir as pictureModelDir } from './picture-search/model-store'
 import type { FetchLike } from './picture-search/model-store'
 
 const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
@@ -280,22 +282,24 @@ app.whenReady().then(() => {
   // --- picture search: model download, background indexing, query (picture-search/service.ts) ---
   // The model lives under the app's data folder; vectors go to picture-search.db beside well.db.
   // No network call happens until the user presses Download in Settings.
-  registerEmbedProtocol()
+  const picModelsRoot = join(app.getPath('userData'), 'models')
+  registerEmbedProtocol(() => pictureModelDir(picModelsRoot))
   const picFetch: FetchLike = (url, init) => net.fetch(url, { headers: init.headers, signal: init.signal }) as ReturnType<FetchLike>
   pictureSearch = new PictureSearchService({
-    modelsRoot: join(app.getPath('userData'), 'models'),
+    modelsRoot: picModelsRoot,
     wellRoot: wellRootResolved,
     archiveRoot: () => (archiveAvailable() ? archiveRoot() : null),
     vaultRoot: detectVaultRoot,
     settings: () => readConfig().pictureSearch ?? {},
     saveSettings: (patch) => writeConfig({ pictureSearch: { ...(readConfig().pictureSearch ?? {}), ...patch } }),
     fetch: picFetch,
-    makeEmbedder: (dir) => new WebGpuEmbedder(dir, join(__dirname, '../preload/embedder.js')),
+    makeEmbedder: (dir) => new WebGpuEmbedder(dir, electronEmbedHost(join(__dirname, '../preload/embedder.js'))),
     broadcast: (st) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('picture:status', st)
     }
   })
-  registerPictureSearchIpc(pictureSearch)
+  // picture IPC answers the main window only (never the hidden picture-search window)
+  registerPictureSearchIpc(pictureSearch, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
   app.on('will-quit', () => pictureSearch?.dispose())
 
   // --- IPC: the typed contract lives in src/preload/index.ts ---
@@ -334,6 +338,7 @@ app.whenReady().then(() => {
       if (res.response !== 1) return readConfig().archiveRoot ?? null
     }
     writeConfig({ archiveRoot: picked })
+    pictureSearch?.pokeArchive() // index the newly chosen archive's renders
     return picked
   })
   ipcMain.handle('shell:open-path', (_e, p: string) => shell.openPath(p).then((err) => err === ''))
@@ -1083,7 +1088,8 @@ app.whenReady().then(() => {
   createWindow().webContents.once('did-finish-load', () => launchScanHook())
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    // not getAllWindows(): the hidden picture-search window would keep that non-empty
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow()
   })
 })
 
@@ -1095,7 +1101,7 @@ async function startWell(): Promise<void> {
     await ensureWell(root)
     await drainInbox(archiveRoot(), root)
     const vr = detectVaultRoot()
-    if (vr) void scanVault(archiveRoot(), root, vr)
+    if (vr) void scanVault(archiveRoot(), root, vr).then((n) => n > 0 && pictureSearch?.poke(), () => undefined)
     const inbox = join(root, '_inbox')
     let busy = false
     fsWatch(inbox, async () => {

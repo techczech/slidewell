@@ -97,6 +97,11 @@ export class PictureSearchEngine {
     if (this.cache) this.cache.set(item.id, { id: item.id, kind: item.kind, vector: v })
   }
 
+  /** Drop one id from the in-memory copy (its vector was removed from the store). */
+  forget(id: string): void {
+    this.cache?.delete(id)
+  }
+
   /** Forget the in-memory copy (after outside changes to the store). */
   invalidate(): void {
     this.cache = null
