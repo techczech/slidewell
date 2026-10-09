@@ -19,8 +19,18 @@ import { convertPptxToOutline } from './convert'
 import { slugify } from './outline'
 import { testR2, type R2Settings, type R2Creds } from './r2'
 import { pickStore, keyForPath, fetchFromR2, syncDirToR2, type StoreName } from './storage'
+import { PictureSearchService, registerPictureSearchIpc, type PictureSearchSettings } from './picture-search/service'
+import { WebGpuEmbedder } from './picture-search/webgpu-embedder'
+import { electronEmbedHost, registerEmbedProtocol, EMBED_SCHEME } from './picture-search/electron-embed-host'
+import { modelDir as pictureModelDir } from './picture-search/model-store'
+import type { FetchLike } from './picture-search/model-store'
 
 const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
+
+// Test-only: SLIDEWELL_E2E_HIDDEN=1 keeps automated runs in the background (no window shown, no
+// Dock icon, nothing takes focus). Honoured only when set to exactly '1'; unset changes nothing.
+const E2E_HIDDEN = process.env['SLIDEWELL_E2E_HIDDEN'] === '1'
+if (E2E_HIDDEN && process.platform === 'darwin') app.dock?.hide()
 
 // Custom schemes must be registered as privileged BEFORE app ready so the renderer treats them
 // as standard secure schemes (CSP img-src matching, no mixed-content blocking). SlideWell mirrors
@@ -29,7 +39,9 @@ const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUI
 protocol.registerSchemesAsPrivileged([
   { scheme: 'swasset', privileges: { standard: true, secure: true, supportFetchAPI: true } },
   { scheme: 'swthumb', privileges: { standard: true, secure: true, supportFetchAPI: true } },
-  { scheme: 'swarchive', privileges: { standard: true, secure: true, supportFetchAPI: true } }
+  { scheme: 'swarchive', privileges: { standard: true, secure: true, supportFetchAPI: true } },
+  // the hidden picture-search window's page + ONNX Runtime Web files (picture-search/webgpu-embedder.ts)
+  { scheme: EMBED_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }
 ])
 
 // An extra folder watched for screenshots. namedOnly = only files named like screenshots, top level only (the Desktop).
@@ -48,6 +60,7 @@ type Config = {
   r2?: { accountId?: string; endpoint?: string; bucket?: string; prefix?: string; accessKeyIdEnc?: string; secretEnc?: string } // R2 backend (creds safeStorage-encrypted)
   storage?: Partial<Record<'archive' | 'others' | 'well', { backend?: 'local' | 'r2' }>> // per-store backend (spec 2026-06-24)
   ownerNames?: string[] // "My decks": authors that count as the user (unset → the OS account's names; owners.ts)
+  pictureSearch?: PictureSearchSettings // picture search: well images on/off, indexing paused (survives restart)
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -174,6 +187,7 @@ function allowedRoots(): string[] {
 }
 
 let mainWindow: BrowserWindow | null = null
+let pictureSearch: PictureSearchService | null = null
 let launchScanHook: () => void = () => undefined
 let refreshWatchers: () => void = () => undefined
 
@@ -185,10 +199,13 @@ function createWindow(): BrowserWindow {
     minHeight: 600,
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#f7f3ea',
+    // hidden test runs: never shown, but still painted and not throttled, so screenshots render
+    ...(E2E_HIDDEN ? { show: false, paintWhenInitiallyHidden: true } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
-      sandbox: false
+      sandbox: false,
+      ...(E2E_HIDDEN ? { backgroundThrottling: false } : {})
     }
   })
 
@@ -270,6 +287,29 @@ app.whenReady().then(() => {
     return net.fetch(pathToFileURL(served).toString())
   })
 
+  // --- picture search: model download, background indexing, query (picture-search/service.ts) ---
+  // The model lives under the app's data folder; vectors go to picture-search.db beside well.db.
+  // No network call happens until the user presses Download in Settings.
+  const picModelsRoot = join(app.getPath('userData'), 'models')
+  registerEmbedProtocol(() => pictureModelDir(picModelsRoot))
+  const picFetch: FetchLike = (url, init) => net.fetch(url, { headers: init.headers, signal: init.signal }) as ReturnType<FetchLike>
+  pictureSearch = new PictureSearchService({
+    modelsRoot: picModelsRoot,
+    wellRoot: wellRootResolved,
+    archiveRoot: () => (archiveAvailable() ? archiveRoot() : null),
+    vaultRoot: detectVaultRoot,
+    settings: () => readConfig().pictureSearch ?? {},
+    saveSettings: (patch) => writeConfig({ pictureSearch: { ...(readConfig().pictureSearch ?? {}), ...patch } }),
+    fetch: picFetch,
+    makeEmbedder: (dir) => new WebGpuEmbedder(dir, electronEmbedHost(join(__dirname, '../preload/embedder.js'))),
+    broadcast: (st) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('picture:status', st)
+    }
+  })
+  // picture IPC answers the main window only (never the hidden picture-search window)
+  registerPictureSearchIpc(pictureSearch, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+  app.on('will-quit', () => pictureSearch?.dispose())
+
   // --- IPC: the typed contract lives in src/preload/index.ts ---
   ipcMain.handle('archive:available', () => archiveAvailable())
   ipcMain.handle('settings:get-paths', async () => ({
@@ -306,6 +346,7 @@ app.whenReady().then(() => {
       if (res.response !== 1) return readConfig().archiveRoot ?? null
     }
     writeConfig({ archiveRoot: picked })
+    pictureSearch?.pokeArchive() // index the newly chosen archive's renders
     return picked
   })
   ipcMain.handle('shell:open-path', (_e, p: string) => shell.openPath(p).then((err) => err === ''))
@@ -615,6 +656,8 @@ app.whenReady().then(() => {
       return await scanVault(archiveRoot(), wellRootResolved(), vr)
     } catch {
       return 0
+    } finally {
+      pictureSearch?.poke()
     }
   })
 
@@ -752,6 +795,8 @@ app.whenReady().then(() => {
       return await importSelectedTriage(archiveRoot(), wellRootResolved(), src, Array.isArray(forceHashes) ? forceHashes : [])
     } catch {
       return { imported: 0, skipped: 0, gated: 0 }
+    } finally {
+      pictureSearch?.poke()
     }
   })
   // Paste-to-include: read an image off the clipboard and ingest it straight into the well (the paste
@@ -763,6 +808,7 @@ app.whenReady().then(() => {
     try {
       writeFileSync(tmp, img.toPNG())
       const res = await ingestScreenshot(archiveRoot(), wellRootResolved(), tmp, 'screenshot')
+      if (res) pictureSearch?.poke()
       return res ? { id: res.id } : null
     } catch {
       return null
@@ -873,6 +919,7 @@ app.whenReady().then(() => {
     }
     const r = await runIngest({ engineRoot: archiveRoot(), dataRoot: archiveRoot(), python: python(), mode: 'pending' }, sendLine)
     invalidateDeckMeta(cacheDir())
+    pictureSearch?.pokeArchive()
     return r
   })
   // Pick the file/folder to import (returns the path so the panel can SHOW it before committing).
@@ -899,6 +946,7 @@ app.whenReady().then(() => {
     if (library === 'others') sendLine(`→ Importing into your Others' Library (kept separate from your archive): ${dataRoot}`)
     const r = await runIngest({ engineRoot: archiveRoot(), dataRoot, python: python(), mode: 'path', targetPath }, sendLine)
     invalidateDeckMeta(cacheDir()) // new decks added → drop the cached index so they show without restart
+    if (library !== 'others') pictureSearch?.pokeArchive()
     return r
   })
   ipcMain.handle('ingest:cancel', () => {
@@ -1044,11 +1092,12 @@ app.whenReady().then(() => {
     return { ok: true, deleted: idList.length }
   })
 
-  void startWell()
+  void startWell().finally(() => pictureSearch?.start())
   createWindow().webContents.once('did-finish-load', () => launchScanHook())
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    // not getAllWindows(): the hidden picture-search window would keep that non-empty
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow()
   })
 })
 
@@ -1060,7 +1109,7 @@ async function startWell(): Promise<void> {
     await ensureWell(root)
     await drainInbox(archiveRoot(), root)
     const vr = detectVaultRoot()
-    if (vr) void scanVault(archiveRoot(), root, vr)
+    if (vr) void scanVault(archiveRoot(), root, vr).then((n) => n > 0 && pictureSearch?.poke(), () => undefined)
     const inbox = join(root, '_inbox')
     let busy = false
     fsWatch(inbox, async () => {
@@ -1068,7 +1117,7 @@ async function startWell(): Promise<void> {
       busy = true
       setTimeout(async () => {
         try {
-          await drainInbox(archiveRoot(), root)
+          if ((await drainInbox(archiveRoot(), root)) > 0) pictureSearch?.poke()
         } finally {
           busy = false
         }

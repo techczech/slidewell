@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { nextPreviewIndex } from '../../main/triage-logic'
+import { PictureSearchSettings, PictureSearchStatusBar } from './PictureSearch'
 import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency, FromFilter, KindFilter, FromCounts } from '../../preload'
 
 type SortKey = 'date-desc' | 'date-asc' | 'title'
@@ -836,6 +837,7 @@ export default function App(): JSX.Element {
             <button className="link" onClick={chooseArchive}>choose folder</button>
           </span>
         )}
+        <PictureSearchStatusBar />
         <span className="path" title={archivePath}>{archivePath}</span>
       </footer>
 
@@ -1554,6 +1556,8 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
           <b>⚙ Settings</b>
           <button className="copyref" onClick={onClose}>close ✕</button>
         </div>
+
+        <PictureSearchSettings />
 
         <div className="settings-section">Folders</div>
         <div className="settings-rows">

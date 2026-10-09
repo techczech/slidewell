@@ -1422,3 +1422,92 @@ body {
 .chip.active .chip-count {
   color: #dbe7f5;
 }
+
+/* Picture search — Settings section (frame S2) and status-bar segment (frame S3) */
+.pic-settings {
+  margin: 0.4rem 0 1.2rem;
+  font-size: 0.95rem;
+}
+.pic-settings p {
+  margin: 0.5rem 0;
+}
+.pic-kicker {
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pic-title {
+  font-size: 1.25rem;
+  margin: 0.35rem 0 0.6rem;
+}
+.pic-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0.9rem 0;
+}
+.pic-primary {
+  background: var(--oxford);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 0.6rem 1.2rem;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+.pic-primary:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.pic-progress {
+  width: 220px;
+}
+.pic-progress-text,
+.pic-confirm {
+  font-size: 0.85rem;
+}
+.pic-ready {
+  color: #166534;
+  font-size: 0.9rem;
+}
+.pic-danger {
+  color: var(--accent);
+}
+.pic-error {
+  color: var(--accent);
+  font-size: 0.85rem;
+}
+.pic-note {
+  background: #eef3fb;
+  border: 1px solid #c9d8ee;
+  border-radius: 6px;
+  color: var(--oxford);
+  padding: 0.55rem 0.8rem;
+  font-size: 0.85rem;
+}
+.pic-check {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+.pic-check input {
+  width: 16px;
+  height: 16px;
+}
+.pic-status {
+  white-space: nowrap;
+  margin-left: -0.6rem; /* reads as part of the archive status (frame S3) */
+}
+.pic-btn {
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+}

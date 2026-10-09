@@ -3,7 +3,31 @@ import type { SwApi } from '../../preload'
 // Browser/dev mock for window.sw so the renderer runs under plain Vite (no Electron).
 // Mirrors the full preload contract; returns inert values. Never used in the packaged app.
 export function installMock(): void {
+  const pictureStatus = {
+    model: 'absent' as const,
+    modelBytes: 910310138,
+    download: null,
+    error: null,
+    includeWell: true,
+    paused: false,
+    index: { phase: 'idle' as const, done: 0, total: 0, failed: 0, secondsLeft: null },
+    text: '',
+    coverage: 0,
+    estimate: null
+  }
   const mock: SwApi = {
+    picture: {
+      status: async () => pictureStatus,
+      estimate: async () => null,
+      download: async () => ({ ok: false, error: 'not available in the browser preview' }),
+      cancelDownload: async () => undefined,
+      deleteModel: async () => undefined,
+      pause: async () => undefined,
+      resume: async () => undefined,
+      setIncludeWell: async () => undefined,
+      query: async () => ({ ok: false, results: [], error: 'not available in the browser preview' }),
+      onStatus: () => () => undefined
+    },
     archive: {
       available: async () => false,
       search: async () => [],

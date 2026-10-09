@@ -37,7 +37,8 @@ utimesSync(join(second, PRE), new Date('2010-01-01'), new Date('2010-01-01')) //
 // pre-seed the config the app reads (isolated well + the fixture as the Triage source)
 writeFileSync(join(userData, 'config.json'), JSON.stringify({ wellRoot, screenshotRoot: source, captureSources: [{ path: second, namedOnly: false }, { path: desk, namedOnly: true }] }), 'utf8')
 
-const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`] })
+// SLIDEWELL_E2E_HIDDEN: runs in the background — no window shown, no Dock icon, no focus taken
+const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, SLIDEWELL_E2E_HIDDEN: '1' } })
 let pass = false
 const result = {}
 try {
