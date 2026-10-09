@@ -1376,3 +1376,49 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* From chips + Kind switch (second filter row). Wraps; never overlaps the results head. */
+.fromrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1.5rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.filter-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.chip {
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 0.3rem 0.8rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.chip.active {
+  background: var(--oxford);
+  border-color: var(--oxford);
+  color: #fff;
+}
+.chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.chip-count {
+  color: var(--muted);
+  margin-left: 0.2rem;
+}
+.chip.active .chip-count {
+  color: #dbe7f5;
+}

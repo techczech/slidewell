@@ -2,6 +2,11 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { Stats } from '../main/stats'
 
 export type { Stats } from '../main/stats'
+// From/Kind filter values. Kept here (not imported from main/searchfilters.ts, which holds the same
+// literals) so the web project needs no main-process file.
+export type FromFilter = 'all' | 'screenshots' | 'old-images' | 'old-slides' | 'talks'
+export type KindFilter = 'all' | 'no-text' | 'embedded'
+export type FromCounts = Record<FromFilter, number>
 
 // One Image Node entity is shared with TalkWeaver (CONTEXT.md / ADR-0020, ADR-0026): a
 // content-addressed image + sidecar. In SlideWell it also carries provenance + notes. On disk
@@ -56,7 +61,8 @@ export type SearchFilters = {
   deck: string // '' = any deck; else a deck name/substring
   role: 'content' | 'all'
   cluster: boolean
-  scope: 'all' | 'archive' | 'well'
+  from: FromFilter // where the result came from (replaces the old Source switch)
+  kind: KindFilter // what the picture shows
   type: 'slides' | 'images' | 'decks'
   // Which archive store to search: the user's own, the separate Others' Library, or both (ADR-0031).
   library: 'mine' | 'others' | 'all'
@@ -129,6 +135,8 @@ const api = {
     // Slide + OCR search with filters; returns clusters (size-1 clusters when clustering is off).
     search: (query: string, filters: SearchFilters): Promise<SlideClusterResult[]> =>
       ipcRenderer.invoke('archive:search', query, filters),
+    // Counts for the From chips (current query, Kind applied).
+    fromCounts: (query: string, filters: SearchFilters): Promise<FromCounts> => ipcRenderer.invoke('archive:from-counts', query, filters),
     // Distinct deck categories (with counts) for the Category filter.
     categories: (): Promise<CategoryCount[]> => ipcRenderer.invoke('archive:categories'),
     // All decks (newest-first) for the Deck filter picker.

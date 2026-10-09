@@ -7,6 +7,7 @@ export function installMock(): void {
     archive: {
       available: async () => false,
       search: async () => [],
+      fromCounts: async () => ({ all: 0, screenshots: 0, 'old-images': 0, 'old-slides': 0, talks: 0 }),
       categories: async () => [],
       decks: async () => [],
       listDecks: async () => [],
