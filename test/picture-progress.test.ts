@@ -10,8 +10,8 @@ describe('planQueue (resume from the store)', () => {
   it('skips what the store already holds, re-embeds changed files, puts well images first', () => {
     const items = [slide(1), slide(2), slide(3, 99), well('aa'), slide(1)]
     const handled = new Map<string, Fingerprint>([
-      ['slide:P#1', { size: 100, mtimeMs: 1 }],
-      ['slide:P#3', { size: 100, mtimeMs: 1 }] // file changed since → todo again
+      ['slide:P#1', { path: '/Volumes/Data/s1.webp', size: 100, mtimeMs: 1 }],
+      ['slide:P#3', { path: '/Volumes/Data/s3.webp', size: 100, mtimeMs: 1 }] // file changed since → todo again
     ])
     const plan = planQueue(items, handled)
     expect(plan.total).toBe(4)
@@ -59,10 +59,10 @@ function harness(items: IndexItem[]) {
       if (it.path.includes('broken')) throw Object.assign(new Error('cannot read image'), { item: true })
       if (embedded === holdAt) await new Promise<void>((r) => (gate = r))
       embedded++
-      stored.set(it.id, { size: it.size, mtimeMs: it.mtimeMs })
+      stored.set(it.id, { path: it.path, size: it.size, mtimeMs: it.mtimeMs })
     },
     isItemFailure: (e) => Boolean((e as { item?: boolean }).item),
-    recordFailure: (it) => failures.set(it.id, { size: it.size, mtimeMs: it.mtimeMs }),
+    recordFailure: (it) => failures.set(it.id, { path: it.path, size: it.size, mtimeMs: it.mtimeMs }),
     onProgress: (p) => events.push(`${p.phase} ${p.done}/${p.total}`),
     progressEveryMs: 0
   }

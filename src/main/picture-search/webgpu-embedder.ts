@@ -12,12 +12,13 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { UnreadableImageError, type Embedder } from './engine'
 import { GemmaText, prepareImage, type ImageProcessorConfig } from './gemma-prep'
-import { QUERY_PREFIX } from './model-manifest'
+import { MODEL_DIM, QUERY_PREFIX } from './model-manifest'
 
 export type Reply = { ok: boolean; value?: unknown; error?: string }
+/** Events from the window. `r` and `id` come from the page and are validated by the embedder. */
 export type HostEvents = {
-  onReady: (r: Reply) => void
-  onReply: (id: number, r: Reply) => void
+  onReady: (r: unknown) => void
+  onReply: (id: unknown, r: unknown) => void
   onGone: (reason: string) => void
 }
 export interface EmbedHost {
@@ -25,6 +26,26 @@ export interface EmbedHost {
   destroy(): void
 }
 export type HostFactory = (ev: HostEvents) => EmbedHost
+
+type Pending = { valid: (v: unknown) => boolean; settle: (r: { ok: true; value: unknown } | { ok: false; error: string }) => void }
+
+/**
+ * Per-call time limits. Loading reads ~900 MB and builds GPU sessions, so it gets 120 s; starting
+ * the page, an embed or any other call gets 30 s (an image takes ~0.3 s). A call over its limit
+ * resets the window, which rejects everything waiting on it.
+ */
+export const DEFAULT_TIMEOUTS = { startMs: 30_000, loadMs: 120_000, callMs: 30_000 }
+
+const isObject = (v: unknown): boolean => typeof v === 'object' && v !== null
+const isInfo = (v: unknown): boolean => isObject(v) && typeof (v as { webgpu?: unknown }).webgpu === 'boolean'
+
+/** Validate a reply from the page: `{ ok: true, value }` with a valid value, or `{ ok: false, error: string }`. */
+export function checkReply(r: unknown, valid: (v: unknown) => boolean): { ok: true; value: unknown } | { ok: false; error: string } {
+  if (!isObject(r) || typeof (r as Reply).ok !== 'boolean') return { ok: false, error: 'malformed reply from the picture search window' }
+  const m = r as Reply
+  if (!m.ok) return { ok: false, error: typeof m.error === 'string' && m.error ? m.error.slice(0, 500) : 'picture search window reported an error' }
+  return valid(m.value) ? { ok: true, value: m.value } : { ok: false, error: 'unexpected reply from the picture search window' }
+}
 
 export type ImageInput = { pv: Float32Array; dims: number[]; pos: BigInt64Array; posDims: number[]; ids: Int32Array }
 /** Turns a query / an image file into model inputs (tokenizer + image processor by default). */
@@ -58,19 +79,23 @@ export class WebGpuEmbedder implements Embedder {
   private rejectReady: ((e: Error) => void) | null = null
   private visionLoaded = false
   private nextId = 0
-  private pending = new Map<number, (r: Reply) => void>()
+  private pending = new Map<number, Pending>()
   private chain: Promise<unknown> = Promise.resolve()
   private idleTimer: ReturnType<typeof setTimeout> | null = null
   private inputs: EmbedInputs
   private idleCloseMs: number
+  private dim: number
+  private timeouts: { startMs: number; loadMs: number; callMs: number }
 
   constructor(
     modelDir: string,
     private makeHost: HostFactory,
-    opts: { idleCloseMs?: number; inputs?: EmbedInputs } = {}
+    opts: { idleCloseMs?: number; inputs?: EmbedInputs; dim?: number; timeouts?: Partial<{ startMs: number; loadMs: number; callMs: number }> } = {}
   ) {
     this.idleCloseMs = opts.idleCloseMs ?? 5 * 60 * 1000
     this.inputs = opts.inputs ?? gemmaInputs(modelDir)
+    this.dim = opts.dim ?? MODEL_DIM
+    this.timeouts = { ...DEFAULT_TIMEOUTS, ...opts.timeouts }
   }
 
   private openWindow(): Promise<void> {
@@ -79,28 +104,36 @@ export class WebGpuEmbedder implements Embedder {
     this.token = token
     const mine = (): boolean => this.token === token
     const opened = new Promise<void>((resolve, reject) => {
-      this.rejectReady = reject
+      const startTimer = setTimeout(() => {
+        if (mine()) this.reset(new Error(`picture search window did not start within ${this.timeouts.startMs / 1000} s`))
+      }, this.timeouts.startMs)
+      this.rejectReady = (e) => {
+        clearTimeout(startTimer)
+        reject(e)
+      }
       this.host = this.makeHost({
+        // Messages from the page are untrusted input: validated here, and nothing thrown back.
         onReady: (r) => {
           if (!mine()) return
-          if (r.ok) resolve()
-          else reject(new Error(r.error ?? 'picture search window failed to start'))
+          clearTimeout(startTimer)
+          const v = checkReply(r, (x) => x === undefined || x === null || typeof x === 'object')
+          if (v.ok) resolve()
+          else this.reset(new Error(`picture search window failed to start: ${v.error}`))
         },
         onReply: (id, r) => {
-          if (!mine()) return
-          const cb = this.pending.get(id)
-          if (cb) {
-            this.pending.delete(id)
-            cb(r)
-          }
+          if (!mine() || typeof id !== 'number') return
+          const p = this.pending.get(id)
+          if (!p) return // unknown id: dropped
+          this.pending.delete(id)
+          p.settle(checkReply(r, p.valid))
         },
         onGone: (reason) => {
-          if (mine()) this.reset(new Error(`picture search window ${reason}`))
+          if (mine()) this.reset(new Error(`picture search window ${String(reason)}`))
         }
       })
     })
     const ready = opened.then(async () => {
-      const info = (await this.send('info', {})) as { webgpu: boolean }
+      const info = (await this.send('info', {}, isInfo, this.timeouts.callMs)) as { webgpu: boolean }
       if (!info.webgpu) throw new Error('this Mac does not offer WebGPU to SlideWell')
     })
     this.ready = ready
@@ -110,26 +143,46 @@ export class WebGpuEmbedder implements Embedder {
     return ready
   }
 
-  /** The window is gone: fail readiness and every call in flight, forget the window. */
+  /** The window is gone or unusable: fail readiness and every call in flight, destroy the window. */
   private reset(err: Error): void {
     this.rejectReady?.(err)
     this.rejectReady = null
-    for (const cb of this.pending.values()) cb({ ok: false, error: err.message })
+    const waiting = [...this.pending.values()]
     this.pending.clear()
+    for (const p of waiting) p.settle({ ok: false, error: err.message })
+    const h = this.host
     this.host = null
     this.token = null
     this.ready = null
     this.visionLoaded = false
+    try {
+      h?.destroy() // the host destroys its window once; later calls are no-ops
+    } catch {
+      /* already gone */
+    }
   }
 
-  private send(name: string, payload: unknown): Promise<unknown> {
+  /** One command to the page; rejects on an error reply, a malformed reply, or after `timeoutMs`. */
+  private send(name: string, payload: unknown, valid: (v: unknown) => boolean, timeoutMs: number): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.host) return reject(new Error('picture search window is not open'))
       const id = ++this.nextId
-      this.pending.set(id, (r) => (r.ok ? resolve(r.value) : reject(new Error(r.error ?? 'embedder error'))))
+      const timer = setTimeout(() => {
+        if (this.pending.has(id)) this.reset(new Error(`picture search window did not answer "${name}" within ${timeoutMs / 1000} s`))
+      }, timeoutMs)
+      this.pending.set(id, {
+        valid,
+        settle: (r) => {
+          clearTimeout(timer)
+          if (r.ok) resolve(r.value)
+          else reject(new Error(r.error))
+        }
+      })
       this.host.send(id, name, payload)
     })
   }
+
+  private isEmbedding = (v: unknown): boolean => v instanceof Float32Array && v.length === this.dim
 
   /** Run one task after the previous one; restart the idle-close timer. */
   private serial<T>(task: () => Promise<T>): Promise<T> {
@@ -148,17 +201,17 @@ export class WebGpuEmbedder implements Embedder {
     if (this.idleTimer) clearTimeout(this.idleTimer)
     await this.openWindow()
     if (withVision && !this.visionLoaded) {
-      await this.send('load', { withVision: true })
+      await this.send('load', { withVision: true }, isObject, this.timeouts.loadMs)
       this.visionLoaded = true
     } else if (!withVision) {
-      await this.send('load', { withVision: false })
+      await this.send('load', { withVision: false }, isObject, this.timeouts.loadMs)
     }
   }
 
   embedText(text: string): Promise<Float32Array> {
     return this.serial(async () => {
       await this.ensure(false)
-      return (await this.send('text', { ids: this.inputs.queryIds(text) })) as Float32Array
+      return (await this.send('text', { ids: this.inputs.queryIds(text) }, this.isEmbedding, this.timeouts.callMs)) as Float32Array
     })
   }
 
@@ -171,7 +224,7 @@ export class WebGpuEmbedder implements Embedder {
         throw new UnreadableImageError(`cannot read image: ${(e as Error)?.message ?? e}`)
       }
       await this.ensure(true)
-      const v = (await this.send('image', input)) as Float32Array
+      const v = (await this.send('image', input, this.isEmbedding, this.timeouts.callMs)) as Float32Array
       if (v.some((x) => Number.isNaN(x))) throw new UnreadableImageError('model returned NaN for this image')
       return v
     })
@@ -180,7 +233,7 @@ export class WebGpuEmbedder implements Embedder {
   /** Free the vision session (indexing idle); text stays for queries until the idle timer closes all. */
   releaseVision(): Promise<void> {
     return this.serial(async () => {
-      if (this.host && this.visionLoaded) await this.send('unloadVision', {})
+      if (this.host && this.visionLoaded) await this.send('unloadVision', {}, () => true, this.timeouts.callMs)
       this.visionLoaded = false
     })
   }
@@ -188,9 +241,7 @@ export class WebGpuEmbedder implements Embedder {
   close(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer)
     this.idleTimer = null
-    const h = this.host
     this.reset(new Error('picture search window closed'))
-    h?.destroy()
   }
 
   dispose(): void {

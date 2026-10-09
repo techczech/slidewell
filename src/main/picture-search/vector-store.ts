@@ -4,7 +4,8 @@
  * readers never block the indexer.
  *
  * Schema (version 1):
- *   meta(key TEXT PRIMARY KEY, value TEXT)            model, model_revision, dim, vector_format, query_prefix
+ *   meta(key TEXT PRIMARY KEY, value TEXT)            model, model_revision, dim, vector_format, query_prefix,
+ *                                                     slide_archive_root (the archive the slide rows come from)
  *   vectors(id TEXT PRIMARY KEY, kind, presentation_id, slide_order, well_id, path,
  *           file_size, file_mtime_ms, embedded_at, vector BLOB)
  *   failures(id TEXT PRIMARY KEY, path, file_size, file_mtime_ms, error, failed_at)
@@ -32,7 +33,11 @@ export type IndexItem = {
   wellId?: string
 }
 
-export type Fingerprint = { size: number; mtimeMs: number }
+/** What resume planning compares: the same path, size and mtime means already handled. */
+export type Fingerprint = { path: string; size: number; mtimeMs: number }
+
+/** meta key: the archive root the slide vectors (and slide failures) were made from. */
+export const SLIDE_ROOT_KEY = 'slide_archive_root'
 
 export type StoredVector = { id: string; kind: ItemKind; vector: Float32Array }
 
@@ -94,6 +99,22 @@ export class VectorStore {
     for (const [k, v] of Object.entries({ schema_version: SCHEMA_VERSION, ...meta })) put.run(k, v)
   }
 
+  /**
+   * Bind the slide rows to an archive root. If they were made from another archive, drop every slide
+   * vector and slide failure (well rows stay) and return the dropped ids, so the caller can forget
+   * them in memory and re-plan. A store with no recorded root adopts this one.
+   */
+  useArchiveRoot(root: string): string[] {
+    const current = this.meta()[SLIDE_ROOT_KEY]
+    let dropped: string[] = []
+    if (current !== undefined && current !== root) {
+      dropped = (this.db.prepare("SELECT id FROM vectors WHERE kind = 'slide'").all() as Array<{ id: string }>).map((r) => r.id)
+      this.db.exec("DELETE FROM vectors WHERE kind = 'slide'; DELETE FROM failures WHERE id LIKE 'slide:%';")
+    }
+    if (current !== root) this.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(SLIDE_ROOT_KEY, root)
+    return dropped
+  }
+
   meta(): Record<string, string> {
     const rows = this.db.prepare('SELECT key, value FROM meta').all() as Array<{ key: string; value: string }>
     return Object.fromEntries(rows.map((r) => [r.key, r.value]))
@@ -103,8 +124,8 @@ export class VectorStore {
   fingerprints(): Map<string, Fingerprint> {
     const out = new Map<string, Fingerprint>()
     for (const table of ['vectors', 'failures']) {
-      const rows = this.db.prepare(`SELECT id, file_size, file_mtime_ms FROM ${table}`).all() as Array<{ id: string; file_size: number; file_mtime_ms: number }>
-      for (const r of rows) out.set(r.id, { size: Number(r.file_size), mtimeMs: Number(r.file_mtime_ms) })
+      const rows = this.db.prepare(`SELECT id, path, file_size, file_mtime_ms FROM ${table}`).all() as Array<{ id: string; path: string; file_size: number; file_mtime_ms: number }>
+      for (const r of rows) out.set(r.id, { path: r.path, size: Number(r.file_size), mtimeMs: Number(r.file_mtime_ms) })
     }
     return out
   }

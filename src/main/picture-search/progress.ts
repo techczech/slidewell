@@ -2,7 +2,7 @@
  * Indexing progress and resume, as pure functions (no Electron, no disk).
  *
  * Resume needs no checkpoint file: the store itself is the record of what is done. `planQueue`
- * compares the images that exist now with the fingerprints (size + mtime) already in the store
+ * compares the images that exist now with the fingerprints (path + size + mtime) already in the store
  * (embedded or failed); everything else is still to do. A restart mid-run therefore picks up exactly
  * where it stopped, and a changed file is embedded again.
  */
@@ -30,7 +30,7 @@ export function planQueue(items: IndexItem[], handled: Map<string, Fingerprint>)
     if (seen.has(it.id)) continue
     seen.add(it.id)
     const fp = handled.get(it.id)
-    if (fp && fp.size === it.size && fp.mtimeMs === Math.round(it.mtimeMs)) done++
+    if (fp && fp.path === it.path && fp.size === it.size && fp.mtimeMs === Math.round(it.mtimeMs)) done++
     else todo.push(it)
   }
   todo.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'well-image' ? -1 : 1))

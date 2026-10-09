@@ -1,7 +1,8 @@
 /**
  * The Electron half of the embedder: the hidden window and the swembed:// protocol that serves its
  * page, ONNX Runtime Web's files and the verified model files. The window is sandboxed and
- * context-isolated, cannot navigate or open windows, and only its own webContents is heard on the
+ * context-isolated, cannot navigate (a navigation after the first load counts as the window being
+ * gone) or open windows, is destroyed exactly once, and only its own webContents is heard on the
  * embedder IPC channels.
  */
 import { BrowserWindow, ipcMain, net, protocol } from 'electron'
@@ -10,7 +11,7 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import PAGE_JS from './embedder-page.js?raw'
 import { MODEL_FILES } from './model-manifest'
-import type { EmbedHost, HostEvents, HostFactory, Reply } from './webgpu-embedder'
+import type { EmbedHost, HostEvents, HostFactory } from './webgpu-embedder'
 
 export const EMBED_SCHEME = 'swembed'
 const ORIGIN = `${EMBED_SCHEME}://ort/`
@@ -55,30 +56,57 @@ export function electronEmbedHost(preloadPath: string): HostFactory {
     })
     const wc = win.webContents
     let gone = false
-    const onReady = (e: Electron.IpcMainEvent, r: Reply): void => {
-      if (e.sender === wc) ev.onReady(r)
+    let destroyed = false
+    let loaded = false
+    // IPC from the page: only this window is heard, and nothing thrown here reaches Electron.
+    const guard = (fn: () => void): void => {
+      try {
+        fn()
+      } catch {
+        /* a bad message must never throw out of an IPC callback */
+      }
     }
-    const onReply = (e: Electron.IpcMainEvent, id: number, r: Reply): void => {
-      if (e.sender === wc) ev.onReply(id, r)
+    const onReady = (e: Electron.IpcMainEvent, r: unknown): void => {
+      if (e.sender === wc) guard(() => ev.onReady(r))
+    }
+    const onReply = (e: Electron.IpcMainEvent, id: unknown, r: unknown): void => {
+      if (e.sender === wc) guard(() => ev.onReply(id, r))
     }
     const cleanup = (): void => {
       ipcMain.removeListener('embedder:ready', onReady)
       ipcMain.removeListener('embedder:reply', onReply)
     }
+    const destroy = (): void => {
+      gone = true
+      cleanup()
+      if (destroyed) return
+      destroyed = true
+      if (!win.isDestroyed()) win.destroy()
+    }
+    // Any way the window stops being usable: tell the embedder once (it resets and calls destroy).
     const fail = (reason: string): void => {
       if (gone) return
       gone = true
       cleanup()
-      ev.onGone(reason)
+      guard(() => ev.onGone(reason))
+      destroy() // in case the embedder did not
     }
     ipcMain.on('embedder:ready', onReady)
     ipcMain.on('embedder:reply', onReply)
-    // never leave swembed://ort/, never open windows
-    wc.on('will-navigate', (e, url) => {
-      if (!url.startsWith(ORIGIN)) e.preventDefault()
-    })
+    // The page never navigates: page-initiated navigation is refused, and any navigation of the main
+    // frame after the first load (which would destroy the command document) counts as gone.
+    wc.on('will-navigate', (e) => e.preventDefault())
     wc.on('will-redirect', (e, url) => {
-      if (!url.startsWith(ORIGIN)) e.preventDefault()
+      if (loaded || !url.startsWith(ORIGIN)) e.preventDefault()
+    })
+    wc.on('did-start-navigation', (e) => {
+      if (loaded && e.isMainFrame && !e.isSameDocument) fail('navigated away')
+    })
+    wc.on('did-navigate', () => {
+      if (loaded) fail('navigated away')
+    })
+    wc.once('did-finish-load', () => {
+      loaded = true
     })
     wc.setWindowOpenHandler(() => ({ action: 'deny' }))
     wc.on('render-process-gone', (_e, d) => fail(`stopped (${d.reason})`))
@@ -86,13 +114,9 @@ export function electronEmbedHost(preloadPath: string): HostFactory {
     win.loadURL(`${ORIGIN}embedder.html`).catch((e) => fail(`could not load (${(e as Error)?.message ?? e})`))
     return {
       send: (id, name, payload) => {
-        if (!wc.isDestroyed()) wc.send('embedder:cmd', id, name, payload)
+        if (!destroyed && !wc.isDestroyed()) wc.send('embedder:cmd', id, name, payload)
       },
-      destroy: () => {
-        gone = true
-        cleanup()
-        if (!win.isDestroyed()) win.destroy()
-      }
+      destroy
     }
   }
 }

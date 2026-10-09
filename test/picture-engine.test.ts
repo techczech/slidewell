@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { PictureSearchEngine, normalise, rank, type Embedder } from '../src/main/picture-search/engine'
+import { planQueue } from '../src/main/picture-search/progress'
 import { VectorStore, slideId, wellImageId, type IndexItem } from '../src/main/picture-search/vector-store'
 
 // A tiny fake embedder: 4 "concepts"; an image's file name and a query's words say which are present.
@@ -75,12 +76,33 @@ describe('picture-search engine (embed text, embed image, nearest neighbours)', 
     store.putFailure(changed, 'cannot read image')
     engine.forget(changed.id)
     expect(store.get(changed.id)).toBeNull()
-    expect(store.fingerprints().get(changed.id)).toEqual({ size: 99, mtimeMs: 2 })
+    expect(store.fingerprints().get(changed.id)).toEqual({ path: '/Volumes/Data/beach.webp', size: 99, mtimeMs: 2 })
     expect((await engine.pictureQuery({ text: 'beach' })).some((r) => r.id === changed.id)).toBe(false)
     // once readable again (changed again), it is embedded and the failure cleared
     await engine.embedAndStore({ ...changed, size: 100, mtimeMs: 3 })
     expect(store.failedCount()).toBe(0)
     expect(store.get(changed.id)).not.toBeNull()
+  })
+
+  it('switching archive drops the old archive slide rows (well rows stay); resume compares paths', async () => {
+    const engine = new PictureSearchEngine(store, () => fake)
+    expect(store.useArchiveRoot('/Volumes/Data/A')).toEqual([]) // first root is adopted
+    await seed(engine)
+    store.putFailure(item(slideId('Broken', 1), '/Volumes/Data/A/broken.webp'), 'cannot read image')
+    expect(store.useArchiveRoot('/Volumes/Data/A')).toEqual([]) // same root: nothing dropped
+    const dropped = store.useArchiveRoot('/Volumes/Data/B')
+    expect(dropped.sort()).toEqual(['slide:AI tools#1', 'slide:Budget#2', 'slide:Seals#4'])
+    dropped.forEach((id) => engine.forget(id))
+    expect(store.count()).toBe(1)
+    expect(store.failedCount()).toBe(0)
+    expect((await engine.pictureQuery({ text: 'robots in a classroom' })).map((r) => r.id)).toEqual(['well:ab12cd3'])
+    expect(store.meta().slide_archive_root).toBe('/Volumes/Data/B')
+    // same id, size and mtime but another path is not "already done"
+    const a = item(slideId('Talk', 1), '/Volumes/Data/A/extracted/Talk/renders/slide_0001.webp')
+    await engine.embedAndStore(a)
+    const b = { ...a, path: '/Volumes/Data/B/extracted/Talk/renders/slide_0001.webp' }
+    expect(planQueue([b], store.fingerprints()).todo.map((i) => i.path)).toEqual([b.path])
+    expect(planQueue([a], store.fingerprints()).todo).toEqual([])
   })
 
   it('rank keeps the true top-k under partial selection', () => {

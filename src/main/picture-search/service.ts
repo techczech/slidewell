@@ -105,9 +105,17 @@ export class PictureSearchService {
     return this.engine
   }
 
+  /** Slide rows belong to one archive root; a different root drops them (store and memory). */
+  private bindArchive(root: string | null): void {
+    if (!root) return
+    for (const id of this.openStore().useArchiveRoot(root)) this.engine?.forget(id)
+  }
+
   private async enumerate(): Promise<IndexItem[]> {
     const root = this.deps.archiveRoot()
-    // keyed by root: pointing Settings at another archive folder enumerates that one
+    // keyed by root: pointing Settings at another archive folder enumerates that one, and the slide
+    // vectors made from the old archive are dropped (an unavailable archive drops nothing)
+    this.bindArchive(root)
     if (!this.archiveCache || this.archiveCache.root !== root) this.archiveCache = { root, items: root ? await archiveRenders(root) : [] }
     const well = this.includeWell() ? await wellImages(this.deps.wellRoot(), this.deps.vaultRoot()) : []
     return [...well, ...this.archiveCache.items]
@@ -230,6 +238,7 @@ export class PictureSearchService {
 
   /** The archive changed (ingest): enumerate its renders again. */
   pokeArchive(): void {
+    if (modelState(this.dir()) === 'ready' || this.store) this.bindArchive(this.deps.archiveRoot())
     this.archiveCache = null
     this.estimateCache = null
     this.poke()
