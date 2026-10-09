@@ -1355,3 +1355,24 @@ body {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* capture inbox: parsed date / app / window under each triage thumbnail */
+.triage-from {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.1rem 0.4rem;
+  font-size: 0.66rem;
+  color: var(--muted);
+  margin-top: 0.15rem;
+  max-height: 2.6em;
+  overflow: hidden;
+}
+.triage-from .triage-app {
+  font-weight: 600;
+}
+.triage-from .triage-win {
+  flex-basis: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -11,10 +11,11 @@
  */
 import { createHash } from 'node:crypto'
 import { createReadStream, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
-import { join, relative, extname } from 'node:path'
+import { join, relative, extname, basename } from 'node:path'
 import { query, run, safeFtsQuery } from './sqlite'
 import { ocrImage, ingestScreenshot, ingestVideo, makePoster } from './well'
 import { tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
+import { parseScreenshotName } from './screenshot-name'
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'heic', 'heif', 'tiff', 'tif', 'bmp'])
 const VIDEO_EXT = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv'])
@@ -39,7 +40,7 @@ async function ensureTriage(wellRoot: string): Promise<void> {
   // The scan index gained an `offline` column (OneDrive placeholders). It is fully rebuildable, so
   // if an older schema is present just drop + recreate it; decisions (keyed by hash) are preserved.
   try {
-    await query(db, 'SELECT offline FROM triage_fts LIMIT 0', [])
+    await query(db, 'SELECT offline, source, taken_at, app, window_title FROM triage_fts LIMIT 0', [])
   } catch {
     await run(db, 'DROP TABLE IF EXISTS triage_fts').catch(() => undefined)
   }
@@ -47,7 +48,8 @@ async function ensureTriage(wellRoot: string): Promise<void> {
     db,
     `CREATE VIRTUAL TABLE IF NOT EXISTS triage_fts USING fts5(
        hash UNINDEXED, kind UNINDEXED, rel_path UNINDEXED, filename, ext UNINDEXED,
-       size UNINDEXED, mtime UNINDEXED, poster_rel UNINDEXED, offline UNINDEXED, ocr_text, scanned_at UNINDEXED
+       size UNINDEXED, mtime UNINDEXED, poster_rel UNINDEXED, offline UNINDEXED, ocr_text, scanned_at UNINDEXED,
+       source UNINDEXED, taken_at UNINDEXED, app, window_title
      )`
   )
   await run(db, `CREATE TABLE IF NOT EXISTS triage_decisions (hash TEXT PRIMARY KEY, state TEXT NOT NULL, decided_at TEXT, well_id TEXT)`)
@@ -72,7 +74,7 @@ function hashFile(path: string, timeoutMs = 15000): Promise<string | null> {
   })
 }
 
-function* walk(dir: string): Generator<{ abs: string }> {
+function* walk(dir: string, recursive = true): Generator<{ abs: string }> {
   let entries: import('node:fs').Dirent[]
   try {
     entries = readdirSync(dir, { withFileTypes: true })
@@ -83,7 +85,7 @@ function* walk(dir: string): Generator<{ abs: string }> {
     if (e.name.startsWith('.') || SKIP_DIRS.has(e.name)) continue
     const abs = join(dir, e.name)
     if (e.isDirectory()) {
-      yield* walk(abs)
+      if (recursive) yield* walk(abs, recursive)
     } else if (e.isFile()) {
       yield { abs }
     }
@@ -91,6 +93,7 @@ function* walk(dir: string): Generator<{ abs: string }> {
 }
 
 interface ScanRow {
+  source: string
   rel_path: string
   size: string
   mtime: string
@@ -106,6 +109,14 @@ interface ScanItem {
   offline: boolean
 }
 
+/** How one source is scanned. `namedOnly` = only files whose names parse as screenshots, top level only (the Desktop). */
+export interface ScanOptions {
+  namedOnly?: boolean
+}
+
+// Scans share one index and its schema migration, so they run one at a time (watcher + manual Scan).
+let scanChain: Promise<unknown> = Promise.resolve()
+
 /**
  * Recursively scan a Triage source in two phases so the UI gets continuous feedback (ADR-0029):
  *
@@ -118,24 +129,38 @@ interface ScanItem {
  * stat alone and NEVER read — reading would force a slow download (the "stuck on nothing" symptom).
  * They are flagged `offline` so the UI can show them as "not downloaded" and skip their thumbnails.
  */
-export async function scanTriageSource(
+export function scanTriageSource(
   archiveRoot: string,
   wellRoot: string,
   sourceRoot: string,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  opts: ScanOptions = {}
+): Promise<{ indexed: number; total: number; offline: number }> {
+  const next = scanChain.then(() => scanTriageSourceNow(archiveRoot, wellRoot, sourceRoot, onProgress, opts))
+  scanChain = next.catch(() => undefined)
+  return next
+}
+
+async function scanTriageSourceNow(
+  archiveRoot: string,
+  wellRoot: string,
+  sourceRoot: string,
+  onProgress: ((msg: string) => void) | undefined,
+  opts: ScanOptions
 ): Promise<{ indexed: number; total: number; offline: number }> {
   if (!existsSync(sourceRoot)) return { indexed: 0, total: 0, offline: 0 }
   await ensureTriage(wellRoot)
   const db = triageDb(wellRoot)
-  const prior = await query<ScanRow>(db, 'SELECT rel_path, size, mtime FROM triage_fts', [])
-  const seen = new Map(prior.map((r) => [r.rel_path, `${r.size}:${r.mtime}`]))
+  const prior = await query<ScanRow>(db, 'SELECT source, rel_path, size, mtime FROM triage_fts', [])
+  const seen = new Map(prior.map((r) => [`${r.source}\0${r.rel_path}`, `${r.size}:${r.mtime}`]))
 
   // Phase 0 — enumerate (stat only).
   const files: ScanItem[] = []
-  for (const { abs } of walk(sourceRoot)) {
+  for (const { abs } of walk(sourceRoot, !opts.namedOnly)) {
     const ext = extname(abs).slice(1).toLowerCase()
     const kind = VIDEO_EXT.has(ext) ? 'video' : IMAGE_EXT.has(ext) ? 'image' : null
     if (!kind) continue
+    if (opts.namedOnly && !parseScreenshotName(basename(abs))) continue
     try {
       const st = statSync(abs)
       files.push({ abs, rel: relative(sourceRoot, abs), kind, ext, size: st.size, mtime: Math.round(st.mtimeMs), offline: st.size > 0 && st.blocks === 0 })
@@ -153,7 +178,7 @@ export async function scanTriageSource(
   for (const f of files) {
     i++
     const sig = `${f.size}:${f.mtime}`
-    if (seen.get(f.rel) === sig) {
+    if (seen.get(`${sourceRoot}\0${f.rel}`) === sig) {
       if (f.offline) offlineN++
       continue
     }
@@ -186,12 +211,14 @@ export async function scanTriageSource(
         indexed++
       }
     }
+    const name = f.abs.split('/').pop() || f.rel
+    const parsed = parseScreenshotName(name)
     await run(
       db,
-      `DELETE FROM triage_fts WHERE rel_path = ?;
-       INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, poster_rel, offline, ocr_text, scanned_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [f.rel, hash, f.kind, f.rel, f.abs.split('/').pop() || f.rel, f.ext, String(f.size), String(f.mtime), posterRel, rowOffline ? '1' : '0', ocr, new Date().toISOString()]
+      `DELETE FROM triage_fts WHERE rel_path = ? AND source = ?;
+       INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, poster_rel, offline, ocr_text, scanned_at, source, taken_at, app, window_title)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [f.rel, sourceRoot, hash, f.kind, f.rel, name, f.ext, String(f.size), String(f.mtime), posterRel, rowOffline ? '1' : '0', ocr, new Date().toISOString(), sourceRoot, parsed?.takenAt ?? '', parsed?.app ?? '', parsed?.window ?? '']
     )
     if (i % 3 === 0 || i === files.length) onProgress?.(`processed ${i}/${files.length} · ${indexed} read · ${offlineN} not downloaded`)
   }
@@ -200,6 +227,10 @@ export async function scanTriageSource(
 }
 
 export interface TriageRow {
+  source: string // absolute root of the source folder this file was found in
+  taken_at: string // parsed from the file name ('' when the name carries no date)
+  app: string
+  window_title: string
   hash: string
   kind: string
   rel_path: string
@@ -215,7 +246,7 @@ export interface TriageRow {
 }
 
 const LIST_COLS =
-  'triage_fts.hash, triage_fts.kind, triage_fts.rel_path, triage_fts.filename, triage_fts.ext, triage_fts.size, triage_fts.mtime, triage_fts.poster_rel, triage_fts.offline, triage_fts.ocr_text, COALESCE(d.state, \'undecided\') AS state, d.well_id'
+  'triage_fts.source, triage_fts.taken_at, triage_fts.app, triage_fts.window_title, triage_fts.hash, triage_fts.kind, triage_fts.rel_path, triage_fts.filename, triage_fts.ext, triage_fts.size, triage_fts.mtime, triage_fts.poster_rel, triage_fts.offline, triage_fts.ocr_text, COALESCE(d.state, \'undecided\') AS state, d.well_id'
 
 export type TriageSort = 'scanned' | 'date-desc' | 'date-asc'
 
@@ -292,16 +323,16 @@ export async function importSelectedTriage(
   // GROUP BY hash: decisions are keyed by content hash, but triage_fts is keyed by path, so a hash
   // with duplicate files JOINs to multiple rows. One row per hash avoids ingesting the same selected
   // item once per duplicate.
-  const staged = await query<{ hash: string; kind: string; rel_path: string; offline: string }>(
+  const staged = await query<{ hash: string; kind: string; rel_path: string; offline: string; source: string }>(
     db,
-    `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline
+    `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline, triage_fts.source AS source
      FROM triage_fts JOIN triage_decisions d ON d.hash = triage_fts.hash
      WHERE d.state = 'selected'
      GROUP BY triage_fts.hash`,
     []
   )
   const enriched = staged.map((s) => {
-    const abs = join(sourceRoot, s.rel_path)
+    const abs = join(s.source || sourceRoot, s.rel_path)
     const missing = !existsSync(abs)
     const sizeBytes = missing ? 0 : statSync(abs).size
     // offline = OneDrive online-only placeholder (stored as '1' at scan time). It can't be ingested

@@ -31,6 +31,8 @@ export function installMock(): void {
         vaultAvailable: false,
         screenshotRoot: null,
         screenshotAvailable: false,
+        captureSources: [],
+        captureDefaults: { desktop: { path: '~/Desktop', namedOnly: true }, cleanshot: null },
         conversionsRoot: null,
         convertOcrDefault: false,
         othersArchiveRoot: '~/SlideWell/others-library',
@@ -38,6 +40,8 @@ export function installMock(): void {
       }),
       chooseArchive: async () => null,
       chooseVault: async () => null,
+      addCaptureSource: async () => false,
+      removeCaptureSource: async () => true,
       chooseScreenshotFolder: async () => null,
       chooseConversionsFolder: async () => null,
       setConvertOcr: async (on: boolean) => on,
@@ -58,7 +62,8 @@ export function installMock(): void {
       list: async () => ({ items: [], counts: { undecided: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }),
       decide: async () => ({ state: 'undecided' }),
       paste: async () => null,
-      onProgress: () => () => {}
+      onProgress: () => () => {},
+      onChanged: () => () => {}
     },
     shell: {
       openPath: async () => false,
