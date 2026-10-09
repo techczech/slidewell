@@ -25,7 +25,7 @@ import { electronEmbedHost, registerEmbedProtocol, EMBED_SCHEME } from './pictur
 import { modelDir as pictureModelDir } from './picture-search/model-store'
 import { SorterService, registerSorterIpc } from './sorter/service'
 import createTrainWorker from './sorter/train-worker?nodeWorker'
-import type { Classifier, Example } from './sorter/classifier'
+import type { Job, JobResult } from './sorter/jobs'
 import type { FetchLike } from './picture-search/model-store'
 
 const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
@@ -318,11 +318,11 @@ app.whenReady().then(() => {
   const sorter = new SorterService({
     wellRoot: wellRootResolved,
     pictures: { modelReady: () => pics.modelReady(), ensureVectors: (items, opts) => pics.ensureVectors(items, opts) },
-    // training runs in a worker thread (sorter/train-worker.ts); the main process stays responsive
-    train: (examples: Example[], signal: AbortSignal) =>
-      new Promise<Classifier>((resolve, reject) => {
+    // grouping and fitting run in a worker thread (sorter/train-worker.ts); the main process stays responsive
+    runJob: <J extends Job>(job: J, signal: AbortSignal) =>
+      new Promise<JobResult<J>>((resolve, reject) => {
         if (signal.aborted) return reject(new Error('cancelled'))
-        const w = createTrainWorker({ workerData: { examples } })
+        const w = createTrainWorker({ workerData: job })
         let settled = false
         const finish = (fn: () => void): void => {
           if (settled) return
@@ -334,7 +334,7 @@ app.whenReady().then(() => {
         // Stop terminates the worker at once; nothing it computed is used
         const onAbort = (): void => finish(() => reject(new Error('cancelled')))
         signal.addEventListener('abort', onAbort)
-        w.once('message', (m: { model?: Classifier; error?: string }) => finish(() => (m.model ? resolve(m.model) : reject(new Error(m.error ?? 'training failed')))))
+        w.once('message', (m: { result?: JobResult<J>; error?: string }) => finish(() => (m.result ? resolve(m.result) : reject(new Error(m.error ?? 'training failed')))))
         w.once('error', (e) => finish(() => reject(e)))
         w.once('exit', (code) => finish(() => reject(new Error(`training worker stopped (${code})`))))
       }),

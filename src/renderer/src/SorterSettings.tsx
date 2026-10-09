@@ -90,7 +90,11 @@ export function SorterSettings(): JSX.Element {
           </div>
         </div>
       ) : (
-        <div className="pic-note">Not trained yet. Training reads your past choices, holds back a fifth of them, and tests itself on those before it sorts anything.</div>
+        <div className="pic-note">
+          {st.retrainNeeded
+            ? 'Retrain needed: the sorter has changed since it last learnt from your choices. Sorting stays off until you train it again.'
+            : 'Not trained yet. Training reads your past choices, holds back a fifth of them, and tests itself on those before it sorts anything.'}
+        </div>
       )}
 
       {rep && !st.canRunUnattended && (

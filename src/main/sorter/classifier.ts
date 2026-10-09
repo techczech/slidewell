@@ -11,7 +11,7 @@
  * Pure: no Electron, no files. The model is plain JSON (stored by store.ts).
  */
 
-import { applyCalibration, chooseCalibration, type Calibration, type CalibrationCheck, type Scored } from './calibration'
+import { applyCalibration, assertEnoughToCalibrate, usableTraining, chooseCalibration, type Calibration, type CalibrationCheck, type Scored } from './calibration'
 
 import { groupKFold } from './groups'
 
@@ -150,7 +150,8 @@ export function train(examples: Example[], opts: TrainOptions = {}): Classifier 
   const foldModels = (l2: number): Array<Classifier | null> =>
     parts.map((test, f) => {
       const trainPart = parts.flatMap((p, j) => (j === f ? [] : p))
-      return test.length && trainPart.some((e) => e.keep) && trainPart.some((e) => !e.keep) ? fit(trainPart, dim, l2, epochs) : null
+      // a fold counts only when it has something to test and enough of each label to learn from
+      return test.length && usableTraining(trainPart) ? fit(trainPart, dim, l2, epochs) : null
     })
   let l2 = opts.l2
   let bestFolds: Array<Classifier | null> | null = null
@@ -174,6 +175,8 @@ export function train(examples: Example[], opts: TrainOptions = {}): Classifier 
   ms.forEach((m, f) => {
     if (m) for (const e of parts[f]) oof.push({ z: rawScore(m, e.vector), keep: e.keep, group: e.group })
   })
+  // degenerate folds (one big group, too few of a label) must fail, never pass as a calibration
+  assertEnoughToCalibrate(ms.filter(Boolean).length, oof)
   const { calibration, check } = chooseCalibration(oof, k)
   return { ...model, calibration, calibrationCheck: check }
 }

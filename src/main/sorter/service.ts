@@ -13,11 +13,11 @@
 import { ipcMain } from 'electron'
 import type { IndexItem } from '../picture-search/vector-store'
 import { applyRules } from './rules'
-import { train, predictKeep, type Classifier, type Example } from './classifier'
+import { predictKeep, type Classifier, type Example } from './classifier'
+import { runJob, type Job, type JobResult } from './jobs'
 import { auc, brier, reliabilityTable, type CalibrationCheck, type ReliabilityRow } from './calibration'
 import { decide, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from './decide'
 import { accuracyReport, enoughToMeasure, holdOutSplit, MIN_HELD_BACK, type AccuracyReport, type LabelledPrediction } from './accuracy'
-import { groupRelated } from './groups'
 import { loadLabelled, loadUndecided, SorterStore, type ProposalRow, type Shot } from './store'
 
 export const HOLD_OUT_FRACTION = 0.2
@@ -59,6 +59,8 @@ export type SorterStatus = {
   report: SorterReport | null
   /** A held-back report with enough items of each label exists, so sorting may run without him watching. */
   canRunUnattended: boolean
+  /** A model exists but was trained under an older sorter version: sorting is refused until retrained. */
+  retrainNeeded: boolean
   /** The least held-back evidence needed (shown in Settings when there is not enough yet). */
   minHeldBack: { total: number; perLabel: number }
   pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
@@ -73,10 +75,15 @@ export type SorterDeps = {
   broadcast: (s: SorterStatus) => void
   thresholds?: Thresholds
   /**
-   * Runs classifier training; the app passes a worker thread so the main process never blocks.
-   * When `signal` aborts, the run must stop (terminate the worker) and reject.
+   * Runs a CPU-bound training job (jobs.ts: grouping, fitting); the app passes a worker thread so the
+   * main process never blocks. When `signal` aborts, the job must stop (terminate the worker) and reject.
    */
-  train?: (examples: Example[], signal: AbortSignal) => Promise<Classifier>
+  runJob?: <J extends Job>(job: J, signal: AbortSignal) => Promise<JobResult<J>>
+}
+
+/** A model counts only when it and its report were made under the current sorter version. */
+function isCurrent(rec: { sorterVersion: string; report: { sorterVersion?: string } }): boolean {
+  return rec.sorterVersion === SORTER_VERSION && rec.report?.sorterVersion === SORTER_VERSION
 }
 
 type Run = Pick<SorterStatus, 'phase' | 'done' | 'total' | 'message' | 'error'>
@@ -102,8 +109,10 @@ export class SorterService {
   }
 
   status(): SorterStatus {
-    const { report, pending } = this.withStore((s) => ({ report: s.latestModel<SorterReport>()?.report ?? null, pending: s.pendingCounts() }))
-    return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: enoughToMeasure(report?.heldBack), minHeldBack: MIN_HELD_BACK, pending }
+    const { rec, pending } = this.withStore((s) => ({ rec: s.latestModel<SorterReport>(), pending: s.pendingCounts() }))
+    const current = rec ? isCurrent(rec) : false
+    const report = current ? rec!.report : null
+    return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: current && enoughToMeasure(report?.heldBack), retrainNeeded: Boolean(rec) && !current, minHeldBack: MIN_HELD_BACK, pending }
   }
 
   private set(patch: Partial<Run>, force = false): void {
@@ -138,10 +147,16 @@ export class SorterService {
       const shots = loadLabelled(this.deps.wellRoot())
       const vectors = await this.vectorsFor(shots, 'reading pictures of your past choices', ctl.signal)
       if (ctl.signal.aborted) throw new Error('cancelled')
-      this.set({ phase: 'training', message: 'learning from your past choices' }, true)
+      this.set({ phase: 'training', message: 'grouping related screenshots' }, true)
       const usable = shots.filter((s) => s.image && vectors.has(s.image.id))
+      const job = <J extends Job>(j: J): Promise<JobResult<J>> => {
+        if (ctl.signal.aborted) throw new Error('cancelled')
+        return this.deps.runJob ? this.deps.runJob(j, ctl.signal) : Promise.resolve(runJob(j))
+      }
       // related screenshots stay together: on one side of the split and in one fold
-      const grouping = groupRelated(usable.map((s) => ({ id: s.key, vector: vectors.get(s.image!.id)!, app: s.facts.app, windowTitle: s.facts.windowTitle, takenAt: s.takenAt })))
+      const grouping = await job({ kind: 'group', items: usable.map((s) => ({ id: s.key, vector: vectors.get(s.image!.id)!, app: s.facts.app, windowTitle: s.facts.windowTitle, takenAt: s.takenAt })) })
+      if (ctl.signal.aborted) throw new Error('cancelled')
+      this.set({ message: 'learning from your past choices' }, true)
       const groupOf = (s: Shot): string => grouping.groupOf.get(s.key) ?? s.key
       const { train: trainSet, test } = holdOutSplit(
         usable,
@@ -151,10 +166,7 @@ export class SorterService {
         groupOf
       )
       const toExamples = (xs: Shot[]): Example[] => xs.map((s) => ({ vector: vectors.get(s.image!.id)!, keep: s.truth === 'keep', group: groupOf(s) }))
-      const fitModel = (xs: Example[]): Promise<Classifier> => {
-        if (ctl.signal.aborted) throw new Error('cancelled')
-        return this.deps.train ? this.deps.train(xs, ctl.signal) : Promise.resolve(train(xs))
-      }
+      const fitModel = (xs: Example[]): Promise<Classifier> => job({ kind: 'train', examples: xs })
       const held: Classifier = await fitModel(toExamples(trainSet))
       if (ctl.signal.aborted) throw new Error('cancelled')
       const t = this.thresholds()
@@ -210,6 +222,7 @@ export class SorterService {
     if (this.busy()) return { ok: false, error: 'the sorter is already running' }
     const rec = this.withStore((s) => s.latestModel<SorterReport>())
     if (!rec) return { ok: false, error: 'train the sorter on your past choices first; it needs an accuracy report before it sorts' }
+    if (!isCurrent(rec)) return { ok: false, error: 'retrain needed: the sorter changed since it was last trained' }
     if (!enoughToMeasure(rec.report.heldBack)) return { ok: false, error: 'not enough of your past choices to measure accuracy yet' }
     if (!this.deps.pictures.modelReady()) return { ok: false, error: 'download the picture search model first (Settings › Picture search)' }
     const ctl = new AbortController()

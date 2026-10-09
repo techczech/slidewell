@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os'
 
 vi.mock('electron', () => ({ ipcMain: { handle: () => undefined } }))
 const { SorterService } = await import('../src/main/sorter/service')
-const { train } = await import('../src/main/sorter/classifier')
+const { runJob } = await import('../src/main/sorter/jobs')
+const { SorterStore } = await import('../src/main/sorter/store')
+const { SORTER_VERSION } = await import('../src/main/sorter/decide')
 type Deps = ConstructorParameters<typeof SorterService>[0]
 
 // A well with `kept` included and `binned` excluded triage screenshots plus 3 undecided ones; each has
@@ -84,7 +86,7 @@ const well = (k: number, b: number): string => {
 
 describe('sorter service: unattended sorting needs enough held-back evidence', () => {
   it('a small history trains and reports, but sorting stays refused', async () => {
-    const w = well(12, 6) // held back: 3 kept + 2 binned
+    const w = well(24, 12) // held back: 5 kept + 3 binned; training keeps 19 + 9, enough to calibrate
     const svc = new SorterService(deps(w))
     const r = await svc.trainAndTest()
     expect(r.ok).toBe(true)
@@ -112,51 +114,82 @@ describe('sorter service: unattended sorting needs enough held-back evidence', (
 })
 
 describe('sorter service: Stop during training', () => {
-  it('stopping while the trainer runs returns cancelled, ends the trainer and saves nothing', async () => {
-    const w = well(70, 30)
-    let sawAbort = false
-    let calls = 0
+  // a job runner that runs `kind` jobs until told to stop (as the worker does) and runs the rest
+  function hanging(kind: 'group' | 'train') {
+    const seen: string[] = []
     let started: () => void = () => undefined
     const running = new Promise<void>((r) => (started = r))
-    const svc = new SorterService(
-      deps(w, {
-        // a trainer that runs until it is told to stop (as the worker does)
-        train: (_xs, signal) =>
-          new Promise((_resolve, reject) => {
-            calls++
-            started()
-            signal.addEventListener('abort', () => {
-              sawAbort = true
-              reject(new Error('cancelled'))
-            })
-          })
-      })
-    )
-    const run = svc.trainAndTest()
-    await running
-    svc.cancel()
-    const r = await run
-    expect(r).toMatchObject({ ok: false, cancelled: true })
-    expect(sawAbort).toBe(true)
-    expect(calls).toBe(1) // no further fit after Stop
-    expect(models(w)).toBe(0)
-    expect(svc.status().phase).toBe('idle')
-  })
+    const run: Deps['runJob'] = (job, signal) => {
+      seen.push(job.kind)
+      if (job.kind !== kind) return Promise.resolve(runJob(job))
+      started()
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled'))))
+    }
+    return { run, running, seen }
+  }
+
+  for (const kind of ['group', 'train'] as const) {
+    it(`stopping during ${kind === 'group' ? 'grouping' : 'a fit'} returns cancelled, runs nothing further and saves nothing`, async () => {
+      const w = well(70, 30)
+      const h = hanging(kind)
+      const svc = new SorterService(deps(w, { runJob: h.run }))
+      const run = svc.trainAndTest()
+      await h.running
+      svc.cancel()
+      expect(await run).toMatchObject({ ok: false, cancelled: true })
+      expect(h.seen).toEqual(kind === 'group' ? ['group'] : ['group', 'train'])
+      expect(models(w)).toBe(0)
+      expect(svc.status().phase).toBe('idle')
+    })
+  }
 
   it('stopping just as a fit finishes still saves nothing', async () => {
     const w = well(70, 30)
     let svc: InstanceType<typeof SorterService> | null = null
     svc = new SorterService(
       deps(w, {
-        train: async (xs) => {
-          const m = train(xs, { epochs: 50, l2: 1e-3 })
-          svc!.cancel() // Stop pressed while this fit was finishing: its result must not be used
-          return m
+        runJob: async (job) => {
+          const r = runJob(job)
+          if (job.kind === 'train') svc!.cancel() // Stop pressed while this fit was finishing: its result must not be used
+          return r
         }
       })
     )
     const r = await svc.trainAndTest()
     expect(r).toMatchObject({ ok: false, cancelled: true })
+    expect(models(w)).toBe(0)
+  })
+})
+
+describe('sorter service: only a model made under the current version sorts', () => {
+  it('an older model shows "retrain needed" and sorting is refused; retraining clears it', async () => {
+    const w = well(70, 30)
+    const svc = new SorterService(deps(w))
+    const fresh = await svc.trainAndTest()
+    expect(fresh.ok).toBe(true)
+    // the same model and report, but stamped with an earlier sorter version
+    const st = new SorterStore(w)
+    const rec = st.latestModel<Record<string, unknown>>()!
+    st.saveModel({ ...rec, id: 'old', trainedAt: '2099-01-01T00:00:00Z', sorterVersion: 'sorter-local-1', report: { ...rec.report, sorterVersion: 'sorter-local-1' } })
+    st.close()
+    expect(svc.status()).toMatchObject({ retrainNeeded: true, canRunUnattended: false, report: null })
+    const s = await svc.sortUndecided()
+    expect(s.ok).toBe(false)
+    expect(s.error).toMatch(/^retrain needed/)
+    // a report stamped current on a model stamped old (or the reverse) does not count either
+    const st2 = new SorterStore(w)
+    st2.saveModel({ ...rec, id: 'mixed', trainedAt: '2099-02-01T00:00:00Z', sorterVersion: 'sorter-local-1', report: { ...rec.report, sorterVersion: SORTER_VERSION } })
+    st2.close()
+    expect(svc.status().retrainNeeded).toBe(true)
+  })
+})
+
+describe('sorter service: too few independent examples', () => {
+  it('training fails plainly and saves nothing', async () => {
+    const w = well(8, 4)
+    const svc = new SorterService(deps(w))
+    const r = await svc.trainAndTest()
+    expect(r).toMatchObject({ ok: false, error: 'not enough independent examples to calibrate' })
     expect(models(w)).toBe(0)
   })
 })

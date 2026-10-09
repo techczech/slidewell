@@ -197,6 +197,7 @@ export type SorterStatus = {
   modelReady: boolean
   report: SorterReport | null
   canRunUnattended: boolean
+  retrainNeeded: boolean
   minHeldBack: { total: number; perLabel: number }
   pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
 }

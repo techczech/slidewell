@@ -7,8 +7,12 @@
  */
 import type { RuleVerdict } from './rules'
 
-/** Stored with every proposal; bump when rules, combination or classifier change. */
-export const SORTER_VERSION = 'sorter-local-1'
+/**
+ * Stored with every model, report and proposal; bump when rules, combination, classifier, calibration
+ * or the evaluation procedure change. Sorting uses only a model trained under the current version.
+ * 2: calibrated, near-duplicates grouped, evidence gate.
+ */
+export const SORTER_VERSION = 'sorter-local-2'
 
 export type Proposal = 'keep' | 'throwaway' | 'doubtful'
 

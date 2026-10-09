@@ -90,3 +90,25 @@ describe('report measures', () => {
     expect(brier([{ p: 1, keep: true }, { p: 0.5, keep: false }])).toBeCloseTo(0.125)
   })
 })
+
+describe('degenerate folds never pass as a calibration', () => {
+  it('fails plainly instead of returning an identity Platt or a zero Brier', async () => {
+    const { train } = await import('../src/main/sorter/classifier')
+    const { normalise } = await import('../src/main/picture-search/engine')
+    const r = rng(3)
+    const ex = (keep: boolean, group?: string) => ({ vector: normalise(Float32Array.from({ length: 8 }, (_, i) => (i === (keep ? 0 : 1) ? 1 : r() * 0.3))), keep, group })
+    // the reviewer's case: one group holds nearly everything, so only one fold has examples
+    const oneGroup = [...Array.from({ length: 30 }, () => ex(true, 'G')), ...Array.from({ length: 12 }, () => ex(false, 'G')), ex(true), ex(false)]
+    expect(() => train(oneGroup)).toThrow('not enough independent examples to calibrate')
+    // too few of a label for five per label out of fold
+    expect(() => train([...Array.from({ length: 30 }, () => ex(true)), ...Array.from({ length: 4 }, () => ex(false))])).toThrow('not enough independent examples to calibrate')
+    // too few in all
+    expect(() => train([...Array.from({ length: 10 }, () => ex(true)), ...Array.from({ length: 6 }, () => ex(false))])).toThrow('not enough independent examples to calibrate')
+    // enough: calibrates
+    expect(train([...Array.from({ length: 30 }, () => ex(true)), ...Array.from({ length: 12 }, () => ex(false))]).calibration).toBeDefined()
+  })
+
+  it('chooseCalibration refuses too few scores directly', () => {
+    expect(() => chooseCalibration(overconfident(10, 2))).toThrow('not enough independent examples to calibrate')
+  })
+})

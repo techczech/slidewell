@@ -168,6 +168,24 @@ export function auc(xs: Array<{ p: number; keep: boolean }>): number | null {
   return s / (pos.length * neg.length)
 }
 
+/** Least evidence for a calibration to count: usable folds, out-of-fold scores, and scores per label. */
+export const MIN_CALIBRATION = { folds: 3, scores: 20, perLabel: 5 }
+export const NOT_ENOUGH_TO_CALIBRATE = 'not enough independent examples to calibrate'
+
+/** A fold's training part is usable when it has at least MIN_CALIBRATION.perLabel of each label. */
+export function usableTraining(xs: Array<{ keep: boolean }>): boolean {
+  const keeps = xs.filter((x) => x.keep).length
+  return keeps >= MIN_CALIBRATION.perLabel && xs.length - keeps >= MIN_CALIBRATION.perLabel
+}
+
+/** Throws NOT_ENOUGH_TO_CALIBRATE unless there are enough usable folds and out-of-fold scores. */
+export function assertEnoughToCalibrate(usableFolds: number, xs: Array<{ keep: boolean }>): void {
+  const keeps = xs.filter((x) => x.keep).length
+  if (usableFolds < MIN_CALIBRATION.folds || xs.length < MIN_CALIBRATION.scores || keeps < MIN_CALIBRATION.perLabel || xs.length - keeps < MIN_CALIBRATION.perLabel) {
+    throw new Error(NOT_ENOUGH_TO_CALIBRATE)
+  }
+}
+
 /** Label-stratified group folds over out-of-fold scores, spread across the score range (deterministic). */
 function foldsOf(xs: Scored[], k: number): Scored[][] {
   return groupKFold([...xs].sort((p, q) => p.z - q.z), k)
@@ -178,11 +196,14 @@ function foldsOf(xs: Scored[], k: number): Scored[][] {
  * fit the better one on all of them.
  */
 export function chooseCalibration(xs: Scored[], k = 5): { calibration: Calibration; check: CalibrationCheck } {
+  assertEnoughToCalibrate(Infinity, xs)
   const parts = foldsOf(xs, Math.max(2, Math.min(k, xs.length)))
+  let usable = 0
   const preds: Record<'raw' | 'platt' | 'isotonic', Array<{ p: number; keep: boolean }>> = { raw: [], platt: [], isotonic: [] }
   parts.forEach((test, f) => {
     const fitOn = parts.flatMap((p, j) => (j === f ? [] : p))
-    if (!test.length || !fitOn.some((x) => x.keep) || !fitOn.some((x) => !x.keep)) return
+    if (!test.length || !usableTraining(fitOn)) return
+    usable++
     const platt = fitPlatt(fitOn)
     const iso = fitIsotonic(fitOn)
     for (const x of test) {
@@ -191,6 +212,8 @@ export function chooseCalibration(xs: Scored[], k = 5): { calibration: Calibrati
       preds.isotonic.push({ p: applyCalibration(iso, x.z), keep: x.keep })
     }
   })
+  // a comparison over too few folds (e.g. one group holding nearly everything) is no comparison
+  assertEnoughToCalibrate(usable, preds.raw)
   const b = { raw: brier(preds.raw), platt: brier(preds.platt), isotonic: brier(preds.isotonic) }
   const chosen: 'platt' | 'isotonic' = b.isotonic < b.platt ? 'isotonic' : 'platt'
   const rel = (ps: Array<{ p: number; keep: boolean }>): ReliabilityRow[] => reliabilityTable(ps.map((x) => ({ pThrow: 1 - x.p, binned: !x.keep })))

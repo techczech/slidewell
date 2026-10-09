@@ -117,22 +117,22 @@ try {
     window.__train = window.sw.sorter.train().then((r) => (window.__trained = r))
   })
   let trained = null
-  let maxMainMs = 0
-  let trainingSamples = 0
+  // samples per training step (grouping, then fitting): polled back to back so short steps are caught
+  const steps = {}
   while (!trained) {
     const a = Date.now()
-    const phase = await app.evaluate(() => 'ok').then(() => win.evaluate(() => window.sw.sorter.status().then((s) => s.phase)))
+    const st = await app.evaluate(() => 'ok').then(() => win.evaluate(() => window.sw.sorter.status().then((s) => ({ phase: s.phase, message: s.message }))))
     const ms = Date.now() - a
-    if (phase === 'training') {
-      trainingSamples++
-      maxMainMs = Math.max(maxMainMs, ms)
+    if (st.phase === 'training') {
+      const k = /grouping/.test(st.message) ? 'grouping' : 'fitting'
+      steps[k] = { samples: (steps[k]?.samples ?? 0) + 1, slowestReplyMs: Math.max(steps[k]?.slowestReplyMs ?? 0, ms) }
     }
     trained = await win.evaluate(() => window.__trained ?? null)
-    if (!trained) await sleep(50)
   }
   out('train seconds', Math.round((Date.now() - t0) / 1000))
-  out('main process during training', { samples: trainingSamples, slowestReplyMs: maxMainMs })
-  check('main process stays responsive while training (slowest reply < 500 ms)', trainingSamples > 0 && maxMainMs < 500, `${trainingSamples} samples, slowest ${maxMainMs} ms`)
+  out('main process during training', steps)
+  for (const k of ['grouping', 'fitting'])
+    check(`main process stays responsive while ${k} (slowest reply < 500 ms)`, (steps[k]?.samples ?? 0) > 0 && steps[k].slowestReplyMs < 500, JSON.stringify(steps[k] ?? null))
   check('training finished', trained.ok, trained.error)
   const rep = trained.report
   out('report', rep)
