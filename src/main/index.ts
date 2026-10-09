@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { planSources, matchesFromKind, countFrom, type FilterableResult, type FromCounts, type SourcePlan } from './searchfilters'
 import { matchedSearch, type MatchCluster } from './matched-search'
+import { runMoreLikeThis } from './more-like-this'
 import type { MatchMode } from './match-bands'
 import { applyFilters, combinedDateFilter, parseQuery, resolveOwnershipFilter } from './searchlib'
 import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
@@ -498,6 +499,57 @@ app.whenReady().then(() => {
   }
   const rep = (c: Record<string, unknown>): FilterableResult => c.representative as FilterableResult
 
+  /** Picture-search ids to wire rows (a size-1 cluster each), through the same Library/Owner/Date/Category/From/Kind filters as word hits. */
+  async function resolvePictureIds(ids: string[], filters: SearchFilters, query: string): Promise<Map<string, MatchCluster>> {
+    const from = filters?.from ?? 'all'
+    const kind = filters?.kind ?? 'all'
+    const lib = filters?.library ?? 'mine'
+    const parsed = parseQuery(query ?? '')
+    const out = new Map<string, MatchCluster>()
+    const single = (w: Record<string, unknown>): MatchCluster => ({ representative: w as never, members: [w as never], size: 1, deckCount: 1 })
+    const slidesByPid = new Map<string, Record<string, unknown>[]>()
+    const wellIds: string[] = []
+    for (const id of ids) {
+      const m = id.match(/^slide:(.+)#(\d+)$/)
+      if (m) {
+        const pid = m[1]
+        const root = rootForDeck(pid)
+        const library: 'mine' | 'others' = root === othersArchiveRootResolved() && root !== archiveRoot() ? 'others' : 'mine'
+        if ((library === 'mine' && lib === 'others') || (library === 'others' && lib === 'mine')) continue
+        if (!slidesByPid.has(pid)) {
+          try {
+            slidesByPid.set(pid, (await deckSlides(root, cacheDir(), pid)).map((h) => toWire(h, library)))
+          } catch {
+            slidesByPid.set(pid, [])
+          }
+        }
+        const w = slidesByPid.get(pid)!.find((r) => r.slideOrder === Number(m[2]))
+        if (!w) continue
+        const forLib = library === 'others' ? { ...filters, owner: 'all' as const } : filters
+        const idx = loadDeckMeta(root, cacheDir())
+        const subs = (f: string): string[] => (f ? [f.toLowerCase()] : [])
+        const kept = applyFilters(
+          [w as { deck: string }],
+          idx,
+          combinedDateFilter(parsed, filters.era),
+          [...parsed.deckSubstrings, ...subs(filters.deck)],
+          resolveOwnershipFilter(parsed.owner, forLib.owner),
+          [...subs(filters.category), ...parsed.categorySubstrings]
+        )
+        if (kept.length && matchesFromKind(w as unknown as FilterableResult, from, kind)) out.set(id, single(w))
+      } else if (id.startsWith('well:') && lib !== 'others') {
+        wellIds.push(id.slice(5))
+      }
+    }
+    if (wellIds.length) {
+      for (const r of await wellByIds(wellRootResolved(), wellIds).catch(() => [] as WellRow[])) {
+        const w = wellToWire(r)
+        if (matchesFromKind(w as unknown as FilterableResult, from, kind)) out.set(`well:${r.id}`, single(w))
+      }
+    }
+    return out
+  }
+
   ipcMain.handle('archive:search', async (_e, query: string, filters: SearchFilters) => {
     const from = filters?.from ?? 'all'
     const kind = filters?.kind ?? 'all'
@@ -512,53 +564,7 @@ app.whenReady().then(() => {
   ipcMain.handle('archive:search-matched', async (_e, query: string, filters: SearchFilters, mode: MatchMode) => {
     const from = filters?.from ?? 'all'
     const kind = filters?.kind ?? 'all'
-    const lib = filters?.library ?? 'mine'
-    const parsed = parseQuery(query ?? '')
-    const resolve = async (ids: string[]): Promise<Map<string, MatchCluster>> => {
-      const out = new Map<string, MatchCluster>()
-      const single = (w: Record<string, unknown>): MatchCluster => ({ representative: w as never, members: [w as never], size: 1, deckCount: 1 })
-      const slidesByPid = new Map<string, Record<string, unknown>[]>()
-      const wellIds: string[] = []
-      for (const id of ids) {
-        const m = id.match(/^slide:(.+)#(\d+)$/)
-        if (m) {
-          const pid = m[1]
-          const root = rootForDeck(pid)
-          const library: 'mine' | 'others' = root === othersArchiveRootResolved() && root !== archiveRoot() ? 'others' : 'mine'
-          if ((library === 'mine' && lib === 'others') || (library === 'others' && lib === 'mine')) continue
-          if (!slidesByPid.has(pid)) {
-            try {
-              slidesByPid.set(pid, (await deckSlides(root, cacheDir(), pid)).map((h) => toWire(h, library)))
-            } catch {
-              slidesByPid.set(pid, [])
-            }
-          }
-          const w = slidesByPid.get(pid)!.find((r) => r.slideOrder === Number(m[2]))
-          if (!w) continue
-          const forLib = library === 'others' ? { ...filters, owner: 'all' as const } : filters
-          const idx = loadDeckMeta(root, cacheDir())
-          const subs = (f: string): string[] => (f ? [f.toLowerCase()] : [])
-          const kept = applyFilters(
-            [w as { deck: string }],
-            idx,
-            combinedDateFilter(parsed, filters.era),
-            [...parsed.deckSubstrings, ...subs(filters.deck)],
-            resolveOwnershipFilter(parsed.owner, forLib.owner),
-            [...subs(filters.category), ...parsed.categorySubstrings]
-          )
-          if (kept.length && matchesFromKind(w as unknown as FilterableResult, from, kind)) out.set(id, single(w))
-        } else if (id.startsWith('well:') && lib !== 'others') {
-          wellIds.push(id.slice(5))
-        }
-      }
-      if (wellIds.length) {
-        for (const r of await wellByIds(wellRootResolved(), wellIds).catch(() => [] as WellRow[])) {
-          const w = wellToWire(r)
-          if (matchesFromKind(w as unknown as FilterableResult, from, kind)) out.set(`well:${r.id}`, single(w))
-        }
-      }
-      return out
-    }
+    const resolve = (ids: string[]): Promise<Map<string, MatchCluster>> => resolvePictureIds(ids, filters, query)
     return matchedSearch(
       {
         words: async (q) => {
@@ -573,6 +579,23 @@ app.whenReady().then(() => {
       query ?? '',
       filters ?? {},
       mode === 'words' || mode === 'meaning' ? mode : 'both'
+    )
+  })
+
+  // More like this (inspector): the six most similar items from other presentations and the well, by
+  // stored vectors (no model run, but the model must be downloaded). Any Library, Owner and date.
+  ipcMain.handle('archive:more-like-this', async (_e, row: { kind: string; deck: string; slideOrder: number | null; reference: string }) => {
+    const open = { library: 'all', owner: 'all', era: 'all', category: '', deck: '', role: 'all', from: 'all', kind: 'all' } as unknown as SearchFilters
+    return runMoreLikeThis<MatchCluster['representative']>(
+      {
+        modelReady: () => pictureSearch?.status().model === 'ready',
+        query: (imageId, opts) => pictureSearch!.pictureQuery({ imageId }, opts),
+        resolve: async (ids) => {
+          const clusters = await resolvePictureIds(ids, open, '')
+          return new Map([...clusters].map(([id, c]) => [id, c.representative]))
+        }
+      },
+      row as never
     )
   })
 

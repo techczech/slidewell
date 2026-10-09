@@ -20,6 +20,9 @@ export interface Embedder {
  * records it and moves on; any other error means the engine failed and indexing stops instead. */
 export class UnreadableImageError extends Error {}
 
+/** The id has no stored vector yet: not indexed (or its image could not be embedded). */
+export class NotIndexedError extends Error {}
+
 export type Scored = { id: string; score: number }
 /** 'stale': the store refused the write (a slide planned under an archive it is no longer bound to). */
 export type WriteResult = 'stored' | 'stale'
@@ -79,7 +82,7 @@ export class PictureSearchEngine {
     const limit = Math.max(1, Math.min(opts.limit ?? 50, 5000))
     if ('imageId' in q) {
       const self = this.vectors().get(q.imageId) ?? this.store.get(q.imageId)
-      if (!self) throw new Error(`no picture-search vector for ${q.imageId}`)
+      if (!self) throw new NotIndexedError(`no picture-search vector for ${q.imageId}`)
       return rank(self.vector, this.vectors().values(), limit, q.imageId, opts.kinds)
     }
     const text = q.text.trim()

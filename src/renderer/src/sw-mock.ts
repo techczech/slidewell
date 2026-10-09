@@ -33,6 +33,7 @@ export function installMock(): void {
       available: async () => false,
       search: async () => [],
       searchMatched: async (_q: string, _f: unknown, mode: 'words' | 'meaning' | 'both') => ({ requested: mode, mode: 'words' as const, modelReady: false, words: [], related: [], pictureError: null, ms: { words: 0, meaning: null } }),
+      moreLikeThis: async () => ({ state: 'no-model' as const, items: [] }),
       fromCounts: async () => ({ all: 0, screenshots: 0, 'old-images': 0, 'old-slides': 0, talks: 0 }),
       categories: async () => [],
       decks: async () => [],
