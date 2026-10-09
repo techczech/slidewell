@@ -433,6 +433,7 @@ export interface EnrichedCluster {
   size: number
   deckCount: number
 }
+import type { FromFilter, KindFilter } from './searchfilters'
 export interface SearchFilters {
   owner: OwnershipFilter
   era: Era
@@ -440,7 +441,8 @@ export interface SearchFilters {
   deck: string // substring on deck filename/title ('' = any); ANDed with any deck: tokens
   role: 'content' | 'all'
   cluster: boolean
-  scope: 'all' | 'archive' | 'well'
+  from: FromFilter
+  kind: KindFilter
   type: 'slides' | 'images' | 'decks'
   library?: 'mine' | 'others' | 'all'
 }

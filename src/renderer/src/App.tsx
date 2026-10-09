@@ -1,10 +1,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { nextPreviewIndex } from '../../main/triage-logic'
-import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency } from '../../preload'
+import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency, FromFilter, KindFilter, FromCounts } from '../../preload'
 
 type SortKey = 'date-desc' | 'date-asc' | 'title'
 
-const DEFAULT_FILTERS: SearchFilters = { owner: 'mine', era: 'all', category: '', deck: '', role: 'content', cluster: true, scope: 'all', type: 'slides', library: 'mine' }
+const FROM_CHIPS: Array<{ value: FromFilter; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'screenshots', label: 'Screenshots' },
+  { value: 'old-images', label: 'Old-PowerPoint images' },
+  { value: 'old-slides', label: 'Old slides' },
+  { value: 'talks', label: 'Used in talks' }
+]
+const KIND_TABS: Array<{ value: KindFilter; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'no-text', label: 'Pictures without text' },
+  { value: 'embedded', label: 'Embedded images only' }
+]
+// A From chip also moves Type to a compatible value, so the chip never lands on an empty combination.
+function fromPatch(from: FromFilter): Partial<SearchFilters> {
+  if (from === 'old-slides') return { from, type: 'slides', kind: 'all' }
+  if (from === 'screenshots' || from === 'old-images') return { from, type: 'images' }
+  return { from }
+}
+// A Kind other than All concerns pictures only, so leave Presentations/slides-only views and any From chip it would empty.
+function kindPatch(kind: KindFilter, f: SearchFilters): Partial<SearchFilters> {
+  if (kind === 'all') return { kind }
+  const p: Partial<SearchFilters> = { kind }
+  if (f.type !== 'images') p.type = 'images'
+  if (f.from === 'old-slides' || f.from === 'talks' || (kind === 'embedded' && f.from === 'screenshots')) p.from = 'all'
+  return p
+}
+const NO_COUNTS: FromCounts = { all: 0, screenshots: 0, 'old-images': 0, 'old-slides': 0, talks: 0 }
+
+const DEFAULT_FILTERS: SearchFilters = { owner: 'mine', era: 'all', category: '', deck: '', role: 'content', cluster: true, from: 'all', kind: 'all', type: 'slides', library: 'mine' }
 
 const ERA_OPTIONS: { value: string; label: string }[] = [
   { value: 'all', label: 'All dates' },
@@ -25,6 +53,7 @@ export default function App(): JSX.Element {
   const [archivePath, setArchivePath] = useState('')
   const [categories, setCategories] = useState<CategoryCount[]>([])
   const [decks, setDecks] = useState<DeckInfo[]>([])
+  const [fromCounts, setFromCounts] = useState<FromCounts>(NO_COUNTS)
   const [sort, setSort] = useState<SortKey>('date-desc')
   const [groupByDeck, setGroupByDeck] = useState(false)
   const [clusters, setClusters] = useState<SlideClusterResult[]>([])
@@ -106,6 +135,13 @@ export default function App(): JSX.Element {
       setLoading(false)
     })()
   }, [debounced, filters, refreshKey, deckFilter])
+
+  // Counts on the From chips follow the query and the other filters (not From itself).
+  useEffect(() => {
+    let live = true
+    void window.sw.archive.fromCounts(debounced, filters).then((c) => { if (live) setFromCounts(c) }).catch(() => undefined)
+    return () => { live = false }
+  }, [debounced, filters.library, filters.owner, filters.era, filters.category, filters.deck, filters.role, filters.cluster, filters.kind, refreshKey])
 
   // ----- actions (defined before selection/keyboard handlers that reference them) -----
   const copyText = useCallback(
@@ -228,12 +264,12 @@ export default function App(): JSX.Element {
     if (!stats) void window.sw.archive.stats().then(setStats)
   }, [stats])
 
-  // Delete-by-filter: remove the Others' Library decks matching the current query + filters
+  // Delete-by-filter: remove the Others' Library presentations matching the current query + filters
   // (the main process shows a confirm with the real count). No filter → deletes the whole library.
   const deleteOthersMatching = useCallback(async () => {
     const r = await window.sw.archive.deleteOthersMatching(debounced, filters)
     if (r.ok) {
-      setToast(`Deleted ${r.deleted ?? 0} deck${r.deleted === 1 ? '' : 's'} from Others' Library`)
+      setToast(`Deleted ${r.deleted ?? 0} presentation${r.deleted === 1 ? '' : 's'} from Others' Library`)
       setRefreshKey((k) => k + 1)
     } else if (!r.cancelled) {
       setToast('Nothing matched — nothing deleted')
@@ -552,22 +588,6 @@ export default function App(): JSX.Element {
 
       <div className="filterbar">
         <label className="filter">
-          <span className="filter-label">Source</span>
-          <div className="scope" role="tablist" aria-label="Source scope">
-            {(['all', 'archive', 'well'] as const).map((s) => (
-              <button
-                key={s}
-                role="tab"
-                aria-selected={filters.scope === s}
-                className={filters.scope === s ? 'scope-tab active' : 'scope-tab'}
-                onClick={() => patch(s === 'well' && filters.type === 'slides' ? { scope: s, type: 'images' } : { scope: s })}
-              >
-                {s === 'all' ? 'All' : s === 'archive' ? 'Archive' : 'Well'}
-              </button>
-            ))}
-          </div>
-        </label>
-        <label className="filter">
           <span className="filter-label">Library</span>
           <div className="scope" role="tablist" aria-label="Which library">
             {(['mine', 'others', 'all'] as const).map((l) => (
@@ -595,14 +615,14 @@ export default function App(): JSX.Element {
                 className={filters.type === t ? 'scope-tab active' : 'scope-tab'}
                 onClick={() => patch({ type: t })}
               >
-                {t === 'slides' ? 'Slides' : t === 'images' ? 'Images' : 'Decks'}
+                {t === 'slides' ? 'Slides' : t === 'images' ? 'Images' : 'Presentations'}
               </button>
             ))}
           </div>
         </label>
         <Select label="Owner" value={filters.owner} onChange={(v) => patch({ owner: v as SearchFilters['owner'] })}
           options={[
-            { value: 'mine', label: 'My decks' },
+            { value: 'mine', label: 'My presentations' },
             { value: 'all', label: 'All owners' },
             { value: 'others', label: 'Other authors' },
             { value: 'unknown', label: 'Unattributed' }
@@ -616,9 +636,9 @@ export default function App(): JSX.Element {
           onChange={(v) => patch({ category: v })}
         />
         <SearchableSelect
-          label="Deck"
+          label="Presentation"
           value={filters.deck}
-          allLabel="All decks"
+          allLabel="All presentations"
           options={decks.map((d) => ({ value: d.title, label: d.title }))}
           onChange={(v) => patch({ deck: v })}
         />
@@ -644,11 +664,52 @@ export default function App(): JSX.Element {
           <button
             className="toggle danger"
             onClick={() => void deleteOthersMatching()}
-            title="Delete the Others' Library decks matching the current filter/search (no filter = the whole library). Your own archive is never touched."
+            title="Delete the Others' Library presentations matching the current filter/search (no filter = the whole library). Your own archive is never touched."
           >
             🗑 Delete matching…
           </button>
         )}
+      </div>
+
+      <div className="fromrow">
+        <div className="filter-inline">
+          <span className="filter-label">From</span>
+          <div className="chips" role="tablist" aria-label="From">
+            {FROM_CHIPS.map((c) => {
+              const n = fromCounts[c.value]
+              const disabled = c.value === 'talks'
+              return (
+                <button
+                  key={c.value}
+                  role="tab"
+                  aria-selected={filters.from === c.value}
+                  disabled={disabled}
+                  title={disabled ? 'Available once talks report which pictures they use' : undefined}
+                  className={filters.from === c.value ? 'chip active' : 'chip'}
+                  onClick={() => patch(fromPatch(c.value))}
+                >
+                  {c.label} <span className="chip-count">{n}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+        <div className="filter-inline">
+          <span className="filter-label">Kind</span>
+          <div className="scope" role="tablist" aria-label="Kind">
+            {KIND_TABS.map((k) => (
+              <button
+                key={k.value}
+                role="tab"
+                aria-selected={filters.kind === k.value}
+                className={filters.kind === k.value ? 'scope-tab active' : 'scope-tab'}
+                onClick={() => patch(kindPatch(k.value, filters))}
+              >
+                {k.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       <main className="results">
@@ -656,7 +717,7 @@ export default function App(): JSX.Element {
           loading ? (
             <div className="results-head">loading…</div>
           ) : sortedDecks.length === 0 ? (
-            <Empty title="No presentations match these filters." sub="Widen the Date / Owner / Category / Deck filters." />
+            <Empty title="No presentations match these filters." sub="Widen the Date / Owner / Category / Presentation filters." />
           ) : (
             <>
               <div className="results-head">
@@ -680,13 +741,11 @@ export default function App(): JSX.Element {
         ) : loading ? (
           <div className="results-head">loading…</div>
         ) : clusters.length === 0 ? (
-          filters.scope === 'well' ? (
-            filters.type === 'slides' ? (
-              <Empty title="The well holds images, not slides." sub="Switch Type to “Images” to browse your well (screenshots + images you’ve used in TalkWeaver)." />
-            ) : filters.library === 'others' ? (
-              <Empty title="The well is your own content." sub="Set Library to “Mine” or “All” — “Others” hides the well." />
+          filters.from === 'screenshots' ? (
+            filters.library === 'others' ? (
+              <Empty title="Screenshots are your own content." sub="Set Library to “Mine” or “All” — “Others” hides them." />
             ) : (
-              <Empty title="Your well is empty." sub="Stash a screenshot via the Raycast hotkey, or it fills automatically from images you use in TalkWeaver." />
+              <Empty title="No screenshots match." sub="Stash a screenshot via the Raycast hotkey, or triage a screenshot folder." />
             )
           ) : (
             <Empty title={debounced ? `No matches for “${debounced}”.` : 'No slides match these filters.'} sub="Try a different term or widen the filters." />
@@ -1467,7 +1526,7 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
   }
 
   const folders: Array<{ key: 'archive' | 'vault' | 'screenshot' | 'well' | 'conversions' | 'others'; label: string; value: string | null; choosable: boolean }> = [
-    { key: 'archive', label: 'Archive (Core A engine · your decks)', value: paths?.archiveRoot ?? null, choosable: true },
+    { key: 'archive', label: 'Archive (Core A engine · your presentations)', value: paths?.archiveRoot ?? null, choosable: true },
     { key: 'others', label: "Others’ Library (other people’s slides, separate)", value: paths?.othersArchiveRoot ?? null, choosable: true },
     { key: 'well', label: 'Well (SlideWell store)', value: paths?.wellRoot ?? null, choosable: false },
     { key: 'vault', label: 'TalkWeaver vault', value: paths?.vaultRoot ?? null, choosable: true },
@@ -1507,13 +1566,13 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
           </div>
         </div>
 
-        <div className="settings-section">My decks</div>
+        <div className="settings-section">My presentations</div>
         <div className="settings-rows">
           <div className="settings-row">
             <div className="settings-row-main">
               <div className="settings-row-label">Your names as PPTX author{ownersDefault ? ' · from your Mac account' : ''}</div>
               <div className="settings-row-detail">
-                <i>{ownersStatus || 'Comma-separated. A deck counts as yours (Owner: My decks) when its author contains any of these names or their words; accents and case are ignored. Clear the field and Save to go back to your Mac account name.'}</i>
+                <i>{ownersStatus || 'Comma-separated. A presentation counts as yours (Owner: My presentations) when its author contains any of these names or their words; accents and case are ignored. Clear the field and Save to go back to your Mac account name.'}</i>
               </div>
               <input className="search-input" value={owners} placeholder="e.g. Jane Smith, jsmith" onChange={(e) => setOwners(e.target.value)} />
             </div>
@@ -1526,7 +1585,7 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
           <div className="settings-row">
             <div className="settings-row-main">
               <div className="settings-row-label">OCR image text by default</div>
-              <div className="settings-row-detail">When converting someone’s deck, recognise text inside images (macOS Vision) and inline it into the Outline.</div>
+              <div className="settings-row-detail">When converting someone’s presentation, recognise text inside images (macOS Vision) and inline it into the Outline.</div>
             </div>
             <label className="toggle" title="Default state of the OCR toggle in the Convert panel">
               <input
@@ -1689,7 +1748,7 @@ function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => v
           <button className="copyref" onClick={onClose} disabled={running}>close ✕</button>
         </div>
         <p className="settings-note">
-          Extracts + OCRs slides into a searchable library. Choose <b>your archive</b> (your own decks) or your separate{' '}
+          Extracts + OCRs slides into a searchable library. Choose <b>your archive</b> (your own presentations) or your separate{' '}
           <b>Others’ Library</b> (other people’s slides, kept out of your archive).
         </p>
         <div className="settings-rows">
@@ -1723,7 +1782,7 @@ function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => v
             {destLib === 'mine' ? 'Import to my archive' : 'Import to Others’ library'}
           </button>
           {destLib === 'mine' && (
-            <button className="copyref" disabled={running} title="Crawl + extract every not-yet-imported deck already in the archive" onClick={() => void run(() => window.sw.ingest.pending())}>
+            <button className="copyref" disabled={running} title="Crawl + extract every not-yet-imported presentation already in the archive" onClick={() => void run(() => window.sw.ingest.pending())}>
               …or ingest everything pending
             </button>
           )}
@@ -1732,7 +1791,7 @@ function ImportPanel({ onClose, onDone }: { onClose: () => void; onDone: () => v
           )}
         </div>
         <pre className="import-log" ref={logRef}>
-          {lines.join('\n') || 'Pick the destination library, choose a file/folder, then Import. Extraction + OCR run via Core A; progress streams here. Re-running is safe — done decks are skipped.'}
+          {lines.join('\n') || 'Pick the destination library, choose a file/folder, then Import. Extraction + OCR run via Core A; progress streams here. Re-running is safe — done presentations are skipped.'}
         </pre>
         {running && <div className="results-head">running in the background — you can keep searching</div>}
       </div>
@@ -1911,8 +1970,8 @@ function SearchableSelect({
 }
 
 function clusterBadge(c: SlideClusterResult): string {
-  if (c.size > 1) return `▸ ${c.size} near-identical in ${c.deckCount} deck${c.deckCount === 1 ? '' : 's'}`
-  if (c.representative.usedInDecks > 1) return `used in ${c.representative.usedInDecks} decks`
+  if (c.size > 1) return `▸ ${c.size} near-identical in ${c.deckCount} presentation${c.deckCount === 1 ? '' : 's'}`
+  if (c.representative.usedInDecks > 1) return `used in ${c.representative.usedInDecks} presentations`
   return ''
 }
 
@@ -1964,7 +2023,7 @@ function Card({
         ) : ocr ? (
           <span className="ocr-tag">OCR</span>
         ) : null}
-        {h.library === 'others' && <span className="ocr-tag others" title="From your Others' Library — not your own deck">OTHERS</span>}
+        {h.library === 'others' && <span className="ocr-tag others" title="From your Others' Library — not your own presentation">OTHERS</span>}
         <button
           className="more"
           title="Actions"
@@ -2021,11 +2080,11 @@ function StatsPanel({ stats: s, onClose }: { stats: Stats | null; onClose: () =>
         ) : (
           <div className="stats-body">
             <p className="stats-headline">
-              <b>{fmt(s.totalDecks)} decks</b> ({fmt(s.distinctTalks)} distinct talks) · <b>{fmt(s.totalSlides)} slides</b> · {fmt(s.totalImages)} images
+              <b>{fmt(s.totalDecks)} presentations</b> ({fmt(s.distinctTalks)} distinct talks) · <b>{fmt(s.totalSlides)} slides</b> · {fmt(s.totalImages)} images
               {s.firstYear && s.lastYear ? ` · ${s.firstYear}–${s.lastYear} · ${s.yearsActive} years` : ''}
             </p>
             <p className="stats-sub">
-              avg <b>{s.avgSlidesPerDeck}</b> slides/deck · median <b>{s.medianSlidesPerDeck}</b>
+              avg <b>{s.avgSlidesPerDeck}</b> slides/presentation · median <b>{s.medianSlidesPerDeck}</b>
               {s.undatedDecks ? ` · ${s.undatedDecks} undated` : ''}
               {s.dateConfidence.uncertainDecks.length ? ` · ⚠️ ${s.dateConfidence.uncertainDecks.length} unreliable (re-save) dates` : ''}
             </p>
@@ -2036,11 +2095,11 @@ function StatsPanel({ stats: s, onClose }: { stats: Stats | null; onClose: () =>
             )}
             {s.masterDeckCount > 0 && (
               <p className="stats-note">
-                +{s.masterDeckCount} master/library deck{s.masterDeckCount === 1 ? '' : 's'} ({fmt(s.masterSlides)} slides) excluded from slide stats.
+                +{s.masterDeckCount} master/library presentation{s.masterDeckCount === 1 ? '' : 's'} ({fmt(s.masterSlides)} slides) excluded from slide stats.
               </p>
             )}
 
-            <h3>🗓️ Decks per year</h3>
+            <h3>🗓️ Presentations per year</h3>
             <div className="statbars">
               {s.byYear.map((y) => (
                 <StatBar key={y.year} value={y.decks} max={maxYearDecks} label={String(y.year)} suffix={`${y.decks} · ${fmt(y.slides)} sl`} />
@@ -2061,10 +2120,10 @@ function StatsPanel({ stats: s, onClose }: { stats: Stats | null; onClose: () =>
               ))}
             </div>
 
-            <h3>📐 Deck sizes</h3>
+            <h3>📐 Presentation sizes</h3>
             <div className="statbars">
               {s.sizeBuckets.map((b) => (
-                <StatBar key={b.label} value={b.decks} max={maxSize} label={b.label} suffix={`${b.decks} decks`} />
+                <StatBar key={b.label} value={b.decks} max={maxSize} label={b.label} suffix={`${b.decks} presentations`} />
               ))}
             </div>
 
@@ -2073,7 +2132,7 @@ function StatsPanel({ stats: s, onClose }: { stats: Stats | null; onClose: () =>
                 <h3>🏷️ Top categories</h3>
                 <table className="stats-table">
                   <thead>
-                    <tr><th>Category</th><th>Decks</th><th>Slides</th></tr>
+                    <tr><th>Category</th><th>Presentations</th><th>Slides</th></tr>
                   </thead>
                   <tbody>
                     {s.topCategoriesByDecks.slice(0, 12).map((c) => (
@@ -2086,7 +2145,7 @@ function StatsPanel({ stats: s, onClose }: { stats: Stats | null; onClose: () =>
                 <h3>🔥 Busiest months</h3>
                 <table className="stats-table">
                   <thead>
-                    <tr><th>Month</th><th>Decks</th><th>Slides</th></tr>
+                    <tr><th>Month</th><th>Presentations</th><th>Slides</th></tr>
                   </thead>
                   <tbody>
                     {s.busiestMonths.map((m) => (
@@ -2099,15 +2158,15 @@ function StatsPanel({ stats: s, onClose }: { stats: Stats | null; onClose: () =>
 
             <h3>🏆 Superlatives</h3>
             <ul className="stats-sups">
-              {s.superlatives.mostProlificYear && <li>Most prolific year: <b>{s.superlatives.mostProlificYear.year}</b> ({s.superlatives.mostProlificYear.decks} decks)</li>}
+              {s.superlatives.mostProlificYear && <li>Most prolific year: <b>{s.superlatives.mostProlificYear.year}</b> ({s.superlatives.mostProlificYear.decks} presentations)</li>}
               {s.superlatives.mostSlidesYear && <li>Most slides in a year: <b>{s.superlatives.mostSlidesYear.year}</b> ({fmt(s.superlatives.mostSlidesYear.slides)} slides)</li>}
-              {s.superlatives.busiestMonth && <li>Busiest month: <b>{s.superlatives.busiestMonth.label}</b> ({s.superlatives.busiestMonth.decks} decks)</li>}
+              {s.superlatives.busiestMonth && <li>Busiest month: <b>{s.superlatives.busiestMonth.label}</b> ({s.superlatives.busiestMonth.decks} presentations)</li>}
               {s.superlatives.biggestDeck && (
-                <li>Biggest deck: <b>{s.superlatives.biggestDeck.title}</b> — {fmt(s.superlatives.biggestDeck.slides)} slides{s.superlatives.biggestDeck.year ? ` (${s.superlatives.biggestDeck.year})` : ''}</li>
+                <li>Biggest presentation: <b>{s.superlatives.biggestDeck.title}</b> — {fmt(s.superlatives.biggestDeck.slides)} slides{s.superlatives.biggestDeck.year ? ` (${s.superlatives.biggestDeck.year})` : ''}</li>
               )}
               {s.superlatives.firstYearAvg && s.superlatives.lastYearAvg && (
                 <li>
-                  Deck-size trend: {s.superlatives.firstYearAvg.avg}/deck in {s.superlatives.firstYearAvg.year} → {s.superlatives.lastYearAvg.avg} in {s.superlatives.lastYearAvg.year}
+                  Presentation-size trend: {s.superlatives.firstYearAvg.avg}/presentation in {s.superlatives.firstYearAvg.year} → {s.superlatives.lastYearAvg.avg} in {s.superlatives.lastYearAvg.year}
                 </li>
               )}
             </ul>
@@ -2226,7 +2285,7 @@ function ContextMenu({
     { id: 'copy-ref', label: 'Copy reference' },
     { id: 'reveal', label: 'Reveal in Finder' },
     ...(cluster.size > 1 ? [{ id: 'expand' as ActionId, label: `Expand cluster (${cluster.size})` }] : []),
-    ...(k === 'well-image' ? [] : [{ id: 'context' as ActionId, label: 'See in context (whole deck)' }]),
+    ...(k === 'well-image' ? [] : [{ id: 'context' as ActionId, label: 'See in context (whole presentation)' }]),
     { id: 'details', label: 'Show details' }
   ]
   // keep the menu on-screen
@@ -2293,7 +2352,7 @@ function ClusterModal({
     <div className="overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <b>{cluster.size} near-identical slides</b> across {cluster.deckCount} deck{cluster.deckCount === 1 ? '' : 's'}
+          <b>{cluster.size} near-identical slides</b> across {cluster.deckCount} presentation{cluster.deckCount === 1 ? '' : 's'}
           <button className="copyref" onClick={onClose}>close ✕</button>
         </div>
         <div className="grid">
@@ -2327,12 +2386,12 @@ function DetailsModal({
   onCopyStructure: () => void
 }): JSX.Element {
   const rows: [string, string][] = [
-    ['Deck', hit.deckTitle || hit.deck],
+    ['Presentation', hit.deckTitle || hit.deck],
     ['File', hit.filename],
     ['Slide', hit.slideOrder !== null ? String(hit.slideOrder + 1) : '—'],
     ['Date', hit.date ? hit.date.slice(0, 10) : '—'],
     ['Category', hit.category || '—'],
-    ['Used in', `${hit.usedInDecks} deck${hit.usedInDecks === 1 ? '' : 's'}`],
+    ['Used in', `${hit.usedInDecks} presentation${hit.usedInDecks === 1 ? '' : 's'}`],
     ['Matched', hit.kind === 'slide' ? 'slide body' : 'image text (OCR)'],
     ['Reference', hit.reference]
   ]
@@ -2365,7 +2424,7 @@ function DetailsModal({
 function actionItems(deckMode: boolean, kind?: string): { id: ActionId; label: string; shortcut?: string }[] {
   if (deckMode)
     return [
-      { id: 'fullsize', label: 'See all slides in this deck', shortcut: '↵' },
+      { id: 'fullsize', label: 'See all slides in this presentation', shortcut: '↵' },
       { id: 'details', label: 'Show metadata (inspector)', shortcut: 'I' },
       { id: 'reveal', label: 'Reveal in Finder', shortcut: 'F' }
     ]
@@ -2379,7 +2438,7 @@ function actionItems(deckMode: boolean, kind?: string): { id: ActionId; label: s
     ...(isImage ? [] : [{ id: 'copy-structure' as ActionId, label: 'Copy structure (JSON)', shortcut: 'J' }]),
     { id: 'copy-ref', label: 'Copy reference', shortcut: 'R' },
     { id: 'reveal', label: 'Reveal in Finder', shortcut: 'F' },
-    ...(kind === 'well-image' ? [] : [{ id: 'context' as ActionId, label: 'See in context (whole deck)', shortcut: 'X' }])
+    ...(kind === 'well-image' ? [] : [{ id: 'context' as ActionId, label: 'See in context (whole presentation)', shortcut: 'X' }])
   ]
 }
 
@@ -2421,13 +2480,13 @@ function SlideInspector({
     }
   }, [hit, isSlide])
   const rows: [string, string][] = [
-    ['Deck', hit.deckTitle || hit.deck || '—'],
+    ['Presentation', hit.deckTitle || hit.deck || '—'],
     ['File', hit.filename || '—'],
     ...(hit.slideOrder !== null ? ([['Slide', String(hit.slideOrder + 1)]] as [string, string][]) : []),
     ['Date', hit.date ? hit.date.slice(0, 10) : '—'],
     ['Category', hit.category || '—'],
     ['Author', authorOf(hit)],
-    ['Used in', `${hit.usedInDecks} deck${hit.usedInDecks === 1 ? '' : 's'}`],
+    ['Used in', `${hit.usedInDecks} presentation${hit.usedInDecks === 1 ? '' : 's'}`],
     ['Kind', kindLabel],
     ['Reference', hit.reference]
   ]
@@ -2560,13 +2619,13 @@ function HelpOverlay({ onClose }: { onClose: () => void }): JSX.Element {
     ['/  ·  ⌘F', 'Focus search'],
     ['← →', 'Previous / next'],
     ['↑ ↓', 'Up / down a row'],
-    ['Enter · dbl-click', 'Open full size (deck: open it)'],
+    ['Enter · dbl-click', 'Open full size (presentation: open it)'],
     ['I  ·  Space', 'Toggle inspector sidebar'],
     ['⌘K', 'Command palette (actions)'],
     ['⌘C  ·  ⌘⇧C', 'Copy image (WebP) · as PNG'],
     ['T · J · R', 'Copy text · structure · reference'],
     ['F · X', 'Reveal in Finder · See in context'],
-    ['1 · 2 · 3', 'Slides · Images · Decks'],
+    ['1 · 2 · 3', 'Slides · Images · Presentations'],
     ['G', 'Group by presentation'],
     ['C', 'Cluster near-identical'],
     ['S · O', 'Stats · Import'],

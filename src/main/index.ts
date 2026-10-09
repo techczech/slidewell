@@ -6,6 +6,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync
 import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
+import { planSources, matchesFromKind, countFrom, type FilterableResult, type FromCounts, type SourcePlan } from './searchfilters'
 import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
 import { loadDeckMeta, categoryList, invalidateDeckMeta, setOwnerNames, type DeckMetaIndex } from './deckmeta'
 import { resolveOwnerNames, cleanOwnerNames } from './owners'
@@ -290,7 +291,7 @@ app.whenReady().then(() => {
     return {
       requirementsUrl: REQUIREMENTS_URL,
       deps: [
-        { key: 'archive', label: 'PowerPoint archive engine (Core A · ppt-archive)', found: archiveAvailable(), detail: archiveRoot(), requiredFor: 'Slide/Deck search & PPTX import', install: 'Clone techczech/ppt-archive and point Settings at it', required: true },
+        { key: 'archive', label: 'PowerPoint archive engine (Core A · ppt-archive)', found: archiveAvailable(), detail: archiveRoot(), requiredFor: 'Slide/presentation search & PPTX import', install: 'Clone techczech/ppt-archive and point Settings at it', required: true },
         { key: 'python', label: 'Python 3 (+ python-pptx, Pillow, lxml)', found: py === 'python3' || existsSync(py), detail: py, requiredFor: 'PPTX import (extraction)', install: 'pip install python-pptx Pillow lxml pdf2image', required: false },
         { key: 'ocr', label: 'macOS Vision OCR helper (vision_ocr)', found: existsSync(ocrBin) || existsSync(ocrSwift), detail: existsSync(ocrBin) ? ocrBin : ocrSwift, requiredFor: 'Text search inside images & screenshots', install: 'Ships with ppt-archive (tools/ocr)', required: false },
         { key: 'ffmpeg', label: 'ffmpeg', found: ff !== 'ffmpeg', detail: ff !== 'ffmpeg' ? ff : 'not found on PATH', requiredFor: 'Video poster frames & triage playback', install: 'brew install ffmpeg', required: false },
@@ -365,10 +366,9 @@ app.whenReady().then(() => {
     }
   }
 
-  ipcMain.handle('archive:search', async (_e, query: string, filters: SearchFilters) => {
-    const scope = filters?.scope ?? 'all'
-    const type = filters?.type ?? 'slides'
-    // Which store(s) to search (ADR-0031): the user's archive, the separate Others' Library, or both.
+  // Collect the wire rows for each store the plan asks for (ADR-0031 library choice applies to all).
+  const collectResults = async (query: string, filters: SearchFilters, plan: SourcePlan): Promise<Array<Record<string, unknown>>> => {
+    // Which store(s) to search: the user's archive, the separate Others' Library, or both.
     const lib = filters?.library ?? 'mine'
     const includeMine = lib !== 'others'
     const includeOthers = lib !== 'mine'
@@ -378,13 +378,13 @@ app.whenReady().then(() => {
     // everything — neutralize it to 'all' there. Author is the lens for the Others' Library.
     const forStore = (library: 'mine' | 'others'): SearchFilters => (library === 'others' ? { ...filters, owner: 'all' } : filters)
     const pushSlides = async (root: string, library: 'mine' | 'others'): Promise<void> => {
-      const clusters = await archiveResults(root, cacheDir(), query ?? '', forStore(library))
+      const clusters = await archiveResults(root, cacheDir(), query, forStore(library))
       for (const c of clusters) out.push({ representative: toWire(c.representative, library), members: c.members.map((m) => toWire(m, library)), size: c.size, deckCount: c.deckCount })
     }
     const pushImages = async (root: string, library: 'mine' | 'others'): Promise<void> => {
       const idx = loadDeckMeta(root, cacheDir())
       const deckNeedle = (filters.deck || '').toLowerCase()
-      for (const im of await searchImages(root, query ?? '', 120)) {
+      for (const im of await searchImages(root, query, 120)) {
         if (deckNeedle) {
           const m = idx[im.deck]
           if (!`${im.deck} ${m?.title || ''} ${m?.filename || ''}`.toLowerCase().includes(deckNeedle)) continue
@@ -394,33 +394,48 @@ app.whenReady().then(() => {
       }
     }
 
-    if (type === 'slides') {
-      // whole slides (the well has no slides, so Well-scope is empty here)
-      if (scope !== 'well' && includeMine && archiveAvailable()) {
+    if (plan.slides) {
+      if (includeMine && archiveAvailable()) {
         try { await pushSlides(archiveRoot(), 'mine') } catch { /* mine search failed */ }
       }
-      if (scope !== 'well' && includeOthers && othersArchiveAvailable()) {
+      if (includeOthers && othersArchiveAvailable()) {
         try { await pushSlides(othersArchiveRootResolved(), 'others') } catch { /* others search failed */ }
       }
-    } else {
-      // images: the pictures embedded in decks (separate from the slides) + the well's images
-      if (scope !== 'well' && includeMine && archiveAvailable()) {
+    }
+    if (plan.archiveImages) {
+      if (includeMine && archiveAvailable()) {
         try { await pushImages(archiveRoot(), 'mine') } catch { /* mine images failed */ }
       }
-      if (scope !== 'well' && includeOthers && othersArchiveAvailable()) {
+      if (includeOthers && othersArchiveAvailable()) {
         try { await pushImages(othersArchiveRootResolved(), 'others') } catch { /* others images failed */ }
       }
-      // the well is the user's own — shown for Mine/All, not when searching Others only
-      if (scope !== 'archive' && includeMine) {
-        try {
-          for (const r of await searchWell(wellRootResolved(), query ?? '', 60)) {
-            const w = wellToWire(r)
-            out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
-          }
-        } catch { /* no well yet */ }
-      }
+    }
+    // the well is the user's own — shown for Mine/All, not when searching Others only
+    if (plan.well && includeMine) {
+      try {
+        for (const r of await searchWell(wellRootResolved(), query, 60)) {
+          const w = wellToWire(r)
+          out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
+        }
+      } catch { /* no well yet */ }
     }
     return out
+  }
+  const rep = (c: Record<string, unknown>): FilterableResult => c.representative as FilterableResult
+
+  ipcMain.handle('archive:search', async (_e, query: string, filters: SearchFilters) => {
+    const from = filters?.from ?? 'all'
+    const kind = filters?.kind ?? 'all'
+    const plan = planSources(filters?.type ?? 'slides', from, kind)
+    const rows = await collectResults(query ?? '', filters, plan)
+    return rows.filter((c) => matchesFromKind(rep(c), from, kind))
+  })
+
+  // Counts for the From chips: the current query over every store, Kind applied, From ignored.
+  ipcMain.handle('archive:from-counts', async (_e, query: string, filters: SearchFilters): Promise<FromCounts> => {
+    const kind = filters?.kind ?? 'all'
+    const rows = await collectResults(query ?? '', filters, { slides: true, archiveImages: true, well: true })
+    return countFrom(rows.map(rep), kind)
   })
 
   // Distinct deck categories (with counts) for the Category filter dropdown.
@@ -912,7 +927,7 @@ app.whenReady().then(() => {
       buttons: ['Cancel', `Delete ${idList.length}`],
       defaultId: 0,
       cancelId: 0,
-      message: `Delete ${idList.length} deck${idList.length === 1 ? '' : 's'} from your Others' Library?`,
+      message: `Delete ${idList.length} presentation${idList.length === 1 ? '' : 's'} from your Others' Library?`,
       detail: 'Removed from this separate store only — your own archive and the source files are untouched.'
     })
     if (res.response !== 1) return { ok: false, cancelled: true }

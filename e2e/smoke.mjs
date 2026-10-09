@@ -35,11 +35,19 @@ try {
   const status = (await win.locator('.statusbar').first().textContent())?.replace(/\s+/g, ' ').trim()
   const archiveConnected = /archive connected/.test(status ?? '')
 
-  // filter bar: Owner/Date/Slides native selects (3) + searchable Category + Group toggle + Source scope
+  // filter bar: Owner/Date/Slides native selects (3) + searchable Category + Group toggle + From chips + Kind switch
   const filterSelects = await win.locator('.filterbar .filter select').count() // Owner, Date, Role, Sort
   const hasSearchableFilters = (await win.locator('.filterbar .ss-btn').count()) >= 2 // Category + Deck
   const hasToggle = (await win.locator('.filterbar .toggle', { hasText: 'near-identical' }).count()) === 1
-  const hasScope = (await win.locator('.filterbar [aria-label="Source scope"] .scope-tab').count()) === 3
+  // Source switch is gone; From chips (5, 'Used in talks' disabled) + Kind switch (3) replace it
+  const noSourceSwitch = (await win.locator('[aria-label="Source scope"]').count()) === 0
+  const fromChips = await win.locator('.fromrow [aria-label="From"] .chip').count()
+  const talksDisabled = await win.locator('.fromrow .chip', { hasText: 'Used in talks' }).isDisabled()
+  const kindTabs = await win.locator('.fromrow [aria-label="Kind"] .scope-tab').count()
+  const hasScope = noSourceSwitch && fromChips === 5 && talksDisabled && kindTabs === 3
+  // no UI string says 'deck' (class names and identifiers are not UI)
+  const deckWords = (await win.evaluate(() => [...document.querySelectorAll('.titlebar, header, .filterbar, .fromrow')].map((e) => e.innerText).join(' '))).match(/\bdecks?\b/gi) ?? []
+  const noDeckWord = deckWords.length === 0
 
   let browseDefault = 0
   let cardCount = 0
@@ -68,7 +76,24 @@ try {
   let triageOpensOk = false
   let settingsOk = false
 
+  let filterLayoutOk = !archiveConnected
   if (archiveConnected) {
+    // 1440x900 screenshot with a query typed; filter rows must not overlap the result count line
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1440, 900))
+    await win.fill('.search-input', 'classroom')
+    await win.waitForTimeout(1500)
+    mkdirSync('e2e/out', { recursive: true })
+    await win.screenshot({ path: 'e2e/out/search-filters-1440.png' })
+    filterLayoutOk = await win.evaluate(() => {
+      const bottom = (sel) => Math.max(0, ...[...document.querySelectorAll(sel)].map((e) => e.getBoundingClientRect().bottom))
+      const head = document.querySelector('.results-head')
+      const rowsBottom = Math.max(bottom('.filterbar'), bottom('.fromrow'))
+      const chips = [...document.querySelectorAll('.fromrow .chip, .fromrow .scope-tab')].every((e) => e.scrollWidth <= e.clientWidth + 1)
+      return chips && (!head || head.getBoundingClientRect().top >= rowsBottom)
+    })
+    await win.fill('.search-input', '')
+    await win.waitForTimeout(500)
+
     // default browse populates with no query (newest first)
     await win.waitForSelector('main .grid .card', { timeout: 15000 })
     browseDefault = await win.locator('main .grid .card').count()
@@ -150,7 +175,7 @@ try {
     await win.waitForSelector('.ctx-menu', { timeout: 4000 })
     const labels = await win.locator('.ctx-menu .ctx-item').allTextContents()
     menuItems = labels.length
-    hasContext = labels.includes('See in context (whole deck)')
+    hasContext = labels.includes('See in context (whole presentation)')
     const hasExpected = ['Open full size', 'Copy text', 'Copy structure (JSON)', 'Copy reference', 'Reveal in Finder'].every((l) => labels.includes(l))
     await win.locator('.menu-scrim').click()
     if (!hasExpected) menuItems = -menuItems
@@ -179,6 +204,8 @@ try {
     await win.waitForTimeout(1200)
     const after = await win.locator('main .grid .card').count()
     filterReran = after >= 0
+    await win.locator('.filterbar select').nth(1).selectOption('all') // restore: later steps need cards (2024 may hold none for this query)
+    await win.waitForTimeout(1000)
 
     // Import panel opens with its What/Where rows + an Import action + a log (no real ingest here)
     await win.locator('.tb-btn', { hasText: 'Import' }).click()
@@ -207,14 +234,14 @@ try {
     // Type = Images: extracted images (separate from slides), tagged IMG
     await win.fill('.search-input', '')
     await win.waitForTimeout(500)
-    await win.locator('.filterbar .scope-tab', { hasText: 'Images' }).click()
+    await win.locator('.filterbar .scope-tab', { hasText: /^Images$/ }).click()
     await win.waitForTimeout(2500)
     imgCards = await win.locator('main .grid .card').count()
     imgTags = await win.locator('main .ocr-tag.img').count()
     imagesTypeOk = imgCards > 0 && imgTags > 0
 
     // Deck MODE: a card per presentation + a metadata sidebar on click
-    await win.locator('.filterbar .scope-tab', { hasText: 'Decks' }).click()
+    await win.locator('.filterbar .scope-tab', { hasText: /^Presentations$/ }).click()
     await win.waitForTimeout(1600)
     const nDeckCards = await win.locator('main .deck-card').count()
     if (nDeckCards > 0) {
@@ -245,9 +272,9 @@ try {
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
-    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk && roleAllOk && selectionOk && rowNavOk && clickSelectsOk && inspectorOk && paletteOk && lightboxPaletteOk && helpOk && triageOpensOk && settingsOk)
+    (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && noDeckWord && filterLayoutOk && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk && roleAllOk && selectionOk && rowNavOk && clickSelectsOk && inspectorOk && paletteOk && lightboxPaletteOk && helpOk && triageOpensOk && settingsOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, rowNavOk, clickSelectsOk, inspectorOk, paletteOk, lightboxPaletteOk, helpOk, triageOpensOk, settingsOk, imgCards, imgTags, pass })
+  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, noDeckWord, filterLayoutOk, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, rowNavOk, clickSelectsOk, inspectorOk, paletteOk, lightboxPaletteOk, helpOk, triageOpensOk, settingsOk, imgCards, imgTags, pass })
   await app.close()
   process.exit(pass ? 0 : 2)
 } catch (e) {
