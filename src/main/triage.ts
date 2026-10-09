@@ -10,16 +10,16 @@
  * record (triage_fts) is keyed by source-relative path and skipped on re-scan when size+mtime match.
  */
 import { createHash } from 'node:crypto'
-import { createReadStream, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs'
 import { join, relative, extname, basename } from 'node:path'
 import { query, run, safeFtsQuery } from './sqlite'
 import { ocrImage, ingestScreenshot, ingestVideo, makePoster } from './well'
 import { tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
 import { parseScreenshotName } from './screenshot-name'
+import { walk } from './scan-walk'
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'heic', 'heif', 'tiff', 'tif', 'bmp'])
 const VIDEO_EXT = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv'])
-const SKIP_DIRS = new Set(['.git', 'node_modules', '.Trash', '$RECYCLE.BIN'])
 
 /** Soft gate (ADR-0029): a video over this needs an explicit confirm before include. */
 export const VIDEO_GATE_BYTES = 20 * 1024 * 1024
@@ -72,24 +72,6 @@ function hashFile(path: string, timeoutMs = 15000): Promise<string | null> {
     s.on('end', () => done(h.digest('hex').slice(0, 12)))
     s.on('error', () => done(null))
   })
-}
-
-function* walk(dir: string, recursive = true): Generator<{ abs: string }> {
-  let entries: import('node:fs').Dirent[]
-  try {
-    entries = readdirSync(dir, { withFileTypes: true })
-  } catch {
-    return
-  }
-  for (const e of entries) {
-    if (e.name.startsWith('.') || SKIP_DIRS.has(e.name)) continue
-    const abs = join(dir, e.name)
-    if (e.isDirectory()) {
-      if (recursive) yield* walk(abs, recursive)
-    } else if (e.isFile()) {
-      yield { abs }
-    }
-  }
 }
 
 interface ScanRow {

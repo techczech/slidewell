@@ -86,6 +86,22 @@ describe('planBacklogImport', () => {
     expect(plan.items[0].nameTaken).toBe(false)
   })
 
+  it('counts Desktop originals copied earlier but still on the Desktop as pending moves', () => {
+    const from = '/H/Desktop/Screenshot 2026-10-08 at 10.05.01.png'
+    const ledger: LedgerEntry[] = [{ step: 'copied', hash: 'h', watched: '/W/Shots', source: 'desktop', from, size: 100, mtimeMs: 1, dest: '/W/Shots/x.png', at: '' }]
+    const plan = planBacklogImport(base({ desktop: [f('Screenshot 2026-10-08 at 10.05.01.png')], ledger }))
+    if (!plan.ok) throw new Error('expected a plan')
+    expect(plan.summary.desktop.count).toBe(0)
+    expect(plan.summary.pendingMoves).toBe(1)
+  })
+
+  it('leaves online-only placeholders out and counts them', () => {
+    const plan = planBacklogImport(base({ cleanshot: [{ ...f('m1/a.png'), onlineOnly: true }, f('m2/b.png')] }))
+    if (!plan.ok) throw new Error('expected a plan')
+    expect(plan.items.map((i) => i.name)).toEqual(['b.png'])
+    expect(plan.summary.onlineOnly).toBe(1)
+  })
+
   it('skips empty files', () => {
     const plan = planBacklogImport(base({ cleanshot: [f('m1/a.png', 0)] }))
     expect(plan.ok && plan.items.length === 0 && plan.summary.skipped.empty === 1).toBe(true)

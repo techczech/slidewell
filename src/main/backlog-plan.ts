@@ -20,8 +20,8 @@ import { parseScreenshotName } from './screenshot-name'
 
 export type BacklogSource = 'desktop' | 'cleanshot'
 
-/** One file from a read-only listing. `rel` is relative to the source root, '/'-separated. */
-export type ListedFile = { rel: string; size: number; mtimeMs: number }
+/** One file from a read-only listing. `rel` is relative to the source root, '/'-separated. `onlineOnly` = a cloud placeholder (dataless): never read. */
+export type ListedFile = { rel: string; size: number; mtimeMs: number; onlineOnly?: boolean }
 
 /** One ledger line (hash-keyed). `copied` = a verified copy exists in `watched`; `moved` = the Desktop original was moved. */
 export type LedgerEntry = {
@@ -61,8 +61,10 @@ export type BacklogPlan =
       cleanshotDir: string | null
       items: PlanItem[]
       summary: {
-        desktop: SourceSummary // still to bring in (excludes likelyDone)
+        desktop: SourceSummary // still to copy (excludes likelyDone)
         cleanshot: SourceSummary
+        pendingMoves: number // Desktop originals already copied but still on the Desktop (an interrupted run)
+        onlineOnly: number // online-only placeholders left out; downloading them first is the user's step
         likelyDone: number
         nameTaken: number
         totalBytes: number
@@ -108,6 +110,11 @@ export function movedFolderName(date: string): string {
   return `${MOVED_FOLDER_PREFIX} ${date}`
 }
 
+/** True for the dated folders the import moves Desktop originals into; the Triage scan skips them. */
+export function isMovedFolderName(name: string): boolean {
+  return /^Moved by SlideWell \d{4}-\d{2}-\d{2}$/.test(name)
+}
+
 /** `name.png` → `name (2).png` (n ≥ 2). Used by the executor when a name is taken by different content. */
 export function alternativeName(name: string, n: number): string {
   const i = name.lastIndexOf('.')
@@ -126,11 +133,16 @@ export function planBacklogImport(input: PlanInput): BacklogPlan {
   const done = new Set(input.ledger.filter((e) => e.watched === watched).map((e) => `${e.from}\0${e.size}\0${e.mtimeMs}`))
   const taken = new Set(input.watchedNames.filter((n) => !n.endsWith(PARTIAL_SUFFIX)).map((n) => n.toLowerCase()))
   const skipped = { cleanshotProjects: 0, cleanshotOther: 0, empty: 0 }
+  let onlineOnly = 0
   const items: PlanItem[] = []
 
   const add = (source: BacklogSource, root: string, f: ListedFile, name: string): void => {
     if (f.size <= 0) {
       skipped.empty++
+      return
+    }
+    if (f.onlineOnly) {
+      onlineOnly++
       return
     }
     const from = joinPath(root, f.rel)
@@ -191,6 +203,8 @@ export function planBacklogImport(input: PlanInput): BacklogPlan {
     summary: {
       desktop,
       cleanshot,
+      pendingMoves: items.filter((i) => i.likelyDone && i.source === 'desktop').length,
+      onlineOnly,
       likelyDone: items.filter((i) => i.likelyDone).length,
       nameTaken: items.filter((i) => i.nameTaken && !i.likelyDone).length,
       totalBytes: desktop.bytes + cleanshot.bytes,

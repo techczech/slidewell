@@ -48,13 +48,16 @@ export function BacklogImportSettings(): JSX.Element {
     }
   }
   const pointCleanShot = async (): Promise<void> => {
-    const r = await window.sw.backlog.setCleanShot()
-    setCsNote(r?.ok ? 'Done. If CleanShot still saves to the old folder, quit and reopen CleanShot.' : 'CleanShot’s setting did not change.')
+    if (!cs) return
+    const r = await window.sw.backlog.setCleanShot(cs.target) // exactly the folder shown
+    setCsNote(r && 'refused' in r && r.refused ? `Not changed: ${r.refused}.` : r && 'ok' in r && r.ok ? 'Done. If CleanShot still saves to the old folder, quit and reopen CleanShot.' : 'CleanShot’s setting did not change.')
     loadCs()
   }
 
   const p = plan?.plan
-  const todo = p?.ok ? p.summary.desktop.count + p.summary.cleanshot.count : 0
+  const copies = p?.ok ? p.summary.desktop.count + p.summary.cleanshot.count : 0
+  const moves = p?.ok ? p.summary.pendingMoves : 0
+  const todo = copies + moves
 
   return (
     <>
@@ -86,12 +89,22 @@ export function BacklogImportSettings(): JSX.Element {
           <div className="settings-row backlog-plan" data-testid="backlog-plan">
             <div className="settings-row-main">
               <div className="settings-row-label">
-                {todo === 0 ? 'Nothing left to bring in.' : `${plural(todo, 'file')} to bring in, ${mb(p.summary.totalBytes)} · into ${p.watchedFolder}`}
+                {todo === 0 ? 'Nothing left to bring in.' : copies > 0 ? `${plural(copies, 'file')} to bring in, ${mb(p.summary.totalBytes)} · into ${p.watchedFolder}` : `Nothing new to copy · into ${p.watchedFolder}`}
               </div>
               <PlanLine title="Desktop screenshots (moved after copying)" s={p.summary.desktop} />
               {p.cleanshotDir ? <PlanLine title="CleanShot history (copied; left in CleanShot)" s={p.summary.cleanshot} /> : <div className="settings-row-detail" style={WRAP}>CleanShot history not found on this Mac.</div>}
               {p.summary.desktop.count > 0 && <div className="settings-row-detail" style={WRAP}>Desktop originals go to “{p.movedFolder.split('/').pop()}”.</div>}
-              {p.summary.likelyDone > 0 && <div className="settings-row-detail" style={WRAP}>{plural(p.summary.likelyDone, 'file')} already brought in earlier; checked again, not copied twice.</div>}
+              {moves > 0 && (
+                <div className="settings-row-detail" style={WRAP}>
+                  <b>{plural(moves, 'original')} still to move to the dated folder</b> (copied in an earlier run that did not finish; each copy is checked again first).
+                </div>
+              )}
+              {p.summary.onlineOnly > 0 && (
+                <div className="settings-row-detail" style={WRAP}>
+                  {plural(p.summary.onlineOnly, 'file')} online-only, left out: open OneDrive (or iCloud) to download them, then run this again.
+                </div>
+              )}
+              {p.summary.likelyDone - moves > 0 && <div className="settings-row-detail" style={WRAP}>{plural(p.summary.likelyDone - moves, 'file')} already brought in earlier; checked again, not copied twice.</div>}
               {p.summary.nameTaken > 0 && (
                 <div className="settings-row-detail" style={WRAP}>{plural(p.summary.nameTaken, 'name')} already used in the folder: an identical file is kept as is, a different one is saved under a new name. Nothing is overwritten.</div>
               )}
@@ -139,7 +152,8 @@ export function BacklogImportSettings(): JSX.Element {
               <div className="settings-row-detail" style={WRAP}>
                 {plural(result.copied, 'copy', 'copies')} made · {plural(result.moved, 'Desktop original')} moved
                 {result.reused + result.alreadyDone > 0 ? ` · ${plural(result.reused + result.alreadyDone, 'file')} already there` : ''}
-                {result.moveSkipped > 0 ? ` · ${plural(result.moveSkipped, 'original')} left on the Desktop` : ''}
+                {result.moveSkipped > 0 ? ` · ${plural(result.moveSkipped, 'original')} left on the Desktop (see the log)` : ''}
+                {result.onlineOnly > 0 ? ` · ${plural(result.onlineOnly, 'online-only file')} left out` : ''}
                 {result.gone > 0 ? ` · ${plural(result.gone, 'file')} no longer there` : ''}
                 {result.failed > 0 ? ` · ${plural(result.failed, 'problem')}` : ''}
               </div>

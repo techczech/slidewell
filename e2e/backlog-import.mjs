@@ -5,7 +5,7 @@
 // Run: `npx electron-vite build && node e2e/backlog-import.mjs [screenshot.png]`.
 import { _electron as electron } from 'playwright'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, relative } from 'node:path'
 
@@ -19,13 +19,24 @@ const desktop = join(home, 'Desktop')
 const media = join(home, 'Library', 'Application Support', 'CleanShot', 'media')
 const watched = join(work, 'Watched')
 const userData = join(work, 'userData')
-for (const d of [desktop, media, watched, userData, join(work, 'well')]) mkdirSync(d, { recursive: true })
+for (const d of [desktop, media, watched, userData, join(work, 'well'), join(work, 'elsewhere')]) mkdirSync(d, { recursive: true })
 writeFileSync(join(desktop, 'Screenshot 2026-10-08 at 10.05.01.png'), PNG('d1'))
 writeFileSync(join(desktop, 'CleanShot 2026-10-08 at 0801 from Safari.png'), PNG('d2'))
 writeFileSync(join(desktop, 'Notes.txt'), 'not a screenshot')
 for (const [dir, name, seed] of [['media_a', 'CleanShot 2026-10-01 at 0900.png', 'c1'], ['media_b', 'CleanShot 2026-10-01 at 0901.png', 'c2'], ['media_c', 'CleanShot 2026-10-01 at 0902.cleanshot', 'p']]) {
   mkdirSync(join(media, dir), { recursive: true })
   writeFileSync(join(media, dir, name), PNG(seed))
+}
+// An earlier run that copied this one but stopped before moving it: Settings must offer the pending move.
+const PENDING = 'Screenshot 2026-10-07 at 09.00.00.png'
+writeFileSync(join(desktop, PENDING), PNG('pending'))
+writeFileSync(join(watched, PENDING), PNG('pending'))
+{
+  const from = join(realpathSync.native(desktop), PENDING)
+  const st = statSync(from)
+  mkdirSync(join(userData, 'backlog-import'), { recursive: true })
+  const entry = { step: 'copied', hash: createHash('sha256').update(PNG('pending')).digest('hex'), watched: realpathSync.native(watched), source: 'desktop', from, size: st.size, mtimeMs: Math.round(st.mtimeMs), dest: join(realpathSync.native(watched), PENDING), at: new Date().toISOString() }
+  writeFileSync(join(userData, 'backlog-import', 'backlog-ledger.jsonl'), JSON.stringify(entry) + '\n')
 }
 writeFileSync(join(userData, 'config.json'), JSON.stringify({ wellRoot: join(work, 'well'), screenshotRoot: watched }), 'utf8')
 
@@ -60,7 +71,8 @@ try {
   const planText = await win.locator('[data-testid="backlog-plan"]').innerText()
   r.planShowsCounts = planText.includes('4 files to bring in') && planText.includes('Desktop screenshots') && planText.includes('CleanShot history')
   r.planShowsExamples = planText.includes('Screenshot 2026-10-08 at 10.05.01.png')
-  r.dryRunChangedNothing = JSON.stringify(snap(work)) === JSON.stringify(before) && !existsSync(join(userData, 'backlog-import'))
+  r.planShowsPendingMove = planText.includes('1 original still to move')
+  r.dryRunChangedNothing = JSON.stringify(snap(work)) === JSON.stringify(before)
   await win.locator('[data-testid="backlog-plan"]').scrollIntoViewIfNeeded()
   if (process.argv[2]) await win.locator('.settings-modal').screenshot({ path: process.argv[2].replace(/\.png$/, '-plan.png') })
 
@@ -75,6 +87,17 @@ try {
   r.cleanshotOffer = (await win.locator('[data-testid="backlog-cleanshot"]').count()) === 1
   if (process.argv[2]) await win.locator('.settings-modal').screenshot({ path: process.argv[2] })
 
+  // Triage indexes the four copies, not the moved originals (the post-run scan is explicit, not watcher-driven)
+  let tri = []
+  for (let i = 0; i < 30 && tri.length < 5; i++) {
+    await win.waitForTimeout(1000)
+    tri = (await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0))).items
+  }
+  r.triageItems = tri.length
+  r.triageSkipsMovedFolder = tri.length === 5 && tri.every((x) => !x.relPath.includes('Moved by SlideWell'))
+  // The CleanShot write refuses a folder other than the watched one (no real write happens here)
+  r.cleanshotRefusesOtherFolder = Boolean((await win.evaluate((p) => window.sw.backlog.setCleanShot(p), join(work, 'elsewhere')))?.refused)
+
   // second dry run: nothing left
   await win.locator('button', { hasText: 'Show what would move' }).click()
   await win.waitForSelector('[data-testid="backlog-plan"]')
@@ -85,11 +108,14 @@ try {
     r.planShowsCounts &&
     r.planShowsExamples &&
     r.dryRunChangedNothing &&
-    r.watched.length === 4 &&
-    r.moved.length === 2 &&
+    r.planShowsPendingMove &&
+    r.watched.length === 5 &&
+    r.moved.length === 3 &&
     JSON.stringify(r.desktopLeft) === JSON.stringify(['Notes.txt']) &&
     r.cleanshotUntouched &&
     r.cleanshotOffer &&
+    r.triageSkipsMovedFolder &&
+    r.cleanshotRefusesOtherFolder &&
     r.secondPlanEmpty
 } catch (e) {
   r.error = String(e)

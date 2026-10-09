@@ -7,7 +7,7 @@ import { ipcMain, shell, type WebContents } from 'electron'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { dryRun, runImport, type BacklogEnv, type RunProgress } from './backlog-import'
+import { dryRun, real, runImport, type BacklogEnv, type RunProgress } from './backlog-import'
 import type { BacklogPlan } from './backlog-plan'
 import { cleanShotSetting, setCleanShotExportPath, type DefaultsWriter } from './cleanshot-folder'
 
@@ -79,9 +79,14 @@ export function registerBacklogIpc(deps: {
     return w ? cleanShotSetting(w) : null
   })
 
-  ipcMain.handle('backlog:set-cleanshot', async (e) => {
+  // Writes only the folder the user was shown, and only if it is still the watched folder (by realpath).
+  ipcMain.handle('backlog:set-cleanshot', async (e, shown: string) => {
     if (!deps.isMainWindow(e.sender)) return null
     const w = deps.watchedFolder()
-    return w ? setCleanShotExportPath(w, deps.writer) : null
+    const [a, b] = await Promise.all([realOrNull(w), realOrNull(typeof shown === 'string' ? shown : null)])
+    if (!a || !b || a !== b) return { refused: 'the folder changed, review again' }
+    return setCleanShotExportPath(shown, deps.writer)
   })
 }
+
+const realOrNull = real

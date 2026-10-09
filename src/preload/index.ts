@@ -165,6 +165,8 @@ export type BacklogPlanView =
       summary: {
         desktop: BacklogSourceSummary
         cleanshot: BacklogSourceSummary
+        pendingMoves: number
+        onlineOnly: number
         likelyDone: number
         nameTaken: number
         totalBytes: number
@@ -181,6 +183,7 @@ export type BacklogRunResult = {
   alreadyDone: number
   moved: number
   moveSkipped: number
+  onlineOnly: number
   gone: number
   failed: number
   logPath: string
@@ -354,7 +357,8 @@ const api = {
     showLogs: (): Promise<boolean> => ipcRenderer.invoke('backlog:show-logs'),
     cleanShotSetting: (): Promise<CleanShotSetting | null> => ipcRenderer.invoke('backlog:cleanshot-setting'),
     // Changes CleanShot's export folder to the watched folder. Only ever called from a click.
-    setCleanShot: (): Promise<(CleanShotSetting & { ok: boolean }) | null> => ipcRenderer.invoke('backlog:set-cleanshot'),
+    // `shown` = the exact folder the user saw; main refuses if it is no longer the watched folder.
+    setCleanShot: (shown: string): Promise<(CleanShotSetting & { ok: boolean; refused?: undefined }) | { refused: string } | null> => ipcRenderer.invoke('backlog:set-cleanshot', shown),
     onProgress: (cb: (p: BacklogProgress) => void): (() => void) => {
       const handler = (_e: Electron.IpcRendererEvent, p: BacklogProgress): void => cb(p)
       ipcRenderer.on('backlog:progress', handler)
