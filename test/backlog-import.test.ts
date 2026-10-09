@@ -222,6 +222,38 @@ describe('backlog import (copy only) on scratch folders', () => {
     })
   })
 
+  describe.each([false, true])('re-review P2-3: an intent-only destination that is online-only (source renamed: %s)', (renamed) => {
+    it('is unresolved work: the item is planned and copied under another name, the placeholder never read', async () => {
+      let crash = true
+      const dying: BacklogEnv = {
+        ...env,
+        ops: {
+          link: async (a, b) => {
+            await realLink(a, b)
+            if (crash && b === W(C1)) {
+              crash = false
+              throw Object.assign(new Error('process died after the link'), { code: 'EIO' })
+            }
+          }
+        }
+      }
+      await runImport(await dryRun(dying), dying)
+      const entries = parseLedger(readFileSync(ledgerPath(env.stateDir), 'utf8'))
+      expect(entries.some((e) => e.step === 'placing' && e.dest === W(C1)) && !entries.some((e) => e.step === 'copied' && e.dest === W(C1))).toBe(true)
+      chmodSync(W(C1), 0o000) // the placeholder: any read attempt would fail
+      const src = renamed ? join(env.cleanshotDir!, 'media_a', 'renamed.png') : join(env.cleanshotDir!, 'media_a', C1)
+      if (renamed) await fsp.rename(join(env.cleanshotDir!, 'media_a', C1), src)
+      const fake: BacklogEnv = { ...env, ops: { isOnlineOnly: async (p) => p === W(C1) } }
+      const plan = await dryRun(fake)
+      expect(plan.ok && plan.summary).toMatchObject({ cleanshot: { count: 1 }, unverifiedOnlineOnly: 0 })
+      const res = await runImport(plan, fake)
+      expect(res).toMatchObject({ ok: true, copied: 1, unverifiedOnlineOnly: 0, onlineOnly: 0, failed: 0 })
+      const dest = renamed ? W('renamed.png') : W('CleanShot 2026-10-01 at 0900 (2).png')
+      expect(readFileSync(dest, 'utf8')).toBe('cs-1')
+      expect(statSync(W(C1)).mode & 0o777).toBe(0) // untouched
+    })
+  })
+
   describe('online-only (never hydrated)', () => {
     it('item 7: an online-only recorded copy is unverified, not done, not copied again, not read', async () => {
       await runImport(await dryRun(env), env)

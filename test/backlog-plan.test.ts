@@ -130,6 +130,13 @@ describe('helpers', () => {
     const plan = planBacklogImport(base({ cleanshot: [f('m1/a.png')], ledger: [intent], copyStates: { [copyStateKey('/W/Shots/a.png', 'other')]: 'ok' } }))
     expect(plan.ok && plan.items.map((i) => i.recopy)).toEqual([false])
   })
+  it('an online-only path vouched for only by an intent is planned, not "unverified"', () => {
+    const intent: LedgerEntry = { ...entry('/H/CS/media/m1/a.png'), step: 'placing' }
+    const plan = planBacklogImport(base({ cleanshot: [f('m1/a.png')], ledger: [intent], copyStates: { [copyStateKey('/W/Shots/a.png', 'h')]: 'online-only' } }))
+    if (!plan.ok) throw new Error('expected a plan')
+    expect(plan.items).toHaveLength(1)
+    expect(plan.summary.unverifiedOnlineOnly).toBe(0)
+  })
   it('parseLedger skips a torn line and old move records', () => {
     const good = JSON.stringify({ step: 'copied', hash: 'h', watched: '/W', source: 'desktop', from: '/x', size: 1, mtimeMs: 1, dest: '/W/x', at: '' })
     const moved = JSON.stringify({ step: 'moved', hash: 'h', watched: '/W', source: 'desktop', from: '/x', size: 1, mtimeMs: 1, dest: '/W/m/x', at: '' })

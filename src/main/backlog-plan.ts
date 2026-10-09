@@ -173,12 +173,12 @@ export function planBacklogImport(input: PlanInput): BacklogPlan {
     }
     const from = joinPath(root, f.rel)
     const prior = byFrom.get(`${from}\0${f.size}\0${f.mtimeMs}`) ?? []
-    const states = prior.map(stateOf)
-    if (states.includes('ok')) {
+    if (prior.some((e) => stateOf(e) === 'ok')) {
       done++
       return
     }
-    if (states.includes('online-only')) {
+    // the unverified policy is for real earlier copies only; an intent-only online-only path is unresolved work
+    if (prior.some((e) => e.step === 'copied' && stateOf(e) === 'online-only')) {
       unverifiedOnlineOnly++
       return
     }

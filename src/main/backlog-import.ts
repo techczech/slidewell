@@ -395,19 +395,23 @@ export async function runImport(
    * from any source item and under any name) whose recorded path still exists and matches.
    * `unrecorded` = only an intent vouches for it (crash between link and the done record).
    */
-  const priorState = async (hash: string): Promise<{ state: 'ok' | 'online-only'; dest: string; unrecorded: boolean } | null> => {
+  const priorState = async (hash: string): Promise<{ state: 'ok' | 'online-only' | 'none'; dest: string; unrecorded: boolean; unresolved: Set<string> }> => {
     const entries = (await readLedger(env.stateDir)).filter((e) => e.watched === watched && e.hash === hash).reverse()
     const done = new Set(entries.filter((e) => e.step === 'copied').map((e) => e.dest))
     const checked = new Set<string>()
     let online: string | null = null
+    const unresolved = new Set<string>() // intent-only paths that are online-only: never read, never reused
     for (const e of entries) {
       if (checked.has(e.dest)) continue
       checked.add(e.dest)
       const s = await copyState(e.dest, hash, env, ops, signal)
-      if (s === 'ok') return { state: 'ok', dest: e.dest, unrecorded: !done.has(e.dest) }
-      if (s === 'online-only') online ??= e.dest
+      if (s === 'ok') return { state: 'ok', dest: e.dest, unrecorded: !done.has(e.dest), unresolved }
+      if (s === 'online-only') {
+        if (done.has(e.dest)) online ??= e.dest // only a real earlier copy is "unverified, online-only"
+        else unresolved.add(e.dest)
+      }
     }
-    return online ? { state: 'online-only', dest: online, unrecorded: false } : null
+    return online ? { state: 'online-only', dest: online, unrecorded: false, unresolved } : { state: 'none', dest: '', unrecorded: false, unresolved }
   }
 
   /** Stage `from`: exclusive create, write while hashing the source, fsync, re-hash the staged bytes. */
@@ -443,13 +447,17 @@ export async function runImport(
   }
 
   /** Put a verified copy of `from` into `watched` under `name` or the next free collision name. */
-  const placeCopy = async (item: PlanItem, hash: string, size: number, mtimeMs: number): Promise<{ dest: string; reused: boolean }> => {
+  const placeCopy = async (item: PlanItem, hash: string, size: number, mtimeMs: number, unresolved: Set<string>): Promise<{ dest: string; reused: boolean }> => {
     let staged: Staged | null = null
     for (let n = 1; n < 1000; n++) {
       const target = join(watched, n === 1 ? item.name : alternativeName(item.name, n))
       const existing = await fsp.lstat(target).catch(() => null)
       if (existing) {
         if (!existing.isFile()) continue // a link, folder or special file: never followed, never opened
+        if (unresolved.has(target)) {
+          await log('unresolved-online-only', { path: target }) // our own earlier attempt, online-only: not read, next name
+          continue
+        }
         if (await ops.isOnlineOnly(target)) throw new Skip(`the name ${basename(target)} is taken by a file that is ${ONLINE_ONLY_NOTE}`, 'online-only')
         if ((await hashOf(target)) === hash) return { dest: target, reused: true } // a staged file from an earlier attempt, if any, is kept
         if (existing.size < size) await log('possible-incomplete-copy', { path: target, size: existing.size, expected: size })
@@ -526,7 +534,7 @@ export async function runImport(
     const hash = await hashOf(item.from)
 
     const prior = await priorState(hash)
-    if (prior?.state === 'ok') {
+    if (prior.state === 'ok') {
       if (prior.unrecorded) {
         const done: LedgerEntry = { step: 'copied', hash, watched, source: item.source, from: item.from, size: st.size, mtimeMs: Math.round(st.mtimeMs), dest: prior.dest, at: now().toISOString() }
         await appendLine(ledgerFile, done, env)
@@ -537,9 +545,9 @@ export async function runImport(
       await log('already-done', { source: item.source, from: item.from, hash, dest: prior.dest })
       return
     }
-    if (prior?.state === 'online-only') throw new Skip(`the earlier copy ${basename(prior.dest)} is ${ONLINE_ONLY_NOTE}; not checked, not copied again`, 'unverified-online-only')
+    if (prior.state === 'online-only') throw new Skip(`the earlier copy ${basename(prior.dest)} is ${ONLINE_ONLY_NOTE}; not checked, not copied again`, 'unverified-online-only')
 
-    const placed = await placeCopy(item, hash, st.size, Math.round(st.mtimeMs))
+    const placed = await placeCopy(item, hash, st.size, Math.round(st.mtimeMs), prior.unresolved)
     if (placed.reused) res.reused++
     else res.copied++
     if (item.source === 'desktop') res.desktopWithCopy++
