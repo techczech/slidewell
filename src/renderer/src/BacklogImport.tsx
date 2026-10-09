@@ -55,9 +55,7 @@ export function BacklogImportSettings(): JSX.Element {
   }
 
   const p = plan?.plan
-  const copies = p?.ok ? p.summary.desktop.count + p.summary.cleanshot.count : 0
-  const moves = p?.ok ? p.summary.pendingMoves : 0
-  const todo = copies + moves
+  const todo = p?.ok ? p.summary.desktop.count + p.summary.cleanshot.count : 0
 
   return (
     <>
@@ -68,12 +66,12 @@ export function BacklogImportSettings(): JSX.Element {
             <div className="settings-row-label">Bring in screenshots from the Desktop and CleanShot history</div>
             <div className="settings-row-detail" style={WRAP}>
               <i>
-                Copies them into the Triage source folder and checks every copy, then moves the Desktop originals into a “Moved by SlideWell” folder there. Nothing is deleted. CleanShot’s history is only read. You see the list before anything moves.
+                Copies them into the Triage source folder and checks every copy. The originals stay where they are; nothing is moved or deleted. You see the list before anything is copied.
               </i>
             </div>
           </div>
           <button className="copyref" disabled={busy !== null} onClick={() => void showPlan()}>
-            {busy === 'planning' ? 'Looking…' : 'Show what would move'}
+            {busy === 'planning' ? 'Looking…' : 'Show what would be copied'}
           </button>
         </div>
 
@@ -89,14 +87,18 @@ export function BacklogImportSettings(): JSX.Element {
           <div className="settings-row backlog-plan" data-testid="backlog-plan">
             <div className="settings-row-main">
               <div className="settings-row-label">
-                {todo === 0 ? 'Nothing left to bring in.' : copies > 0 ? `${plural(copies, 'file')} to bring in, ${mb(p.summary.totalBytes)} · into ${p.watchedFolder}` : `Nothing new to copy · into ${p.watchedFolder}`}
+                {todo === 0 ? 'Nothing left to bring in.' : `${plural(todo, 'file')} to copy, ${mb(p.summary.totalBytes)} · into ${p.watchedFolder}`}
               </div>
-              <PlanLine title="Desktop screenshots (moved after copying)" s={p.summary.desktop} />
-              {p.cleanshotDir ? <PlanLine title="CleanShot history (copied; left in CleanShot)" s={p.summary.cleanshot} /> : <div className="settings-row-detail" style={WRAP}>CleanShot history not found on this Mac.</div>}
-              {p.summary.desktop.count > 0 && <div className="settings-row-detail" style={WRAP}>Desktop originals go to “{p.movedFolder.split('/').pop()}”.</div>}
-              {moves > 0 && (
+              <PlanLine title="Desktop screenshots" s={p.summary.desktop} />
+              {p.cleanshotDir ? <PlanLine title="CleanShot history" s={p.summary.cleanshot} /> : <div className="settings-row-detail" style={WRAP}>CleanShot history not found on this Mac.</div>}
+              {p.summary.recopy > 0 && (
                 <div className="settings-row-detail" style={WRAP}>
-                  <b>{plural(moves, 'original')} still to move to the dated folder</b> (copied in an earlier run that did not finish; each copy is checked again first).
+                  <b>{plural(p.summary.recopy, 'file')} copied before, but the copy is missing or changed</b>: copied again (included above). A changed copy is never overwritten.
+                </div>
+              )}
+              {p.summary.unverifiedOnlineOnly > 0 && (
+                <div className="settings-row-detail" style={WRAP}>
+                  {plural(p.summary.unverifiedOnlineOnly, 'earlier copy', 'earlier copies')} unverified, online-only: not checked (that would download them) and not copied again.
                 </div>
               )}
               {p.summary.onlineOnly > 0 && (
@@ -104,15 +106,16 @@ export function BacklogImportSettings(): JSX.Element {
                   {plural(p.summary.onlineOnly, 'file')} online-only, left out: open OneDrive (or iCloud) to download them, then run this again.
                 </div>
               )}
-              {p.summary.likelyDone - moves > 0 && <div className="settings-row-detail" style={WRAP}>{plural(p.summary.likelyDone - moves, 'file')} already brought in earlier; checked again, not copied twice.</div>}
+              {p.summary.done > 0 && <div className="settings-row-detail" style={WRAP}>{plural(p.summary.done, 'file')} already copied earlier and checked; not copied twice.</div>}
               {p.summary.nameTaken > 0 && (
                 <div className="settings-row-detail" style={WRAP}>{plural(p.summary.nameTaken, 'name')} already used in the folder: an identical file is kept as is, a different one is saved under a new name. Nothing is overwritten.</div>
               )}
               {p.summary.skipped.cleanshotProjects + p.summary.skipped.cleanshotOther > 0 && (
                 <div className="settings-row-detail" style={WRAP}>Left out: {plural(p.summary.skipped.cleanshotProjects + p.summary.skipped.cleanshotOther, 'CleanShot project file')} (not images or videos).</div>
               )}
-              {p.summary.leftoverPartials > 0 && (
-                <div className="settings-row-detail" style={WRAP}>{plural(p.summary.leftoverPartials, 'hidden unfinished copy', 'hidden unfinished copies')} from an interrupted run in the folder (names end “.slidewell-partial”). SlideWell leaves them; they are safe to remove.</div>
+              {p.summary.skipped.notRegular > 0 && <div className="settings-row-detail" style={WRAP}>Skipped: {plural(p.summary.skipped.notRegular, 'item')} that are not regular files.</div>}
+              {p.summary.leftoverStaged > 0 && (
+                <div className="settings-row-detail" style={WRAP}>{plural(p.summary.leftoverStaged, 'unfinished copy', 'unfinished copies')} from an interrupted run in the hidden “.slidewell-staging” folder. SlideWell leaves them; they are safe to remove.</div>
               )}
             </div>
             {todo > 0 && (
@@ -150,13 +153,19 @@ export function BacklogImportSettings(): JSX.Element {
             <div className="settings-row-main">
               <div className="settings-row-label">{result.cancelled ? 'Stopped. Run it again to carry on; nothing is copied twice.' : result.ok ? 'Done.' : 'Finished with problems.'}</div>
               <div className="settings-row-detail" style={WRAP}>
-                {plural(result.copied, 'copy', 'copies')} made · {plural(result.moved, 'Desktop original')} moved
+                {plural(result.copied, 'copy', 'copies')} made
                 {result.reused + result.alreadyDone > 0 ? ` · ${plural(result.reused + result.alreadyDone, 'file')} already there` : ''}
-                {result.moveSkipped > 0 ? ` · ${plural(result.moveSkipped, 'original')} left on the Desktop (see the log)` : ''}
                 {result.onlineOnly > 0 ? ` · ${plural(result.onlineOnly, 'online-only file')} left out` : ''}
+                {result.unverifiedOnlineOnly > 0 ? ` · ${plural(result.unverifiedOnlineOnly, 'earlier copy', 'earlier copies')} unverified, online-only` : ''}
+                {result.notRegular > 0 ? ` · ${plural(result.notRegular, 'item')} skipped: not a regular file` : ''}
                 {result.gone > 0 ? ` · ${plural(result.gone, 'file')} no longer there` : ''}
                 {result.failed > 0 ? ` · ${plural(result.failed, 'problem')}` : ''}
               </div>
+              {result.desktopWithCopy > 0 && (
+                <div className="settings-row-detail" style={WRAP} data-testid="backlog-desktop-note">
+                  {result.desktopWithCopy === 1 ? '1 original is' : `${result.desktopWithCopy.toLocaleString('en-GB')} originals are`} still on your Desktop — they’re safe to delete yourself once you’ve checked the copies.
+                </div>
+              )}
               {result.errors.slice(0, 3).map((e) => (
                 <div className="settings-row-detail" style={WRAP} key={e}>
                   {e}

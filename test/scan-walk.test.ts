@@ -10,8 +10,8 @@ const root = join(homedir(), 'Library', 'Caches', 'slidewell-dev-13', `walk-${pr
 afterAll(() => rmSync(root, { recursive: true, force: true }))
 
 describe('Triage source walk', () => {
-  it('skips "Moved by SlideWell <date>" folders but nothing else named alike', () => {
-    for (const rel of ['a.png', 'sub/b.png', 'Moved by SlideWell 2026-10-09/a.png', 'Moved by SlideWell notes/c.png', '.hidden/d.png']) {
+  it('skips "Moved by SlideWell <date>" folders and dot folders (incl. .slidewell-staging)', () => {
+    for (const rel of ['a.png', 'sub/b.png', 'Moved by SlideWell 2026-10-09/a.png', 'Moved by SlideWell notes/c.png', '.hidden/d.png', '.slidewell-staging/e.png.0a1b']) {
       mkdirSync(join(root, rel, '..'), { recursive: true })
       writeFileSync(join(root, rel), 'x')
     }

@@ -159,19 +159,19 @@ export type BacklogPlanView =
       ok: true
       date: string
       watchedFolder: string
-      movedFolder: string
       desktopDir: string
       cleanshotDir: string | null
       summary: {
         desktop: BacklogSourceSummary
         cleanshot: BacklogSourceSummary
-        pendingMoves: number
+        recopy: number
+        done: number
+        unverifiedOnlineOnly: number
         onlineOnly: number
-        likelyDone: number
         nameTaken: number
         totalBytes: number
-        skipped: { cleanshotProjects: number; cleanshotOther: number; empty: number }
-        leftoverPartials: number
+        skipped: { cleanshotProjects: number; cleanshotOther: number; empty: number; notRegular: number }
+        leftoverStaged: number
       }
     }
   | { ok: false; reason: 'no-watched-folder' | 'watched-folder-overlaps'; detail: string }
@@ -181,11 +181,12 @@ export type BacklogRunResult = {
   copied: number
   reused: number
   alreadyDone: number
-  moved: number
-  moveSkipped: number
+  unverifiedOnlineOnly: number
   onlineOnly: number
+  notRegular: number
   gone: number
   failed: number
+  desktopWithCopy: number
   logPath: string
   errors: string[]
 }

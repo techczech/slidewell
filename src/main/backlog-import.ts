@@ -1,37 +1,47 @@
 /**
- * Execution layer for the one-off screenshot backlog import (ticket 13). Small interface:
- *   listBacklog(env)  → read-only listings (names, sizes, mtimes, online-only flag); never opens a file
+ * Execution layer for the one-off screenshot backlog import (ticket 13). COPY ONLY: originals on the
+ * Desktop and in CleanShot's history are only read, never moved, changed or removed. Small interface:
+ *   listBacklog(env)  → read-only listings (names, sizes, mtimes, online-only / not-regular flags)
  *   dryRun(env)       → the plan (backlog-plan.ts); writes nothing anywhere
- *   runImport(plan, env, opts) → copy → verify → move, with a ledger and a log
+ *   runImport(plan, env, opts) → stage → verify → link into place, with a ledger and a log
  *
- * Safety rules this module holds:
- * - Nothing is deleted. CleanShot's history is only read. A Desktop original is moved into
- *   `Moved by SlideWell <date>` only after a hash-verified copy exists, and only if, right before the
- *   move, the original is still the same file (dev, ino, size, mtime, hash) and the copy still verifies.
- *   A move is link(2) to the new name then removal of the old name (same inode, so the content is
- *   never without a name); across volumes it is skipped and logged, never emulated by copy+delete.
- *   The only file this module ever unlinks by itself is a temp file it created in the same call,
- *   checked by inode first.
- * - Nothing is replaced. Every placement uses a primitive that fails on an existing name: link(2),
- *   or where hard links are unsupported, an O_EXCL reservation that only our own empty placeholder
- *   can be renamed over. On EEXIST the next collision name is tried. Temp files are created with
- *   O_EXCL|O_NOFOLLOW under a random name.
- * - Folders are compared by realpath (aliases and symlinks cannot defeat the overlap guard), at plan
- *   time and again at run time. The dated moved folder must be a real directory directly inside the
- *   watched folder.
- * - OneDrive: EDEADLK / EAGAIN / EBUSY are retried with backoff; online-only placeholders are never
- *   read (they would trigger a download and can stall); every read has an idle timeout and stops
- *   on cancel. No watcher events drive the run.
- * - Resume: a JSONL ledger (fsynced per line, in SlideWell's own data folder, torn tails repaired by
- *   starting a fresh line) keyed by content hash per watched folder. "Already copied" always means a
- *   ledger entry whose recorded copy still exists and matches by hash.
+ * Placement of one copy:
+ *   1. `<watched>/.slidewell-staging/` must be a real directory directly inside the watched folder;
+ *      created without following links and lstat-verified on every use (never cached).
+ *   2. The staged file is created O_CREAT|O_EXCL|O_NOFOLLOW, written while the source is hashed in the
+ *      same pass, fsynced, then re-read and re-hashed; both hashes must equal the source hash.
+ *   3. `link(staged, final)`: refuses to replace (EEXIST → next collision name). Where hard links are
+ *      unavailable (ENOTSUP / EPERM / EXDEV) `copyFile(staged, final, COPYFILE_EXCL)` instead, which
+ *      also never replaces. Plain rename onto a final name is never used.
+ *   4. The final file is lstat-checked and re-hashed. Only then is the staged name unlinked, after an
+ *      identity check (same dev + inode as the file this call created). On a mismatch the staged file
+ *      is kept and the final file is left as it is.
+ *
+ * Threat model: this defends against accidental concurrent activity (OneDrive sync, CleanShot
+ * writing, the user editing or adding files), not against a hostile process of the same user racing
+ * our private staging folder. Unlinking our own staged file inside that dot folder after an identity
+ * check is therefore acceptable; it is the only unlink this module performs.
+ *
+ * Resume: a JSONL ledger (fsynced per line, in SlideWell's own data folder; a torn tail is followed by
+ * a fresh line) keyed by content hash per watched folder. "Already copied" always means a ledger
+ * entry whose recorded copy still exists, is a regular file and matches by hash. A recorded copy that
+ * is online-only is reported as unverified and neither hydrated nor copied again. A final name that
+ * exists with different content is a collision (the copy takes the next name); it is never removed,
+ * and if it is smaller than the source it is logged as a possible incomplete copy.
+ *
+ * Reads: every source and destination is opened O_RDONLY|O_NOFOLLOW|O_NONBLOCK and fstat-checked to be
+ * a regular file before a byte is read (FIFOs, sockets and devices are skipped and counted); online-only
+ * placeholders (SF_DATALESS) are never opened; every read has an idle timeout and stops on cancel.
+ * Remaining limit: a read already blocked inside a libuv worker (a hung network or File Provider read)
+ * cannot be interrupted. We stop waiting for it (timeout or Stop rejects), but that worker stays busy
+ * until the OS returns.
  */
 import { createHash, randomBytes } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { constants as FS, createReadStream, promises as fsp, realpath as realpathCb, type Stats } from 'node:fs'
+import { constants as FS, promises as fsp, realpath as realpathCb } from 'node:fs'
 import { promisify } from 'node:util'
-import { join, dirname, basename } from 'node:path'
-import { alternativeName, foldersOverlap, PARTIAL_SUFFIX, planBacklogImport, parseLedger, type BacklogPlan, type LedgerEntry, type ListedFile, type PlanItem } from './backlog-plan'
+import { join, basename } from 'node:path'
+import { alternativeName, foldersOverlap, planBacklogImport, parseLedger, STAGING_DIR, type BacklogPlan, type CopyState, type LedgerEntry, type ListedFile, type PlanItem } from './backlog-plan'
 
 export type BacklogEnv = {
   desktopDir: string
@@ -39,19 +49,19 @@ export type BacklogEnv = {
   watchedFolder: string | null
   stateDir: string // ledger + logs (SlideWell's own data folder, not the watched folder)
   now?: () => Date
-  /** Filesystem calls the run makes; tests inject faults and races here. */
+  /** Filesystem calls; only tests pass these (backlog-ipc.ts never does). */
   ops?: Partial<FsOps>
-  /** Test seam: called just before the pre-move checks of a Desktop item. */
-  hooks?: { beforeMoveCheck?: (item: PlanItem) => void | Promise<void> }
   retry?: { tries?: number; baseMs?: number }
   readIdleMs?: number // a read that delivers no data for this long fails (default 30 s)
 }
 
 export type FsOps = {
   link: (from: string, to: string) => Promise<void>
-  rename: (from: string, to: string) => Promise<void>
+  copyFileExcl: (from: string, to: string) => Promise<void>
   isOnlineOnly: (path: string) => Promise<boolean>
-  tempName: (target: string) => string
+  stagedName: (stagingDir: string, name: string) => string
+  /** Test seam: called with each chunk read from a source while staging it. */
+  onSourceChunk?: (from: string, chunk: Buffer) => Promise<void> | void
 }
 
 export type RunProgress = { done: number; total: number; name: string }
@@ -59,32 +69,34 @@ export type RunResult = {
   ok: boolean
   cancelled: boolean
   copied: number // new verified copies written
-  reused: number // identical file already in the watched folder (same name, same hash)
+  reused: number // identical file already in the watched folder under that name
   alreadyDone: number // the ledger's recorded copy still exists and matches
-  moved: number // Desktop originals moved
-  moveSkipped: number // Desktop originals left in place (changed, copy missing, cross-volume…), logged
-  onlineOnly: number // left out: online-only placeholders (source, existing name or recorded copy)
+  unverifiedOnlineOnly: number // recorded copy is online-only: not checked, not copied again
+  onlineOnly: number // left out: online-only source, or the name is taken by an online-only file
+  notRegular: number // skipped: not a regular file
   gone: number // file vanished since the plan
   failed: number
+  desktopWithCopy: number // Desktop originals that now have a verified copy (they stay on the Desktop)
   logPath: string
   errors: string[]
 }
 
 const RETRY_CODES = new Set(['EDEADLK', 'EAGAIN', 'EBUSY'])
-const LINK_UNSUPPORTED = new Set(['ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EMLINK'])
+const LINK_UNAVAILABLE = new Set(['ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV'])
 const SF_DATALESS = 0x40000000
 const ONLINE_ONLY_NOTE = 'online-only; open OneDrive (or iCloud) to download it, then run again'
 
-class SkipItem extends Error {
+class Skip extends Error {
   constructor(
     message: string,
-    readonly kind: 'online-only' | 'move'
+    readonly kind: 'online-only' | 'not-regular' | 'unverified-online-only'
   ) {
     super(message)
   }
 }
 const errCode = (e: unknown): string | undefined => (e as NodeJS.ErrnoException)?.code
 const abortError = (): Error => Object.assign(new Error('stopped'), { code: 'ABORT_ERR' })
+const notRegular = (p: string): Error => Object.assign(new Error(`not a regular file: ${basename(p)}`), { code: 'ENOTREG' })
 
 export function ledgerPath(stateDir: string): string {
   return join(stateDir, 'backlog-ledger.jsonl')
@@ -106,9 +118,9 @@ export async function defaultIsOnlineOnly(path: string): Promise<boolean> {
 
 const defaultOps: FsOps = {
   link: (a, b) => fsp.link(a, b),
-  rename: (a, b) => fsp.rename(a, b),
+  copyFileExcl: (a, b) => fsp.copyFile(a, b, FS.COPYFILE_EXCL),
   isOnlineOnly: defaultIsOnlineOnly,
-  tempName: (target) => join(dirname(target), `.${basename(target)}.${randomBytes(8).toString('hex')}${PARTIAL_SUFFIX}`)
+  stagedName: (dir, name) => join(dir, `${name}.${randomBytes(8).toString('hex')}`)
 }
 
 async function withRetry<T>(fn: () => Promise<T>, env: BacklogEnv): Promise<T> {
@@ -126,14 +138,30 @@ async function withRetry<T>(fn: () => Promise<T>, env: BacklogEnv): Promise<T> {
 }
 
 /**
- * Stream a file through `onChunk` with an idle timeout and cancellation; resolves with its sha256.
- * `onChunk` may return a promise (back-pressure: reading pauses until it settles).
+ * Open a regular file without following links or blocking on FIFOs, then stream it through `onChunk`
+ * with an idle timeout and cancellation. Resolves with the sha256 of the bytes read.
  */
-export function readHashed(path: string, opts: { idleMs?: number; signal?: AbortSignal; onChunk?: (c: Buffer) => Promise<unknown> | void } = {}): Promise<string> {
+export async function readHashed(path: string, opts: { idleMs?: number; signal?: AbortSignal; onChunk?: (c: Buffer) => Promise<unknown> | void } = {}): Promise<string> {
+  if (opts.signal?.aborted) throw abortError()
+  let fh: fsp.FileHandle
+  try {
+    fh = await fsp.open(path, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK)
+  } catch (e) {
+    if (errCode(e) === 'ELOOP') throw notRegular(path)
+    throw e
+  }
+  const st = await fh.stat().catch(async (e) => {
+    await fh.close()
+    throw e
+  })
+  if (!st.isFile()) {
+    await fh.close()
+    throw notRegular(path)
+  }
   const idleMs = opts.idleMs ?? 30_000
   return new Promise<string>((resolve, reject) => {
     const h = createHash('sha256')
-    const rs = createReadStream(path)
+    const rs = fh.createReadStream({ autoClose: true })
     let timer: ReturnType<typeof setTimeout> | undefined
     let settled = false
     const finish = (err: Error | null, digest?: string): void => {
@@ -151,21 +179,23 @@ export function readHashed(path: string, opts: { idleMs?: number; signal?: Abort
       clearTimeout(timer)
       timer = setTimeout(() => finish(Object.assign(new Error(`read stalled for ${Math.round(idleMs / 1000)} s`), { code: 'ETIMEDOUT' })), idleMs)
     }
-    if (opts.signal?.aborted) return finish(abortError())
     opts.signal?.addEventListener('abort', onAbort, { once: true })
     arm()
     rs.on('data', (chunk) => {
-      arm()
       const b = chunk as Buffer
       h.update(b)
       const p = opts.onChunk?.(b)
       if (p && typeof (p as Promise<unknown>).then === 'function') {
         rs.pause()
         ;(p as Promise<unknown>).then(
-          () => settled || rs.resume(),
+          () => {
+            if (settled) return
+            arm()
+            rs.resume()
+          },
           (e) => finish(e as Error)
         )
-      }
+      } else arm()
     })
     rs.on('error', (e) => finish(e))
     rs.on('end', () => finish(null, h.digest('hex')))
@@ -187,16 +217,18 @@ async function listFiles(root: string, depth: 1 | 2, ops: FsOps): Promise<Listed
       if (e.name.startsWith('.')) continue
       const r = rel ? `${rel}/${e.name}` : e.name
       const abs = join(dir, e.name)
-      if (e.isFile()) {
-        try {
-          const st = await fsp.lstat(abs)
-          if (st.isFile()) out.push({ rel: r, size: st.size, mtimeMs: Math.round(st.mtimeMs), ...((await ops.isOnlineOnly(abs)) ? { onlineOnly: true } : {}) })
-        } catch {
-          /* vanished */
-        }
-      } else if (e.isDirectory()) {
+      if (e.isDirectory()) {
         if (level < depth) await visit(abs, r, level + 1)
         else out.push({ rel: `${r}/…`, size: 0, mtimeMs: 0 }) // deeper content (bundles) — counted as skipped, never read
+        continue
+      }
+      if (e.isSymbolicLink()) continue // links are never followed
+      try {
+        const st = await fsp.lstat(abs)
+        if (!st.isFile()) out.push({ rel: r, size: st.size, mtimeMs: Math.round(st.mtimeMs), notRegular: true })
+        else out.push({ rel: r, size: st.size, mtimeMs: Math.round(st.mtimeMs), ...((await ops.isOnlineOnly(abs)) ? { onlineOnly: true } : {}) })
+      } catch {
+        /* vanished */
       }
     }
   }
@@ -222,20 +254,49 @@ export async function resolveFolders(env: BacklogEnv): Promise<{ desktop: string
   return { desktop, cleanshot, watched }
 }
 
-export async function listBacklog(env: BacklogEnv): Promise<{ desktop: ListedFile[]; cleanshot: ListedFile[]; watchedNames: string[] }> {
+/** State of a recorded copy: never opens an online-only or non-regular file. */
+async function copyState(path: string, hash: string, env: BacklogEnv, ops: FsOps, signal?: AbortSignal): Promise<CopyState> {
+  const st = await fsp.lstat(path).catch(() => null)
+  if (!st || !st.isFile()) return 'missing-or-changed'
+  if (await ops.isOnlineOnly(path)) return 'online-only'
+  // a stalled or failed read propagates (it must not look "missing", which would copy it again)
+  const h = await withRetry(() => readHashed(path, { idleMs: env.readIdleMs, signal }), env).catch((e) => {
+    if (errCode(e) === 'ENOTREG') return null
+    throw e
+  })
+  return h === hash ? 'ok' : 'missing-or-changed'
+}
+
+export async function listBacklog(env: BacklogEnv): Promise<{ desktop: ListedFile[]; cleanshot: ListedFile[]; watchedNames: string[]; stagingNames: string[] }> {
   const ops = { ...defaultOps, ...env.ops }
   const dirs = await resolveFolders(env)
   const desktop = dirs.desktop ? await listFiles(dirs.desktop, 1, ops) : []
   const cleanshot = dirs.cleanshot ? await listFiles(dirs.cleanshot, 2, ops) : []
   const watchedNames = dirs.watched ? await fsp.readdir(dirs.watched).catch(() => []) : []
+  let stagingNames: string[] = []
+  if (dirs.watched) {
+    const s = join(dirs.watched, STAGING_DIR)
+    const st = await fsp.lstat(s).catch(() => null)
+    if (st?.isDirectory()) stagingNames = await fsp.readdir(s).catch(() => [])
+  }
   // folders below the listing depth appear as `<rel>/…` markers: ignored on the Desktop, counted as skipped in CleanShot
-  return { desktop: desktop.filter((f) => !f.rel.endsWith('/…')), cleanshot, watchedNames }
+  return { desktop: desktop.filter((f) => !f.rel.endsWith('/…')), cleanshot, watchedNames, stagingNames }
 }
 
-/** The dry run: listings + ledger → plan, all folders by realpath. Writes nothing (no state folder, no log). */
+/**
+ * The dry run: listings + ledger + the state of each recorded copy → plan, all folders by realpath.
+ * Writes nothing (no state folder, no log). Reads recorded copies to check them; never online-only ones.
+ */
 export async function dryRun(env: BacklogEnv): Promise<BacklogPlan> {
+  const ops = { ...defaultOps, ...env.ops }
   const dirs = await resolveFolders(env)
   const l = await listBacklog(env)
+  const ledger = (await readLedger(env.stateDir)).filter((e) => e.watched === dirs.watched)
+  const copyStates: Record<string, CopyState> = {}
+  for (const e of ledger) {
+    if (copyStates[e.dest] === 'ok') continue
+    copyStates[e.dest] = await copyState(e.dest, e.hash, env, ops).catch(() => 'missing-or-changed' as const) // the run re-checks and fails that item if the read fails again
+  }
   return planBacklogImport({
     watchedFolder: dirs.watched,
     desktopDir: dirs.desktop ?? env.desktopDir,
@@ -243,7 +304,9 @@ export async function dryRun(env: BacklogEnv): Promise<BacklogPlan> {
     desktop: l.desktop,
     cleanshot: l.cleanshot,
     watchedNames: l.watchedNames,
-    ledger: await readLedger(env.stateDir),
+    stagingNames: l.stagingNames,
+    ledger,
+    copyStates,
     date: localDate((env.now ?? (() => new Date()))())
   })
 }
@@ -270,42 +333,7 @@ async function appendLine(path: string, obj: unknown, env: BacklogEnv): Promise<
   }, env)
 }
 
-type OwnTemp = { path: string; ino: number; dev: number }
-
-/** Remove a temp file only if it is still the very file this call created. */
-async function removeOwnTemp(t: OwnTemp): Promise<void> {
-  const st = await fsp.lstat(t.path).catch(() => null)
-  if (st && st.isFile() && st.ino === t.ino && st.dev === t.dev) await fsp.unlink(t.path).catch(() => undefined)
-}
-
-/**
- * Put `src` at `dest` without ever replacing an existing `dest`; afterwards `src`'s old name is gone
- * and its inode lives at `dest`. EEXIST and EXDEV propagate to the caller.
- */
-async function placeNoReplace(src: string, dest: string, env: BacklogEnv, ops: FsOps): Promise<void> {
-  const before = await fsp.lstat(src)
-  try {
-    await withRetry(() => ops.link(src, dest), env)
-  } catch (e) {
-    if (!LINK_UNSUPPORTED.has(errCode(e) ?? '')) throw e
-    // No hard links here: reserve the name exclusively, then rename over our own empty placeholder only.
-    const fh = await fsp.open(dest, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW, 0o644)
-    const resv = await fh.stat()
-    await fh.close()
-    const nowSt = await fsp.lstat(dest)
-    if (nowSt.ino !== resv.ino || nowSt.dev !== resv.dev || nowSt.size !== 0) throw Object.assign(new Error('reserved name was taken'), { code: 'EEXIST' })
-    try {
-      await withRetry(() => ops.rename(src, dest), env)
-    } catch (err) {
-      await removeOwnTemp({ path: dest, ino: resv.ino, dev: resv.dev }) // our own empty placeholder only
-      throw err
-    }
-    return
-  }
-  const linked = await fsp.lstat(dest)
-  if (linked.ino !== before.ino || linked.dev !== before.dev) throw new Error(`link check failed for ${basename(dest)}`) // both names left in place
-  await withRetry(() => fsp.unlink(src), env) // the content stays under `dest` (same inode)
-}
+type Staged = { path: string; ino: number; dev: number }
 
 export async function runImport(
   plan: BacklogPlan,
@@ -315,7 +343,21 @@ export async function runImport(
   const now = env.now ?? (() => new Date())
   await fsp.mkdir(join(env.stateDir, 'logs'), { recursive: true })
   const logPath = join(env.stateDir, 'logs', `backlog-import-${now().toISOString().replace(/[:.]/g, '-')}.jsonl`)
-  const res: RunResult = { ok: false, cancelled: false, copied: 0, reused: 0, alreadyDone: 0, moved: 0, moveSkipped: 0, onlineOnly: 0, gone: 0, failed: 0, logPath, errors: [] }
+  const res: RunResult = {
+    ok: false,
+    cancelled: false,
+    copied: 0,
+    reused: 0,
+    alreadyDone: 0,
+    unverifiedOnlineOnly: 0,
+    onlineOnly: 0,
+    notRegular: 0,
+    gone: 0,
+    failed: 0,
+    desktopWithCopy: 0,
+    logPath,
+    errors: []
+  }
   const log = (event: string, extra: Record<string, unknown> = {}): Promise<void> => appendLine(logPath, { at: now().toISOString(), event, ...extra }, env)
   if (!plan.ok) {
     await log('refused', { reason: plan.reason })
@@ -334,113 +376,100 @@ export async function runImport(
   }
   if (!dirs.watched || dirs.watched !== plan.watchedFolder) return refuse('the watched folder changed since the plan was shown; review again')
   for (const other of [dirs.desktop, dirs.cleanshot]) if (other && foldersOverlap(dirs.watched, other)) return refuse('the watched folder overlaps the Desktop or CleanShot history')
-  if (dirname(plan.movedFolder) !== dirs.watched) return refuse('the moved folder is not inside the watched folder')
-
   const watched = dirs.watched
   const ledgerFile = ledgerPath(env.stateDir)
 
-  // Moved folder: created without following links, then checked to be a real folder directly inside `watched`.
-  let movedReady: Promise<string | null> | null = null
-  const ensureMovedFolder = (): Promise<string | null> =>
-    (movedReady ??= (async () => {
-      const m = plan.movedFolder
-      const pre = await fsp.lstat(m).catch(() => null)
-      if (!pre) await withRetry(() => fsp.mkdir(m), env).catch((e) => (errCode(e) === 'EEXIST' ? undefined : Promise.reject(e)))
-      const st = await fsp.lstat(m)
-      if (st.isSymbolicLink() || !st.isDirectory()) return 'the moved folder is not a real folder (a link or a file has that name)'
-      if (dirname((await real(m)) ?? '') !== watched) return 'the moved folder resolves outside the watched folder'
-      return null
-    })())
-
-  /** Check a recorded or existing copy: 'ok', 'online-only' (exists, cannot be read without downloading), or 'bad'. */
-  const checkCopy = async (path: string, hash: string): Promise<'ok' | 'online-only' | 'bad'> => {
-    const st = await fsp.lstat(path).catch(() => null)
-    if (!st || !st.isFile()) return 'bad'
-    if (await ops.isOnlineOnly(path)) return 'online-only'
-    return (await hashOf(path)) === hash ? 'ok' : 'bad'
+  /** The private staging folder, checked on every use: a real directory directly inside `watched`. */
+  const stagingDir = async (): Promise<string> => {
+    const s = join(watched, STAGING_DIR)
+    if (!(await fsp.lstat(s).catch(() => null))) await withRetry(() => fsp.mkdir(s), env).catch((e) => (errCode(e) === 'EEXIST' ? undefined : Promise.reject(e)))
+    const st = await fsp.lstat(s)
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error('the staging folder is not a real folder (a link or a file has its name)')
+    if ((await real(s)) !== s) throw new Error('the staging folder resolves outside the watched folder')
+    return s
   }
 
   /** "Already copied": a ledger entry for this content whose recorded copy still exists and matches. */
-  const verifiedPrior = async (hash: string, size: number): Promise<{ dest: string; onlineOnly: boolean } | null> => {
-    const entries = (await readLedger(env.stateDir)).filter((e) => e.watched === watched && e.step === 'copied' && e.hash === hash).reverse()
+  const priorState = async (hash: string): Promise<{ state: 'ok' | 'online-only'; dest: string } | null> => {
+    const entries = (await readLedger(env.stateDir)).filter((e) => e.watched === watched && e.hash === hash).reverse()
+    let online: string | null = null
     for (const e of entries) {
-      const c = await checkCopy(e.dest, hash)
-      if (c === 'ok') return { dest: e.dest, onlineOnly: false }
-      if (c === 'online-only' && (await fsp.lstat(e.dest)).size === size) return { dest: e.dest, onlineOnly: true }
+      const s = await copyState(e.dest, hash, env, ops, signal)
+      if (s === 'ok') return { state: 'ok', dest: e.dest }
+      if (s === 'online-only') online ??= e.dest
     }
-    return null
+    return online ? { state: 'online-only', dest: online } : null
+  }
+
+  /** Stage `from`: exclusive create, write while hashing the source, fsync, re-hash the staged bytes. */
+  const stage = async (from: string, name: string, hash: string): Promise<Staged> =>
+    withRetry(async () => {
+      const path = ops.stagedName(await stagingDir(), name)
+      const fh = await fsp.open(path, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW, 0o644)
+      const st = await fh.stat()
+      const staged: Staged = { path, ino: st.ino, dev: st.dev }
+      let read: string
+      try {
+        read = await readHashed(from, {
+          idleMs: env.readIdleMs,
+          signal,
+          onChunk: async (c) => {
+            await ops.onSourceChunk?.(from, c)
+            await fh.write(c)
+          }
+        })
+        await fh.sync()
+      } finally {
+        await fh.close()
+      }
+      if (read !== hash) throw Object.assign(new Error('the original changed while copying'), { code: 'ECHANGED', staged })
+      if ((await hashOf(path)) !== hash) throw Object.assign(new Error('the staged copy did not verify'), { code: 'ESTAGED', staged })
+      return staged
+    }, env)
+
+  /** Unlink our own staged file, only if it is still the file we created (see the threat model). */
+  const dropStaged = async (s: Staged): Promise<void> => {
+    const st = await fsp.lstat(s.path).catch(() => null)
+    if (st && st.isFile() && st.ino === s.ino && st.dev === s.dev) await fsp.unlink(s.path)
   }
 
   /** Put a verified copy of `from` into `watched` under `name` or the next free collision name. */
-  const placeCopy = async (from: string, hash: string, name: string): Promise<{ dest: string; reused: boolean }> => {
-    let temp: OwnTemp | null = null
-    try {
-      for (let n = 1; n < 1000; n++) {
-        const target = join(watched, n === 1 ? name : alternativeName(name, n))
-        const existing = await fsp.lstat(target).catch(() => null)
-        if (existing) {
-          if (!existing.isFile()) continue // a link or folder: never followed, never compared
-          if (await ops.isOnlineOnly(target)) throw new SkipItem(`the name ${basename(target)} is taken by a file that is ${ONLINE_ONLY_NOTE}`, 'online-only')
-          if ((await hashOf(target)) === hash) return { dest: target, reused: true }
-          continue
-        }
-        temp ??= await writeTemp(from, target, hash)
-        try {
-          await placeNoReplace(temp.path, target, env, ops)
-        } catch (e) {
-          if (errCode(e) === 'EEXIST') continue // someone took the name meanwhile: try the next one
-          throw e
-        }
-        temp = null // placed: the temp's inode now lives at `target`
-        if ((await hashOf(target)) !== hash) throw new Error(`copy did not verify (${basename(target)})`) // left in place; never deleted
-        return { dest: target, reused: false }
-      }
-      throw new Error(`no free name for ${name}`)
-    } finally {
-      if (temp) await removeOwnTemp(temp)
-    }
-  }
-
-  /** Write `from` into an exclusively created temp next to `target`; fsync; check the bytes read match `hash`. */
-  const writeTemp = async (from: string, target: string, hash: string): Promise<OwnTemp> =>
-    withRetry(async () => {
-      const path = ops.tempName(target)
-      const fh = await fsp.open(path, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW, 0o644)
-      const st = await fh.stat()
-      const own: OwnTemp = { path, ino: st.ino, dev: st.dev }
-      try {
-        const got = await readHashed(from, { idleMs: env.readIdleMs, signal, onChunk: (c) => fh.write(c) })
-        await fh.sync()
-        if (got !== hash) throw Object.assign(new Error('the original changed while copying'), { code: 'ECHANGED' })
-      } catch (e) {
-        await fh.close().catch(() => undefined)
-        await removeOwnTemp(own)
-        throw e
-      }
-      await fh.close()
-      return own
-    }, env)
-
-  /** Move a Desktop original into the moved folder under a free name, never replacing anything. */
-  const moveOriginal = async (from: string, name: string): Promise<string> => {
-    const bad = await ensureMovedFolder()
-    if (bad) throw new SkipItem(bad, 'move')
+  const placeCopy = async (item: PlanItem, hash: string, size: number): Promise<{ dest: string; reused: boolean }> => {
+    let staged: Staged | null = null
     for (let n = 1; n < 1000; n++) {
-      const to = join(plan.movedFolder, n === 1 ? name : alternativeName(name, n))
+      const target = join(watched, n === 1 ? item.name : alternativeName(item.name, n))
+      const existing = await fsp.lstat(target).catch(() => null)
+      if (existing) {
+        if (!existing.isFile()) continue // a link, folder or special file: never followed, never opened
+        if (await ops.isOnlineOnly(target)) throw new Skip(`the name ${basename(target)} is taken by a file that is ${ONLINE_ONLY_NOTE}`, 'online-only')
+        if ((await hashOf(target)) === hash) return { dest: target, reused: true } // a staged file from an earlier attempt, if any, is kept
+        if (existing.size < size) await log('possible-incomplete-copy', { path: target, size: existing.size, expected: size })
+        else await log('name-taken', { path: target })
+        continue
+      }
+      staged ??= await stage(item.from, item.name, hash)
       try {
-        await placeNoReplace(from, to, env, ops)
-        return to
+        await withRetry(() => ops.link(staged!.path, target), env)
       } catch (e) {
         const code = errCode(e)
         if (code === 'EEXIST') continue
-        if (code === 'EXDEV') throw new SkipItem('different volume; left on the Desktop', 'move')
-        throw e
+        if (!LINK_UNAVAILABLE.has(code ?? '')) throw e
+        try {
+          await withRetry(() => ops.copyFileExcl(staged!.path, target), env)
+        } catch (e2) {
+          if (errCode(e2) === 'EEXIST') continue
+          throw e2
+        }
       }
+      const fin = await fsp.lstat(target)
+      if (!fin.isFile() || (await hashOf(target)) !== hash) throw new Error(`copy did not verify (${basename(target)}); staged file kept`)
+      await dropStaged(staged)
+      return { dest: target, reused: false }
     }
-    throw new SkipItem('no free name in the moved folder', 'move')
+    throw new Error(`no free name for ${item.name}`)
   }
 
-  await log('start', { watched, items: plan.items.length, desktop: plan.summary.desktop.count, cleanshot: plan.summary.cleanshot.count, pendingMoves: plan.summary.pendingMoves })
+  await log('start', { watched, items: plan.items.length, desktop: plan.summary.desktop.count, cleanshot: plan.summary.cleanshot.count })
   const total = plan.items.length
   let done = 0
   for (const item of plan.items) {
@@ -457,15 +486,15 @@ export async function runImport(
         await log('stopped-mid-item', { source: item.source, from: item.from })
         break
       }
-      if (e instanceof SkipItem) {
-        if (e.kind === 'online-only') res.onlineOnly++
-        else res.moveSkipped++
-        await log(e.kind === 'online-only' ? 'online-only' : 'move-skipped', { source: item.source, from: item.from, reason: e.message })
-      } else {
+      const kind = e instanceof Skip ? e.kind : errCode(e) === 'ENOTREG' ? 'not-regular' : null
+      if (kind === 'online-only') res.onlineOnly++
+      else if (kind === 'not-regular') res.notRegular++
+      else if (kind === 'unverified-online-only') res.unverifiedOnlineOnly++
+      else {
         res.failed++
         res.errors.push(`${item.name}: ${(e as Error).message}`)
-        await log('failed', { source: item.source, from: item.from, error: (e as Error).message }).catch(() => undefined)
       }
+      await log(kind ?? 'failed', { source: item.source, from: item.from, reason: (e as Error).message }).catch(() => undefined)
     }
     done++
   }
@@ -476,44 +505,31 @@ export async function runImport(
 
   async function importOne(item: PlanItem): Promise<void> {
     const st = await withRetry(() => fsp.lstat(item.from), env).catch(() => null)
-    if (!st || !st.isFile()) {
+    if (!st) {
       res.gone++
       await log('gone', { source: item.source, from: item.from })
       return
     }
-    if (await ops.isOnlineOnly(item.from)) throw new SkipItem(`this file is ${ONLINE_ONLY_NOTE}`, 'online-only')
+    if (!st.isFile()) throw new Skip('not a regular file', 'not-regular')
+    if (await ops.isOnlineOnly(item.from)) throw new Skip(`this file is ${ONLINE_ONLY_NOTE}`, 'online-only')
     const hash = await hashOf(item.from)
-    const record = (step: 'copied' | 'moved', dest: string, s: Stats = st): Promise<void> =>
-      appendLine(ledgerFile, { step, hash, watched, source: item.source, from: item.from, size: s.size, mtimeMs: Math.round(s.mtimeMs), dest, at: now().toISOString() } satisfies LedgerEntry, env)
 
-    // 1. a verified copy in the watched folder (a ledger entry alone is not enough)
-    let copy: string
-    const prior = await verifiedPrior(hash, st.size)
-    if (prior) {
-      copy = prior.dest
+    const prior = await priorState(hash)
+    if (prior?.state === 'ok') {
       res.alreadyDone++
-      await log('already-done', { source: item.source, from: item.from, hash, dest: prior.dest, copyOnlineOnly: prior.onlineOnly || undefined })
-    } else {
-      const placed = await placeCopy(item.from, hash, item.name)
-      copy = placed.dest
-      if (placed.reused) res.reused++
-      else res.copied++
-      await record('copied', copy)
-      await log(placed.reused ? 'reused' : 'copied', { source: item.source, from: item.from, to: copy, hash, verified: true })
+      if (item.source === 'desktop') res.desktopWithCopy++
+      await log('already-done', { source: item.source, from: item.from, hash, dest: prior.dest })
+      return
     }
+    if (prior?.state === 'online-only') throw new Skip(`the earlier copy ${basename(prior.dest)} is ${ONLINE_ONLY_NOTE}; not checked, not copied again`, 'unverified-online-only')
 
-    // 2. Desktop only: move the original (never delete), after re-checking both files
-    if (item.source !== 'desktop') return
-    await env.hooks?.beforeMoveCheck?.(item)
-    const again = await fsp.lstat(item.from).catch(() => null)
-    if (!again || !again.isFile() || again.dev !== st.dev || again.ino !== st.ino || again.size !== st.size || again.mtimeMs !== st.mtimeMs)
-      throw new SkipItem('the original changed or moved since it was copied; left where it is', 'move')
-    if ((await hashOf(item.from)) !== hash) throw new SkipItem('the original changed since it was copied; left on the Desktop', 'move')
-    const c = await checkCopy(copy, hash)
-    if (c !== 'ok') throw new SkipItem(c === 'online-only' ? `the copy is ${ONLINE_ONLY_NOTE}; original left on the Desktop` : 'the copy is missing or differs; original left on the Desktop', 'move')
-    const to = await moveOriginal(item.from, item.name)
-    res.moved++
-    await record('moved', to)
-    await log('moved', { from: item.from, to, hash })
+    const placed = await placeCopy(item, hash, st.size)
+    if (placed.reused) res.reused++
+    else res.copied++
+    if (item.source === 'desktop') res.desktopWithCopy++
+    const entry: LedgerEntry = { step: 'copied', hash, watched, source: item.source, from: item.from, size: st.size, mtimeMs: Math.round(st.mtimeMs), dest: placed.dest, at: now().toISOString() }
+    await appendLine(ledgerFile, entry, env)
+    await log(placed.reused ? 'reused' : 'copied', { source: item.source, from: item.from, to: placed.dest, hash, verified: true })
   }
 }
+

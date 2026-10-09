@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { planBacklogImport, parseLedger, alternativeName, foldersOverlap, type PlanInput, type LedgerEntry } from '../src/main/backlog-plan'
+import { planBacklogImport, parseLedger, alternativeName, foldersOverlap, isMovedFolderName, type PlanInput, type LedgerEntry } from '../src/main/backlog-plan'
 
 const base = (over: Partial<PlanInput> = {}): PlanInput => ({
   watchedFolder: '/W/Shots',
@@ -13,9 +13,10 @@ const base = (over: Partial<PlanInput> = {}): PlanInput => ({
   ...over
 })
 const f = (rel: string, size = 100, mtimeMs = 1): { rel: string; size: number; mtimeMs: number } => ({ rel, size, mtimeMs })
+const entry = (from: string, dest = '/W/Shots/a.png', watched = '/W/Shots'): LedgerEntry => ({ step: 'copied', hash: 'h', watched, source: 'cleanshot', from, size: 100, mtimeMs: 1, dest, at: '' })
 
-describe('planBacklogImport', () => {
-  it('takes only screenshot-named media from the Desktop top level', () => {
+describe('planBacklogImport (copy only)', () => {
+  it('takes only screenshot-named media from the Desktop top level; plans copies, never moves', () => {
     const plan = planBacklogImport(
       base({
         desktop: [
@@ -31,20 +32,17 @@ describe('planBacklogImport', () => {
     )
     if (!plan.ok) throw new Error('expected a plan')
     expect(plan.items.map((i) => i.name)).toEqual(['CleanShot 2026-10-08 at 0801 from Google Chrome.png', 'Screenshot 2026-10-08 at 10.05.01.png'])
-    expect(plan.items.every((i) => i.source === 'desktop' && i.moveTo?.startsWith('/W/Shots/Moved by SlideWell 2026-10-09/'))).toBe(true)
     expect(plan.items[0].copyTo).toBe('/W/Shots/CleanShot 2026-10-08 at 0801 from Google Chrome.png')
+    expect(Object.keys(plan.items[0])).not.toContain('moveTo')
   })
 
-  it('copies CleanShot history captures, never moves them, and skips project files and bundles', () => {
+  it('copies CleanShot history captures and skips project files and bundles', () => {
     const plan = planBacklogImport(
       base({ cleanshot: [f('media_a/CleanShot 2026-10-01 at 0900.png'), f('media_b/CleanShot 2026-10-01 at 0901.cleanshot'), f('media_c/x.cleanshotvideo/…', 0), f('media_d/clip.mp4'), f('loose.png')] })
     )
     if (!plan.ok) throw new Error('expected a plan')
-    expect(plan.items.map((i) => [i.name, i.moveTo])).toEqual([
-      ['CleanShot 2026-10-01 at 0900.png', null],
-      ['clip.mp4', null]
-    ])
-    expect(plan.summary.skipped).toEqual({ cleanshotProjects: 1, cleanshotOther: 2, empty: 0 })
+    expect(plan.items.map((i) => i.name)).toEqual(['CleanShot 2026-10-01 at 0900.png', 'clip.mp4'])
+    expect(plan.summary.skipped).toEqual({ cleanshotProjects: 1, cleanshotOther: 2, empty: 0, notRegular: 0 })
   })
 
   it('summarises counts, bytes and up to five example names per source', () => {
@@ -67,44 +65,44 @@ describe('planBacklogImport', () => {
     )
     if (!plan.ok) throw new Error('expected a plan')
     expect(plan.items.map((i) => i.nameTaken)).toEqual([false, true, true])
-    expect(plan.summary.nameTaken).toBe(2)
   })
 
-  it('marks items the ledger already holds (same path, size, mtime, same watched folder) as likely done', () => {
-    const e = (from: string, watched = '/W/Shots'): LedgerEntry => ({ step: 'copied', hash: 'h', watched, source: 'cleanshot', from, size: 100, mtimeMs: 1, dest: '/W/Shots/a.png', at: '' })
-    const plan = planBacklogImport(base({ cleanshot: [f('m1/a.png'), f('m2/b.png'), f('m3/c.png')], ledger: [e('/H/CS/media/m1/a.png'), e('/H/CS/media/m2/b.png', '/Other')] }))
+  it('an item is done only when its recorded copy checks out; missing or changed copies are planned again', () => {
+    const ledger = [entry('/H/CS/media/m1/a.png', '/W/Shots/a.png'), entry('/H/CS/media/m2/b.png', '/W/Shots/b.png'), entry('/H/CS/media/m3/c.png', '/W/Shots/c.png'), entry('/H/CS/media/m4/d.png', '/W/Shots/d.png', '/Other')]
+    const plan = planBacklogImport(
+      base({
+        cleanshot: [f('m1/a.png'), f('m2/b.png'), f('m3/c.png'), f('m4/d.png')],
+        ledger,
+        copyStates: { '/W/Shots/a.png': 'ok', '/W/Shots/b.png': 'missing-or-changed' } // c: not checked → treated as missing
+      })
+    )
     if (!plan.ok) throw new Error('expected a plan')
-    expect(plan.items.map((i) => i.likelyDone)).toEqual([true, false, false])
-    expect(plan.summary.cleanshot.count).toBe(2)
-    expect(plan.summary.likelyDone).toBe(1)
+    expect(plan.items.map((i) => [i.name, i.recopy])).toEqual([
+      ['b.png', true],
+      ['c.png', true],
+      ['d.png', false]
+    ])
+    expect(plan.summary).toMatchObject({ done: 1, recopy: 2, cleanshot: { count: 3 } })
   })
 
-  it('counts leftover partial copies and does not treat them as taken names', () => {
-    const plan = planBacklogImport(base({ watchedNames: ['.a.png.1-ab.slidewell-partial', 'x.png'], cleanshot: [f('m1/a.png')] }))
+  it('a recorded copy that is online-only is counted as unverified: neither done nor copied again', () => {
+    const plan = planBacklogImport(base({ cleanshot: [f('m1/a.png')], ledger: [entry('/H/CS/media/m1/a.png')], copyStates: { '/W/Shots/a.png': 'online-only' } }))
     if (!plan.ok) throw new Error('expected a plan')
-    expect(plan.summary.leftoverPartials).toBe(1)
-    expect(plan.items[0].nameTaken).toBe(false)
+    expect(plan.items).toHaveLength(0)
+    expect(plan.summary).toMatchObject({ done: 0, unverifiedOnlineOnly: 1 })
   })
 
-  it('counts Desktop originals copied earlier but still on the Desktop as pending moves', () => {
-    const from = '/H/Desktop/Screenshot 2026-10-08 at 10.05.01.png'
-    const ledger: LedgerEntry[] = [{ step: 'copied', hash: 'h', watched: '/W/Shots', source: 'desktop', from, size: 100, mtimeMs: 1, dest: '/W/Shots/x.png', at: '' }]
-    const plan = planBacklogImport(base({ desktop: [f('Screenshot 2026-10-08 at 10.05.01.png')], ledger }))
-    if (!plan.ok) throw new Error('expected a plan')
-    expect(plan.summary.desktop.count).toBe(0)
-    expect(plan.summary.pendingMoves).toBe(1)
-  })
-
-  it('leaves online-only placeholders out and counts them', () => {
-    const plan = planBacklogImport(base({ cleanshot: [{ ...f('m1/a.png'), onlineOnly: true }, f('m2/b.png')] }))
+  it('leaves out online-only sources, empty files and non-regular files, and counts them', () => {
+    const plan = planBacklogImport(base({ cleanshot: [{ ...f('m1/a.png'), onlineOnly: true }, f('m2/b.png'), f('m3/c.png', 0), { ...f('m4/d.png'), notRegular: true }] }))
     if (!plan.ok) throw new Error('expected a plan')
     expect(plan.items.map((i) => i.name)).toEqual(['b.png'])
     expect(plan.summary.onlineOnly).toBe(1)
+    expect(plan.summary.skipped).toMatchObject({ empty: 1, notRegular: 1 })
   })
 
-  it('skips empty files', () => {
-    const plan = planBacklogImport(base({ cleanshot: [f('m1/a.png', 0)] }))
-    expect(plan.ok && plan.items.length === 0 && plan.summary.skipped.empty === 1).toBe(true)
+  it('counts staged files left by an interrupted run', () => {
+    const plan = planBacklogImport(base({ stagingNames: ['a.png.0123abcd', '.DS_Store'] }))
+    expect(plan.ok && plan.summary.leftoverStaged).toBe(1)
   })
 
   it('refuses without a watched folder or when folders overlap', () => {
@@ -123,8 +121,13 @@ describe('helpers', () => {
     expect(foldersOverlap('/a/b', '/a/b/')).toBe(true)
     expect(foldersOverlap('/a/b', '/a/bc')).toBe(false)
   })
-  it('parseLedger skips a torn last line', () => {
+  it('isMovedFolderName', () => {
+    expect(isMovedFolderName('Moved by SlideWell 2026-10-09')).toBe(true)
+    expect(isMovedFolderName('Moved by SlideWell notes')).toBe(false)
+  })
+  it('parseLedger skips a torn line and old move records', () => {
     const good = JSON.stringify({ step: 'copied', hash: 'h', watched: '/W', source: 'desktop', from: '/x', size: 1, mtimeMs: 1, dest: '/W/x', at: '' })
-    expect(parseLedger(`${good}\n{"step":"cop`)).toHaveLength(1)
+    const moved = JSON.stringify({ step: 'moved', hash: 'h', watched: '/W', source: 'desktop', from: '/x', size: 1, mtimeMs: 1, dest: '/W/m/x', at: '' })
+    expect(parseLedger(`${good}\n${moved}\n{"step":"cop`)).toHaveLength(1)
   })
 })
