@@ -60,9 +60,13 @@ function harness(items: IndexItem[]) {
       if (embedded === holdAt) await new Promise<void>((r) => (gate = r))
       embedded++
       stored.set(it.id, { path: it.path, size: it.size, mtimeMs: it.mtimeMs })
+      return 'stored' as const
     },
     isItemFailure: (e) => Boolean((e as { item?: boolean }).item),
-    recordFailure: (it) => failures.set(it.id, { path: it.path, size: it.size, mtimeMs: it.mtimeMs }),
+    recordFailure: (it) => {
+      failures.set(it.id, { path: it.path, size: it.size, mtimeMs: it.mtimeMs })
+      return 'stored' as const
+    },
     onProgress: (p) => events.push(`${p.phase} ${p.done}/${p.total}`),
     progressEveryMs: 0
   }

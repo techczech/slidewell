@@ -12,7 +12,8 @@ import { PictureSearchEngine, UnreadableImageError, type Embedder, type PictureQ
 import { Indexer } from './indexer'
 import { coveragePercent, estimateText, statusText, type IndexProgress } from './progress'
 import { archiveRenders, wellImages } from './sources'
-import { STORE_FILE, VectorStore, canonicalRoot, type IndexItem } from './vector-store'
+import { STORE_FILE, VectorStore } from './vector-store'
+import { ImageEnumerator } from './enumeration'
 
 export type PictureSearchSettings = { includeWell?: boolean; paused?: boolean }
 
@@ -49,7 +50,7 @@ export class PictureSearchService {
   private engine: PictureSearchEngine | null = null
   private embedder: ReturnType<PictureSearchDeps['makeEmbedder']> | null = null
   private indexer: Indexer
-  private archiveCache: { root: string | null; items: IndexItem[] } | null = null
+  private images: ImageEnumerator
   private estimateCache: PictureSearchStatus['estimate'] = null
   private downloading: AbortController | null = null
   private download: PictureSearchStatus['download'] = null
@@ -57,15 +58,22 @@ export class PictureSearchService {
   private lastBroadcast = 0
 
   constructor(private deps: PictureSearchDeps) {
+    this.images = new ImageEnumerator({
+      archiveRoot: () => this.deps.archiveRoot(),
+      bind: (canon) => this.bindArchive(canon),
+      archive: (canon) => archiveRenders(canon),
+      well: () => (this.includeWell() ? wellImages(this.deps.wellRoot(), this.deps.vaultRoot()) : Promise.resolve([]))
+    })
     this.indexer = new Indexer({
-      enumerate: () => this.enumerate(),
+      enumerate: async () => (await this.images.enumerate()).items,
       handled: () => this.openStore().fingerprints(),
       failedCount: () => this.openStore().failedCount(),
       embed: (item) => this.openEngine().embedAndStore(item),
       isItemFailure: (e) => e instanceof UnreadableImageError,
       recordFailure: (item, err) => {
-        this.openStore().putFailure(item, err)
+        if (!this.openStore().putFailure(item, err)) return 'stale'
         this.engine?.forget(item.id)
+        return 'stored'
       },
       onProgress: () => this.push(true),
       onIdle: () => void this.embedder?.releaseVision?.().catch(() => undefined)
@@ -106,21 +114,9 @@ export class PictureSearchService {
   }
 
   /** Slide rows belong to one archive root; a different root drops them (store and memory). */
-  private bindArchive(root: string | null): string | null {
-    const canon = root ? canonicalRoot(root) : null
-    if (!canon) return null // unavailable: drop nothing
+  /** Slide rows belong to one canonical archive root; another root drops them (store and memory). */
+  private bindArchive(canon: string): void {
     for (const id of this.openStore().useArchiveRoot(canon)) this.engine?.forget(id)
-    return canon
-  }
-
-  private async enumerate(): Promise<IndexItem[]> {
-    const root = this.deps.archiveRoot()
-    // keyed by root: pointing Settings at another archive folder enumerates that one, and the slide
-    // vectors made from the old archive are dropped (an unavailable archive drops nothing)
-    const canon = this.bindArchive(root)
-    if (!this.archiveCache || this.archiveCache.root !== canon) this.archiveCache = { root: canon, items: canon ? await archiveRenders(canon) : [] }
-    const well = this.includeWell() ? await wellImages(this.deps.wellRoot(), this.deps.vaultRoot()) : []
-    return [...well, ...this.archiveCache.items]
   }
 
   status(): PictureSearchStatus {
@@ -151,7 +147,7 @@ export class PictureSearchService {
 
   /** Count what would be indexed (local disk only) for the Settings note. */
   async estimate(): Promise<PictureSearchStatus['estimate']> {
-    const items = await this.enumerate()
+    const { items } = await this.images.enumerate()
     const slides = items.filter((i) => i.kind === 'slide').length
     const well = items.length - slides
     this.estimateCache = { slides, wellImages: well, text: estimateText(items.length) }
@@ -240,8 +236,9 @@ export class PictureSearchService {
 
   /** The archive changed (ingest): enumerate its renders again. */
   pokeArchive(): void {
-    if (modelState(this.dir()) === 'ready' || this.store) this.bindArchive(this.deps.archiveRoot())
-    this.archiveCache = null
+    const canon = this.images.currentRoot()
+    if (canon && (modelState(this.dir()) === 'ready' || this.store)) this.bindArchive(canon)
+    this.images.invalidate()
     this.estimateCache = null
     this.poke()
   }

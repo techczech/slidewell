@@ -6,6 +6,7 @@
  */
 import { planQueue, RateMeter, etaSeconds, type IndexProgress } from './progress'
 import type { Fingerprint, IndexItem } from './vector-store'
+import type { WriteResult } from './engine'
 
 export type IndexerDeps = {
   /** Every image that should have a vector now. */
@@ -13,11 +14,11 @@ export type IndexerDeps = {
   /** What the store already holds (embedded or failed). */
   handled: () => Map<string, Fingerprint>
   failedCount: () => number
-  /** Embed one image and store it. */
-  embed: (item: IndexItem) => Promise<void>
+  /** Embed one image and store it; 'stale' = the store refused it (the plan is out of date). */
+  embed: (item: IndexItem) => Promise<WriteResult>
   /** True when an embed error is about this image (record it, go on); false = engine failure (stop). */
   isItemFailure: (e: unknown) => boolean
-  recordFailure: (item: IndexItem, error: string) => void
+  recordFailure: (item: IndexItem, error: string) => WriteResult
   onProgress: (p: IndexProgress) => void
   /** Called once when the loop goes idle (done, paused, stopped) — e.g. to free the GPU model. */
   onIdle?: () => void
@@ -105,23 +106,37 @@ export class Indexer {
     const now = this.deps.now ?? Date.now
     const meter = new RateMeter()
     try {
+      // A refused ('stale') write means the plan no longer matches the store (the archive was
+      // switched): the pass stops without counting that item and re-plans from scratch. If the
+      // fresh plan's very first write is refused again, stop with an error instead of spinning.
+      let previousPassStale = false
       do {
         this.repoke = false
         const plan = planQueue(await this.deps.enumerate(), this.deps.handled())
         let done = plan.done
         const failedBase = this.deps.failedCount()
         let failed = failedBase
+        let written = 0
+        let stale = false
         this.emit({ phase: plan.todo.length ? 'indexing' : 'done', done, total: plan.total, failed, secondsLeft: plan.todo.length ? null : 0 }, true)
         for (const item of plan.todo) {
           if (this.paused || this.stopped || this.repoke) break
           const t0 = now()
+          let result: WriteResult
+          let itemFailed = false
           try {
-            await this.deps.embed(item)
+            result = await this.deps.embed(item)
           } catch (e) {
             if (!this.deps.isItemFailure(e)) throw e
-            this.deps.recordFailure(item, (e as Error)?.message ?? String(e))
-            failed++
+            result = this.deps.recordFailure(item, (e as Error)?.message ?? String(e))
+            itemFailed = true
           }
+          if (result === 'stale') {
+            stale = true
+            break
+          }
+          if (itemFailed) failed++
+          written++
           meter.add((now() - t0) / 1000)
           done++
           const left = plan.total - done
@@ -132,6 +147,13 @@ export class Indexer {
           break
         }
         if (this.stopped) break
+        if (stale) {
+          if (previousPassStale && written === 0) throw new Error('the archive keeps changing while indexing; try again')
+          previousPassStale = true
+          this.repoke = true
+          continue
+        }
+        previousPassStale = false
         if (!this.repoke) this.emit({ ...this.progress, phase: 'done', secondsLeft: 0 }, true)
       } while (this.repoke && !this.paused && !this.stopped)
     } catch (e) {

@@ -21,6 +21,8 @@ export interface Embedder {
 export class UnreadableImageError extends Error {}
 
 export type Scored = { id: string; score: number }
+/** 'stale': the store refused the write (a slide planned under an archive it is no longer bound to). */
+export type WriteResult = 'stored' | 'stale'
 export type PictureQuery = { text: string } | { imageId: string }
 export type QueryOptions = { limit?: number; kinds?: ItemKind[] }
 
@@ -88,13 +90,15 @@ export class PictureSearchEngine {
     return rank(qv, this.vectors().values(), limit, undefined, opts.kinds)
   }
 
-  /** Embed one image and store its vector (the indexer's unit of work). */
-  async embedAndStore(item: IndexItem): Promise<void> {
+  /** Embed one image and store its vector (the indexer's unit of work). A refused write is 'stale'. */
+  async embedAndStore(item: IndexItem): Promise<WriteResult> {
     const e = this.embedder()
     if (!e) throw new Error('picture search model is not ready')
     const v = await e.embedImage(item.path)
     // the store refuses a slide planned under an archive root it is no longer bound to
-    if (this.store.put(item, v) && this.cache) this.cache.set(item.id, { id: item.id, kind: item.kind, vector: v })
+    if (!this.store.put(item, v)) return 'stale'
+    this.cache?.set(item.id, { id: item.id, kind: item.kind, vector: v })
+    return 'stored'
   }
 
   /** Drop one id from the in-memory copy (its vector was removed from the store). */
