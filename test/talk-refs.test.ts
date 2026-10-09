@@ -42,15 +42,15 @@ describe('extractTalkRefs: what counts as a reference (compiler image syntax)', 
   it('does not count video, audio, remote URLs or a talk\'s own assets folder', () => {
     expect(ids('![](vid-aaaaaaa)\n![](chime.mp3)\n![](https://example.com/_assets/img-aaaaaaa.webp)\n![](assets/img-aaaaaaa.png)')).toEqual([])
   })
-  it('counts the talk\'s own assets folder only when asked', () => {
-    expect(ids('![](assets/img-aaaaaaa.png)', { includeTalkAssets: true })).toEqual(['aaaaaaa'])
+  it('reports the talk\'s own assets folder as local, only when asked', () => {
+    expect(extractTalkRefs('## S\n![](assets/img-aaaaaaa.png)\n', { includeTalkAssets: true }).refs).toEqual([{ id: 'aaaaaaa', slide: 2, via: 'local' }])
   })
   it('ignores fenced code, :::notes, HTML comments and the preamble above the first ## heading', () => {
     expect(ids('```md\n![](img-aaaaaaa)\n```\n~~~\n![](img-aaaaaaa)\n~~~\n<!-- ![](img-aaaaaaa) -->\n:::notes\n![](img-aaaaaaa)\n:::\n![](img-bbbbbbb)')).toEqual(['bbbbbbb'])
     expect(extractTalkRefs('![](img-aaaaaaa)\n# Title\n![](img-aaaaaaa)\n## A\n').refs).toEqual([])
   })
   it('a heading ends an unterminated notes block', () => {
-    expect(extractTalkRefs('## A\n:::notes\n## B\n![](img-aaaaaaa)').refs).toEqual([{ id: 'aaaaaaa', slide: 3 }])
+    expect(extractTalkRefs('## A\n:::notes\n## B\n![](img-aaaaaaa)').refs).toEqual([{ id: 'aaaaaaa', slide: 3, via: 'pool' }])
   })
 })
 
@@ -65,13 +65,13 @@ describe('extractTalkRefs: slide numbers (14-outline-tree.mjs / 08-source-adapte
   ].join('\n')
   it('# is the talk title, not a slide: cover, then every ## to ###### heading', () => {
     expect(extractTalkRefs(talk).refs).toEqual([
-      { id: 'aaaaaaa', slide: 3 },
-      { id: 'bbbbbbb', slide: 4 },
-      { id: 'aaaaaaa', slide: 5 }
+      { id: 'aaaaaaa', slide: 3, via: 'pool' },
+      { id: 'bbbbbbb', slide: 4, via: 'pool' },
+      { id: 'aaaaaaa', slide: 5, via: 'pool' }
     ])
   })
   it('a title then ### First is slide 2 (cover, First)', () => {
-    expect(extractTalkRefs('# Talk\n### First\n![](img-aaaaaaa)').refs).toEqual([{ id: 'aaaaaaa', slide: 2 }])
+    expect(extractTalkRefs('# Talk\n### First\n![](img-aaaaaaa)').refs).toEqual([{ id: 'aaaaaaa', slide: 2, via: 'pool' }])
   })
   it('has no title slide when auto_title_slide is off (false, no, off, hide, 0), quoted or not', () => {
     for (const v of ['false', '"false"', 'no', 'off', 'hide', '0']) {
@@ -96,7 +96,7 @@ describe('extractTalkRefs: title and odd input', () => {
     expect(extractTalkRefs('## no title heading').title).toBe('')
   })
   it('copes with CRLF and an empty file', () => {
-    expect(extractTalkRefs('### A\r\n![](img-aaaaaaa)\r\n').refs).toEqual([{ id: 'aaaaaaa', slide: 2 }])
+    expect(extractTalkRefs('### A\r\n![](img-aaaaaaa)\r\n').refs).toEqual([{ id: 'aaaaaaa', slide: 2, via: 'pool' }])
     expect(extractTalkRefs('')).toEqual({ title: '', refs: [] })
   })
 })

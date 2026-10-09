@@ -68,7 +68,7 @@ describe('scanTalkUsage', () => {
     const well = fresh('well')
     const before = fingerprint(fixture)
     const out = await scanTalkUsage(well, fixture)
-    expect(out).toEqual({ status: 'ok', summary: { talks: 3, references: 7, images: 6 } })
+    expect(out).toEqual({ status: 'ok', summary: { talks: 3, references: 8, images: 7 } })
     const usage = await loadUsage(well, fixture)
     expect(usage.get('aaaaaaa')).toEqual([
       { title: 'Garden Notes', relPath: join('garden-talk', 'garden-talk-outline.md'), slide: 1 },
@@ -78,7 +78,8 @@ describe('scanTalkUsage', () => {
     expect(usage.get('ccccccc')?.[0].slide).toBe(4)
     expect(usage.get('fffffff')?.[0].slide).toBe(2)
     // everything the compiler would not count is absent
-    for (const no of ['9999999', '8888888', '7777777', '6666666', '5555555', '4444444', '3333333', '2222222', '1111111']) expect(usage.has(no)).toBe(false)
+    expect(usage.get('7777777')?.[0].slide).toBe(1) // a talk-local copy of a pool image counts as the pool image
+    for (const no of ['0000000', '9999999', '8888888', '6666666', '5555555', '4444444', '3333333', '2222222', '1111111']) expect(usage.has(no)).toBe(false)
     const meta = await query<{ key: string; value: string }>(join(well, 'well.db'), 'SELECT key, value FROM talk_usage_meta')
     expect(meta.find((m) => m.key === 'vault_root')?.value).toBe(realpathSync(fixture))
     await scanTalkUsage(well, fixture)
@@ -102,7 +103,7 @@ describe('scanTalkUsage', () => {
     renameSync(vault, moved)
     expect(await scanTalkUsage(well, vault)).toEqual({ status: 'kept', reason: 'vault-unavailable' })
     renameSync(moved, vault)
-    expect((await loadUsage(well, vault)).size).toBe(6)
+    expect((await loadUsage(well, vault)).size).toBe(7)
   })
 
   it('keeps the previous snapshot when a folder cannot be read', async () => {
@@ -114,7 +115,7 @@ describe('scanTalkUsage', () => {
     try {
       const out = await scanTalkUsage(well, vault)
       expect(out).toMatchObject({ status: 'kept', reason: 'read-failed' })
-      expect((await loadUsage(well, vault)).size).toBe(6)
+      expect((await loadUsage(well, vault)).size).toBe(7)
     } finally { chmodSync(join(vault, 'robots-talk'), 0o755) }
   })
 
@@ -157,7 +158,7 @@ describe('the replacement script', () => {
     await scanTalkUsage(well, fixture)
     const db = join(well, 'well.db')
     await expect(run(db, ".bail on\nBEGIN IMMEDIATE;\nDELETE FROM talk_image_use;\nINSERT INTO no_such_table VALUES (1);\nCOMMIT;")).rejects.toThrow()
-    expect((await loadUsage(well, fixture)).size).toBe(6)
+    expect((await loadUsage(well, fixture)).size).toBe(7)
   })
 })
 

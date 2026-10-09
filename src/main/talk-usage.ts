@@ -110,14 +110,28 @@ export async function scanTalkUsage(root: string, vaultRoot: string, isCurrent: 
   if (wellInsideVault(root, vault)) return { status: 'kept', reason: 'db-inside-vault', detail: 'the well folder is inside the vault; nothing is written there' }
   const found = findTalkFiles(vault)
   if (!found.ok) return { status: 'kept', reason: 'read-failed', detail: 'a folder in the vault could not be read' }
+  // the pool catalogue: the ids of the images actually in the vault's _assets folder
+  const pool = new Set<string>()
+  try {
+    for (const f of readdirSync(join(vault, '_assets'))) {
+      const m = /^img-(?:img-)?([0-9a-f]{7,})\.[A-Za-z0-9]{2,5}$/i.exec(f)
+      if (m) pool.add(m[1].toLowerCase().slice(0, 7))
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return { status: 'kept', reason: 'read-failed', detail: 'the image pool could not be read' }
+  }
   const rows: Array<[string, string, string, number]> = []
   const images = new Set<string>()
   for (const rel of found.files) {
     let text: string
     try { text = readFileSync(join(vault, rel), 'utf8') } catch { return { status: 'kept', reason: 'read-failed', detail: 'a talk could not be read' } }
-    const { title, refs } = extractTalkRefs(text)
+    // a talk's own pool-named copy counts as the pool image, but only when that image is in the pool
+    const { title, refs } = extractTalkRefs(text, { includeTalkAssets: true })
     const t = title || basename(rel).replace(/-outline\.md$/i, '').replace(/-/g, ' ')
-    for (const r of refs) { rows.push([r.id, rel, t, r.slide]); images.add(r.id) }
+    for (const r of refs) {
+      if (r.via === 'local' && !pool.has(r.id)) continue
+      rows.push([r.id, rel, t, r.slide]); images.add(r.id)
+    }
   }
   if (!isCurrent()) return { status: 'kept', reason: 'superseded' }
   const now = new Date().toISOString()

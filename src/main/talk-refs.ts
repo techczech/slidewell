@@ -29,6 +29,8 @@ export interface ImageRef {
   id: string
   /** 1-based slide number as the strip numbers slides (approximate; see above). */
   slide: number
+  /** 'pool' = named through the pool; 'local' = a pool-named copy beside the talk (only with includeTalkAssets). */
+  via: 'pool' | 'local'
 }
 
 export interface TalkRefs {
@@ -101,7 +103,7 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
   let inNotes = false
   let fence: { marker: string } | null = null
   let afterHeading = -1 // line index of the last heading, to find its trigger block
-  const found: Array<{ id: string; slideIdx: number }> = []
+  const found: Array<{ id: string; slideIdx: number; via: 'pool' | 'local' }> = []
   const seen = new Set<string>()
 
   for (let i = 0; i < lines.length; i++) {
@@ -138,13 +140,13 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
     const c = classifyTarget(im[2])
     if (!c || (c.via === 'local' && !opts.includeTalkAssets)) continue
     const key = `${c.id}@${slide}`
-    if (!seen.has(key)) { seen.add(key); found.push({ id: c.id, slideIdx: slide }) }
+    if (!seen.has(key)) { seen.add(key); found.push({ id: c.id, slideIdx: slide, via: c.via }) }
   }
 
   const cover = !OFF.has((meta['auto_title_slide'] ?? '').toLowerCase()) && !explicitOpening
   const offset = cover ? 1 : 0
   return {
     title: (meta['title'] || deckTitle).trim(),
-    refs: found.map((f) => ({ id: f.id, slide: f.slideIdx + offset }))
+    refs: found.map((f) => ({ id: f.id, slide: f.slideIdx + offset, via: f.via }))
   }
 }
