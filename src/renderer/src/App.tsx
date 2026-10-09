@@ -94,6 +94,8 @@ export default function App(): JSX.Element {
   const [showHelp, setShowHelp] = useState(false)
   const [stats, setStats] = useState<Stats | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
+  // a scan of the talks finished: counts, pills and the inspector follow the new usage
+  useEffect(() => window.sw.archive.onTalkUsageChanged((r) => { if (r.ok) setRefreshKey((k) => k + 1) }), [])
   // keyboard selection + inspector + command palette
   const [sel, setSel] = useState(-1)
   const [inspectorOpen, setInspectorOpen] = useState(false)

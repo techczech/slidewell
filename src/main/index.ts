@@ -18,7 +18,7 @@ import { ensureWell, drainInbox, scanVault, searchWell, wellByIds, wellAbsPath, 
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow } from './triage'
 import { cleanShotFolder } from './cleanshot-folder'
 import { createSourceWatcher } from './source-watcher'
-import { ensureUsageTable, loadUsage, scanTalkUsage, talkAbsPath, type UsageMap } from './talk-usage'
+import { ensureUsageTable, loadUsage, scanTalkUsage, talkAbsPath, isVaultChangeRelevant, createScanQueue, type UsageMap } from './talk-usage'
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
 import { convertPptxToOutline } from './convert'
 import { slugify } from './outline'
@@ -761,6 +761,7 @@ app.whenReady().then(() => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     writeConfig({ vaultRoot: r.filePaths[0] })
+    void syncTalkUsage()
     return r.filePaths[0]
   })
   // Re-scan the TalkWeaver vault for new images and index them; returns count added.
@@ -768,7 +769,8 @@ app.whenReady().then(() => {
     const vr = detectVaultRoot()
     if (!vr) return 0
     try {
-      void refreshTalkUsage(wellRootResolved(), vr)
+      await syncTalkUsage()
+      void refreshTalkUsage(vr)
       return await scanVault(archiveRoot(), wellRootResolved(), vr)
     } catch {
       return 0
@@ -1220,30 +1222,57 @@ app.whenReady().then(() => {
 // On launch: ensure the well exists, drain anything Raycast dropped while we were closed, index
 // new TalkWeaver vault images, and watch the inbox so future drops ingest live.
 // Which talks use which picture; filled from well.db at launch and refreshed by each talk scan.
+// Scans run one at a time (a newer request replaces a waiting one); a result is dropped when the
+// vault it read is no longer the current vault, and a failed scan keeps the previous snapshot.
 let talkUsage: UsageMap = new Map()
-async function refreshTalkUsage(root: string, vr: string): Promise<void> {
-  try {
-    await scanTalkUsage(root, vr)
-    talkUsage = await loadUsage(root)
-  } catch {
-    /* keep the last known usage */
+let watchedVault: string | null = null
+let usageWatcher: ReturnType<typeof createSourceWatcher> | null = null
+const usageQueue = createScanQueue<string>(async (vr) => {
+  const root = wellRootResolved()
+  const outcome = await scanTalkUsage(root, vr, () => detectVaultRoot() === vr)
+  if (outcome.status === 'ok') {
+    if (detectVaultRoot() !== vr) return
+    talkUsage = await loadUsage(root, vr)
+  } else if (outcome.reason !== 'superseded') {
+    console.warn(`talk usage kept as it was: ${outcome.reason}${outcome.detail ? ` (${outcome.detail})` : ''}`)
   }
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) w.webContents.send('talks:usage-changed', { ok: outcome.status === 'ok', reason: outcome.status === 'ok' ? '' : outcome.reason })
+  }
+})
+function refreshTalkUsage(vr: string): Promise<void> {
+  return usageQueue.request(vr)
+}
+// Point the usage scan and its watcher at the current vault; tears the old watcher down on a change.
+async function syncTalkUsage(): Promise<void> {
+  const vr = detectVaultRoot()
+  if (vr === watchedVault && usageWatcher) return
+  usageWatcher?.close()
+  usageWatcher = null
+  watchedVault = vr
+  if (!vr) { talkUsage = new Map(); return }
+  try {
+    const root = wellRootResolved()
+    await ensureUsageTable(root)
+    talkUsage = await loadUsage(root, vr) // empty unless the stored snapshot describes this vault
+  } catch { talkUsage = new Map() }
+  // only talk outlines outside the excluded folders matter; wait at most 30 s however busy the vault is
+  usageWatcher = createSourceWatcher(() => void refreshTalkUsage(vr), 4000, 30000)
+  usageWatcher.setSources([{ path: vr, recursive: true, accept: isVaultChangeRelevant }])
+  void refreshTalkUsage(vr)
 }
 
 async function startWell(): Promise<void> {
   try {
     const root = wellRootResolved()
     await ensureWell(root)
-    await ensureUsageTable(root)
-    talkUsage = await loadUsage(root)
     await drainInbox(archiveRoot(), root)
     const vr = detectVaultRoot()
     if (vr) {
       void scanVault(archiveRoot(), root, vr).then((n) => n > 0 && pictureSearch?.poke(), () => undefined)
-      // read-only scan of the vault's talks on launch and whenever the vault changes
-      void refreshTalkUsage(root, vr)
-      createSourceWatcher(() => void refreshTalkUsage(root, vr), 4000).setSources([{ path: vr, recursive: true }])
     }
+    // read-only scan of the vault's talks on launch and whenever the vault changes
+    await syncTalkUsage()
     const inbox = join(root, '_inbox')
     let busy = false
     fsWatch(inbox, async () => {

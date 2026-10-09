@@ -4,8 +4,22 @@ auto_title_slide: false
 ---
 
 ### Spring
-<img src="../_assets/img-aaaaaaa.webp" alt="robot again">
+![robot again](../_assets/img-aaaaaaa.webp)
+![remote](https://example.com/_assets/img-8888888.webp)
+![local copy](assets/img-7777777.png)
 
 ### Summer
-![[img-ddddddd]]
-![[_assets/img-eeeeeee.webp|300]]
+![A caption](img-ddddddd "caption"){fit=cover}
+![](<../_assets/img-eeeeeee.webp>)
+<img src="img-6666666.webp">
+![[img-5555555]]
+
+```md
+![](img-4444444)
+```
+
+<!-- ![](img-3333333) -->
+
+:::notes
+![](img-2222222)
+:::

@@ -4,7 +4,7 @@ auto_title_slide: true
 ---
 
 # Robots in the classroom
-{id=aaaaa}
+![](img-9999999)
 
 ## Why robots
 

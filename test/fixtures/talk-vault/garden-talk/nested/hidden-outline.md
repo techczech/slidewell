@@ -1,4 +1,4 @@
 # Untitled notes
 
-### Only slide
-![](assets/img-fffffff.png)
+## Only slide
+![](img-fffffff)

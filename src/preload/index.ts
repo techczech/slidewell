@@ -231,6 +231,12 @@ const api = {
     // Reveal an image in Finder. Pass the hit's thumbUrl.
     reveal: (thumbUrl: string | null): Promise<boolean> => ipcRenderer.invoke('shell:reveal', thumbUrl),
     // TalkWeaver registers no URL scheme, so "open in TalkWeaver" reveals the talk's file in Finder.
+    // A scan of the vault's talks finished (ok = false: it failed and the previous usage was kept).
+    onTalkUsageChanged: (cb: (r: { ok: boolean; reason: string }) => void): (() => void) => {
+      const handler = (_e: unknown, r: { ok: boolean; reason: string }): void => cb(r)
+      ipcRenderer.on('talks:usage-changed', handler)
+      return () => ipcRenderer.removeListener('talks:usage-changed', handler)
+    },
     revealTalk: (relPath: string): Promise<boolean> => ipcRenderer.invoke('talks:reveal', relPath),
     // Re-scan the TalkWeaver vault for new images; returns count added.
     scanVault: (): Promise<number> => ipcRenderer.invoke('well:scan-vault'),

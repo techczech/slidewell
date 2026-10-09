@@ -5,20 +5,31 @@
  */
 import { watch, existsSync, type FSWatcher } from 'node:fs'
 
-export type WatchedSource = { path: string; recursive: boolean }
+export type WatchedSource = {
+  path: string
+  recursive: boolean
+  /** Only events whose path relative to the source passes this count (default: all non-dot names). */
+  accept?: (relName: string) => boolean
+}
 
-export function createSourceWatcher(onChange: (path: string) => void, debounceMs = 1500): { setSources: (sources: WatchedSource[]) => void; close: () => void } {
+export function createSourceWatcher(onChange: (path: string) => void, debounceMs = 1500, maxWaitMs = Infinity): { setSources: (sources: WatchedSource[]) => void; close: () => void } {
   const watchers = new Map<string, { w: FSWatcher; recursive: boolean }>()
   const timers = new Map<string, ReturnType<typeof setTimeout>>()
 
+  const firstAt = new Map<string, number>()
+  // fires once per quiet period, but never later than maxWaitMs after the first pending event
   const fire = (path: string): void => {
     clearTimeout(timers.get(path))
+    const now = Date.now()
+    if (!firstAt.has(path)) firstAt.set(path, now)
+    const wait = Math.max(0, Math.min(debounceMs, firstAt.get(path)! + maxWaitMs - now))
     timers.set(
       path,
       setTimeout(() => {
         timers.delete(path)
+        firstAt.delete(path)
         onChange(path)
-      }, debounceMs)
+      }, wait)
     )
   }
   const drop = (path: string): void => {
@@ -26,17 +37,21 @@ export function createSourceWatcher(onChange: (path: string) => void, debounceMs
     watchers.delete(path)
     clearTimeout(timers.get(path))
     timers.delete(path)
+    firstAt.delete(path)
   }
 
   return {
     setSources(sources) {
       const want = new Map(sources.map((s) => [s.path, s.recursive]))
+      const accepts = new Map(sources.map((s) => [s.path, s.accept]))
       for (const [p, cur] of [...watchers]) if (!want.has(p) || want.get(p) !== cur.recursive) drop(p)
       for (const [p, recursive] of want) {
         if (watchers.has(p) || !existsSync(p)) continue
         try {
           const w = watch(p, { recursive, persistent: false }, (_ev, name) => {
-            if (name && String(name).startsWith('.')) return
+            const accept = accepts.get(p)
+            if (accept) { if (!name || !accept(String(name))) return }
+            else if (name && String(name).startsWith('.')) return
             fire(p)
           })
           w.on('error', () => drop(p))

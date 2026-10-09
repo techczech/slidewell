@@ -87,9 +87,14 @@ writeFileSync(talk, talkText('![A friendly robot](img-aaaaaaa)'))
 try {
   const c = await untilCounts(win, (x) => x.talks >= 1)
   check('after relaunch one picture is used in talks', c?.talks === 1, JSON.stringify(c))
-  await refreshResults(win)
+  // no manual refresh: the app is told when the scan finishes and updates the chip itself
   const chip = win.locator('.fromrow .chip', { hasText: 'Used in talks' })
-  check('the Used in talks chip is enabled and says 1', (await chip.isEnabled()) && /1/.test((await chip.textContent()) ?? ''))
+  let chipOk = false
+  for (let i = 0; i < 40 && !chipOk; i++) {
+    chipOk = (await chip.isEnabled()) && /1/.test((await chip.textContent()) ?? '')
+    if (!chipOk) await sleep(500)
+  }
+  check('the chip updates by itself after the scan: enabled and says 1', chipOk)
   await chip.click()
   await sleep(1200)
   const cards = await win.locator('.card').count()
