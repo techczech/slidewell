@@ -26,11 +26,13 @@ export function installMock(): void {
       resume: async () => undefined,
       setIncludeWell: async () => undefined,
       query: async () => ({ ok: false, results: [], error: 'not available in the browser preview' }),
+      queryCount: async () => 0,
       onStatus: () => () => undefined
     },
     archive: {
       available: async () => false,
       search: async () => [],
+      searchMatched: async (_q: string, _f: unknown, mode: 'words' | 'meaning' | 'both') => ({ requested: mode, mode: 'words' as const, modelReady: false, words: [], related: [], pictureError: null, ms: { words: 0, meaning: null } }),
       fromCounts: async () => ({ all: 0, screenshots: 0, 'old-images': 0, 'old-slides': 0, talks: 0 }),
       categories: async () => [],
       decks: async () => [],

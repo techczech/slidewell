@@ -47,6 +47,18 @@ export type SlideResult = {
   library?: 'mine' | 'others' // which archive store this came from (Others' Library = badged)
   ownership?: string // deck ownership (mine|others|unknown) — for the author label
   author?: string // raw deck author ('' when none)
+  score?: MatchScore // Match switch: the card's score label ('words 0.91' / 'meaning 0.78')
+}
+export type MatchMode = 'words' | 'meaning' | 'both'
+export type MatchScore = { kind: 'words' | 'meaning'; value: number; label: string }
+export type MatchedSearchResult = {
+  requested: MatchMode
+  mode: MatchMode // what ran: 'words' when the model is missing, the query is empty or the picture query failed
+  modelReady: boolean
+  words: SlideClusterResult[]
+  related: SlideClusterResult[]
+  pictureError: string | null
+  ms: { words: number; meaning: number | null }
 }
 export type SlideClusterResult = {
   representative: SlideResult
@@ -167,6 +179,7 @@ const api = {
     setIncludeWell: (on: boolean): Promise<void> => ipcRenderer.invoke('picture:set-include-well', on),
     query: (q: PictureQuery, opts?: { limit?: number; kinds?: Array<'slide' | 'well-image'> }): Promise<{ ok: boolean; results: PictureScored[]; error?: string }> =>
       ipcRenderer.invoke('picture:query', q, opts),
+    queryCount: (): Promise<number> => ipcRenderer.invoke('picture:query-count'),
     onStatus: (cb: (s: PictureSearchStatus) => void): (() => void) => {
       const handler = (_e: Electron.IpcRendererEvent, s: PictureSearchStatus): void => cb(s)
       ipcRenderer.on('picture:status', handler)
@@ -179,6 +192,9 @@ const api = {
     // Slide + OCR search with filters; returns clusters (size-1 clusters when clustering is off).
     search: (query: string, filters: SearchFilters): Promise<SlideClusterResult[]> =>
       ipcRenderer.invoke('archive:search', query, filters),
+    // The same search with the Match switch: word hits and picture hits in two bands, with scores.
+    searchMatched: (query: string, filters: SearchFilters, mode: MatchMode): Promise<MatchedSearchResult> =>
+      ipcRenderer.invoke('archive:search-matched', query, filters, mode),
     // Counts for the From chips (current query, Kind applied).
     fromCounts: (query: string, filters: SearchFilters): Promise<FromCounts> => ipcRenderer.invoke('archive:from-counts', query, filters),
     // Distinct deck categories (with counts) for the Category filter.
