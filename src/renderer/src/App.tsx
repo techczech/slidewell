@@ -723,7 +723,7 @@ export default function App(): JSX.Element {
         <button
           className={filters.cluster ? 'toggle on' : 'toggle'}
           onClick={() => patch({ cluster: !filters.cluster })}
-          title="Collapse near-identical slides into one result"
+          title="Collapse look-alike pictures and near-identical slides into one result"
         >
           ▸ Group near-identical
         </button>
@@ -2133,6 +2133,7 @@ function SearchableSelect({
 }
 
 function clusterBadge(c: SlideClusterResult): string {
+  if (c.size > 1 && c.lookAlike) return `▸ ${c.size} versions`
   if (c.size > 1) return `▸ ${c.size} near-identical in ${c.deckCount} presentation${c.deckCount === 1 ? '' : 's'}`
   if (c.representative.usedInDecks > 1) return `used in ${c.representative.usedInDecks} presentations`
   return ''
@@ -2516,7 +2517,7 @@ function ClusterModal({
     <div className="overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <b>{cluster.size} near-identical slides</b> across {cluster.deckCount} presentation{cluster.deckCount === 1 ? '' : 's'}
+          <b>{cluster.size} {cluster.lookAlike ? 'versions' : 'near-identical slides'}</b>{cluster.lookAlike ? (cluster.lookAlike === 'same-picture' ? ' of the same picture' : ' of the same thing, changed') : ''}{cluster.members.some((m) => m.kind !== 'well-image') && <> across {cluster.deckCount} presentation{cluster.deckCount === 1 ? '' : 's'}</>}
           <button className="copyref" onClick={onClose}>close ✕</button>
         </div>
         <div className="grid">

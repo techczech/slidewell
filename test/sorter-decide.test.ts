@@ -72,3 +72,41 @@ describe('sorter verdict: reasons in plain words', () => {
     expect(decide(rule('keep', 0.65), 0.3).reason).toBe('Not sure: looks like a chart, but it looks like screenshots you binned before')
   })
 })
+
+describe('sorter verdict: copy of a kept screenshot (look-alike signal)', () => {
+  it('leans throwaway: the signal raises p(throwaway) for the same inputs, never lowers it', () => {
+    for (const p of [0.2, 0.5, 0.8]) {
+      const none = decide(null, p)
+      const same = decide(null, p, DEFAULT_THRESHOLDS, 'same-picture')
+      const changed = decide(null, p, DEFAULT_THRESHOLDS, 'same-thing')
+      expect(1 - same.pKeep).toBeGreaterThan(1 - none.pKeep)
+      expect(1 - same.pKeep).toBeGreaterThan(1 - changed.pKeep)
+      expect(1 - changed.pKeep).toBeGreaterThan(1 - none.pKeep)
+    }
+  })
+  it('turns a borderline doubtful into throwaway only when it reaches the threshold, and says why', () => {
+    const base = decide(rule('throwaway', 0.8), 0.4)
+    expect(base.proposal).toBe('doubtful')
+    const nudged = decide(rule('throwaway', 0.8), 0.4, DEFAULT_THRESHOLDS, 'same-picture')
+    expect(nudged.proposal).toBe('throwaway')
+    expect(1 - nudged.pKeep).toBeGreaterThanOrEqual(DEFAULT_THRESHOLDS.throwaway)
+    expect(nudged.reason).toMatch(/one you already kept/)
+  })
+  it('is never throwaway below the threshold, whatever the signal (sweep)', () => {
+    for (const copy of ['same-picture', 'same-thing', null] as const)
+      for (const t of [DEFAULT_THRESHOLDS, { throwaway: THROWAWAY_FLOOR, keep: 0.6 }])
+        for (const r of [null, rule('keep', 0.9), rule('throwaway', 0.6), rule('throwaway', 0.95)])
+          for (let i = 0; i <= 100; i++) {
+            const v = decide(r, i === 100 ? null : i / 99, t, copy)
+            if (v.proposal === 'throwaway') expect(1 - v.pKeep).toBeGreaterThanOrEqual(t.throwaway)
+          }
+  })
+  it('the signal alone (no rule, no model) is only ever doubtful', () => {
+    expect(decide(null, null, DEFAULT_THRESHOLDS, 'same-picture').proposal).toBe('doubtful')
+  })
+  it('does not touch a keep verdict or its reason', () => {
+    const v = decide(rule('keep', 0.95), 0.95, DEFAULT_THRESHOLDS, 'same-thing')
+    expect(v.proposal).toBe('keep')
+    expect(v.reason).not.toMatch(/already kept/)
+  })
+})

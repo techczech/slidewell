@@ -5,6 +5,7 @@
  * `download()` runs (the user pressed Download in Settings).
  */
 import { ipcMain } from 'electron'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { MODEL_DIM, MODEL_REPO, MODEL_REVISION, MODEL_TOTAL_BYTES, QUERY_PREFIX } from './model-manifest'
 import { bytesOnDisk, deleteModel, downloadModel, modelDir, modelState, type FetchLike } from './model-store'
@@ -289,6 +290,15 @@ export class PictureSearchService {
   pictureQuery(q: PictureQuery, opts?: QueryOptions): Promise<Scored[]> {
     this.queries++
     return this.openEngine().pictureQuery(q, opts)
+  }
+
+  /**
+   * Look-alike grouping's seam onto the store: stored vectors and source image paths for these ids.
+   * Reads only; no model needed. Empty when nothing has been indexed yet (does not create the store).
+   */
+  lookAlikeInputs(ids: string[]): { vectors: Map<string, Float32Array>; paths: () => Map<string, string> } {
+    if (!this.store && !existsSync(join(this.deps.wellRoot(), STORE_FILE))) return { vectors: new Map(), paths: () => new Map() }
+    return { vectors: this.openEngine().vectorsOf(ids), paths: () => this.openStore().pathsOf(ids) }
   }
 
   /** How many picture queries this process has run (the Words-only fast path must leave it unchanged). */
