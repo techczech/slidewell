@@ -28,6 +28,9 @@ export type MergeDeps<R> = {
 
 type Entry<R, C> = { row: R; from: number; src: C }
 
+/** The meaning/words score a row carries (matched-search.ts sets `score` on the representative), or undefined. */
+const scoreOf = <R>(row: R): number | undefined => (row as { score?: { value: number } }).score?.value
+
 export async function mergeLookAlikeClusters<R extends { deck: string }, C extends ClusterShape<R>>(
   clusters: C[],
   deps: MergeDeps<R>,
@@ -54,9 +57,26 @@ export async function mergeLookAlikeClusters<R extends { deck: string }, C exten
   const groups = await groupWithFingerprints(items, deps.fingerprints ?? (async () => new Map()), opts.thresholds ?? LOOK_ALIKE_THRESHOLDS)
 
   const embeddedRows = new Set<R>(embedded.map((e) => e.row))
+  // The scored copy of each row: a cluster's representative carries the score (matched-search.ts),
+  // while its members are the bare rows. Map members back to the scored copy by picture id.
+  const scoredById = new Map<string, R>()
+  for (const c of clusters) {
+    const id = deps.idOf(c.representative)
+    if (id !== null && scoreOf(c.representative) !== undefined) scoredById.set(id, c.representative)
+  }
+  // The card's head: the member with the highest score (first one wins on a tie or when none is scored).
+  const headOf = (members: R[]): R => {
+    let best: R | undefined
+    for (const m of members) {
+      const id = deps.idOf(m)
+      const cand = (id !== null ? scoredById.get(id) : undefined) ?? m
+      if (best === undefined || (scoreOf(cand) ?? -Infinity) > (scoreOf(best) ?? -Infinity)) best = cand
+    }
+    return best ?? members[0]
+  }
   const build = (src: C, members: R[], tier: Tier | null): C & LookAlikeTag => {
     const presentations = new Set(members.map((m) => m.deck).filter(Boolean))
-    return { ...src, representative: members[0], members, size: members.length, deckCount: presentations.size, ...(tier ? { lookAlike: tier } : {}) }
+    return { ...src, representative: headOf(members), members, size: members.length, deckCount: presentations.size, ...(tier ? { lookAlike: tier } : {}) }
   }
   // appearance cards, placed where their first row sat in the original order
   const cardsAt = new Map<number, Array<C & LookAlikeTag>>()

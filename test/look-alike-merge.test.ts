@@ -1,11 +1,16 @@
 import { describe, it, expect } from 'vitest'
 import { mergeLookAlikeClusters, type ClusterShape } from '../src/main/look-alike/merge-clusters'
 
-type Row = { deck: string; id: string | null }
+type Row = { deck: string; id: string | null; score?: { kind: 'meaning'; value: number; label: string } }
 const row = (deck: string, id: string | null): Row => ({ deck, id })
 const cluster = (...rows: Row[]): ClusterShape<Row> => ({ representative: rows[0], members: rows, size: rows.length, deckCount: new Set(rows.map((r) => r.deck)).size })
 const vec = (deg: number): Float32Array => Float32Array.from([Math.cos((deg * Math.PI) / 180), Math.sin((deg * Math.PI) / 180)])
 const deps = (v: Record<string, Float32Array>) => ({ idOf: (r: Row) => r.id, vectorsOf: (ids: string[]) => new Map(ids.filter((i) => v[i]).map((i) => [i, v[i]])) })
+// A search hit as matched-search.ts emits it: the representative is a scored copy, the member is the bare row.
+const scoredCluster = (id: string, value: number): ClusterShape<Row> => {
+  const r = row('d', id)
+  return { representative: { ...r, score: { kind: 'meaning', value, label: `meaning ${value}` } }, members: [r], size: 1, deckCount: 1 }
+}
 
 describe('merging result clusters by appearance', () => {
   it('collapses look-alikes into one "N versions" cluster at the first one, keeping order', async () => {
@@ -66,6 +71,19 @@ describe('merging result clusters by appearance', () => {
     const v: Record<string, Float32Array> = { a: vec(0), b: vec(1), c: vec(2) }
     const out = await mergeLookAlikeClusters([cluster(row('1', 'a')), cluster(row('2', 'b')), cluster(row('3', 'c'))], deps(v), { limit: 2 })
     expect(out.map((c) => c.size)).toEqual([2, 1])
+  })
+  it('keeps the meaning score on unrelated singleton cards (reviewer case: 0.95 and 0.85 stay [0.95, 0.85])', async () => {
+    const out = await mergeLookAlikeClusters([scoredCluster('p', 0.95), scoredCluster('q', 0.85)], deps({ p: vec(0), q: vec(90) }))
+    expect(out.map((c) => c.representative.id)).toEqual(['p', 'q'])
+    expect(out.map((c) => c.representative.score?.value)).toEqual([0.95, 0.85])
+    expect(out.map((c) => c.size)).toEqual([1, 1])
+  })
+  it('a merged group keeps its highest member score on the representative', async () => {
+    const out = await mergeLookAlikeClusters([scoredCluster('a', 0.6), scoredCluster('a2', 0.9), scoredCluster('a3', 0.75)], deps({ a: vec(0), a2: vec(3), a3: vec(5) }))
+    expect(out).toHaveLength(1)
+    expect(out[0].size).toBe(3)
+    expect(out[0].representative.id).toBe('a2')
+    expect(out[0].representative.score?.value).toBe(0.9)
   })
   it('uses a fingerprint only for ambiguous pairs', async () => {
     const mid = 18 // cos ~ 0.951: in the hash-decided band
