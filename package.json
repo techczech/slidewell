@@ -16,7 +16,8 @@
     "test:smoke": "electron-vite build && node e2e/smoke.mjs",
     "test:triage": "electron-vite build && node e2e/triage.mjs",
     "test:review-ui": "node e2e/review-ui.mjs",
-    "test:review": "electron-vite build && node e2e/review.mjs"
+    "test:review": "electron-vite build && node e2e/review.mjs",
+    "test:sorter-cloud": "electron-vite build && node e2e/sorter-cloud.mjs"
   },
   "build": {
     "appId": "net.dominiklukes.slidewell",

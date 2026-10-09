@@ -38,6 +38,10 @@ import type { Job, JobResult } from './sorter/jobs'
 import type { FetchLike } from './picture-search/model-store'
 import { ReviewService } from './review/service'
 import { registerReviewIpc } from './review/ipc'
+import { CloudSorter, normaliseCloudSettings, registerCloudIpc, type CloudRunSummary, type CloudSettings } from './sorter/cloud/service'
+import { ApiKeyStore } from './sorter/cloud/key-store'
+import { shrinkForLuna } from './sorter/cloud/images'
+import type { HttpPost } from './sorter/cloud/client'
 import { guardedHandle } from './ipc-guard'
 import { pileOf, type ProposalLabel } from './review/piles'
 
@@ -77,6 +81,8 @@ type Config = {
   storage?: Partial<Record<'archive' | 'others' | 'well', { backend?: 'local' | 'r2' }>> // per-store backend (spec 2026-06-24)
   ownerNames?: string[] // "My decks": authors that count as the user (unset → the OS account's names; owners.ts)
   pictureSearch?: PictureSearchSettings // picture search: well images on/off, indexing paused (survives restart)
+  // sorter cloud step (ticket 07): the OpenAI key only as safeStorage ciphertext (keyEnc), never in plain text
+  sorterCloud?: Partial<CloudSettings> & { keyEnc?: string; lastRunAt?: string | null; since?: string | null; lastRun?: CloudRunSummary | null }
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -357,6 +363,50 @@ app.whenReady().then(() => {
   })
   registerSorterIpc(sorter, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
   app.on('will-quit', () => sorter.cancel())
+
+  // --- screenshot sorter, cloud step (sorter/cloud/service.ts): Luna for the doubtful ones, nightly + Sort now ---
+  // The OpenAI key is stored like the R2 credentials: safeStorage ciphertext in config.json, never returned or logged.
+  const cloudCfg = (): NonNullable<Config['sorterCloud']> => readConfig().sorterCloud ?? {}
+  const saveCloudCfg = (patch: Partial<NonNullable<Config['sorterCloud']>>): void => writeConfig({ sorterCloud: { ...cloudCfg(), ...patch } })
+  const lunaKey = new ApiKeyStore(
+    () => cloudCfg().keyEnc,
+    (enc) => saveCloudCfg({ keyEnc: enc }),
+    { available: () => safeStorage.isEncryptionAvailable(), encrypt: (k) => safeStorage.encryptString(k), decrypt: (b) => safeStorage.decryptString(b) }
+  )
+  const lunaHttp: HttpPost = (url, init) => net.fetch(url, { method: init.method, headers: init.headers, body: init.body, signal: init.signal })
+  const cloudSettings = (): CloudSettings => normaliseCloudSettings(cloudCfg())
+  const cloud = new CloudSorter({
+    wellRoot: wellRootResolved,
+    sortLocal: () => sorter.sortUndecided(),
+    canSortLocal: () => {
+      const st = sorter.status()
+      return st.canRunUnattended && st.modelReady
+    },
+    key: lunaKey,
+    online: () => net.isOnline(),
+    http: lunaHttp,
+    shrink: (p) => shrinkForLuna(p),
+    settings: cloudSettings,
+    state: () => {
+      const c = cloudCfg()
+      return { lastRunAt: c.lastRunAt ?? null, since: c.since ?? null, lastRun: c.lastRun ?? null }
+    },
+    saveState: (patch) => saveCloudCfg(patch),
+    broadcast: (st) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('cloud:status', st)
+    },
+    log: (line) => console.warn(line)
+  })
+  registerCloudIpc(cloud, lunaKey, (s) => saveCloudCfg(s), cloudSettings, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+  // the nightly batch runs only while the app is open: checked shortly after launch (a missed night runs then) and every minute
+  const cloudTick = (): void => void cloud.tick().catch((e) => console.warn(`[sorter-cloud] nightly check failed: ${(e as Error)?.name ?? 'error'}`))
+  const cloudFirst = setTimeout(cloudTick, 30_000)
+  const cloudTimer = setInterval(cloudTick, 60_000)
+  app.on('will-quit', () => {
+    clearTimeout(cloudFirst)
+    clearInterval(cloudTimer)
+    cloud.cancel()
+  })
 
   // --- review screen (review/service.ts): his keep/throwaway, piles, 30-day Bin; never touches an original ---
   const review = new ReviewService({

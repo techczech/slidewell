@@ -134,6 +134,7 @@ export type ReviewCard = {
   proposal: 'keep' | 'throwaway' | 'doubtful'
   pile: ReviewPile
   by: 'you' | 'sorter' // his decision, or a proposal he has not overridden
+  decidedBy: 'rules' | 'history' | 'luna' | null // which sorter step made the call (shown as rules / your history / asked Luna)
   binInDays: number | null // Throwaway only: whole days before it moves to the Bin
   thumbUrl: string | null
   offline: boolean
@@ -306,6 +307,44 @@ export type SorterStatus = {
   pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
 }
 
+// Screenshot sorter, cloud step (ticket 07). Same shapes as src/main/sorter/cloud/service.ts.
+export type CloudSettings = { enabled: boolean; batchTime: string; nightlyCap: number }
+export type CloudRunSummary = {
+  at: string
+  trigger: 'nightly' | 'manual'
+  local: { ok: boolean; message: string } | null
+  asked: number
+  answered: number
+  keep: number
+  throwaway: number
+  stayedDoubtful: number
+  skipped: 'no-key' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | null
+  error: string | null
+  message: string
+}
+export type CloudCostEstimate = { screenshots: number; requests: number; inputTokens: number; outputTokens: number; usd: number }
+export type CloudPreview = {
+  local: { ok: boolean; message: string }
+  doubtful: number
+  toSend: number
+  cap: number
+  estimate: CloudCostEstimate
+  blocked: 'no-key' | 'offline' | 'busy' | 'nothing-doubtful' | null
+  message: string
+}
+export type CloudStatus = {
+  phase: 'idle' | 'sorting' | 'asking'
+  done: number
+  total: number
+  hasKey: boolean // the key itself never crosses to the renderer
+  encryptionAvailable: boolean
+  settings: CloudSettings
+  lastRun: CloudRunSummary | null
+  nextRunAt: string | null
+  model: string
+  longEdge: number
+}
+
 const api = {
   // Picture search: model download/delete, background indexing, query by text or by image id.
   picture: {
@@ -337,6 +376,21 @@ const api = {
       const handler = (_e: Electron.IpcRendererEvent, s: SorterStatus): void => cb(s)
       ipcRenderer.on('sorter:status', handler)
       return () => ipcRenderer.removeListener('sorter:status', handler)
+    }
+  },
+  // Sorter cloud step: Luna for the doubtful ones. The key is write-only from here (set / clear); status says only whether one is saved.
+  cloud: {
+    status: (): Promise<CloudStatus> => ipcRenderer.invoke('cloud:status'),
+    setKey: (key: string): Promise<{ ok: boolean; saved: boolean; error?: string; status: CloudStatus }> => ipcRenderer.invoke('cloud:set-key', key),
+    clearKey: (): Promise<CloudStatus> => ipcRenderer.invoke('cloud:clear-key'),
+    setSettings: (patch: Partial<CloudSettings>): Promise<CloudStatus> => ipcRenderer.invoke('cloud:set-settings', patch),
+    prepare: (): Promise<CloudPreview> => ipcRenderer.invoke('cloud:prepare'),
+    send: (max: number): Promise<CloudRunSummary> => ipcRenderer.invoke('cloud:send', max),
+    cancel: (): Promise<void> => ipcRenderer.invoke('cloud:cancel'),
+    onStatus: (cb: (s: CloudStatus) => void): (() => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, s: CloudStatus): void => cb(s)
+      ipcRenderer.on('cloud:status', handler)
+      return () => ipcRenderer.removeListener('cloud:status', handler)
     }
   },
   archive: {

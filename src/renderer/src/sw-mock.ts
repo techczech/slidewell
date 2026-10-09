@@ -1,5 +1,30 @@
 import type { SwApi } from '../../preload'
 import { reviewMock } from './review-mock'
+import type { CloudStatus } from '../../preload'
+
+// Settings › Luna in the browser preview: a pretend key flag and settings; nothing is ever sent.
+function cloudMock(): SwApi['cloud'] {
+  const st: CloudStatus = { phase: 'idle', done: 0, total: 0, hasKey: false, encryptionAvailable: true, settings: { enabled: true, batchTime: '02:00', nightlyCap: 300 }, lastRun: null, nextRunAt: null, model: 'gpt-6-luna', longEdge: 1456 }
+  return {
+    status: async () => ({ ...st }),
+    setKey: async (k: string) => {
+      st.hasKey = k.trim().length >= 20
+      return { ok: st.hasKey, saved: st.hasKey, error: st.hasKey ? undefined : 'That does not look like an API key.', status: { ...st } }
+    },
+    clearKey: async () => {
+      st.hasKey = false
+      return { ...st }
+    },
+    setSettings: async (patch) => {
+      st.settings = { ...st.settings, ...patch }
+      return { ...st }
+    },
+    prepare: async () => ({ local: { ok: false, message: 'not available in the browser preview' }, doubtful: 0, toSend: 0, cap: st.settings.nightlyCap, estimate: { screenshots: 0, requests: 0, inputTokens: 0, outputTokens: 0, usd: 0 }, blocked: 'nothing-doubtful' as const, message: 'Nothing doubtful is waiting for Luna.' }),
+    send: async () => ({ at: new Date().toISOString(), trigger: 'manual' as const, local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, skipped: 'nothing-doubtful' as const, error: null, message: 'Nothing doubtful was waiting for Luna.' }),
+    cancel: async () => undefined,
+    onStatus: () => () => undefined
+  }
+}
 
 // Browser/dev mock for window.sw so the renderer runs under plain Vite (no Electron).
 // Mirrors the full preload contract; returns inert values. Never used in the packaged app.
@@ -37,6 +62,7 @@ export function installMock(): void {
       cancel: async () => undefined,
       onStatus: () => () => undefined
     },
+    cloud: cloudMock(),
     archive: {
       available: async () => false,
       search: async () => [],

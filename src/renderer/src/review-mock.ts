@@ -15,6 +15,7 @@ type MockItem = {
   filename: string
   takenAt: string
   reason: string
+  decidedBy: ReviewCard['decidedBy']
 }
 
 const DAY = 86_400_000
@@ -36,12 +37,13 @@ function seed(now: number): MockItem[] {
       windowTitle,
       filename: `CleanShot ${taken.slice(0, 10)} at ${taken.slice(11, 13)}${taken.slice(14, 16)} from ${app} with ${windowTitle}.png`,
       takenAt: taken,
-      reason
+      reason,
+      decidedBy: proposal === 'doubtful' ? null : 'history'
     }
   }
   const out: MockItem[] = [
     item('doubtful', 'Google Chrome', 'ChatGPT', 'A ChatGPT window is usually slide material, but this one shows a settings page rather than an answer.'),
-    item('doubtful', 'Claude', 'New chat', 'Short Claude reply. Could be a useful example, could be a test.'),
+    { ...item('doubtful', 'Claude', 'New chat', 'Not sure, and Luna was not sure either: a short Claude reply; could be a useful example, could be a test.'), decidedBy: 'luna' },
     item('doubtful', 'Slack', '#sidequest-apps', 'A Slack thread, but it holds a picture of a TalkWeaver layout.'),
     item('doubtful', 'Terminal', 'zsh', 'Terminal, but the output is a clean results table, not an error.'),
     item('doubtful', 'WriteFlex', 'Untitled', 'No text it could read. Nothing to go on.'),
@@ -61,7 +63,8 @@ function seed(now: number): MockItem[] {
     ['Outlook', 'Calendar invite, Thursday', 6], ['Slack', 'DM · link pasted once', 9], ['Finder', 'Downloads · file list', 18], ['Terminal', 'zsh · git push rejected', 21],
     ['Google Chrome', 'Cookie consent banner', 26], ['Finder', 'Desktop · empty', 27], ['Slack', 'Huddle ended', 28], ['Terminal', 'zsh · permission denied', 34], ['System Settings', 'Wi-Fi', 40]
   ]
-  for (const [app, win, days] of toss) out.push(item('throwaway', app, win, 'Looks like screenshots you binned before.', days))
+  for (const [app, win, days] of toss) out.push(app === 'Terminal' || app === 'System Settings' ? { ...item('throwaway', app, win, `${app} window — usually throwaway`, days), decidedBy: 'rules' } : item('throwaway', app, win, 'Looks like screenshots you binned before.', days))
+  out[7] = { ...out[7], reason: 'A TalkWeaver layout showcase, useful slide material', decidedBy: 'luna' }
   // one he already kept from an earlier session
   out[8].decision = { state: 'included', decidedAt: new Date(now - DAY).toISOString() }
   // ?reviewBin=N adds N more items past 30 days (paging and Empty Bin at scale in the UI test)
@@ -79,7 +82,7 @@ export function reviewMock(): SwApi['review'] {
   const newest = (a: MockItem, b: MockItem): number => b.takenAt.localeCompare(a.takenAt)
   const card = (i: MockItem): ReviewCard => {
     const v = view(i)
-    return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, binInDays: v.binInDays, thumbUrl: null, offline: false }
+    return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, decidedBy: i.decidedBy, binInDays: v.binInDays, thumbUrl: null, offline: false }
   }
   const head = (): { needALook: number; kept: number; throwaway: number } => {
     const s = summarise(live().map((i) => ({ view: view(i), proposal: i.proposal, decided: Boolean(i.decision) })))

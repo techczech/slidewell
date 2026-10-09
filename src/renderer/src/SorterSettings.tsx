@@ -3,6 +3,7 @@
 // file shows state and sends the two commands. Sorting records proposals only.
 import { useCallback, useEffect, useState } from 'react'
 import type { SorterAccuracy, SorterStatus } from '../../preload'
+import { SorterCloudSettings } from './SorterCloudSettings'
 
 function useSorterStatus(): SorterStatus | null {
   const [st, setSt] = useState<SorterStatus | null>(null)
@@ -136,6 +137,7 @@ export function SorterSettings(): JSX.Element {
           Waiting for you: {n(st.pending.keep)} proposed keep, {n(st.pending.throwaway)} proposed throwaway, {n(st.pending.doubtful)} need a look · sorted {day(st.pending.lastProposedAt)}
         </div>
       )}
+      <SorterCloudSettings />
     </div>
   )
 }
