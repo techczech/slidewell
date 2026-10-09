@@ -13,8 +13,8 @@
  * ids: `slide:<presentation_id>#<slide_order>` for archive slide renders, `well:<id>` for well images.
  */
 import { DatabaseSync } from 'node:sqlite'
-import { mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { mkdirSync, realpathSync } from 'node:fs'
+import { dirname, sep } from 'node:path'
 
 export const STORE_FILE = 'picture-search.db'
 export const SCHEMA_VERSION = '1'
@@ -31,6 +31,21 @@ export type IndexItem = {
   presentationId?: string
   slideOrder?: number
   wellId?: string
+  /** Slides: the canonical archive root this item was planned under (see canonicalRoot). */
+  root?: string
+}
+
+/**
+ * The identity of an archive folder: its real path (symlinks resolved), no trailing separator.
+ * null when the folder cannot be resolved (unavailable): callers then drop nothing.
+ */
+export function canonicalRoot(p: string): string | null {
+  try {
+    const r = realpathSync.native(p)
+    return r.length > 1 && r.endsWith(sep) ? r.slice(0, -1) : r
+  } catch {
+    return null
+  }
 }
 
 /** What resume planning compares: the same path, size and mtime means already handled. */
@@ -102,12 +117,13 @@ export class VectorStore {
   /**
    * Bind the slide rows to an archive root. If they were made from another archive, drop every slide
    * vector and slide failure (well rows stay) and return the dropped ids, so the caller can forget
-   * them in memory and re-plan. A store with no recorded root adopts this one.
+   * them in memory and re-plan. Slide rows with no recorded root are of unknown origin and are
+   * dropped too. `root` must be canonical (canonicalRoot), so other spellings of one folder match.
    */
   useArchiveRoot(root: string): string[] {
     const current = this.meta()[SLIDE_ROOT_KEY]
     let dropped: string[] = []
-    if (current !== undefined && current !== root) {
+    if (current !== root) {
       dropped = (this.db.prepare("SELECT id FROM vectors WHERE kind = 'slide'").all() as Array<{ id: string }>).map((r) => r.id)
       this.db.exec("DELETE FROM vectors WHERE kind = 'slide'; DELETE FROM failures WHERE id LIKE 'slide:%';")
     }
@@ -130,7 +146,39 @@ export class VectorStore {
     return out
   }
 
-  put(item: IndexItem, vector: Float32Array): void {
+  /** A slide row may be written only under the archive root the store is bound to now. */
+  private acceptsSlide(item: IndexItem): boolean {
+    if (item.kind !== 'slide') return true
+    const current = (this.db.prepare('SELECT value FROM meta WHERE key = ?').get(SLIDE_ROOT_KEY) as { value: string } | undefined)?.value
+    return current === undefined || item.root === current
+  }
+
+  /** Run `fn` in one write transaction (the root check and the write cannot be split). */
+  private tx<T>(fn: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const r = fn()
+      this.db.exec('COMMIT')
+      return r
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
+  /**
+   * Store a vector. Returns false (and writes nothing) for a slide planned under an archive root the
+   * store is no longer bound to — e.g. an embed that finished after the user switched archive.
+   */
+  put(item: IndexItem, vector: Float32Array): boolean {
+    return this.tx(() => {
+      if (!this.acceptsSlide(item)) return false
+      this.writeVector(item, vector)
+      return true
+    })
+  }
+
+  private writeVector(item: IndexItem, vector: Float32Array): void {
     this.db
       .prepare(
         `INSERT INTO vectors (id, kind, presentation_id, slide_order, well_id, path, file_size, file_mtime_ms, embedded_at, vector)
@@ -143,7 +191,16 @@ export class VectorStore {
     this.db.prepare('DELETE FROM failures WHERE id = ?').run(item.id)
   }
 
-  putFailure(item: IndexItem, error: string): void {
+  /** Record an unreadable image (same root rule as put). Returns false when nothing was written. */
+  putFailure(item: IndexItem, error: string): boolean {
+    return this.tx(() => {
+      if (!this.acceptsSlide(item)) return false
+      this.writeFailure(item, error)
+      return true
+    })
+  }
+
+  private writeFailure(item: IndexItem, error: string): void {
     this.db
       .prepare(
         `INSERT INTO failures (id, path, file_size, file_mtime_ms, error, failed_at) VALUES (?, ?, ?, ?, ?, ?)

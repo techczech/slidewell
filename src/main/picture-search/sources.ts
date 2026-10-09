@@ -27,7 +27,8 @@ async function statItems<T>(rows: T[], pathOf: (r: T) => string, make: (r: T, si
 }
 
 /** Slide renders of one archive store: the renders.json pairing when present, else slide_NNNN = order. */
-export async function archiveRenders(archiveRoot: string): Promise<IndexItem[]> {
+/** `tag` (the canonical root) is recorded on every item, so its result is only kept under that root. */
+export async function archiveRenders(archiveRoot: string, tag: string = archiveRoot): Promise<IndexItem[]> {
   const extracted = join(archiveRoot, 'extracted')
   if (!existsSync(extracted)) return []
   const rows: Array<{ pid: string; order: number; path: string }> = []
@@ -58,7 +59,7 @@ export async function archiveRenders(archiveRoot: string): Promise<IndexItem[]> 
   return statItems(
     rows,
     (r) => r.path,
-    (r, size, mtimeMs) => ({ id: slideId(r.pid, r.order), kind: 'slide', path: r.path, size, mtimeMs, presentationId: r.pid, slideOrder: r.order })
+    (r, size, mtimeMs) => ({ id: slideId(r.pid, r.order), kind: 'slide', path: r.path, size, mtimeMs, presentationId: r.pid, slideOrder: r.order, root: tag })
   )
 }
 

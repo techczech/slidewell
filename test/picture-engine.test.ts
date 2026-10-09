@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { PictureSearchEngine, normalise, rank, type Embedder } from '../src/main/picture-search/engine'
 import { planQueue } from '../src/main/picture-search/progress'
-import { VectorStore, slideId, wellImageId, type IndexItem } from '../src/main/picture-search/vector-store'
+import { VectorStore, canonicalRoot, slideId, wellImageId, type IndexItem } from '../src/main/picture-search/vector-store'
 
 // A tiny fake embedder: 4 "concepts"; an image's file name and a query's words say which are present.
 const CONCEPTS = ['robot', 'classroom', 'beach', 'chart']
@@ -14,7 +14,8 @@ const fake: Embedder = {
   embedImage: async (p) => vec(p)
 }
 
-const item = (id: string, path: string, kind: IndexItem['kind'] = 'slide'): IndexItem => ({ id, kind, path, size: 10, mtimeMs: 1 })
+const A = '/Volumes/Data/A'
+const item = (id: string, path: string, kind: IndexItem['kind'] = 'slide', root = A): IndexItem => ({ id, kind, path, size: 10, mtimeMs: 1, ...(kind === 'slide' ? { root } : {}) })
 
 let dir: string
 let store: VectorStore
@@ -98,11 +99,56 @@ describe('picture-search engine (embed text, embed image, nearest neighbours)', 
     expect((await engine.pictureQuery({ text: 'robots in a classroom' })).map((r) => r.id)).toEqual(['well:ab12cd3'])
     expect(store.meta().slide_archive_root).toBe('/Volumes/Data/B')
     // same id, size and mtime but another path is not "already done"
-    const a = item(slideId('Talk', 1), '/Volumes/Data/A/extracted/Talk/renders/slide_0001.webp')
+    const a = item(slideId('Talk', 1), '/Volumes/Data/B/old/extracted/Talk/renders/slide_0001.webp', 'slide', '/Volumes/Data/B')
     await engine.embedAndStore(a)
-    const b = { ...a, path: '/Volumes/Data/B/extracted/Talk/renders/slide_0001.webp' }
+    const b = { ...a, path: '/Volumes/Data/B/new/extracted/Talk/renders/slide_0001.webp' }
     expect(planQueue([b], store.fingerprints()).todo.map((i) => i.path)).toEqual([b.path])
     expect(planQueue([a], store.fingerprints()).todo).toEqual([])
+  })
+
+  it('an embed that finishes after an archive switch is not written (store or memory)', async () => {
+    let release: () => void = () => undefined
+    const slow: Embedder = { embedText: fake.embedText, embedImage: (p) => new Promise((r) => (release = () => r(vec(p)))) }
+    const engine = new PictureSearchEngine(store, () => slow)
+    store.useArchiveRoot(A)
+    await engine.pictureQuery({ imageId: 'x' }).catch(() => undefined) // load the in-memory copy
+    const inFlight = engine.embedAndStore(item(slideId('AI tools', 1), '/Volumes/Data/A/robot-classroom.webp'))
+    await new Promise((r) => setTimeout(r, 5))
+    store.useArchiveRoot('/Volumes/Data/B') // the user switches archive mid-call
+    release()
+    await inFlight
+    expect(store.get('slide:AI tools#1')).toBeNull()
+    expect(store.count()).toBe(0)
+    await expect(engine.pictureQuery({ imageId: 'slide:AI tools#1' })).rejects.toThrow(/no picture-search vector/)
+    // a failure recorded for an old-archive slide is refused the same way; well images are unaffected
+    expect(store.putFailure(item(slideId('Old', 2), '/Volumes/Data/A/bad.webp'), 'cannot read image')).toBe(false)
+    expect(store.put(item(wellImageId('ab12cd3'), '/Volumes/Data/robot.png', 'well-image'), vec('robot'))).toBe(true)
+  })
+
+  it('slide rows with no recorded root are dropped when a root is first recorded', async () => {
+    await seed(new PictureSearchEngine(store, () => fake)) // written before any root was recorded
+    store.putFailure(item(slideId('Broken', 1), '/Volumes/Data/A/broken.webp'), 'cannot read image')
+    const dropped = store.useArchiveRoot(A)
+    expect(dropped.sort()).toEqual(['slide:AI tools#1', 'slide:Budget#2', 'slide:Seals#4'])
+    expect(store.count()).toBe(1) // the well image stays
+    expect(store.failedCount()).toBe(0)
+    expect(store.meta().slide_archive_root).toBe(A)
+  })
+
+  it('other spellings of the same archive folder (trailing slash, symlink) keep the index', async () => {
+    const real = join(dir, 'archive')
+    mkdirSync(real)
+    symlinkSync(real, join(dir, 'link'))
+    const canon = canonicalRoot(real)!
+    expect(canonicalRoot(`${real}/`)).toBe(canon)
+    expect(canonicalRoot(join(dir, 'link'))).toBe(canon)
+    expect(canonicalRoot(join(dir, 'missing'))).toBeNull() // unavailable: callers drop nothing
+    store.useArchiveRoot(canon)
+    const engine = new PictureSearchEngine(store, () => fake)
+    await engine.embedAndStore(item(slideId('AI tools', 1), join(canon, 'robot-classroom.webp'), 'slide', canon))
+    expect(store.useArchiveRoot(canonicalRoot(`${real}/`)!)).toEqual([])
+    expect(store.useArchiveRoot(canonicalRoot(join(dir, 'link'))!)).toEqual([])
+    expect(store.count()).toBe(1)
   })
 
   it('rank keeps the true top-k under partial selection', () => {

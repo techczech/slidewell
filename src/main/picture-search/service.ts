@@ -12,7 +12,7 @@ import { PictureSearchEngine, UnreadableImageError, type Embedder, type PictureQ
 import { Indexer } from './indexer'
 import { coveragePercent, estimateText, statusText, type IndexProgress } from './progress'
 import { archiveRenders, wellImages } from './sources'
-import { STORE_FILE, VectorStore, type IndexItem } from './vector-store'
+import { STORE_FILE, VectorStore, canonicalRoot, type IndexItem } from './vector-store'
 
 export type PictureSearchSettings = { includeWell?: boolean; paused?: boolean }
 
@@ -106,17 +106,19 @@ export class PictureSearchService {
   }
 
   /** Slide rows belong to one archive root; a different root drops them (store and memory). */
-  private bindArchive(root: string | null): void {
-    if (!root) return
-    for (const id of this.openStore().useArchiveRoot(root)) this.engine?.forget(id)
+  private bindArchive(root: string | null): string | null {
+    const canon = root ? canonicalRoot(root) : null
+    if (!canon) return null // unavailable: drop nothing
+    for (const id of this.openStore().useArchiveRoot(canon)) this.engine?.forget(id)
+    return canon
   }
 
   private async enumerate(): Promise<IndexItem[]> {
     const root = this.deps.archiveRoot()
     // keyed by root: pointing Settings at another archive folder enumerates that one, and the slide
     // vectors made from the old archive are dropped (an unavailable archive drops nothing)
-    this.bindArchive(root)
-    if (!this.archiveCache || this.archiveCache.root !== root) this.archiveCache = { root, items: root ? await archiveRenders(root) : [] }
+    const canon = this.bindArchive(root)
+    if (!this.archiveCache || this.archiveCache.root !== canon) this.archiveCache = { root: canon, items: canon ? await archiveRenders(canon) : [] }
     const well = this.includeWell() ? await wellImages(this.deps.wellRoot(), this.deps.vaultRoot()) : []
     return [...well, ...this.archiveCache.items]
   }

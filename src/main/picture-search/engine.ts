@@ -93,8 +93,8 @@ export class PictureSearchEngine {
     const e = this.embedder()
     if (!e) throw new Error('picture search model is not ready')
     const v = await e.embedImage(item.path)
-    this.store.put(item, v)
-    if (this.cache) this.cache.set(item.id, { id: item.id, kind: item.kind, vector: v })
+    // the store refuses a slide planned under an archive root it is no longer bound to
+    if (this.store.put(item, v) && this.cache) this.cache.set(item.id, { id: item.id, kind: item.kind, vector: v })
   }
 
   /** Drop one id from the in-memory copy (its vector was removed from the store). */
