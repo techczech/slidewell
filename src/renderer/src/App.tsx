@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { nextPreviewIndex } from '../../main/triage-logic'
 import { PictureSearchSettings, PictureSearchStatusBar, usePictureStatus } from './PictureSearch'
 import { RELATED_SHOWN, relatedFold } from './match-fold'
-import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency, FromFilter, KindFilter, FromCounts, MatchMode } from '../../preload'
+import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency, FromFilter, KindFilter, FromCounts, MatchMode, MoreLikeThisResult } from '../../preload'
 
 type SortKey = 'best' | 'date-desc' | 'date-asc' | 'title'
 
@@ -97,6 +97,8 @@ export default function App(): JSX.Element {
   // keyboard selection + inspector + command palette
   const [sel, setSel] = useState(-1)
   const [inspectorOpen, setInspectorOpen] = useState(false)
+  // an item opened from "More like this": the inspector shows it instead of the selected card until selection moves
+  const [pinned, setPinned] = useState<SlideResult | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const reqId = useRef(0)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -285,11 +287,13 @@ export default function App(): JSX.Element {
   // the lightbox-aware target for ⌘K / shortcuts: the image being viewed in the slideshow, else the grid selection
   const activeItem: SlideResult | DeckCard | null = lightbox ? lightbox.list[lightbox.index] : current
   // other slides of the same group (group-by-presentation) — shown in the inspector
+  useEffect(() => setPinned(null), [sel, inspectorOpen, debounced, filters, deckFilter, refreshKey])
+  const shownHit = pinned ?? selectedRep
   const siblings = useMemo<SlideResult[]>(() => {
-    if (!selectedRep || !view.groups) return []
+    if (pinned || !selectedRep || !view.groups) return []
     const g = view.groups.find((grp) => grp.slides.some((c) => c.representative === selectedRep))
     return g ? g.slides.map((c) => c.representative) : []
-  }, [selectedRep, view])
+  }, [selectedRep, view, pinned])
 
   // reset selection when the result set changes
   useEffect(() => setSel(-1), [debounced, filters, deckFilter, refreshKey])
@@ -1024,9 +1028,12 @@ export default function App(): JSX.Element {
                 onReveal={() => void window.sw.archive.reveal(selectedDeck.coverThumbUrl)}
               />
             )
-          : selectedRep && (
+          : shownHit && (
               <SlideInspector
-                hit={selectedRep}
+                hit={shownHit}
+                pinned={pinned !== null}
+                onBackToList={() => setPinned(null)}
+                onOpenSimilar={setPinned}
                 pos={`${sel + 1} / ${orderedReps.length}`}
                 siblings={siblings}
                 onNavigate={(rep) => {
@@ -1034,16 +1041,16 @@ export default function App(): JSX.Element {
                   if (idx >= 0) setSel(idx)
                 }}
                 onClose={() => setInspectorOpen(false)}
-                onFullsize={() => openLightbox(orderedReps, sel)}
-                onCopyText={() => void copyText(selectedRep.text, 'slide text')}
-                onCopyRef={() => void copyText(selectedRep.reference, 'reference')}
-                onCopyImage={() => void copyImage(selectedRep)}
-                onReveal={() => void reveal(selectedRep)}
+                onFullsize={() => (pinned ? openLightbox([pinned], 0) : openLightbox(orderedReps, sel))}
+                onCopyText={() => void copyText(shownHit.text, 'slide text')}
+                onCopyRef={() => void copyText(shownHit.reference, 'reference')}
+                onCopyImage={() => void copyImage(shownHit)}
+                onReveal={() => void reveal(shownHit)}
                 onContext={
-                  selectedRep.kind !== 'well-image'
+                  shownHit.kind !== 'well-image'
                     ? () => {
                         setInspectorOpen(false)
-                        setDeckFilter({ pid: selectedRep.deck, title: selectedRep.deckTitle || selectedRep.deck })
+                        setDeckFilter({ pid: shownHit.deck, title: shownHit.deckTitle || shownHit.deck })
                       }
                     : undefined
                 }
@@ -2594,6 +2601,61 @@ function actionItems(deckMode: boolean, kind?: string): { id: ActionId; label: s
   ]
 }
 
+function MoreLikeThis({ hit, onOpen }: { hit: SlideResult; onOpen: (rep: SlideResult) => void }): JSX.Element {
+  const [modelReady, setModelReady] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [res, setRes] = useState<MoreLikeThisResult | null>(null)
+  useEffect(() => {
+    let live = true
+    void window.sw.picture.status().then((s) => live && setModelReady(s.model === 'ready'))
+    const off = window.sw.picture.onStatus((s) => setModelReady(s.model === 'ready'))
+    return () => {
+      live = false
+      off()
+    }
+  }, [])
+  // a new item in the inspector starts with no results
+  useEffect(() => setRes(null), [hit])
+  const run = (): void => {
+    setBusy(true)
+    const asked = hit
+    void window.sw.archive
+      .moreLikeThis({ kind: hit.kind, deck: hit.deck, slideOrder: hit.slideOrder, reference: hit.reference })
+      .then((r) => setRes((cur) => (asked === hit ? r : cur)))
+      .catch((e) => setRes({ state: 'error', items: [], error: String(e) }))
+      .finally(() => setBusy(false))
+  }
+  const hint = !modelReady
+    ? 'Download the picture-search model in Settings to use this'
+    : res?.state === 'not-indexed'
+      ? 'Not indexed yet — picture search has not reached this one. Try again in a while.'
+      : res?.state === 'none'
+        ? 'Nothing similar found in other presentations or the well'
+        : res?.state === 'error'
+          ? 'Could not look this up just now'
+          : 'by what’s on it · other presentations'
+  return (
+    <div className="more-like-this">
+      <div className="mlt-bar">
+        <button className="primary-btn" onClick={run} disabled={!modelReady || busy} title={modelReady ? 'Find pictures that look like this one' : 'Needs the picture-search model (Settings)'}>
+          More like this
+        </button>
+        <span className={res && res.state !== 'ok' && modelReady ? 'mlt-hint quiet' : 'mlt-hint'}>{hint}</span>
+      </div>
+      {res?.state === 'ok' && (
+        <div className="mlt-grid">
+          {res.items.map((r, i) => (
+            <button key={`${r.deck}-${r.slideOrder}-${r.reference}-${i}`} className="mlt-item" title={r.title} onClick={() => onOpen(r)}>
+              {r.thumbUrl ? <img src={r.thumbUrl} alt="" loading="lazy" onError={(e) => (e.currentTarget.style.visibility = 'hidden')} /> : <span className="mlt-blank" />}
+              {r.score && <span className="score-chip meaning">{r.score.label.replace('meaning ', '')}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SlideInspector({
   hit,
   pos,
@@ -2605,9 +2667,15 @@ function SlideInspector({
   onCopyRef,
   onCopyImage,
   onReveal,
-  onContext
+  onContext,
+  pinned,
+  onBackToList,
+  onOpenSimilar
 }: {
   hit: SlideResult
+  pinned: boolean
+  onBackToList: () => void
+  onOpenSimilar: (rep: SlideResult) => void
   pos: string
   siblings: SlideResult[]
   onNavigate: (rep: SlideResult) => void
@@ -2648,7 +2716,15 @@ function SlideInspector({
         <b>{hit.title}</b>
         <button className="copyref" onClick={onClose}>✕</button>
       </div>
-      <div className="inspector-pos">{pos} · ←/→ to navigate{hit.score && <span className={`score-chip inline ${hit.score.kind}`}>{hit.score.label}</span>}</div>
+      <div className="inspector-pos">
+        {pinned ? (
+          <>
+            opened from More like this · <button className="link" onClick={onBackToList}>back to the list</button>
+          </>
+        ) : (
+          <>{pos} · ←/→ to navigate</>
+        )}
+        {hit.score && <span className={`score-chip inline ${hit.score.kind}`}>{hit.score.label}</span>}</div>
       {hit.thumbUrl && <img className="deck-sidebar-cover" src={hit.thumbUrl} alt="" />}
       <div className="details-table">
         {rows.map(([k, v]) => (
@@ -2658,6 +2734,7 @@ function SlideInspector({
           </div>
         ))}
         {!isSlide && hit.text && <div className="details-text">{hit.text}</div>}
+        <MoreLikeThis hit={hit} onOpen={onOpenSimilar} />
         {siblings.length > 1 && (
           <>
             <div className="inspector-section">Other slides in this presentation ({siblings.length - 1})</div>

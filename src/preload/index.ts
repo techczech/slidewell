@@ -60,6 +60,7 @@ export type MatchedSearchResult = {
   pictureError: string | null
   ms: { words: number; meaning: number | null }
 }
+export type MoreLikeThisResult = { state: 'ok' | 'no-model' | 'not-indexed' | 'none' | 'error'; items: SlideResult[]; error?: string }
 export type SlideClusterResult = {
   representative: SlideResult
   members: SlideResult[]
@@ -195,6 +196,9 @@ const api = {
     // The same search with the Match switch: word hits and picture hits in two bands, with scores.
     searchMatched: (query: string, filters: SearchFilters, mode: MatchMode): Promise<MatchedSearchResult> =>
       ipcRenderer.invoke('archive:search-matched', query, filters, mode),
+    // More like this: the six most similar items (other presentations and the well), each with a meaning score.
+    moreLikeThis: (row: { kind: string; deck: string; slideOrder: number | null; reference: string }): Promise<MoreLikeThisResult> =>
+      ipcRenderer.invoke('archive:more-like-this', row),
     // Counts for the From chips (current query, Kind applied).
     fromCounts: (query: string, filters: SearchFilters): Promise<FromCounts> => ipcRenderer.invoke('archive:from-counts', query, filters),
     // Distinct deck categories (with counts) for the Category filter.

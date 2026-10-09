@@ -1582,3 +1582,51 @@ body {
   margin-left: 0.4rem;
   font-size: 0.7rem;
 }
+
+/* More like this (inspector): button, one-line hint, up to six score-badged thumbnails */
+.more-like-this {
+  margin-top: 0.9rem;
+}
+.mlt-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.mlt-hint {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.mlt-hint.quiet {
+  font-style: italic;
+}
+.mlt-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 0.5rem;
+}
+.mlt-item {
+  position: relative;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #ece5d6;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  cursor: pointer;
+}
+.mlt-item:hover {
+  border-color: var(--oxford);
+}
+.mlt-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.mlt-blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
