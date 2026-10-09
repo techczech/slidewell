@@ -11,6 +11,8 @@ import { loadDeckMeta, categoryList, invalidateDeckMeta, setOwnerNames, type Dec
 import { resolveOwnerNames, cleanOwnerNames } from './owners'
 import { ensureWell, drainInbox, scanVault, searchWell, wellAbsPath, ingestScreenshot, findFfmpeg, type WellRow } from './well'
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow } from './triage'
+import { cleanShotFolder } from './cleanshot-folder'
+import { createSourceWatcher } from './source-watcher'
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
 import { convertPptxToOutline } from './convert'
 import { slugify } from './outline'
@@ -29,12 +31,16 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'swarchive', privileges: { standard: true, secure: true, supportFetchAPI: true } }
 ])
 
+// An extra folder watched for screenshots. namedOnly = only files named like screenshots, top level only (the Desktop).
+type CaptureSource = { path: string; namedOnly: boolean }
+
 // Simple JSON config — avoids ESM/CJS issues with electron-store (same call TalkWeaver made).
 type Config = {
   archiveRoot?: string
   wellRoot?: string
   vaultRoot?: string
   screenshotRoot?: string
+  captureSources?: CaptureSource[] // extra capture sources beside screenshotRoot (capture inbox)
   conversionsRoot?: string // default destination for throwaway PPTX→Outline conversions
   convertOcrByDefault?: boolean // initial state of the convert OCR toggle
   othersArchiveRoot?: string // the Others' Library store (Scenario A) — other people's decks, kept separate
@@ -132,6 +138,27 @@ function screenshotRootResolved(): string | null {
   return r && existsSync(r) ? r : null
 }
 
+// Defaults offered in Settings. The Desktop is namedOnly so other Desktop files are never read.
+// CleanShot's folder is read from its own preferences; null (not offered) when unset or missing.
+async function captureDefaults(): Promise<{ desktop: CaptureSource; cleanshot: CaptureSource | null }> {
+  const cs = await cleanShotFolder()
+  return {
+    desktop: { path: join(homedir(), 'Desktop'), namedOnly: true },
+    cleanshot: cs ? { path: cs, namedOnly: false } : null
+  }
+}
+
+// Every folder the capture inbox reads: the primary screenshotRoot plus configured extras that exist.
+function triageSources(): CaptureSource[] {
+  const out: CaptureSource[] = []
+  const primary = screenshotRootResolved()
+  if (primary) out.push({ path: primary, namedOnly: false })
+  for (const s of readConfig().captureSources ?? []) {
+    if (s && typeof s.path === 'string' && existsSync(s.path) && !out.some((o) => o.path === s.path)) out.push({ path: s.path, namedOnly: Boolean(s.namedOnly) })
+  }
+  return out
+}
+
 // The default destination for throwaway conversions (Settings-chosen). Pre-fills the save dialog;
 // any single conversion can still redirect elsewhere. Returned even if missing — the convert
 // handler falls back to home when it no longer exists.
@@ -142,10 +169,12 @@ function conversionsRootResolved(): string | null {
 // A render/image request is allowed only if it resolves inside one of the roots SlideWell knows.
 // The Triage source is included so source screenshots/video posters render via swarchive://.
 function allowedRoots(): string[] {
-  return [archiveRoot(), othersArchiveRootResolved(), wellRootResolved(), detectVaultRoot(), screenshotRootResolved()].filter((r): r is string => Boolean(r))
+  return [archiveRoot(), othersArchiveRootResolved(), wellRootResolved(), detectVaultRoot(), screenshotRootResolved(), ...triageSources().map((s) => s.path)].filter((r): r is string => Boolean(r))
 }
 
 let mainWindow: BrowserWindow | null = null
+let launchScanHook: () => void = () => undefined
+let refreshWatchers: () => void = () => undefined
 
 function createWindow(): BrowserWindow {
   const bounds = readConfig().windowBounds ?? { width: 1400, height: 900 }
@@ -242,7 +271,7 @@ app.whenReady().then(() => {
 
   // --- IPC: the typed contract lives in src/preload/index.ts ---
   ipcMain.handle('archive:available', () => archiveAvailable())
-  ipcMain.handle('settings:get-paths', () => ({
+  ipcMain.handle('settings:get-paths', async () => ({
     archiveRoot: readConfig().archiveRoot ?? null,
     archiveDefault: ARCHIVE_DEFAULT,
     archiveAvailable: archiveAvailable(),
@@ -251,6 +280,8 @@ app.whenReady().then(() => {
     vaultAvailable: Boolean(detectVaultRoot()),
     screenshotRoot: screenshotRootResolved(),
     screenshotAvailable: Boolean(screenshotRootResolved()),
+    captureSources: (readConfig().captureSources ?? []).map((s) => ({ path: s.path, namedOnly: Boolean(s.namedOnly), exists: existsSync(s.path) })),
+    captureDefaults: await captureDefaults(),
     conversionsRoot: conversionsRootResolved(),
     convertOcrDefault: Boolean(readConfig().convertOcrByDefault),
     othersArchiveRoot: othersArchiveRootResolved(),
@@ -577,19 +608,39 @@ app.whenReady().then(() => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     writeConfig({ screenshotRoot: r.filePaths[0] })
+    refreshWatchers()
     return r.filePaths[0]
+  })
+  // Capture inbox extras: 'desktop' | 'cleanshot' add the offered defaults; 'folder' asks for a folder.
+  ipcMain.handle('settings:add-capture-source', async (_e, which: 'desktop' | 'cleanshot' | 'folder') => {
+    let src: CaptureSource | null = null
+    if (which === 'desktop' || which === 'cleanshot') src = (await captureDefaults())[which]
+    else {
+      const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+      if (!r.canceled && r.filePaths[0]) src = { path: r.filePaths[0], namedOnly: false }
+    }
+    if (!src) return false
+    const cur = readConfig().captureSources ?? []
+    if (!cur.some((c) => c.path === src!.path)) writeConfig({ captureSources: [...cur, src] })
+    refreshWatchers()
+    return true
+  })
+  ipcMain.handle('settings:remove-capture-source', (_e, path: string) => {
+    writeConfig({ captureSources: (readConfig().captureSources ?? []).filter((c) => c.path !== path) })
+    refreshWatchers()
+    return true
   })
   // One row → renderable wire shape. Images render from the source file; videos from a cached poster,
   // with mediaUrl pointing at the source file so the renderer can play it inline.
   const triageToWire = (r: TriageRow, sourceRoot: string, wellR: string): Record<string, unknown> => {
     const isVideo = r.kind === 'video'
     const offline = r.offline === '1'
-    const fileAbs = join(sourceRoot, r.rel_path)
+    const fileAbs = join(r.source || sourceRoot, r.rel_path)
     const posterAbs = r.poster_rel ? join(wellR, r.poster_rel) : null
     const sizeBytes = Number(r.size) || 0
     const mtime = Number(r.mtime) || 0
-    let date = ''
-    try {
+    let date = r.taken_at ? r.taken_at.slice(0, 10) : ''
+    if (!date) try {
       date = new Date(mtime).toISOString().slice(0, 10)
     } catch {
       /* bad mtime → no date */
@@ -597,7 +648,11 @@ app.whenReady().then(() => {
     // Never point a thumbnail/media URL at an online-only placeholder — loading it would force a download.
     return {
       hash: r.hash,
-      relPath: r.rel_path, // unique per file (the hash is the CONTENT hash and repeats for duplicates)
+      relPath: join(r.source || sourceRoot, r.rel_path), // unique per file across sources (the hash is the CONTENT hash and repeats for duplicates)
+      source: r.source || sourceRoot,
+      takenAt: r.taken_at || null,
+      app: r.app || null,
+      windowTitle: r.window_title || null,
       kind: r.kind,
       filename: r.filename,
       ext: r.ext,
@@ -612,19 +667,46 @@ app.whenReady().then(() => {
       mediaUrl: offline || !isVideo ? null : swThumb(fileAbs)
     }
   }
+  const onTriageProgress = (m: string): void => void mainWindow?.webContents.send('triage:progress', m)
   ipcMain.handle('triage:scan', async () => {
-    const src = screenshotRootResolved()
-    if (!src) return { ok: false, indexed: 0, total: 0 }
-    const onP = (m: string): void => void mainWindow?.webContents.send('triage:progress', m)
+    return scanAllSources()
+  })
+  // One scan of every capture source, through the one-at-a-time scan queue.
+  async function scanAllSources(): Promise<{ ok: boolean; indexed: number; total: number; offline?: number }> {
+    const sources = triageSources()
+    if (sources.length === 0) return { ok: false, indexed: 0, total: 0 }
+    const sum = { indexed: 0, total: 0, offline: 0 }
     try {
-      const res = await scanTriageSource(archiveRoot(), wellRootResolved(), src, onP)
-      return { ok: true, ...res }
+      for (const s of sources) {
+        const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, { namedOnly: s.namedOnly })
+        sum.indexed += res.indexed
+        sum.total += res.total
+        sum.offline += res.offline
+      }
+      return { ok: true, ...sum }
     } catch {
       return { ok: false, indexed: 0, total: 0 }
     }
+  }
+  // Capture-and-forget: files added while SlideWell was closed are picked up shortly after launch.
+  const launchScan = (): void => {
+    setTimeout(() => void scanAllSources().then(() => mainWindow?.webContents.send('triage:changed')), 2500)
+  }
+  launchScanHook = launchScan
+  // Capture inbox: a debounced watcher per source runs the same scan for just that source, then tells
+  // the Triage panel to re-list. Originals are only read.
+  const watcher = createSourceWatcher((path) => {
+    const s = triageSources().find((x) => x.path === path)
+    if (!s) return
+    void scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, { namedOnly: s.namedOnly })
+      .then(() => mainWindow?.webContents.send('triage:changed'))
+      .catch(() => undefined)
   })
+  refreshWatchers = (): void => watcher.setSources(triageSources().map((s) => ({ path: s.path, recursive: !s.namedOnly })))
+  refreshWatchers()
+  app.on('will-quit', () => watcher.close())
   ipcMain.handle('triage:list', async (_e, q: string, state: string, sort?: string, limit?: number, offset?: number) => {
-    const src = screenshotRootResolved()
+    const src = triageSources()[0]?.path ?? null
     const wellR = wellRootResolved()
     const empty = { items: [], counts: { undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }
     if (!src) return empty
@@ -640,7 +722,7 @@ app.whenReady().then(() => {
     }
   })
   ipcMain.handle('triage:decide', async (_e, hash: string, action: 'select' | 'exclude' | 'reset', force?: boolean) => {
-    const src = screenshotRootResolved()
+    const src = triageSources()[0]?.path ?? null
     if (!src) return { state: 'undecided' }
     try {
       return await setTriageDecision(archiveRoot(), wellRootResolved(), src, hash, action, Boolean(force))
@@ -649,7 +731,7 @@ app.whenReady().then(() => {
     }
   })
   ipcMain.handle('triage:import-selected', async (_e, forceHashes?: string[]) => {
-    const src = screenshotRootResolved()
+    const src = triageSources()[0]?.path ?? null
     if (!src) return { imported: 0, skipped: 0, gated: 0 }
     try {
       return await importSelectedTriage(archiveRoot(), wellRootResolved(), src, Array.isArray(forceHashes) ? forceHashes : [])
@@ -948,7 +1030,7 @@ app.whenReady().then(() => {
   })
 
   void startWell()
-  createWindow()
+  createWindow().webContents.once('did-finish-load', () => launchScanHook())
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

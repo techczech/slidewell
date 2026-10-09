@@ -979,8 +979,9 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
     refreshRef.current = refresh
   }, [refresh])
   useEffect(() => {
-    void window.sw.settings.getPaths().then((p) => setRoot(p.screenshotRoot))
-    return window.sw.triage.onProgress((line) => {
+    void window.sw.settings.getPaths().then((p) => setRoot(p.screenshotRoot ?? p.captureSources.find((c) => c.exists)?.path ?? null))
+    const offChanged = window.sw.triage.onChanged(() => void refreshRef.current())
+    const offProgress = window.sw.triage.onProgress((line) => {
       setProgress(line)
       const now = Date.now()
       if (now - lastTickRef.current > 600) {
@@ -988,6 +989,10 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
         void refreshRef.current()
       }
     })
+    return () => {
+      offChanged()
+      offProgress()
+    }
   }, [])
 
   useEffect(() => {
@@ -1321,6 +1326,13 @@ function TriageCard({
       </div>
       <div className="triage-meta">
         <div className="triage-name" title={item.filename}>{item.filename}</div>
+        {(item.app || item.windowTitle || item.takenAt) && (
+          <div className="triage-from" title={[item.takenAt?.replace('T', ' ').slice(0, 16), item.app, item.windowTitle].filter(Boolean).join(' · ')}>
+            {item.takenAt && <span className="triage-when">{item.takenAt.slice(0, 10)} {item.takenAt.slice(11, 16)}</span>}
+            {item.app && <span className="triage-app">{item.app}</span>}
+            {item.windowTitle && <span className="triage-win">{item.windowTitle}</span>}
+          </div>
+        )}
         {item.snippet && <div className="triage-snip">{item.snippet}</div>}
       </div>
       <div className="triage-actions">
@@ -1366,6 +1378,8 @@ function TriagePreview({ item, onClose, onDecide }: { item: TriageItem; onClose:
 
 function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }): JSX.Element {
   const [paths, setPaths] = useState<{ archiveRoot: string | null; wellRoot: string; vaultRoot: string | null; screenshotRoot: string | null; conversionsRoot: string | null; othersArchiveRoot: string } | null>(null)
+  const [cleanshotOffered, setCleanshotOffered] = useState(false)
+  const [captureSources, setCaptureSources] = useState<{ path: string; namedOnly: boolean; exists: boolean }[]>([])
   const [convertOcr, setConvertOcr] = useState(false)
   const [deps, setDeps] = useState<Dependency[]>([])
   const [reqUrl, setReqUrl] = useState('https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md')
@@ -1386,6 +1400,8 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
     const p = await window.sw.settings.getPaths()
     setPaths({ archiveRoot: p.archiveRoot, wellRoot: p.wellRoot, vaultRoot: p.vaultRoot, screenshotRoot: p.screenshotRoot, conversionsRoot: p.conversionsRoot, othersArchiveRoot: p.othersArchiveRoot })
     setConvertOcr(p.convertOcrDefault)
+    setCaptureSources(p.captureSources)
+    setCleanshotOffered(Boolean(p.captureDefaults.cleanshot))
     setR2(await window.sw.settings.getR2())
     setStorage(await window.sw.settings.getStorage())
     const d = await window.sw.settings.dependencies()
@@ -1504,6 +1520,28 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
               <div className="settings-row-detail"><i>Delete everything imported into the Others’ Library. Your own archive is never touched.</i></div>
             </div>
             <button className="copyref" onClick={() => void clearOthers()}>Clear library…</button>
+          </div>
+        </div>
+
+        <div className="settings-section">Capture sources</div>
+        <div className="settings-rows">
+          {captureSources.map((c) => (
+            <div className="settings-row" key={c.path}>
+              <div className="settings-row-main">
+                <div className="settings-row-label">{c.namedOnly ? 'Only files named like screenshots (Screenshot…, CleanShot…)' : 'All images and videos'}{c.exists ? '' : ' · folder not found'}</div>
+                <div className="settings-row-detail" title={c.path}>{c.path}</div>
+              </div>
+              <button className="copyref" onClick={() => void window.sw.settings.removeCaptureSource(c.path).then(load)}>Remove</button>
+            </div>
+          ))}
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-label">Watched for new screenshots, alongside the Triage source folder</div>
+              <div className="settings-row-detail"><i>New files reach Triage within a minute. SlideWell only reads these folders; it never moves or changes the originals.</i></div>
+            </div>
+            <button className="copyref" onClick={() => void window.sw.settings.addCaptureSource('desktop').then(load)}>Add Desktop</button>
+            {cleanshotOffered && <button className="copyref" onClick={() => void window.sw.settings.addCaptureSource('cleanshot').then(load)}>Add CleanShot folder</button>}
+            <button className="copyref" onClick={() => void window.sw.settings.addCaptureSource('folder').then(load)}>Add folder…</button>
           </div>
         </div>
 

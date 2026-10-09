@@ -75,7 +75,7 @@ export type Dependency = {
 // A scanned item in a Triage source (ADR-0029) — not yet in the library unless state==='included'.
 export type TriageItem = {
   hash: string // content hash — the DECISION key; repeats across duplicate files (not unique)
-  relPath: string // source-relative path — unique per file; use as the React key
+  relPath: string // absolute path — unique per file across sources; use as the React key
   kind: 'image' | 'video'
   filename: string
   ext: string
@@ -88,6 +88,10 @@ export type TriageItem = {
   snippet: string
   thumbUrl: string | null
   mediaUrl: string | null // video source file (for inline playback); null for images
+  source: string // absolute root of the capture source the file came from
+  takenAt: string | null // local time parsed from a screenshot file name (YYYY-MM-DDTHH:MM:SS)
+  app: string | null // source app parsed from a CleanShot name
+  windowTitle: string | null // window title parsed from a CleanShot name
 }
 export type TriageCounts = { undecided: number; selected: number; included: number; excluded: number; total: number }
 export type DeckInfo = { id: string; title: string; date: string | null }
@@ -166,6 +170,8 @@ const api = {
       vaultAvailable: boolean
       screenshotRoot: string | null
       screenshotAvailable: boolean
+      captureSources: { path: string; namedOnly: boolean; exists: boolean }[]
+      captureDefaults: { desktop: { path: string; namedOnly: boolean }; cleanshot: { path: string; namedOnly: boolean } | null }
       conversionsRoot: string | null
       convertOcrDefault: boolean
       othersArchiveRoot: string
@@ -173,6 +179,9 @@ const api = {
     }> => ipcRenderer.invoke('settings:get-paths'),
     chooseArchive: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-archive'),
     chooseVault: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-vault'),
+    // Capture inbox extras: add an offered default ('desktop' = screenshot-named files only, 'cleanshot') or any folder.
+    addCaptureSource: (which: 'desktop' | 'cleanshot' | 'folder'): Promise<boolean> => ipcRenderer.invoke('settings:add-capture-source', which),
+    removeCaptureSource: (path: string): Promise<boolean> => ipcRenderer.invoke('settings:remove-capture-source', path),
     chooseScreenshotFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-screenshot-folder'),
     // Default destination folder for throwaway conversions (pre-fills the convert save dialog).
     chooseConversionsFolder: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-conversions-folder'),
@@ -214,6 +223,12 @@ const api = {
       ipcRenderer.invoke('triage:import-selected', forceHashes ?? []),
     // Paste-to-include: ingest the clipboard image straight into the well. Returns the new id or null.
     paste: (): Promise<{ id: string } | null> => ipcRenderer.invoke('well:add-from-clipboard'),
+    // A watched source got a new file and was re-scanned; re-list. Returns an unsubscribe function.
+    onChanged: (cb: () => void): (() => void) => {
+      const handler = (): void => cb()
+      ipcRenderer.on('triage:changed', handler)
+      return () => ipcRenderer.removeListener('triage:changed', handler)
+    },
     // Stream scan progress; returns an unsubscribe function.
     onProgress: (cb: (line: string) => void): (() => void) => {
       const handler = (_e: Electron.IpcRendererEvent, line: string): void => cb(line)

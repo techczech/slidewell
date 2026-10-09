@@ -16,6 +16,8 @@ const work = mkdtempSync(join(tmpdir(), 'sw-triage-'))
 const userData = join(work, 'userData')
 const wellRoot = join(work, 'well')
 const source = join(work, 'source')
+const second = join(work, 'second') // a second capture source (watched)
+const desk = join(work, 'desktop') // Desktop-like source: screenshot-named files only
 mkdirSync(userData, { recursive: true })
 mkdirSync(join(source, 'sub'), { recursive: true }) // a subfolder, to prove recursive traversal
 writeFileSync(join(source, 'one.png'), Buffer.from(RED, 'base64'))
@@ -25,8 +27,15 @@ writeFileSync(join(source, 'dup.png'), Buffer.from(BLUE, 'base64')) // SAME byte
 utimesSync(join(source, 'one.png'), new Date('2024-06-01'), new Date('2024-06-01'))
 utimesSync(join(source, 'sub', 'two.png'), new Date('2020-01-15'), new Date('2020-01-15'))
 utimesSync(join(source, 'dup.png'), new Date('2022-03-03'), new Date('2022-03-03'))
+mkdirSync(second, { recursive: true })
+// a file already sitting in a source BEFORE launch: the launch scan must pick it up (no Scan press)
+const PRE = 'CleanShot 2026-09-30 at 0915 from Safari with Preexisting.png'
+writeFileSync(join(second, PRE), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==', 'base64'))
+mkdirSync(desk, { recursive: true })
+writeFileSync(join(desk, 'holiday.png'), Buffer.from(RED, 'base64')) // not a screenshot name: must be ignored
+utimesSync(join(second, PRE), new Date('2010-01-01'), new Date('2010-01-01')) // oldest by mtime, so the original date ordering below is unchanged
 // pre-seed the config the app reads (isolated well + the fixture as the Triage source)
-writeFileSync(join(userData, 'config.json'), JSON.stringify({ wellRoot, screenshotRoot: source }), 'utf8')
+writeFileSync(join(userData, 'config.json'), JSON.stringify({ wellRoot, screenshotRoot: source, captureSources: [{ path: second, namedOnly: false }, { path: desk, namedOnly: true }] }), 'utf8')
 
 const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`] })
 let pass = false
@@ -41,10 +50,17 @@ try {
   await win.waitForSelector('.triage-panel', { timeout: 5000 })
   result.panelOpened = (await win.locator('.triage-panel').count()) === 1
 
+  let pre = []
+  for (let i = 0; i < 20 && pre.length < 1; i++) {
+    await win.waitForTimeout(1000)
+    pre = (await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0))).items.filter((x) => x.filename === PRE)
+  }
+  result.launchScanPicksUp = pre.length === 1 && pre[0].app === 'Safari'
+
   // scan the fixture (recursive: 3 files across a subfolder, two of them byte-identical)
   const scan = await win.evaluate(() => window.sw.triage.scan())
-  result.scanned = scan.indexed
-  result.recursiveOk = scan.total === 3 // found the nested file too
+  result.scanned = scan.total // launch scan already indexed everything: this manual scan must find 4 files (3 primary incl. nested + PRE), 0 new
+  result.recursiveOk = scan.total === 4 && scan.indexed === 0
 
   const all0 = (await win.evaluate(() => window.sw.triage.list('', 'all', 'date-desc', 50, 0))).items
   result.undecidedAfterScan = (await win.evaluate(() => window.sw.triage.list('', 'undecided'))).counts.undecided
@@ -105,21 +121,48 @@ try {
   result.datesOk = desc.items.every((i) => /^\d{4}-\d{2}-\d{2}$/.test(i.date))
   result.dateSortFlips = desc.items[0].relPath === asc.items[asc.items.length - 1].relPath && desc.items[0].date >= desc.items[1].date
 
+  // capture inbox: files dropped into the extra sources appear WITHOUT pressing Scan (watcher), carrying
+  // the app/window parsed from the name; non-screenshot Desktop files are ignored.
+  const CS = 'CleanShot 2026-10-08 at 0801 from Google Chrome with TalkWeaver Layout Showcase.png'
+  const GREEN = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkaGj4DwAEQAIAvFrtDAAAAABJRU5ErkJggg=='
+  const YELLOW = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg=='
+  writeFileSync(join(second, CS), Buffer.from(GREEN, 'base64'))
+  writeFileSync(join(desk, 'Screenshot 2026-10-09 at 10.05.01.png'), Buffer.from(YELLOW, 'base64'))
+  writeFileSync(join(desk, 'notes.png'), Buffer.from(BLUE, 'base64'))
+  let watched = []
+  for (let i = 0; i < 25 && watched.length < 2; i++) {
+    await win.waitForTimeout(1000)
+    watched = (await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0))).items.filter((x) => x.filename !== PRE && (x.source.endsWith('second') || x.source.endsWith('desktop')))
+  }
+  const cs = watched.find((x) => x.filename === CS)
+  result.watchedAppears = watched.length === 2
+  result.parsedFields = Boolean(cs) && cs.app === 'Google Chrome' && cs.windowTitle === 'TalkWeaver Layout Showcase' && cs.takenAt === '2026-10-08T08:01:00' && cs.date === '2026-10-08'
+  result.desktopOthersIgnored = !watched.some((x) => x.filename === 'holiday.png' || x.filename === 'notes.png')
+  // manual scan still works and covers all sources without disturbing the watched rows
+  const rescan = await win.evaluate(() => window.sw.triage.scan())
+  result.manualScanOk = rescan.ok && rescan.total === 6
+
   pass =
+    result.watchedAppears &&
+    result.parsedFields &&
+    result.desktopOthersIgnored &&
+    result.manualScanOk &&
     result.panelOpened &&
-    result.scanned === 3 &&
+    result.scanned === 4 &&
+    result.launchScanPicksUp &&
     result.recursiveOk &&
-    result.undecidedAfterScan === 3 &&
-    result.distinctPaths === 3 &&
-    result.distinctHashes === 2 &&
-    result.cardsRendered === 3 &&
+    result.undecidedAfterScan === 4 &&
+    result.distinctPaths === 4 &&
+    result.distinctHashes === 3 &&
+    result.cardsRendered === 4 &&
     result.cardHeightOk &&
     result.groupCols === 6 &&
     result.selectedCount === 2 && // unique hashes: one.png + (dup.png|two.png share a hash)
     result.includedBeforeImport === 0 &&
     result.wellEmptyBeforeImport &&
     result.excludedCount === 2 &&
-    result.undecidedCount === 0 &&
+    result.undecidedCount === 1 && // PRE
+    
     result.imported >= 1 &&
     result.wellHasImagesAfterImport &&
     result.includedAfterImport >= 1 &&
