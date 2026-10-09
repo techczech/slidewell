@@ -217,6 +217,25 @@ describe('scanTalkUsage', () => {
     expect(uses.find((u) => u.title === 'Multi')?.relPath).toBe(join(odd, 'x-outline.md'))
   })
 
+  it('a NUL or lone surrogate cannot break a literal: the title round-trips as data, the table intact', async () => {
+    const vault = fresh('vault')
+    mkdirSync(join(vault, '_assets'))
+    writeFileSync(join(vault, '_assets', 'img-aaaaaaa.webp'), 'x')
+    mkdirSync(join(vault, 'n'))
+    mkdirSync(join(vault, 'm'))
+    writeFileSync(join(vault, 'n', 'n-outline.md'), "# A\u0000'); DROP TABLE talk_image_use; --\n## S\n![](img-aaaaaaa)\n")
+    const ctl = Array.from({ length: 31 }, (_, i) => String.fromCharCode(i + 1)).join('')
+    writeFileSync(join(vault, 'm', 'm-outline.md'), `# B${ctl.replace(/\n|\r/g, '')}\ud800'; --\n## S\n![](img-aaaaaaa)\n`)
+    const well = fresh('well')
+    expect(await scanTalkUsage(well, vault)).toEqual({ status: 'ok', summary: { talks: 2, references: 2, images: 1 } })
+    const titles = ((await loadUsage(well, vault)).get('aaaaaaa') ?? []).map((u) => u.title).sort()
+    expect(titles[0]).toBe("A'); DROP TABLE talk_image_use; --")
+    expect(titles[1].startsWith('B\u0001')).toBe(true)
+    expect(titles[1].endsWith("'; --")).toBe(true)
+    const [{ c }] = await query<{ c: number }>(join(well, 'well.db'), 'SELECT count(*) AS c FROM talk_image_use')
+    expect(c).toBe(2)
+  })
+
   it('an absent pool is empty; an unavailable one keeps the previous snapshot', async () => {
     const vault = vaultCopy()
     const well = fresh('well')

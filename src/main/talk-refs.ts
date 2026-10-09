@@ -185,16 +185,19 @@ function applyFoldAttrs(a: FoldAttrs, toks: string[], allowLayout = true): void 
   }
 }
 /**
- * Does this heading fold its children as {compare}? foldChildLayoutNodes (08-source-adapters.mjs:1876-1937)
- * tries carousel, static cards (grid/rows), image-grid, contrast and columns first; compare (layout
- * compare, two or more children) keeps only the first two children's own content (_compareHalves).
+ * Does this heading render as {compare}, keeping only its first two children's own content?
+ * The renderer's compare branch comes first (isCompare, 08-source-adapters.mjs:1134, 1151-1161):
+ * whenever the children reach it as cards (a plain compare fold, _compareHalves, or a carousel /
+ * cards=grid|rows fold, _foldedCards) and the slide's layout is compare, only two cards are drawn.
+ * A cards fold whose rendered layout is not compare (a {compare} only inside a fence) draws all
+ * cards, and a {columns} fold merges the children into the heading's lines (no cards), so neither
+ * discards anything here. A plain compare fold drops the third and later children in any case.
  */
-function foldsAsCompare(a: FoldAttrs, children: number): boolean {
+function compareKeepsTwo(a: FoldAttrs, children: number, renderedLayout: string | undefined): boolean {
   if (a.layout !== 'compare' || children < 2) return false
-  if (a.carousel === 'true') return false
-  if (a.cards === 'grid' || a.cards === 'rows') return false
-  if (a.cols !== undefined && a.cols !== 'true') return false
-  return true
+  const cardsFold = a.carousel === 'true' || a.cards === 'grid' || a.cards === 'rows'
+  if (cardsFold) return renderedLayout === 'compare'
+  return !(a.cols !== undefined && a.cols !== 'true') // a columns fold
 }
 /** Does this heading fold as {columns}, merging its children's lines into its own (same order of checks)? */
 function foldsAsColumns(a: FoldAttrs, children: number): boolean {
@@ -261,6 +264,7 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
   // a role in talk-wide triggers applies to every slide (attrs = { ...deckTriggerDefaults, ... }): not modelled
   if (roleIn(triggerDefaults) !== undefined) unsure(1)
   const foldAttrs: FoldAttrs[] = [] // per slide: the attrs container-fold resolution reads (resolvedNodeAttrs, fences included)
+  const openingToken: boolean[] = [] // per slide: a role=opening token anywhere in its heading or Trigger lines
   const slideLayout: Array<string | undefined> = [] // per slide: the layout the slide renders with (fences excluded)
   const noteTokens = (k: number, toks: string[]): void => {
     for (const kind of toks.map(tokenKind)) {
@@ -301,6 +305,7 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
       levels[slide] = m[1].length
       const toks = tokensIn(headingGroups(m[2]))
       roles[slide] = roleIn(toks)
+      if (toks.some((x) => roleIn([x]) === 'opening')) openingToken[slide] = true
       noteTokens(slide, toks)
       foldAttrs[slide] = {}
       applyFoldAttrs(foldAttrs[slide], triggerDefaults, false)
@@ -318,6 +323,7 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
       const toks = tokensIn(triggerGroups(t))
       const r = roleIn(toks)
       if (r !== undefined) roles[slide] = r
+      if (toks.some((x) => roleIn([x]) === 'opening')) openingToken[slide] = true
       noteTokens(slide, toks)
       applyFoldAttrs(foldAttrs[slide], toks)
       const own: FoldAttrs = { layout: slideLayout[slide] }
@@ -363,10 +369,16 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
   const discarded = new Set<number>()
   for (let k = 1; k <= slide; k++) {
     const kids = kidsOf(k)
-    if (!foldsAsCompare(foldAttrs[k] ?? {}, kids.length)) continue
+    if (!compareKeepsTwo(foldAttrs[k] ?? {}, kids.length, slideLayout[k])) continue
     const halves = new Set([...merged(kids[0]), ...merged(kids[1])])
     if (slideLayout[k] === 'compare') discarded.add(k)
     for (let j = k + 1; j <= slide && levels[j] > levels[k]; j++) if (!halves.has(j)) discarded.add(j)
+  }
+  // a heading below any fold-token heading may be absorbed rather than emitted; an opening role on
+  // one is then not modelled (the compiler may still generate the title slide), so nothing is certain
+  for (let k = 1; k <= slide; k++) {
+    if (!(fold[k] || defaults.includes('fold'))) continue
+    for (let j = k + 1; j <= slide && levels[j] > levels[k]; j++) if (openingToken[j]) unsure(1)
   }
   for (let k = 1; k <= slide; k++) {
     const hasChildren = k < slide && levels[k + 1] > levels[k]

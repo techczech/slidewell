@@ -77,9 +77,15 @@ export async function runScript(dbPath: string, script: string, timeoutMs = 8000
   await exec(['-bail', '-nofollow', '-safe', dbPath], `.timeout 4000\n${script}\n`, timeoutMs)
 }
 
-/** An SQL string literal for `runScript` scripts. */
+/**
+ * An SQL string literal for `runScript` scripts. NUL is removed (the CLI reads its input as C
+ * strings, so a NUL would end the line mid-literal) and so is any lone UTF-16 surrogate (it cannot
+ * be encoded as UTF-8 and would reach sqlite3 as a replacement byte sequence). Other control
+ * characters, newlines included, are plain data inside a quoted literal.
+ */
 export function sqlString(s: string): string {
-  return `'${s.replace(/'/g, "''")}'`
+  const clean = s.replace(/\u0000/g, '').replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '')
+  return `'${clean.replace(/'/g, "''")}'`
 }
 
 /** Sanitise a user string for FTS5 MATCH (wrap bare tokens in quotes unless it uses FTS syntax). */

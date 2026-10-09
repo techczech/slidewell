@@ -177,6 +177,10 @@ describe('extractTalkRefs: a slide number is kept only when it is certain (else 
     // compiler: a@2 c@4 (container-fold resolution reads the fenced {image-grid})
     expect(nums(fixture('fenced-fold-outline.md'))).toEqual(['a@2', 'b@0', 'c@0'])
   })
+  it('a {role=opening} on a heading a fold may absorb makes every number unknown', () => {
+    // compiler: d@2 a@3 b@3 c@4 (the absorbed opening is ignored: the title slide is still generated)
+    expect(nums(fixture('opening-in-fold-outline.md'))).toEqual(['d@0', 'a@0', 'b@0', 'c@0'])
+  })
   it('one image on several unknown slides is one reference', () => {
     expect(nums('## B {image-grid}\n### c\n![](img-aaaaaaa)\n### d\n## E\n![](img-aaaaaaa)\n')).toEqual(['a@0'])
   })
@@ -196,9 +200,17 @@ describe('extractTalkRefs: {compare} keeps only its first two child groups', () 
     // compiler: a@3 b@4 c@5
     expect(ids('## Versus {compare}\n{list}\n### A\n![](img-aaaaaaa)\n### B\n![](img-bbbbbbb)\n### C\n![](img-ccccccc)\n')).toEqual(['a', 'b', 'c'])
   })
-  it('a compare with one group, or with {cards=grid}, folds differently and drops nothing', () => {
-    expect(ids('## V {compare}\n### A\n![](img-aaaaaaa)\n')).toEqual(['a'])
-    expect(ids('## V {compare cards=grid}\n### A\n![](img-aaaaaaa)\n### B\n![](img-bbbbbbb)\n### C\n![](img-ccccccc)\n')).toEqual(['a', 'b', 'c'])
+  it('compare wins in the renderer whatever else the heading carries: {compare cards=grid}, {compare carousel}', () => {
+    // compiler: a and b on the compare slide; 0 (own lines) and c not drawn
+    expect(ids(readFileSync(join(__dirname, 'fixtures', 'compare-cards-grid-outline.md'), 'utf8'))).toEqual(['a', 'b'])
+    expect(ids('## V {compare carousel}\n![](img-0000000)\n### A\n![](img-aaaaaaa)\n### B\n![](img-bbbbbbb)\n### C\n![](img-ccccccc)\n')).toEqual(['a', 'b'])
+  })
+  it('no discard when the children never reach compare as cards', () => {
+    expect(ids('## V {compare}\n### A\n![](img-aaaaaaa)\n')).toEqual(['a']) // one group
+    // compiler: 0, a, b, c all drawn ({2col} merges the children into the heading's lines)
+    expect(ids('## V {compare 2col}\n![](img-0000000)\n### A\n![](img-aaaaaaa)\n### B\n![](img-bbbbbbb)\n### C\n![](img-ccccccc)\n')).toEqual(['0', 'a', 'b', 'c'])
+    // compiler: a, b, c drawn as cards ({compare} only inside a fence: the slide renders as cards)
+    expect(ids('## V {cards=grid}\n```\n{compare}\n```\n### A\n![](img-aaaaaaa)\n### B\n![](img-bbbbbbb)\n### C\n![](img-ccccccc)\n')).toEqual(['a', 'b', 'c'])
   })
 })
 
