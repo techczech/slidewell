@@ -9,7 +9,10 @@
  *                    proposal TEXT,                    keep | throwaway | doubtful
  *                    confidence REAL, p_keep REAL,     probability of the proposal; combined p(keep)
  *                    reason TEXT, rule TEXT,           plain-words reason; rule name or NULL
- *                    sorter_version TEXT, model_id TEXT, proposed_at TEXT)
+ *                    sorter_version TEXT, model_id TEXT, proposed_at TEXT,
+ *                    throwaway_since TEXT,             when it first proposed throwaway (kept across re-sorts;
+ *                                                      starts the review's 30-day clock), NULL otherwise
+ *                    answered_at TEXT, answer TEXT)    set by the review screen when he answers (keep | throwaway)
  *   sorter_models(id TEXT PRIMARY KEY, trained_at TEXT, sorter_version TEXT,
  *                 model TEXT (classifier JSON), report TEXT (accuracy report JSON))
  *
@@ -177,6 +180,20 @@ export function loadUndecided(wellRoot: string): Shot[] {
   }
 }
 
+/**
+ * Review columns on sorter_proposals (ticket 08), added in place to an older table. A new
+ * throwaway_since is backfilled from proposed_at for existing throwaway proposals.
+ */
+export function migrateProposalColumns(db: DatabaseSync): void {
+  const cols = new Set((db.prepare("SELECT name FROM pragma_table_info('sorter_proposals')").all() as Array<{ name: string }>).map((c) => c.name))
+  if (!cols.has('throwaway_since')) {
+    db.exec('ALTER TABLE sorter_proposals ADD COLUMN throwaway_since TEXT')
+    db.exec("UPDATE sorter_proposals SET throwaway_since = proposed_at WHERE proposal = 'throwaway'")
+  }
+  if (!cols.has('answered_at')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN answered_at TEXT')
+  if (!cols.has('answer')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN answer TEXT')
+}
+
 /** The sorter's own tables in triage.db: proposals and trained models. */
 export class SorterStore {
   private db: DatabaseSync
@@ -195,7 +212,10 @@ export class SorterStore {
         rule TEXT,
         sorter_version TEXT NOT NULL,
         model_id TEXT,
-        proposed_at TEXT NOT NULL
+        proposed_at TEXT NOT NULL,
+        throwaway_since TEXT,
+        answered_at TEXT,
+        answer TEXT
       );
       CREATE TABLE IF NOT EXISTS sorter_models (
         id TEXT PRIMARY KEY,
@@ -205,6 +225,7 @@ export class SorterStore {
         report TEXT NOT NULL
       );
     `)
+    migrateProposalColumns(this.db)
   }
 
   saveModel<R>(rec: ModelRecord<R>): void {
@@ -223,14 +244,17 @@ export class SorterStore {
     if (!rows.length) return
     const now = new Date().toISOString()
     const put = this.db.prepare(
-      `INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, rule, sorter_version, model_id, proposed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, rule, sorter_version, model_id, proposed_at, throwaway_since)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'throwaway' THEN ? END)
        ON CONFLICT(hash) DO UPDATE SET proposal = excluded.proposal, confidence = excluded.confidence, p_keep = excluded.p_keep,
-         reason = excluded.reason, rule = excluded.rule, sorter_version = excluded.sorter_version, model_id = excluded.model_id, proposed_at = excluded.proposed_at`
+         reason = excluded.reason, rule = excluded.rule, sorter_version = excluded.sorter_version, model_id = excluded.model_id, proposed_at = excluded.proposed_at,
+         throwaway_since = CASE WHEN excluded.proposal != 'throwaway' THEN NULL
+                                WHEN sorter_proposals.proposal = 'throwaway' AND sorter_proposals.throwaway_since IS NOT NULL THEN sorter_proposals.throwaway_since
+                                ELSE excluded.proposed_at END`
     )
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      for (const r of rows) put.run(r.hash, r.proposal, r.confidence, r.pKeep, r.reason, r.rule, sorterVersion, modelId, now)
+      for (const r of rows) put.run(r.hash, r.proposal, r.confidence, r.pKeep, r.reason, r.rule, sorterVersion, modelId, now, r.proposal, now)
       this.db.exec('COMMIT')
     } catch (e) {
       this.db.exec('ROLLBACK')
@@ -253,6 +277,25 @@ export class SorterStore {
       if (r.last && (!out.lastProposedAt || r.last > out.lastProposedAt)) out.lastProposedAt = r.last
     }
     return out
+  }
+
+  /** The review screen marks a proposal answered (or, on undo, restores the earlier mark). */
+  setAnswer(hash: string, answer: { answer: string; answeredAt: string } | null): void {
+    this.db.prepare('UPDATE sorter_proposals SET answer = ?, answered_at = ? WHERE hash = ?').run(answer?.answer ?? null, answer?.answeredAt ?? null, hash)
+  }
+
+  /** Empty Bin: SlideWell's proposal records for these items go (one transaction). */
+  deleteProposals(hashes: string[]): void {
+    if (!hashes.length) return
+    const del = this.db.prepare('DELETE FROM sorter_proposals WHERE hash = ?')
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const h of hashes) del.run(h)
+      this.db.exec('COMMIT')
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
   }
 
   close(): void {

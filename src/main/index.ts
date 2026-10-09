@@ -32,6 +32,9 @@ import { SorterService, registerSorterIpc } from './sorter/service'
 import createTrainWorker from './sorter/train-worker?nodeWorker'
 import type { Job, JobResult } from './sorter/jobs'
 import type { FetchLike } from './picture-search/model-store'
+import { ReviewService } from './review/service'
+import { registerReviewIpc } from './review/ipc'
+import { pileOf, type ProposalLabel } from './review/piles'
 
 const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
 
@@ -349,6 +352,19 @@ app.whenReady().then(() => {
   })
   registerSorterIpc(sorter, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
   app.on('will-quit', () => sorter.cancel())
+
+  // --- review screen (review/service.ts): his keep/throwaway, piles, 30-day Bin; never touches an original ---
+  const review = new ReviewService({
+    wellRoot: wellRootResolved,
+    archiveRoot: () => archiveRoot(),
+    sourceRoot: () => triageSources()[0]?.path ?? null,
+    thumbUrl: swThumb,
+    changed: () => {
+      pictureSearch?.poke()
+      mainWindow?.webContents.send('triage:changed')
+    }
+  })
+  registerReviewIpc(review, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
 
   // --- IPC: the typed contract lives in src/preload/index.ts ---
   ipcMain.handle('archive:available', () => archiveAvailable())
@@ -820,6 +836,20 @@ app.whenReady().then(() => {
     refreshWatchers()
     return true
   })
+  // Review pile of a triage row the sorter proposed something for: a throwaway shows 'bin in N days'.
+  const reviewLabel = (r: TriageRow): { pile: string | null; binInDays: number | null } => {
+    if (!r.proposal) return { pile: null, binInDays: null }
+    const v = pileOf(
+      {
+        proposal: r.proposal as ProposalLabel,
+        proposedAt: r.proposed_at ?? null,
+        throwawaySince: r.throwaway_since ?? null,
+        decision: r.state && r.state !== 'undecided' ? { state: r.state, decidedAt: r.decided_at ?? null } : null
+      },
+      Date.now()
+    )
+    return { pile: v.pile === 'gone' ? null : v.pile, binInDays: v.binInDays }
+  }
   // One row → renderable wire shape. Images render from the source file; videos from a cached poster,
   // with mediaUrl pointing at the source file so the renderer can play it inline.
   const triageToWire = (r: TriageRow, sourceRoot: string, wellR: string): Record<string, unknown> => {
@@ -854,7 +884,8 @@ app.whenReady().then(() => {
       large: isVideo && sizeBytes > VIDEO_GATE_BYTES,
       snippet: (r.ocr_text || '').replace(/\s+/g, ' ').trim().slice(0, 160),
       thumbUrl: offline ? null : swThumb(isVideo ? posterAbs : fileAbs),
-      mediaUrl: offline || !isVideo ? null : swThumb(fileAbs)
+      mediaUrl: offline || !isVideo ? null : swThumb(fileAbs),
+      ...reviewLabel(r)
     }
   }
   const onTriageProgress = (m: string): void => void mainWindow?.webContents.send('triage:progress', m)

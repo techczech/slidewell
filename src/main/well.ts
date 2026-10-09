@@ -96,7 +96,7 @@ export async function ingestScreenshot(
   root: string,
   srcPath: string,
   source = 'screenshot'
-): Promise<{ id: string; relPath: string } | null> {
+): Promise<{ id: string; relPath: string; created: boolean } | null> {
   if (!existsSync(srcPath)) return null
   await ensureWell(root)
   const orig = readFileSync(srcPath)
@@ -116,7 +116,8 @@ export async function ingestScreenshot(
   const slug = slugify(text, 'screenshot')
   const relPath = join('images', `${slug}--${id}.${ext}`)
   const dest = join(root, relPath)
-  if (!existsSync(dest)) {
+  const created = !existsSync(dest) // false: the well already held this picture (review undo must leave it)
+  if (created) {
     mkdirSync(dirname(dest), { recursive: true })
     writeFileSync(dest, buf)
     const sidecar = join(root, 'images', `${slug}--${id}.yml`)
@@ -127,7 +128,7 @@ export async function ingestScreenshot(
     )
   }
   await upsert(root, { id, slug, ext, relPath, storeRoot: 'well', source, tags: '', notes: '', ocr: text })
-  return { id, relPath }
+  return { id, relPath, created }
 }
 
 export function findFfmpeg(): string {
@@ -163,7 +164,7 @@ function hashFileStream(path: string): Promise<string> {
  * discoverable on disk without the app (ADR-0026) and reusable by TalkWeaver. The 20 MB gate is
  * enforced by the caller (triage), so a forced large video still copies here.
  */
-export async function ingestVideo(archiveRoot: string, root: string, srcPath: string): Promise<{ id: string; relPath: string } | null> {
+export async function ingestVideo(archiveRoot: string, root: string, srcPath: string): Promise<{ id: string; relPath: string; created: boolean } | null> {
   if (!existsSync(srcPath)) return null
   await ensureWell(root)
   mkdirSync(join(root, 'videos'), { recursive: true })
@@ -172,7 +173,8 @@ export async function ingestVideo(archiveRoot: string, root: string, srcPath: st
   const slug = slugify(basename(srcPath).replace(/\.[^.]+$/, ''), 'video')
   const relPath = join('videos', `${slug}--${id}.${ext}`)
   const dest = join(root, relPath)
-  if (!existsSync(dest)) {
+  const created = !existsSync(dest)
+  if (created) {
     copyFileSync(srcPath, dest)
     const posterAbs = join(root, 'videos', `${slug}--${id}.jpg`)
     await makePoster(srcPath, posterAbs)
@@ -183,7 +185,7 @@ export async function ingestVideo(archiveRoot: string, root: string, srcPath: st
       'utf8'
     )
   }
-  return { id, relPath }
+  return { id, relPath, created }
 }
 
 function readSidecarField(yml: string, key: string): string {
@@ -286,4 +288,11 @@ export async function drainInbox(archiveRoot: string, root: string): Promise<num
     }
   }
   return n
+}
+
+/** Forget one well record (FTS row only; files are removed by the caller through review/owned-copy.ts). */
+export async function deleteWellRecord(root: string, id: string): Promise<void> {
+  const db = wellDb(root)
+  if (!existsSync(db)) return
+  await run(db, 'DELETE FROM well_fts WHERE id = ?', [id])
 }

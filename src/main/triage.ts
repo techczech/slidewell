@@ -17,6 +17,7 @@ import { ocrImage, ingestScreenshot, ingestVideo, makePoster } from './well'
 import { tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
 import { parseScreenshotName } from './screenshot-name'
 import { walk } from './scan-walk'
+import { BIN_AFTER_DAYS } from './review/piles'
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'heic', 'heif', 'tiff', 'tif', 'bmp'])
 const VIDEO_EXT = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv'])
@@ -225,6 +226,11 @@ export interface TriageRow {
   ocr_text: string
   state: string
   well_id: string | null
+  decided_at?: string | null
+  // the sorter's proposal for this item, when it made one (review piles, ticket 08)
+  proposal?: string | null
+  proposed_at?: string | null
+  throwaway_since?: string | null
 }
 
 const LIST_COLS =
@@ -232,21 +238,50 @@ const LIST_COLS =
 
 export type TriageSort = 'scanned' | 'date-desc' | 'date-asc'
 
+async function hasProposals(db: string): Promise<boolean> {
+  const r = await query<{ n: number }>(db, "SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'sorter_proposals'", [])
+  if (!r[0] || Number(r[0].n) === 0) return false
+  // the review columns arrive with the sorter store's migration; an older table lacks them
+  const cols = await query<{ name: string }>(db, "SELECT name FROM pragma_table_info('sorter_proposals')", [])
+  return cols.some((c) => c.name === 'throwaway_since')
+}
+
+/**
+ * Review piles in the triage list (ticket 08): an emptied item is gone, and an item in the review's
+ * Bin (his throwaway or the sorter's, 30 days on) is no longer findable. Throwaways younger than that
+ * stay listed and carry their pile. Items the sorter never looked at are listed as before.
+ */
+function reviewClause(withProposals: boolean, cutoffIso: string): { join: string; cols: string; where: string; params: string[] } {
+  const notEmptied = "COALESCE(d.state, 'undecided') != 'emptied'"
+  if (!withProposals) return { join: '', cols: ', d.decided_at, NULL AS proposal, NULL AS proposed_at, NULL AS throwaway_since', where: notEmptied, params: [] }
+  const binned = `p.hash IS NOT NULL AND (
+      (d.state = 'excluded' AND d.decided_at IS NOT NULL AND d.decided_at < ?)
+      OR (d.hash IS NULL AND p.proposal = 'throwaway' AND COALESCE(p.throwaway_since, p.proposed_at) < ?))`
+  return {
+    join: ' LEFT JOIN sorter_proposals p ON p.hash = triage_fts.hash',
+    cols: ', d.decided_at, p.proposal, p.proposed_at, p.throwaway_since',
+    where: `${notEmptied} AND NOT (${binned})`,
+    params: [cutoffIso, cutoffIso]
+  }
+}
+
 /** Browse/search the triage index. sort: scanned (default) | date-desc | date-asc (by file mtime). */
-export async function listTriage(wellRoot: string, raw: string, state: string, sort: TriageSort = 'scanned', limit = 150, offset = 0): Promise<TriageRow[]> {
+export async function listTriage(wellRoot: string, raw: string, state: string, sort: TriageSort = 'scanned', limit = 150, offset = 0, now = Date.now()): Promise<TriageRow[]> {
   const db = triageDb(wellRoot)
   if (!existsSync(db)) return []
+  const rv = reviewClause(await hasProposals(db), new Date(now - BIN_AFTER_DAYS * 86_400_000).toISOString())
   const stateClause = state && state !== 'all' ? `COALESCE(d.state, 'undecided') = '${state.replace(/[^a-z]/g, '')}'` : ''
-  const join = 'triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash'
+  const join = `triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash${rv.join}`
+  const cols = LIST_COLS + rv.cols
   const dateOrder = `ORDER BY CAST(triage_fts.mtime AS INTEGER) ${sort === 'date-asc' ? 'ASC' : 'DESC'}`
   const useDate = sort === 'date-asc' || sort === 'date-desc'
   if (raw && raw.trim().length >= 2) {
     const q = safeFtsQuery(raw)
-    const where = `triage_fts MATCH ?${stateClause ? ` AND ${stateClause}` : ''}`
-    return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} WHERE ${where} ${useDate ? dateOrder : 'ORDER BY rank'} LIMIT ? OFFSET ?`, [q, limit, offset])
+    const where = `triage_fts MATCH ? AND ${rv.where}${stateClause ? ` AND ${stateClause}` : ''}`
+    return query<TriageRow>(db, `SELECT ${cols} FROM ${join} WHERE ${where} ${useDate ? dateOrder : 'ORDER BY rank'} LIMIT ? OFFSET ?`, [q, ...rv.params, limit, offset])
   }
-  const where = stateClause ? `WHERE ${stateClause}` : ''
-  return query<TriageRow>(db, `SELECT ${LIST_COLS} FROM ${join} ${where} ${useDate ? dateOrder : 'ORDER BY triage_fts.scanned_at DESC'} LIMIT ? OFFSET ?`, [limit, offset])
+  const where = `WHERE ${rv.where}${stateClause ? ` AND ${stateClause}` : ''}`
+  return query<TriageRow>(db, `SELECT ${cols} FROM ${join} ${where} ${useDate ? dateOrder : 'ORDER BY triage_fts.scanned_at DESC'} LIMIT ? OFFSET ?`, [...rv.params, limit, offset])
 }
 
 export async function triageCounts(wellRoot: string): Promise<TriageCounts> {
@@ -256,7 +291,8 @@ export async function triageCounts(wellRoot: string): Promise<TriageCounts> {
   const rows = await query<{ state: string; n: number; hashes: number }>(
     db,
     `SELECT COALESCE(d.state, 'undecided') AS state, COUNT(*) AS n, COUNT(DISTINCT triage_fts.hash) AS hashes
-     FROM triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash GROUP BY state`,
+     FROM triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash
+     WHERE COALESCE(d.state, 'undecided') != 'emptied' GROUP BY state`,
     []
   )
   return tallyTriageStates(rows)
@@ -289,19 +325,54 @@ export async function setTriageDecision(
   return { state: 'selected' }
 }
 
+export type TriageDecisionRow = { state: string; decidedAt: string | null; wellId: string | null }
+
+/** His decision for one content hash, exactly as stored (null = undecided). */
+export async function getTriageDecision(wellRoot: string, hash: string): Promise<TriageDecisionRow | null> {
+  const db = triageDb(wellRoot)
+  if (!existsSync(db)) return null
+  await ensureTriage(wellRoot)
+  const r = await query<{ state: string; decided_at: string | null; well_id: string | null }>(db, 'SELECT state, decided_at, well_id FROM triage_decisions WHERE hash = ?', [hash])
+  return r[0] ? { state: r[0].state, decidedAt: r[0].decided_at ?? null, wellId: r[0].well_id ?? null } : null
+}
+
 /**
- * Promote every staged (state='selected') item into the well. Offline/missing files are skipped; a
- * video over the 20 MB gate is skipped unless its hash is in forceHashes. Imported items move to
- * state='included' with their new well id. Idempotent: a second run finds nothing still 'selected'.
+ * Write one decision exactly (review keep/throwaway, undo restoring the prior row, Empty Bin's
+ * 'emptied' marker), or forget it with null. The review screen writes his choices through here,
+ * the same table the Triage panel uses; the sorter never calls it.
  */
-export async function importSelectedTriage(
+export async function putTriageDecision(wellRoot: string, hash: string, row: TriageDecisionRow | null): Promise<void> {
+  await ensureTriage(wellRoot)
+  const db = triageDb(wellRoot)
+  if (!row) {
+    await run(db, 'DELETE FROM triage_decisions WHERE hash = ?', [hash])
+    return
+  }
+  await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)', [hash, row.state, row.decidedAt, row.wellId])
+}
+
+export type PromoteResult = {
+  imported: Array<{ hash: string; wellId: string; relPath: string; created: boolean }>
+  skipped: number
+  gated: number
+}
+
+/**
+ * Promote staged (state='selected') items into the well — all of them, or only `onlyHashes`.
+ * Offline/missing files are skipped; a video over the 20 MB gate is skipped unless its hash is in
+ * forceHashes. Imported items move to state='included' with their new well id; the rest stay staged.
+ */
+export async function promoteTriageHashes(
   archiveRoot: string,
   wellRoot: string,
   sourceRoot: string,
+  onlyHashes: string[] | null,
   forceHashes: string[] = []
-): Promise<{ imported: number; skipped: number; gated: number }> {
+): Promise<PromoteResult> {
   await ensureTriage(wellRoot)
   const db = triageDb(wellRoot)
+  if (onlyHashes && onlyHashes.length === 0) return { imported: [], skipped: 0, gated: 0 }
+  const only = onlyHashes ? ` AND triage_fts.hash IN (${onlyHashes.map(() => '?').join(',')})` : ''
   // GROUP BY hash: decisions are keyed by content hash, but triage_fts is keyed by path, so a hash
   // with duplicate files JOINs to multiple rows. One row per hash avoids ingesting the same selected
   // item once per duplicate.
@@ -309,9 +380,9 @@ export async function importSelectedTriage(
     db,
     `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline, triage_fts.source AS source
      FROM triage_fts JOIN triage_decisions d ON d.hash = triage_fts.hash
-     WHERE d.state = 'selected'
+     WHERE d.state = 'selected'${only}
      GROUP BY triage_fts.hash`,
-    []
+    onlyHashes ?? []
   )
   const enriched = staged.map((s) => {
     const abs = join(s.source || sourceRoot, s.rel_path)
@@ -322,7 +393,7 @@ export async function importSelectedTriage(
     return { hash: s.hash, kind: s.kind, offline: s.offline === '1', missing, sizeBytes, abs }
   })
   const plan = planSelectedImport(enriched, forceHashes, VIDEO_GATE_BYTES)
-  let imported = 0
+  const imported: PromoteResult['imported'] = []
   let failed = 0
   for (const hash of plan.toImport) {
     const row = enriched.find((e) => e.hash === hash)
@@ -330,11 +401,25 @@ export async function importSelectedTriage(
     const res = row.kind === 'video' ? await ingestVideo(archiveRoot, wellRoot, row.abs) : await ingestScreenshot(archiveRoot, wellRoot, row.abs, 'screenshot')
     if (res?.id) {
       await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)', [hash, 'included', new Date().toISOString(), res.id])
-      imported++
+      imported.push({ hash, wellId: res.id, relPath: res.relPath, created: res.created })
     } else {
       console.error(`[triage] import failed for ${row.abs} — ingest returned no id; left staged`)
       failed++
     }
   }
   return { imported, skipped: plan.skipped.length + failed, gated: plan.gated.length }
+}
+
+/**
+ * Promote every staged (state='selected') item into the well (the Triage panel's Import). Idempotent:
+ * a second run finds nothing still 'selected'.
+ */
+export async function importSelectedTriage(
+  archiveRoot: string,
+  wellRoot: string,
+  sourceRoot: string,
+  forceHashes: string[] = []
+): Promise<{ imported: number; skipped: number; gated: number }> {
+  const r = await promoteTriageHashes(archiveRoot, wellRoot, sourceRoot, null, forceHashes)
+  return { imported: r.imported.length, skipped: r.skipped, gated: r.gated }
 }

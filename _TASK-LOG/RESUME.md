@@ -35,6 +35,17 @@ Code: `src/main/sorter/` — `rules.ts` (app/window/OCR → lean + reason), `cla
 - Caveat: throwaway precision rests on 2 held-back proposals, too few to confirm the 0.95 bar either way.
 - An earlier copy that embedded most kept pictures from the well's re-encoded copies looked better than it was (file format); disregard it.
 
+## Review screen (ticket 08, 2026-10-09)
+
+Code: `src/main/review/` — `piles.ts` (pure state machine: doubtful / kept / throwaway / bin / gone, 30-day clock, keep/throwaway/rescue plans; also compiled into the renderer via `tsconfig.web.json`), `store.ts` (read model: proposals + decisions + triage facts), `service.ts` (action layer: act, undo, emptyBin), `owned-copy.ts` (the only file deletion: realpath containment in `images/`, `videos/`, `_triage-posters/`, regular file, not a symlink, single link), `ipc.ts`. Renderer: `Review.tsx` + `review.css`; title bar Search | Review switch in `App.tsx`; browser mock `review-mock.ts` uses the real `piles.ts`.
+
+- Piles are derived, never stored. His decision (triage_decisions) wins: selected/included = kept by you; excluded = throwaway, clock from decided_at; emptied = gone. Without one, the proposal: doubtful = queue, keep = kept, throwaway = throwaway, clock from `sorter_proposals.throwaway_since` (first throwaway proposal, kept across re-sorts). 30 days on → Bin. Missing date → stays in Throwaway (when unsure, keep).
+- Keep = `selected` then `promoteTriageHashes` (the Triage Import path, one hash) → `included` + well id. Throwaway = `excluded`. Both via `putTriageDecision` in triage.ts; the proposal gets `answer` + `answered_at`. Skip writes nothing (session-only reorder).
+- Undo (⌘Z): in-memory stack in the service, restores the exact prior decision row and answer; removes a well copy only if that Keep created it.
+- Empty Bin: needs the token of the Bin shown (refused if it changed); removes proposal rows, well records/copies of binned items, video posters; writes a hash-only `emptied` decision so the item never returns. Scan index rows (triage_fts) stay, hidden. Originals are never touched.
+- Triage panel list hides emptied and binned items; young throwaways carry a "throwaway · bin in N days" label.
+- Tests: `test/review-piles.test.ts`, `test/review-actions.test.ts` (scratch originals, real ingest with a stand-in OCR script); `npm run test:review-ui` (renderer mock, headless shell); `npm run test:review` (hidden Electron, `SLIDEWELL_REVIEW_SCRATCH`).
+
 ## Decided (2026-06-18 grill — presentation-system)
 
 - App-face of Core A (`ppt-archive`): reuse engine, redesign storage.

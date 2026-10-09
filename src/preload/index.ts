@@ -111,7 +111,46 @@ export type TriageItem = {
   takenAt: string | null // local time parsed from a screenshot file name (YYYY-MM-DDTHH:MM:SS)
   app: string | null // source app parsed from a CleanShot name
   windowTitle: string | null // window title parsed from a CleanShot name
+  pile?: ReviewPile | null // review pile when the sorter made a proposal (a throwaway shows 'bin in N days')
+  binInDays?: number | null
 }
+// Review screen (ticket 08): one screenshot the sorter proposed something for, as a card.
+export type ReviewPile = 'doubtful' | 'kept' | 'throwaway' | 'bin'
+export type ReviewCard = {
+  hash: string // triage content hash (the decision key)
+  filename: string
+  app: string | null
+  windowTitle: string | null
+  takenAt: string | null
+  reason: string // the sorter's reason, in words
+  confidence: number
+  proposal: 'keep' | 'throwaway' | 'doubtful'
+  pile: ReviewPile
+  by: 'you' | 'sorter' // his decision, or a proposal he has not overridden
+  binInDays: number | null // Throwaway only: whole days before it moves to the Bin
+  thumbUrl: string | null
+  offline: boolean
+}
+export type ReviewOverview = {
+  needALook: number
+  confident: { kept: number; throwaway: number } // proposals he has not overridden
+  lastSortedAt: string | null
+  queue: ReviewCard[] // the doubtful queue, newest first
+  confidentSample: ReviewCard[]
+  canUndo: boolean
+}
+export type ReviewPiles = {
+  needALook: number
+  confidentTotal: number
+  lastSortedAt: string | null
+  kept: { total: number; items: ReviewCard[] }
+  throwaway: { total: number; items: ReviewCard[] }
+  bin: { total: number; items: ReviewCard[]; token: string } // token: Empty Bin acts only on this set
+  canUndo: boolean
+}
+export type ReviewActResult = { ok: boolean; hash: string; message: string; pile?: ReviewPile }
+export type ReviewUndoResult = { ok: boolean; hash?: string; message: string }
+export type EmptyBinResult = { ok: boolean; emptied: number; copiesRemoved: number; copiesRefused: number; message: string }
 export type TriageCounts = { undecided: number; selected: number; included: number; excluded: number; total: number }
 export type DeckInfo = { id: string; title: string; date: string | null }
 export type DeckCard = {
@@ -410,6 +449,15 @@ const api = {
       ipcRenderer.on('triage:progress', handler)
       return () => ipcRenderer.removeListener('triage:progress', handler)
     }
+  },
+  // Review screen (ticket 08). act/undo/emptyBin write his decisions; no action deletes or moves an
+  // original. emptyBin needs the token of the Bin he confirmed and removes only SlideWell's records and copies.
+  review: {
+    overview: (opts?: { queue?: number; sample?: number }): Promise<ReviewOverview> => ipcRenderer.invoke('review:overview', opts ?? {}),
+    piles: (opts?: { kept?: number; throwaway?: number; bin?: number }): Promise<ReviewPiles> => ipcRenderer.invoke('review:piles', opts ?? {}),
+    act: (hash: string, action: 'keep' | 'throwaway' | 'rescue'): Promise<ReviewActResult> => ipcRenderer.invoke('review:act', hash, action),
+    undo: (): Promise<ReviewUndoResult> => ipcRenderer.invoke('review:undo'),
+    emptyBin: (token: string): Promise<EmptyBinResult> => ipcRenderer.invoke('review:empty-bin', token)
   },
   // One-off backlog import (ticket 13). dryRun writes nothing; run needs the id of the plan just shown.
   backlog: {

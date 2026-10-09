@@ -1,4 +1,5 @@
 import type { SwApi } from '../../preload'
+import { reviewMock } from './review-mock'
 
 // Browser/dev mock for window.sw so the renderer runs under plain Vite (no Electron).
 // Mirrors the full preload contract; returns inert values. Never used in the packaged app.
@@ -100,6 +101,7 @@ export function installMock(): void {
       onProgress: () => () => {},
       onChanged: () => () => {}
     },
+    review: reviewMock(),
     backlog: {
       dryRun: async () => ({ id: 'mock', plan: { ok: false as const, reason: 'no-watched-folder' as const, detail: 'not available in the browser preview' } }),
       run: async () => ({ refused: 'not available in the browser preview' }),

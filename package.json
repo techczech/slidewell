@@ -14,7 +14,9 @@
     "dist:mac": "tsc --noEmit && electron-vite build && electron-builder --mac dmg zip --arm64",
     "test": "vitest run",
     "test:smoke": "electron-vite build && node e2e/smoke.mjs",
-    "test:triage": "electron-vite build && node e2e/triage.mjs"
+    "test:triage": "electron-vite build && node e2e/triage.mjs",
+    "test:review-ui": "node e2e/review-ui.mjs",
+    "test:review": "electron-vite build && node e2e/review.mjs"
   },
   "build": {
     "appId": "net.dominiklukes.slidewell",
