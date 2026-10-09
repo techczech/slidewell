@@ -1,5 +1,6 @@
 import { describe, it, expect, afterAll } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
+import { isVaultChangeRelevant } from '../src/main/talk-usage'
 import { join } from 'node:path'
 import { createSourceWatcher } from '../src/main/source-watcher'
 
@@ -32,6 +33,28 @@ describe('createSourceWatcher', () => {
     const t0 = Date.now()
     while (Date.now() - t0 < 1500) { writeFileSync(join(dir, 'b-outline.md'), String(Date.now())); await sleep(100) }
     expect(fired).toBeGreaterThanOrEqual(1)
+    w.close()
+  })
+
+  it('with the vault filter: a pool image added or removed triggers, a pool subfolder does not', async () => {
+    const vault = join(dir, 'vault')
+    mkdirSync(join(vault, '_assets', 'sub'), { recursive: true })
+    let fired = 0
+    const w = createSourceWatcher(() => { fired++ }, 150, 2000)
+    w.setSources([{ path: vault, recursive: true, accept: isVaultChangeRelevant }])
+    // the folders were just made: under load FSEvents can still report that (as the root's own name)
+    await sleep(600)
+    fired = 0
+    writeFileSync(join(vault, '_assets', 'sub', 'img-1234567.webp'), '1')
+    writeFileSync(join(vault, '_assets', 'notes.txt'), '1')
+    await sleep(600)
+    expect(fired).toBe(0)
+    writeFileSync(join(vault, '_assets', 'img-aaaaaaa.webp'), '1')
+    await sleep(700)
+    expect(fired).toBe(1)
+    rmSync(join(vault, '_assets', 'img-aaaaaaa.webp'))
+    await sleep(700)
+    expect(fired).toBe(2)
     w.close()
   })
 })

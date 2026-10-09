@@ -8,8 +8,8 @@ import { watch, existsSync, type FSWatcher } from 'node:fs'
 export type WatchedSource = {
   path: string
   recursive: boolean
-  /** Only events whose path relative to the source passes this count (default: all non-dot names). */
-  accept?: (relName: string) => boolean
+  /** Only events whose path relative to the source passes this count (default: all non-dot names). `event` is fs.watch's 'rename' (add or remove) or 'change'. */
+  accept?: (relName: string, event: string) => boolean
 }
 
 export function createSourceWatcher(onChange: (path: string) => void, debounceMs = 1500, maxWaitMs = Infinity): { setSources: (sources: WatchedSource[]) => void; close: () => void } {
@@ -48,9 +48,9 @@ export function createSourceWatcher(onChange: (path: string) => void, debounceMs
       for (const [p, recursive] of want) {
         if (watchers.has(p) || !existsSync(p)) continue
         try {
-          const w = watch(p, { recursive, persistent: false }, (_ev, name) => {
+          const w = watch(p, { recursive, persistent: false }, (ev, name) => {
             const accept = accepts.get(p)
-            if (accept) { if (!name || !accept(String(name))) return }
+            if (accept) { if (!name || !accept(String(name), String(ev))) return }
             else if (name && String(name).startsWith('.')) return
             fire(p)
           })

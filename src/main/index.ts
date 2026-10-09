@@ -18,7 +18,8 @@ import { ensureWell, drainInbox, scanVault, searchWell, wellByIds, wellAbsPath, 
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow } from './triage'
 import { cleanShotFolder } from './cleanshot-folder'
 import { createSourceWatcher } from './source-watcher'
-import { ensureUsageTable, loadUsage, scanTalkUsage, talkAbsPath, isVaultChangeRelevant, createScanQueue, type UsageMap } from './talk-usage'
+import { talkAbsPath, isVaultChangeRelevant } from './talk-usage'
+import { createTalkUsageService } from './talk-usage-service'
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
 import { convertPptxToOutline } from './convert'
 import { slugify } from './outline'
@@ -411,8 +412,8 @@ app.whenReady().then(() => {
       date: r.added_at || null,
       slideOrder: null,
       usedInDecks: 1,
-      usedInTalks: (talkUsage.get(r.id) ?? []).length,
-      talkUses: talkUsage.get(r.id) ?? [],
+      usedInTalks: (talkUsage.usage().get(r.id) ?? []).length,
+      talkUses: talkUsage.usage().get(r.id) ?? [],
       reference: `![](img-${r.id})`,
       thumbUrl: swThumb(abs),
       library: 'mine',
@@ -495,7 +496,7 @@ app.whenReady().then(() => {
         const wellRows = await searchWell(wellRootResolved(), query, 60)
         // pictures talks use always get their chance, even past the first 60 words-matches
         const seen = new Set(wellRows.map((r) => r.id))
-        const used = [...talkUsage.keys()].slice(0, 900)
+        const used = [...talkUsage.usage().keys()].slice(0, 900)
         for (const r of await searchWell(wellRootResolved(), query, 60, used).catch(() => [] as WellRow[])) if (!seen.has(r.id)) wellRows.push(r)
         for (const r of wellRows) {
           const w = wellToWire(r)
@@ -761,7 +762,7 @@ app.whenReady().then(() => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     writeConfig({ vaultRoot: r.filePaths[0] })
-    void syncTalkUsage()
+    void talkUsage.sync()
     return r.filePaths[0]
   })
   // Re-scan the TalkWeaver vault for new images and index them; returns count added.
@@ -769,8 +770,9 @@ app.whenReady().then(() => {
     const vr = detectVaultRoot()
     if (!vr) return 0
     try {
-      await syncTalkUsage()
-      void refreshTalkUsage(vr)
+      // queued, not awaited: a switch waits for an in-flight talk scan, and image indexing need not
+      void talkUsage.sync()
+      void talkUsage.refresh()
       return await scanVault(archiveRoot(), wellRootResolved(), vr)
     } catch {
       return 0
@@ -1222,45 +1224,22 @@ app.whenReady().then(() => {
 // On launch: ensure the well exists, drain anything Raycast dropped while we were closed, index
 // new TalkWeaver vault images, and watch the inbox so future drops ingest live.
 // Which talks use which picture; filled from well.db at launch and refreshed by each talk scan.
-// Scans run one at a time (a newer request replaces a waiting one); a result is dropped when the
-// vault it read is no longer the current vault, and a failed scan keeps the previous snapshot.
-let talkUsage: UsageMap = new Map()
-let watchedVault: string | null = null
-let usageWatcher: ReturnType<typeof createSourceWatcher> | null = null
-const usageQueue = createScanQueue<string>(async (vr) => {
-  const root = wellRootResolved()
-  const outcome = await scanTalkUsage(root, vr, () => detectVaultRoot() === vr)
-  if (outcome.status === 'ok') {
-    if (detectVaultRoot() !== vr) return
-    talkUsage = await loadUsage(root, vr)
-  } else if (outcome.reason !== 'superseded') {
-    console.warn(`talk usage kept as it was: ${outcome.reason}${outcome.detail ? ` (${outcome.detail})` : ''}`)
-  }
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('talks:usage-changed', { ok: outcome.status === 'ok', reason: outcome.status === 'ok' ? '' : outcome.reason })
-  }
+// Vault switches and scans run through one serial queue (talk-usage-service.ts); a failed scan keeps
+// the previous snapshot, and a well.db the containment check refuses keeps the feature off.
+const talkUsage = createTalkUsageService({
+  wellRoot: wellRootResolved,
+  vaultRoot: detectVaultRoot,
+  // only talk outlines, folders and pool images appearing or going; wait at most 30 s however busy the vault is
+  watch: (vault, onChange) => {
+    const w = createSourceWatcher(() => onChange(), 4000, 30000)
+    w.setSources([{ path: vault, recursive: true, accept: isVaultChangeRelevant }])
+    return w
+  },
+  notify: (r) => {
+    for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('talks:usage-changed', r)
+  },
+  log: (m) => console.warn(m)
 })
-function refreshTalkUsage(vr: string): Promise<void> {
-  return usageQueue.request(vr)
-}
-// Point the usage scan and its watcher at the current vault; tears the old watcher down on a change.
-async function syncTalkUsage(): Promise<void> {
-  const vr = detectVaultRoot()
-  if (vr === watchedVault && usageWatcher) return
-  usageWatcher?.close()
-  usageWatcher = null
-  watchedVault = vr
-  if (!vr) { talkUsage = new Map(); return }
-  try {
-    const root = wellRootResolved()
-    await ensureUsageTable(root)
-    talkUsage = await loadUsage(root, vr) // empty unless the stored snapshot describes this vault
-  } catch { talkUsage = new Map() }
-  // only talk outlines outside the excluded folders matter; wait at most 30 s however busy the vault is
-  usageWatcher = createSourceWatcher(() => void refreshTalkUsage(vr), 4000, 30000)
-  usageWatcher.setSources([{ path: vr, recursive: true, accept: isVaultChangeRelevant }])
-  void refreshTalkUsage(vr)
-}
 
 async function startWell(): Promise<void> {
   try {
@@ -1272,7 +1251,7 @@ async function startWell(): Promise<void> {
       void scanVault(archiveRoot(), root, vr).then((n) => n > 0 && pictureSearch?.poke(), () => undefined)
     }
     // read-only scan of the vault's talks on launch and whenever the vault changes
-    await syncTalkUsage()
+    await talkUsage.sync()
     const inbox = join(root, '_inbox')
     let busy = false
     fsWatch(inbox, async () => {

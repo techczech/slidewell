@@ -1,9 +1,9 @@
 import { describe, it, expect, afterAll } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync, statSync, symlinkSync, cpSync, renameSync, writeFileSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync, statSync, lstatSync, symlinkSync, cpSync, renameSync, writeFileSync, realpathSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { findTalkFiles, scanTalkUsage, loadUsage, groupUsage, talkAbsPath, wellInsideVault, isTalkOutlinePath, isVaultChangeRelevant, createScanQueue } from '../src/main/talk-usage'
-import { query, run } from '../src/main/sqlite'
+import { findTalkFiles, scanTalkUsage, loadUsage, groupUsage, talkAbsPath, checkWellDb, readPool, isTalkOutlinePath, isVaultChangeRelevant } from '../src/main/talk-usage'
+import { query, runScript } from '../src/main/sqlite'
 
 const fixture = join(__dirname, 'fixtures', 'talk-vault')
 const scratch = realpathSync(mkdtempSync(join(__dirname, '.scratch-usage-')))
@@ -18,7 +18,8 @@ function fingerprint(dir: string): string {
   const walk = (d: string): void => {
     for (const name of readdirSync(d).sort()) {
       const p = join(d, name)
-      if (statSync(p).isDirectory()) walk(p)
+      if (lstatSync(p).isSymbolicLink()) h.update(p).update('link')
+      else if (statSync(p).isDirectory()) walk(p)
       else h.update(p).update(readFileSync(p)).update(String(statSync(p).mtimeMs))
     }
   }
@@ -43,10 +44,15 @@ describe('path rules', () => {
     expect(isTalkOutlinePath('a/b-outline.md')).toBe(true)
     for (const bad of ['a/readme.md', '_assets/x-outline.md', 'node_modules/p/x-outline.md', 'cache/x-outline.md', '../x-outline.md', '.hidden/x-outline.md', '']) expect(isTalkOutlinePath(bad)).toBe(false)
   })
-  it('watches outlines and folders, not caches, the pool or other files', () => {
+  it('watches outlines and folders, not caches or other files', () => {
     expect(isVaultChangeRelevant('a/b-outline.md')).toBe(true)
     expect(isVaultChangeRelevant('some-folder')).toBe(true)
-    for (const no of ['cache/x', 'cache', '_assets/img-aaaaaaa.webp', '_assets', 'node_modules/x/y.js', 'a/notes.md', '.git/index']) expect(isVaultChangeRelevant(no)).toBe(false)
+    for (const no of ['cache/x', 'cache', '_assets', 'node_modules/x/y.js', 'a/notes.md', '.git/index']) expect(isVaultChangeRelevant(no, 'rename')).toBe(false)
+  })
+  it('watches top-level pool images appearing or going, not rewrites, subfolders or other pool churn', () => {
+    expect(isVaultChangeRelevant('_assets/img-aaaaaaa.webp', 'rename')).toBe(true)
+    expect(isVaultChangeRelevant('_assets/img-aaaaaaa.webp', 'change')).toBe(false)
+    for (const no of ['_assets/sub/img-aaaaaaa.webp', '_assets/thumbs/img-aaaaaaa.webp', '_assets/other.png', '_assets/.img-aaaaaaa.webp', 'x/_assets/img-aaaaaaa.webp']) expect(isVaultChangeRelevant(no, 'rename')).toBe(false)
   })
 })
 
@@ -125,17 +131,85 @@ describe('scanTalkUsage', () => {
     expect((await loadUsage(well, fixture)).size).toBe(0)
   })
 
-  it('writes nothing when the well folder is inside the vault, directly or through a symlink', async () => {
+  it('writes nothing when the well folder is inside the vault, equal to it, or reached through a symlink', async () => {
     const vault = vaultCopy()
+    mkdirSync(join(vault, 'well'))
+    mkdirSync(join(vault, 'sub', 'deeper', 'well'), { recursive: true })
     const before = fingerprint(vault)
-    expect(await scanTalkUsage(join(vault, 'well'), vault)).toMatchObject({ status: 'kept', reason: 'db-inside-vault' })
+    expect(await scanTalkUsage(join(vault, 'well'), vault)).toMatchObject({ status: 'kept', reason: 'db-refused' })
+    expect(await scanTalkUsage(vault, vault)).toMatchObject({ reason: 'db-refused' })
+    expect(await scanTalkUsage(join(vault, 'sub', 'deeper', 'well'), vault)).toMatchObject({ reason: 'db-refused' })
     const outside = fresh('outside')
     symlinkSync(vault, join(outside, 'link-to-vault'))
-    expect(wellInsideVault(join(outside, 'link-to-vault', 'well'), vault)).toBe(true)
-    expect(await scanTalkUsage(join(outside, 'link-to-vault'), vault)).toMatchObject({ reason: 'db-inside-vault' })
-    expect(await scanTalkUsage(join(vault, 'sub', 'deeper', 'well'), vault)).toMatchObject({ reason: 'db-inside-vault' })
+    expect(checkWellDb(join(outside, 'link-to-vault'), vault)).toMatchObject({ ok: false })
+    expect(await scanTalkUsage(join(outside, 'link-to-vault'), vault)).toMatchObject({ reason: 'db-refused' })
     expect(fingerprint(vault)).toBe(before)
-    expect(wellInsideVault(fresh('elsewhere'), vault)).toBe(false)
+    expect(checkWellDb(fresh('elsewhere'), vault)).toMatchObject({ ok: true })
+  })
+
+  it('refuses a symlinked well.db, dangling or not, and never creates its target', async () => {
+    const vault = vaultCopy()
+    const before = fingerprint(vault)
+    // dangling: points at a not-yet-existing well.db inside the vault
+    const well = fresh('well')
+    symlinkSync(join(vault, 'well.db'), join(well, 'well.db'))
+    expect(checkWellDb(well, vault)).toEqual({ ok: false, reason: 'well.db is a symbolic link' })
+    expect(await scanTalkUsage(well, vault)).toMatchObject({ status: 'kept', reason: 'db-refused' })
+    expect(existsSync(join(vault, 'well.db'))).toBe(false)
+    // live: points at a database outside the vault; still refused
+    const other = fresh('other')
+    expect((await scanTalkUsage(other, vault)).status).toBe('ok')
+    const well2 = fresh('well')
+    symlinkSync(join(other, 'well.db'), join(well2, 'well.db'))
+    expect(await scanTalkUsage(well2, vault)).toMatchObject({ reason: 'db-refused' })
+    expect(fingerprint(vault)).toBe(before)
+  })
+
+  it('refuses when the vault or the well folder cannot be resolved', () => {
+    expect(checkWellDb(fresh('well'), join(scratch, 'no-vault'))).toMatchObject({ ok: false })
+    expect(checkWellDb(join(scratch, 'no-well'), fixture)).toMatchObject({ ok: false })
+  })
+
+  it("titles and paths with ?, ', ; and newlines round-trip", async () => {
+    const vault = fresh('vault')
+    mkdirSync(join(vault, '_assets'))
+    writeFileSync(join(vault, '_assets', 'img-aaaaaaa.webp'), 'x')
+    const titles = ['What? Why?', "Dominik's talk", 'A; DROP TABLE talk_image_use; --', "?' ; ?"]
+    titles.forEach((t, i) => {
+      mkdirSync(join(vault, `t${i}`))
+      writeFileSync(join(vault, `t${i}`, `t${i}-outline.md`), `---\ntitle: ${t}\n---\n## S\n![](img-aaaaaaa)\n`)
+    })
+    // a newline cannot be in a title line, but it can be in a folder name
+    const odd = 'odd\n.bail off\n?'
+    mkdirSync(join(vault, odd))
+    writeFileSync(join(vault, odd, 'x-outline.md'), '# Multi\n## S\n![](img-aaaaaaa)\n')
+    const well = fresh('well')
+    expect(await scanTalkUsage(well, vault)).toEqual({ status: 'ok', summary: { talks: 5, references: 5, images: 1 } })
+    const uses = (await loadUsage(well, vault)).get('aaaaaaa') ?? []
+    expect(uses.map((u) => u.title).sort()).toEqual([...titles, 'Multi'].sort())
+    expect(uses.find((u) => u.title === 'Multi')?.relPath).toBe(join(odd, 'x-outline.md'))
+  })
+
+  it('an absent pool is empty; an unavailable one keeps the previous snapshot', async () => {
+    const vault = vaultCopy()
+    const well = fresh('well')
+    expect((await scanTalkUsage(well, vault)).status).toBe('ok')
+    const parked = join(scratch, `pool-${++n}`)
+    renameSync(join(vault, '_assets'), parked)
+    // a symlink whose target is gone
+    symlinkSync(join(scratch, 'gone'), join(vault, '_assets'))
+    expect(readPool(vault)).toBeNull()
+    expect(await scanTalkUsage(well, vault)).toMatchObject({ status: 'kept', reason: 'read-failed' })
+    expect((await loadUsage(well, vault)).get('7777777')).toBeDefined()
+    // `_assets` is a file: also unreadable, also kept
+    rmSync(join(vault, '_assets'))
+    writeFileSync(join(vault, '_assets'), 'not a folder')
+    expect(await scanTalkUsage(well, vault)).toMatchObject({ status: 'kept', reason: 'read-failed' })
+    // genuinely absent: an empty pool, so the talk-local copy no longer counts
+    rmSync(join(vault, '_assets'))
+    expect(readPool(vault)).toEqual(new Set())
+    expect((await scanTalkUsage(well, vault)).status).toBe('ok')
+    expect((await loadUsage(well, vault)).has('7777777')).toBe(false)
   })
 
   it('a stored snapshot is replaced in one step: rows and meta always agree', async () => {
@@ -153,11 +227,11 @@ describe('scanTalkUsage', () => {
 })
 
 describe('the replacement script', () => {
-  it('rolls back everything when a statement in the transaction fails (.bail on)', async () => {
+  it('rolls back everything when a statement in the transaction fails (-bail)', async () => {
     const well = fresh('well')
     await scanTalkUsage(well, fixture)
     const db = join(well, 'well.db')
-    await expect(run(db, ".bail on\nBEGIN IMMEDIATE;\nDELETE FROM talk_image_use;\nINSERT INTO no_such_table VALUES (1);\nCOMMIT;")).rejects.toThrow()
+    await expect(runScript(db, "BEGIN IMMEDIATE;\nDELETE FROM talk_image_use;\nINSERT INTO no_such_table VALUES (1);\nCOMMIT;")).rejects.toThrow()
     expect((await loadUsage(well, fixture)).size).toBe(7)
   })
 })
@@ -178,30 +252,5 @@ describe('talkAbsPath (reveal)', () => {
     expect(talkAbsPath(vault, join('escape', 'secret-outline.md'))).toBeNull()
     expect(talkAbsPath(vault, join('garden-talk', 'link-outline.md'))).toBeNull()
     expect(talkAbsPath(vault, join('garden-talk', 'garden-talk-outline.md'))).not.toBeNull()
-  })
-})
-
-describe('createScanQueue', () => {
-  it('runs one at a time and lets a newer request replace a waiting one', async () => {
-    const ran: string[] = []
-    let active = 0
-    let maxActive = 0
-    let release: () => void = () => undefined
-    const gate = new Promise<void>((r) => { release = r })
-    const q = createScanQueue<string>(async (arg) => {
-      active++; maxActive = Math.max(maxActive, active)
-      if (arg === 'first') await gate
-      ran.push(arg)
-      active--
-    })
-    const p1 = q.request('first')
-    const p2 = q.request('second')
-    const p3 = q.request('third')
-    release()
-    await Promise.all([p1, p2, p3])
-    expect(ran).toEqual(['first', 'third'])
-    expect(maxActive).toBe(1)
-    await q.request('again')
-    expect(ran).toEqual(['first', 'third', 'again'])
   })
 })

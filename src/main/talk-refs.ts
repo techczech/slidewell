@@ -13,23 +13,39 @@
  *    HTML comments (html-comments.mjs:12, applied at 08-source-adapters.mjs:441), and not in the
  *    preamble above the first `##` (only tree.root.children become slides, 08-source-adapters.mjs:1942).
  *  - A target is a pooled image when it is a bare id `img-xxxxxxx` (legacy `img-img-xxxxxxx`;
- *    08/image-refs.ts REF_RE in TalkWeaver's src/main/image-refs.ts) or a path inside a folder
- *    called `_assets`. A target with a URL scheme never counts. A talk's own `assets/img-xxxxxxx.png`
- *    is a copy beside the talk, not the pool file: counted only with `includeTalkAssets`.
+ *    REF_RE in TalkWeaver's src/main/image-refs.ts) or a path inside a folder called `_assets`.
+ *    A target with a URL scheme never counts. A talk-local copy is a target that is exactly
+ *    `assets/img-xxxxxxx.<image ext>` (optionally `./assets/…`): the `assets` folder beside the
+ *    outline. It counts only when the caller passes the pool and the id is in it; any other path
+ *    with a pool-like file name never counts. Filtering happens before de-duplication, so a
+ *    rejected copy never hides a later valid reference to the same image on the same slide.
  *
  * Slide numbers: `#` is the talk title and never a slide (14-outline-tree.mjs:155-160); every `##` to
  * `######` heading is one slide, in order (emitNodeSlides, 08-source-adapters.mjs:1715-1780). A
- * generated title slide comes first unless `auto_title_slide` is off (DECK_FLAG_OFF, deck-settings.mjs:34)
- * or a heading carries `{role=opening}` (08-source-adapters.mjs:2016-2025). Approximation: a `{compare}`
- * heading that folds two `####` children into one slide is not modelled.
+ * generated title slide comes first unless `auto_title_slide` is off (readDeckFlag, deck-settings.mjs:34)
+ * or some slide's role is `opening` (hasExplicitOpening, 08-source-adapters.mjs:2020-2024).
+ * A slide's role is the LAST `role` token among, in order: the heading's trailing `{…}` groups
+ * (parseHeadingAttrs, 02-triggers-layout.mjs:54), its Trigger block (Object.assign per line,
+ * 14-outline-tree.mjs:177-185), then every other Trigger-only line in its body outside fences and
+ * notes (contentLinesAndAttrs folds stray Trigger lines into the same attrs object,
+ * 08-source-adapters.mjs:1577-1583, read as slide.attrs.role at 1257). So `## S {role=opening}`
+ * followed by `{role=content}` is a content slide and the title slide is still generated.
+ * A wrong slide number is worse than none, so a number is kept only when it is certain: when nothing
+ * the extractor does not model appears in the talk at or before that slide. Not modelled, and so
+ * turning that slide's and every later number into 0 (unknown): a fold token (see FOLD_*; in a
+ * heading, its Trigger lines, or talk-wide `triggers:`) on a heading with child headings; a split
+ * token, quote or `**Timeline:**` block on a slide with no image line (so possibly a single block
+ * that splits into continuations); and an
+ * authored opening below a `##` section (the opening-first reorder, 08-source-adapters.mjs:1973-2008;
+ * unknown from that section's heading on).
  */
 
 export interface ImageRef {
   /** Pool id: 7 hex digits, no `img-` prefix. */
   id: string
-  /** 1-based slide number as the strip numbers slides (approximate; see above). */
+  /** 1-based slide number as TalkWeaver numbers slides, or 0 when it is not certain (see above). */
   slide: number
-  /** 'pool' = named through the pool; 'local' = a pool-named copy beside the talk (only with includeTalkAssets). */
+  /** 'pool' = named through the pool; 'local' = the talk's own `assets/` copy of a pool image. */
   via: 'pool' | 'local'
 }
 
@@ -40,20 +56,23 @@ export interface TalkRefs {
 }
 
 export interface ExtractOptions {
-  /** Also count `assets/img-xxxxxxx.ext` copies kept beside the talk (default: pool references only). */
-  includeTalkAssets?: boolean
+  /** The pool's ids. When given, a talk-local copy `assets/img-xxxxxxx.<ext>` counts if its id is here. */
+  pool?: ReadonlySet<string>
 }
 
 const IMAGE_SYNTAX = /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)\s*((?:\{[^}]*\}\s*)*)$/
 const POOL_NAME = /^img-(?:img-)?([0-9a-f]{7,})$/i
+const LOCAL_COPY = /^(?:\.\/)?assets\/img-([0-9a-f]{7,})\.(?:png|jpe?g|gif|webp|avif|svg)$/i
 const OFF = new Set(['false', 'no', 'off', 'hide', '0'])
 
-/** 'pool' for a pooled image, 'local' for a pool-named file kept elsewhere, null otherwise. */
+/** 'pool' for a pooled image, 'local' for a talk-local `assets/img-xxxxxxx.<ext>` copy, null otherwise. */
 export function classifyTarget(target: string): { id: string; via: 'pool' | 'local' } | null {
   let t = target.trim().replace(/^<|>$/g, '')
   if (/^[a-z][a-z0-9+.-]*:/i.test(t) || t.startsWith('//')) return null // URL scheme: never the pool
   t = t.replace(/[?#].*$/, '')
   try { t = decodeURIComponent(t) } catch { /* keep as written */ }
+  const local = LOCAL_COPY.exec(t)
+  if (local) return { id: local[1].toLowerCase().slice(0, 7), via: 'local' }
   const parts = t.split(/[\\/]/)
   const file = parts.pop() ?? ''
   const hasExt = /\.[A-Za-z0-9]{2,5}$/.test(file)
@@ -62,7 +81,7 @@ export function classifyTarget(target: string): { id: string; via: 'pool' | 'loc
   const id = m[1].toLowerCase().slice(0, 7)
   if (parts.length === 0 && !hasExt) return { id, via: 'pool' } // bare id
   if (parts[parts.length - 1] === '_assets') return { id, via: 'pool' }
-  return { id, via: 'local' }
+  return null // a pool-like name anywhere else is not the pool
 }
 
 /** The pool id a reference target names (pooled forms only), or null. */
@@ -79,7 +98,84 @@ const fenceCloses = (line: string, open: { marker: string }): boolean => {
   const m = line.replace(/\r$/, '').trim().match(/^(`{3,}|~{3,})\s*$/)
   return Boolean(m && m[1][0] === open.marker[0] && m[1].length >= open.marker.length)
 }
-const TRIGGER_ONLY = /^\s*(\{[^}]*\}\s*)+$/
+// TRIGGER_LINE_RE, trigger-tokenizer.mjs:2 (tested on the trimmed line)
+const TRIGGER_LINE = /^\{[^}]*\}(\s*\{[^}]*\})*$/
+
+/** The tokens of `{…}` group bodies, quotes unwrapped (tokenizeTriggerBody, trigger-tokenizer.mjs:13). */
+function tokensIn(groups: string[]): string[] {
+  const out: string[] = []
+  for (const body of groups) {
+    let i = 0
+    while (i < body.length) {
+      while (i < body.length && (/\s/.test(body[i]) || body[i] === ',')) i++
+      let tok = ''
+      while (i < body.length && !/\s/.test(body[i]) && body[i] !== ',') {
+        if (body[i] === '"') { i++; while (i < body.length && body[i] !== '"') tok += body[i++]; i++ }
+        else tok += body[i++]
+      }
+      if (tok) out.push(tok)
+    }
+  }
+  return out
+}
+/** The last `role` value among these tokens, or undefined. `key=value`, or the colon form `key:value` (parseHeadingAttrs, 02-triggers-layout.mjs:88-108). */
+function roleIn(tokens: string[]): string | undefined {
+  let role: string | undefined
+  for (const tok of tokens) {
+    // (a token with an `=` is always the equals form, so `role:x=y` is not a role)
+    if (tok.startsWith('role=')) role = tok.slice(5)
+    else if (tok.startsWith('role:') && !tok.includes('=')) role = tok.slice(5)
+  }
+  return role
+}
+/**
+ * Tokens that can change how many slides a heading emits. Folds: {carousel}, {cards=grid|rows},
+ * {image-grid}, {contrast}, {columns}/{cols}/{2col}/{3col} and {compare} absorb `####` children into
+ * one slide (foldChildLayoutNodes, 08-source-adapters.mjs:1876-1955). Splits: a timeline or quote
+ * slide may become several continuation slides (continuationSplitForNode, 08-source-adapters.mjs:1592;
+ * timelineContinuationParts, splitQuoteSlideBlocks). Bare words resolve through TalkWeaver's trigger
+ * dictionary (trigger-dictionary.generated.mjs); these are the words that resolve to the keys and
+ * layouts above. Any other token keeps one slide per heading.
+ */
+// folds act only on a heading that has child headings; splits only on a slide with a single block
+const FOLD_KEYS = new Set(['carousel', 'cards', 'cols', 'contrast', 'compare', 'columns'])
+const FOLD_LAYOUTS = new Set(['cards', 'image-grid', 'contrast', 'columns', 'compare'])
+const FOLD_WORDS = new Set(['carousel', 'cards', '2col', '3col', 'columns', 'compare', 'contrast', 'image-grid', 'imagegrid'])
+const SPLIT_KEYS = new Set(['timeline'])
+const SPLIT_LAYOUTS = new Set(['timeline', 'timeline-visual', 'quote'])
+const SPLIT_WORDS = new Set(['quote', 'timeline', 'timeline-visual', 'timelinedynamic', 'timelinehorizontal', 'timeline-pills', 'timelinepills', 'timelinespine', 'timelinevertical'])
+function tokenKind(tok: string): 'fold' | 'split' | null {
+  const eq = tok.indexOf('=')
+  const colon = tok.indexOf(':')
+  const cut = eq > 0 ? eq : colon > 0 ? colon : -1
+  if (cut < 0) {
+    const w = tok.toLowerCase()
+    return FOLD_WORDS.has(w) ? 'fold' : SPLIT_WORDS.has(w) ? 'split' : null
+  }
+  const key = tok.slice(0, cut).toLowerCase()
+  const value = tok.slice(cut + 1).toLowerCase()
+  if (key === 'layout') return FOLD_LAYOUTS.has(value) ? 'fold' : SPLIT_LAYOUTS.has(value) ? 'split' : null
+  return FOLD_KEYS.has(key) ? 'fold' : SPLIT_KEYS.has(key) ? 'split' : null
+}
+// A quote (`>` or a paragraph starting with a double quote, quoteFromQuotedParagraph, 02-triggers-layout.mjs:664)
+// or a `**Timeline:**` block splits only when it is the slide's single block
+// (quoteBlockOnQuoteSlide, quote-layout.mjs:430; timelineContinuationParts, timeline-layout.mjs:126).
+const QUOTE_START = /^(?:>|"|“)/
+const TIMELINE_START = /^\*\*Timeline:\*\*\s*$/i
+
+/** Trailing `{…}` groups of a heading's text, peeled right to left (parseHeadingAttrs). */
+function headingGroups(text: string): string[] {
+  const groups: string[] = []
+  let t = text.trimEnd()
+  for (;;) {
+    const m = t.match(/^([\s\S]*?)\s*\{([^}]*)\}$/)
+    if (!m) break
+    groups.unshift(m[2])
+    t = m[1].trimEnd()
+  }
+  return groups
+}
+const triggerGroups = (line: string): string[] => [...line.matchAll(/\{([^}]*)\}/g)].map((g) => g[1])
 
 export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): TalkRefs {
   let raw = markdown.replace(/\r\n?/g, '\n')
@@ -97,12 +193,30 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
   // blank HTML comments but keep newlines, as the compiler does
   const lines = raw.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, '')).split('\n')
 
-  let deckTitle = ''
-  let explicitOpening = false
+  let talkTitle = ''
+  const roles: Array<string | undefined> = [] // per slide: its role token, last one wins
+  const levels: number[] = [] // per slide: its heading level
+  // the first slide at which numbering stops being certain (a construct the extractor does not model)
+  let uncertainFrom = Infinity
+  const unsure = (at: number): void => { uncertainFrom = Math.min(uncertainFrom, at) }
+  const fold: boolean[] = [] // per slide: a token that folds child headings into it
+  const splitMarker: boolean[] = [] // per slide: a split token or a `**Timeline:**` block
+  const quoteMarker: boolean[] = [] // per slide: a quote
+  const imageLine: boolean[] = [] // per slide: an image-syntax line (so the slide has more than one block)
+  // per slide: a fenced block, certainly a block of its own beside a quote (a list after a quote is
+  // not: it can be folded into the quote as its attribution, foldQuoteAttribution)
+  const otherBlock: boolean[] = []
+  // talk-wide trigger defaults apply to every slide (deckTriggerDefaults, 08-source-adapters.mjs:595)
+  const defaults = tokensIn([(meta['triggers'] ?? '').replace(/[{}]/g, ' ')]).map(tokenKind)
+  const noteTokens = (k: number, toks: string[]): void => {
+    for (const kind of toks.map(tokenKind)) {
+      if (kind === 'fold') fold[k] = true
+      if (kind === 'split') splitMarker[k] = true
+    }
+  }
   let slide = 0 // headings seen
   let inNotes = false
   let fence: { marker: string } | null = null
-  let afterHeading = -1 // line index of the last heading, to find its trigger block
   const found: Array<{ id: string; slideIdx: number; via: 'pool' | 'local' }> = []
   const seen = new Set<string>()
 
@@ -110,43 +224,69 @@ export function extractTalkRefs(markdown: string, opts: ExtractOptions = {}): Ta
     const line = lines[i]
     if (fence) { if (fenceCloses(line, fence)) fence = null; continue }
     const open = fenceOpen(line)
-    if (open) { fence = open; continue }
+    if (open) { if (slide > 0 && !inNotes) otherBlock[slide] = true; fence = open; continue }
     let m: RegExpMatchArray | null
     if ((m = line.match(/^#\s+(.+)/)) && !line.startsWith('##')) {
-      deckTitle = m[1].replace(/\s*\{[^}]*\}\s*$/, '').trim()
+      talkTitle = m[1].replace(/\s*\{[^}]*\}\s*$/, '').trim()
       continue
     }
     if ((m = line.match(/^(#{2,6})\s+(.+)/))) {
       inNotes = false
       slide += 1
-      afterHeading = i
-      if (/\{[^}]*\brole\s*=\s*["']?opening\b/.test(m[2])) explicitOpening = true
+      levels[slide] = m[1].length
+      const toks = tokensIn(headingGroups(m[2]))
+      roles[slide] = roleIn(toks)
+      noteTokens(slide, toks)
       continue
     }
     const t = line.trim()
     if (t.toLowerCase() === ':::notes') { inNotes = true; continue }
     if (t === ':::' && inNotes) { inNotes = false; continue }
-    if (afterHeading >= 0) {
-      // the heading's trigger block: the first non-blank line after it and the trigger-only lines that follow
-      let j = afterHeading + 1
-      while (j < i && !lines[j].trim()) j++
-      let inBlock = j <= i && TRIGGER_ONLY.test(lines[j] ?? '')
-      for (let k = j; inBlock && k < i; k++) if (!TRIGGER_ONLY.test(lines[k])) inBlock = false
-      if (inBlock && TRIGGER_ONLY.test(line) && /\brole\s*=\s*["']?opening\b/.test(line)) explicitOpening = true
-    }
     if (inNotes || slide === 0) continue
+    // every Trigger-only line of the slide's body, in order: the Trigger block and stray ones alike.
+    // (A chart object token line holds exactly one `chart` token, so it can never set a role.)
+    if (TRIGGER_LINE.test(t)) {
+      const toks = tokensIn(triggerGroups(t))
+      const r = roleIn(toks)
+      if (r !== undefined) roles[slide] = r
+      noteTokens(slide, toks)
+      continue
+    }
+    if (TIMELINE_START.test(t)) splitMarker[slide] = true
+    if (QUOTE_START.test(t)) quoteMarker[slide] = true
     const im = IMAGE_SYNTAX.exec(t)
     if (!im) continue
+    imageLine[slide] = true
     const c = classifyTarget(im[2])
-    if (!c || (c.via === 'local' && !opts.includeTalkAssets)) continue
+    // filter first, then de-duplicate: a rejected copy must not hide a later valid reference
+    if (!c || (c.via === 'local' && !opts.pool?.has(c.id))) continue
     const key = `${c.id}@${slide}`
     if (!seen.has(key)) { seen.add(key); found.push({ id: c.id, slideIdx: slide, via: c.via }) }
   }
 
-  const cover = !OFF.has((meta['auto_title_slide'] ?? '').toLowerCase()) && !explicitOpening
-  const offset = cover ? 1 : 0
-  return {
-    title: (meta['title'] || deckTitle).trim(),
-    refs: found.map((f) => ({ id: f.id, slide: f.slideIdx + offset, via: f.via }))
+  for (let k = 1; k <= slide; k++) {
+    const hasChildren = k < slide && levels[k + 1] > levels[k]
+    const folds = fold[k] || defaults.includes('fold')
+    const splits = splitMarker[k] || defaults.includes('split')
+    const quoteAlone = quoteMarker[k] && !imageLine[k] && !otherBlock[k]
+    if ((folds && hasChildren) || (splits && !imageLine[k]) || quoteAlone) unsure(k)
   }
+  const opening = roles.findIndex((r) => r === 'opening')
+  // an authored opening below a `##` section may be moved in front of that section's divider, or
+  // the divider dropped (OPENING-FIRST ORDERING, 08-source-adapters.mjs:1973-2008)
+  if (opening > 0 && levels[opening] > 2) {
+    let p = opening - 1
+    while (p >= 1 && levels[p] !== 2) p--
+    if (p >= 1) unsure(p) // only below a `##` section heading
+  }
+  const cover = !OFF.has((meta['auto_title_slide'] ?? '').toLowerCase()) && opening < 0
+  const offset = cover ? 1 : 0
+  const refs: ImageRef[] = []
+  const kept = new Set<string>()
+  for (const f of found) {
+    const slide = f.slideIdx < uncertainFrom ? f.slideIdx + offset : 0 // 0 = not certain
+    const key = `${f.id}@${slide}`
+    if (!kept.has(key)) { kept.add(key); refs.push({ id: f.id, slide, via: f.via }) }
+  }
+  return { title: (meta['title'] || talkTitle).trim(), refs }
 }

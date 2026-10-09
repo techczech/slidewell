@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { extractTalkRefs, poolIdOf, classifyTarget } from '../src/main/talk-refs'
 
 describe('poolIdOf', () => {
@@ -19,8 +21,14 @@ describe('poolIdOf', () => {
     expect(poolIdOf('assets/Pasted%20image.png')).toBeNull()
     expect(poolIdOf('vid-4e8ba04')).toBeNull()
   })
-  it('names a pool-named file kept elsewhere as local', () => {
+  it('a talk-local copy is exactly assets/img-<hex>.<image ext> beside the outline, optionally ./assets/', () => {
     expect(classifyTarget('assets/img-9c8057e.png')).toEqual({ id: '9c8057e', via: 'local' })
+    expect(classifyTarget('./assets/img-9C8057E.webp')).toEqual({ id: '9c8057e', via: 'local' })
+    expect(classifyTarget('<assets/img-9c8057e.jpeg>')).toEqual({ id: '9c8057e', via: 'local' })
+  })
+  it('any other path with a pool-like file name is neither pool nor local copy', () => {
+    for (const no of ['unrelated/img-aaaaaaa.png', '../assets/img-aaaaaaa.png', 'assets/sub/img-aaaaaaa.png', 'other/assets/img-aaaaaaa.png',
+      'assets/img-aaaaaaa.txt', 'assets/img-aaaaaaa', 'img-aaaaaaa.png', '/assets/img-aaaaaaa.png', 'assets\\img-aaaaaaa.png']) expect(classifyTarget(no)).toBeNull()
   })
 })
 
@@ -42,8 +50,17 @@ describe('extractTalkRefs: what counts as a reference (compiler image syntax)', 
   it('does not count video, audio, remote URLs or a talk\'s own assets folder', () => {
     expect(ids('![](vid-aaaaaaa)\n![](chime.mp3)\n![](https://example.com/_assets/img-aaaaaaa.webp)\n![](assets/img-aaaaaaa.png)')).toEqual([])
   })
-  it('reports the talk\'s own assets folder as local, only when asked', () => {
-    expect(extractTalkRefs('## S\n![](assets/img-aaaaaaa.png)\n', { includeTalkAssets: true }).refs).toEqual([{ id: 'aaaaaaa', slide: 2, via: 'local' }])
+  it('counts the talk\'s own assets copy only when its id is in the pool passed in', () => {
+    const pool = new Set(['aaaaaaa'])
+    expect(extractTalkRefs('## S\n![](assets/img-aaaaaaa.png)\n', { pool }).refs).toEqual([{ id: 'aaaaaaa', slide: 2, via: 'local' }])
+    expect(extractTalkRefs('## S\n![](assets/img-bbbbbbb.png)\n', { pool }).refs).toEqual([])
+    expect(extractTalkRefs('## S\n![](unrelated/img-aaaaaaa.png)\n', { pool }).refs).toEqual([])
+  })
+  it('filters before de-duplicating: a rejected copy does not hide a later reference on the same slide', () => {
+    const pool = new Set(['aaaaaaa'])
+    expect(extractTalkRefs('## S\n![](assets/img-bbbbbbb.png)\n![](img-bbbbbbb)\n', { pool }).refs).toEqual([{ id: 'bbbbbbb', slide: 2, via: 'pool' }])
+    // a valid copy and a pool reference to the same image on one slide are one row
+    expect(extractTalkRefs('## S\n![](assets/img-aaaaaaa.png)\n![](img-aaaaaaa)\n', { pool }).refs).toHaveLength(1)
   })
   it('ignores fenced code, :::notes, HTML comments and the preamble above the first ## heading', () => {
     expect(ids('```md\n![](img-aaaaaaa)\n```\n~~~\n![](img-aaaaaaa)\n~~~\n<!-- ![](img-aaaaaaa) -->\n:::notes\n![](img-aaaaaaa)\n:::\n![](img-bbbbbbb)')).toEqual(['bbbbbbb'])
@@ -83,9 +100,76 @@ describe('extractTalkRefs: slide numbers (14-outline-tree.mjs / 08-source-adapte
     expect(extractTalkRefs('### Open {role=opening}\n![](img-aaaaaaa)').refs[0].slide).toBe(1)
     expect(extractTalkRefs('### Open\n{role=opening}\n![](img-aaaaaaa)').refs[0].slide).toBe(1)
   })
-  it('{role=opening} in fenced code, notes-free prose or a later content line does not', () => {
+  it('{role=opening} in fenced code, in notes or above the first ## does not', () => {
     expect(extractTalkRefs('### A\n```\n{role=opening}\n```\n![](img-aaaaaaa)').refs[0].slide).toBe(2)
-    expect(extractTalkRefs('### A\n\ntext\n{role=opening}\n![](img-aaaaaaa)').refs[0].slide).toBe(2)
+    expect(extractTalkRefs('### A\n:::notes\n{role=opening}\n:::\n![](img-aaaaaaa)').refs[0].slide).toBe(2)
+    expect(extractTalkRefs('{role=opening}\n# T\n### A\n![](img-aaaaaaa)').refs[0].slide).toBe(2)
+  })
+  // Expected numbers below were produced by TalkWeaver's compiler itself (adaptMarkdownOutlineV2,
+  // 08-source-adapters.mjs) on the same Markdown, then pinned here.
+  it('a stray Trigger line later in the body still sets the role (contentLinesAndAttrs folds it in)', () => {
+    expect(extractTalkRefs('### A\n\ntext\n{role=opening}\n![](img-aaaaaaa)').refs[0].slide).toBe(1)
+  })
+  it('the last role token wins: heading, then Trigger block, then stray Trigger lines', () => {
+    // `## Start {role=opening}` overridden by `{role=content}`: content slide, title slide still generated
+    const overridden = '# Two\n## Start {role=opening}\n{role=content}\n![](img-aaaaaaa)\n\n## Next\n![](img-bbbbbbb)\n'
+    expect(extractTalkRefs(overridden).refs.map((r) => r.slide)).toEqual([2, 3])
+    expect(extractTalkRefs('## S {role=content}\n{role=opening}\n![](img-aaaaaaa)').refs[0].slide).toBe(1)
+    expect(extractTalkRefs('## A\n{role=opening}\n{role=content}\n![](img-aaaaaaa)').refs[0].slide).toBe(2)
+    expect(extractTalkRefs('## A\n{role=opening}\n\n{role=content}\n![](img-aaaaaaa)').refs[0].slide).toBe(2)
+    expect(extractTalkRefs('## A\n{role=content}\n\n{role=opening}\n![](img-aaaaaaa)').refs[0].slide).toBe(1)
+    expect(extractTalkRefs('## A {role="opening"}\n![](img-aaaaaaa)').refs[0].slide).toBe(1)
+    expect(extractTalkRefs('## A {role:opening}\n![](img-aaaaaaa)').refs[0].slide).toBe(1)
+    expect(extractTalkRefs('## A {role=opening}{role=foo}\n![](img-aaaaaaa)').refs[0].slide).toBe(2)
+  })
+  it('the role-precedence fixture talk matches the compiler', () => {
+    const md = readFileSync(join(__dirname, 'fixtures', 'role-precedence-outline.md'), 'utf8')
+    // compiler: 1 generated title slide, 2 start (content), 3 middle, 4 later (content), 5 generated thanks slide
+    expect(extractTalkRefs(md).refs).toEqual([
+      { id: 'aaaaaaa', slide: 2, via: 'pool' },
+      { id: 'bbbbbbb', slide: 3, via: 'pool' },
+      { id: 'ccccccc', slide: 4, via: 'pool' }
+    ])
+  })
+})
+
+describe('extractTalkRefs: a slide number is kept only when it is certain (else 0)', () => {
+  // Each case was compiled by TalkWeaver's compiler (adaptMarkdownOutlineV2); its numbers are in the
+  // comments. Every number kept here equals the compiler's; 0 marks where the compiler's numbering
+  // can depart from one-slide-per-heading.
+  const nums = (md: string): string[] => extractTalkRefs(md).refs.map((r) => `${r.id[0]}@${r.slide}`)
+  const long = 'word '.repeat(400).trim()
+  it('a fold token on a heading with children makes that slide and later ones unknown', () => {
+    // compiler: a@2 b@3 d@3 c@4 (the children fold into slide 3)
+    expect(nums('## A\n![](img-aaaaaaa)\n## B {image-grid}\n### c\n![](img-bbbbbbb)\n### d\n![](img-ddddddd)\n## E\n![](img-ccccccc)\n')).toEqual(['a@2', 'b@0', 'd@0', 'c@0'])
+    // compiler: a@2 c@4 ({2col} on the Trigger line)
+    expect(nums('## A\n![](img-aaaaaaa)\n## B\n{2col}\n### c\nx\n### d\ny\n## E\n![](img-ccccccc)\n')).toEqual(['a@2', 'c@0'])
+  })
+  it('a fold token on a heading without children changes nothing', () => {
+    // compiler: a@2 b@3 c@4
+    expect(nums('## A\n![](img-aaaaaaa)\n## B {image-grid}\n![](img-bbbbbbb)\n## E\n![](img-ccccccc)\n')).toEqual(['a@2', 'b@3', 'c@4'])
+  })
+  it('a quote-only slide may split into continuations; a quote beside an image does not', () => {
+    // compiler: a@2 c@13 (the quote became ten slides)
+    expect(nums(`## A\n![](img-aaaaaaa)\n## Q\n> ${long}\n## E\n![](img-ccccccc)\n`)).toEqual(['a@2', 'c@0'])
+    // compiler: a@2 b@3 c@4
+    expect(nums(`## A\n![](img-aaaaaaa)\n## Q\n> ${long}\n![](img-bbbbbbb)\n## E\n![](img-ccccccc)\n`)).toEqual(['a@2', 'b@3', 'c@4'])
+  })
+  it('a timeline-only slide may split, so later numbers are unknown', () => {
+    const stops = Array.from({ length: 14 }, (_, i) => `- ${2000 + i} — event ${i}`).join('\n')
+    // compiler: a@2 c@4 (under the cap this time; a longer one splits)
+    expect(nums(`## A\n![](img-aaaaaaa)\n## T\n**Timeline:**\n${stops}\n## E\n![](img-ccccccc)\n`)).toEqual(['a@2', 'c@0'])
+  })
+  it('an authored opening below a ## section: unknown from that section on, certain before it', () => {
+    // compiler: d@1 a@2 b@4 c@5 (the section divider moved after the opening)
+    expect(nums('## Z\n![](img-ddddddd)\n## P\n### A {role=opening}\n![](img-aaaaaaa)\n### B\n![](img-bbbbbbb)\n## E\n![](img-ccccccc)\n')).toEqual(['d@1', 'a@0', 'b@0', 'c@0'])
+  })
+  it('talk-wide triggers apply to every heading', () => {
+    // compiler: a@2 c@4
+    expect(nums('---\ntriggers: 2col\n---\n## A\n![](img-aaaaaaa)\n## B\n### c\nx\n### d\ny\n## E\n![](img-ccccccc)\n')).toEqual(['a@2', 'c@0'])
+  })
+  it('one image on several unknown slides is one reference', () => {
+    expect(nums('## B {image-grid}\n### c\n![](img-aaaaaaa)\n### d\n## E\n![](img-aaaaaaa)\n')).toEqual(['a@0'])
   })
 })
 

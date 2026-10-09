@@ -66,6 +66,22 @@ export async function run(dbPath: string, sql: string, params: Array<string | nu
   await exec([dbPath], script, timeoutMs)
 }
 
+/**
+ * Execute a complete script exactly as written: no `?` placeholder substitution, so `?` inside the
+ * script's own string literals stays data. The caller quotes every value itself (see `sqlString`).
+ * Opened with -bail (the first failing statement stops the script, so an open transaction is never
+ * committed), -nofollow (a symlinked database file, dangling or not, is refused rather than opened or
+ * created at its target) and -safe (no ATTACH, no file-writing or shell dot-commands).
+ */
+export async function runScript(dbPath: string, script: string, timeoutMs = 8000): Promise<void> {
+  await exec(['-bail', '-nofollow', '-safe', dbPath], `.timeout 4000\n${script}\n`, timeoutMs)
+}
+
+/** An SQL string literal for `runScript` scripts. */
+export function sqlString(s: string): string {
+  return `'${s.replace(/'/g, "''")}'`
+}
+
 /** Sanitise a user string for FTS5 MATCH (wrap bare tokens in quotes unless it uses FTS syntax). */
 export function safeFtsQuery(raw: string): string {
   const q = raw.trim()
