@@ -71,6 +71,8 @@ export type SlideClusterResult = {
   members: SlideResult[]
   size: number
   deckCount: number
+  /** Set when the cluster was merged by appearance ("N versions"): every pair is at least this alike. */
+  lookAlike?: 'same-picture' | 'same-thing'
 }
 export type SearchFilters = {
   owner: 'mine' | 'all' | 'others' | 'unknown'

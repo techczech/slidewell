@@ -166,7 +166,23 @@ try {
   check('Stop during training returns cancelled and saves nothing', stopped.cancelled === true && readDb('SELECT COUNT(*) AS n FROM sorter_models')[0].n === modelsBefore, JSON.stringify(stopped))
 
   const t1 = Date.now()
-  const sorted = await win.evaluate((lim) => window.sw.sorter.sort(lim === null ? {} : { limit: lim }), limit ?? null)
+  // sorting (rules, classifier and the copy-of-kept scan in the worker): the main process must keep answering
+  await win.evaluate((lim) => {
+    window.__sortRun = window.sw.sorter.sort(lim === null ? {} : { limit: lim }).then((r) => (window.__sorted = r))
+  }, limit ?? null)
+  const sortSteps = { samples: 0, slowestReplyMs: 0 }
+  while (!(await win.evaluate(() => window.__sorted ?? null))) {
+    const a = Date.now()
+    const st = await win.evaluate(() => window.sw.sorter.status().then((s) => s.phase))
+    const ms = Date.now() - a
+    if (st === 'sorting' || st === 'embedding') {
+      sortSteps.samples++
+      sortSteps.slowestReplyMs = Math.max(sortSteps.slowestReplyMs, ms)
+    }
+  }
+  const sorted = await win.evaluate(() => window.__sorted)
+  out('main process during sorting', sortSteps)
+  check('main process stays responsive while sorting (slowest reply < 500 ms)', sortSteps.samples > 0 && sortSteps.slowestReplyMs < 500, JSON.stringify(sortSteps))
   out('sort seconds', Math.round((Date.now() - t1) / 1000))
   out('sort', sorted)
   check('sorting finished', sorted.ok, sorted.error)

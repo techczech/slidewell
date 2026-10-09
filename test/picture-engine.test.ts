@@ -157,3 +157,31 @@ describe('picture-search engine (embed text, embed image, nearest neighbours)', 
     expect(rank(q, items, 3).map((x) => x.id)).toEqual(['i49', 'i48', 'i47'])
   })
 })
+
+describe('look-alike vector lookup (bounded reads)', () => {
+  it('a cold engine reads only the asked ids from the store, never the whole store', async () => {
+    const engine = new PictureSearchEngine(store, () => fake)
+    await seed(engine)
+    const cold = new PictureSearchEngine(store, () => fake)
+    let all = 0
+    let gets = 0
+    const realAll = store.all.bind(store)
+    const realGet = store.get.bind(store)
+    store.all = () => (all++, realAll())
+    store.get = (id: string) => (gets++, realGet(id))
+    const got = cold.vectorsOf([slideId('Seals', 4), wellImageId('ab12cd3'), 'slide:nope#1'])
+    expect([...got.keys()].sort()).toEqual([slideId('Seals', 4), wellImageId('ab12cd3')].sort())
+    expect(all).toBe(0)
+    expect(gets).toBe(3)
+  })
+  it('uses the in-memory copy when it is already warm', async () => {
+    const engine = new PictureSearchEngine(store, () => fake)
+    await seed(engine)
+    await engine.pictureQuery({ text: 'robot' }) // warms the cache
+    let gets = 0
+    const realGet = store.get.bind(store)
+    store.get = (id: string) => (gets++, realGet(id))
+    expect(engine.vectorsOf([slideId('Seals', 4)]).size).toBe(1)
+    expect(gets).toBe(0)
+  })
+})

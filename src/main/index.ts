@@ -7,7 +7,9 @@ import { pathToFileURL } from 'url'
 import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { planSources, matchesFromKind, countFrom, type FilterableResult, type FromCounts, type SourcePlan } from './searchfilters'
-import { matchedSearch, type MatchCluster } from './matched-search'
+import { matchedSearch, rowIds, type MatchCluster, type MatchRow } from './matched-search'
+import { mergeLookAlikeClusters } from './look-alike/merge-clusters'
+import { cachedDHash } from './look-alike/fingerprint'
 import { runMoreLikeThis } from './more-like-this'
 import type { MatchMode } from './match-bands'
 import { applyFilters, combinedDateFilter, parseQuery, resolveOwnershipFilter } from './searchlib'
@@ -595,12 +597,35 @@ app.whenReady().then(() => {
     return out
   }
 
+  /** Group result clusters by appearance ("N versions") when grouping is on; items with no embedding keep their text clusters. */
+  async function groupByLook<C>(clusters: C[], filters: SearchFilters): Promise<C[]> {
+    if (!filters?.cluster || clusters.length < 2) return clusters
+    try {
+      return (await mergeLookAlikeClusters(clusters as never, {
+        idOf: (row: MatchRow) => rowIds(row)[0] ?? null,
+        vectorsOf: (ids: string[]) => pictureSearch?.lookAlikeInputs(ids).vectors ?? new Map(),
+        fingerprints: async (ids: string[]) => {
+          const paths = pictureSearch?.lookAlikeInputs(ids).paths() ?? new Map<string, string>()
+          const out = new Map<string, bigint>()
+          for (const id of ids.slice(0, 80)) {
+            const p = paths.get(id)
+            const h = p ? await cachedDHash(p) : null
+            if (h !== null) out.set(id, h)
+          }
+          return out
+        }
+      } as never)) as unknown as C[]
+    } catch {
+      return clusters // grouping is a nicety: never lose results to it
+    }
+  }
+
   ipcMain.handle('archive:search', async (_e, query: string, filters: SearchFilters) => {
     const from = filters?.from ?? 'all'
     const kind = filters?.kind ?? 'all'
     const plan = planSources(filters?.type ?? 'slides', from, kind)
     const rows = await collectResults(query ?? '', filters, plan)
-    return rows.filter((c) => matchesFromKind(rep(c), from, kind))
+    return groupByLook(rows.filter((c) => matchesFromKind(rep(c), from, kind)), filters)
   })
 
   // Search with the Match switch (Words / Meaning / Both): word hits, picture hits, two bands.
@@ -610,12 +635,12 @@ app.whenReady().then(() => {
     const from = filters?.from ?? 'all'
     const kind = filters?.kind ?? 'all'
     const resolve = (ids: string[]): Promise<Map<string, MatchCluster>> => resolvePictureIds(ids, filters, query)
-    return matchedSearch(
+    const result = await matchedSearch(
       {
         words: async (q) => {
           const plan = planSources(filters?.type ?? 'slides', from, kind)
           const rows = await collectResults(q ?? '', filters, plan)
-          return rows.filter((c) => matchesFromKind(rep(c), from, kind)) as unknown as MatchCluster[]
+          return (await groupByLook(rows.filter((c) => matchesFromKind(rep(c), from, kind)), filters)) as unknown as MatchCluster[]
         },
         modelReady: () => pictureSearch?.status().model === 'ready',
         pictureQuery: (text, opts) => pictureSearch!.pictureQuery({ text }, opts),
@@ -625,6 +650,7 @@ app.whenReady().then(() => {
       filters ?? {},
       mode === 'words' || mode === 'meaning' ? mode : 'both'
     )
+    return { ...result, related: await groupByLook(result.related, filters) }
   })
 
   // More like this (inspector): the six most similar items from other presentations and the well, by

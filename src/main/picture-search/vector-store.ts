@@ -228,6 +228,27 @@ export class VectorStore {
     return rows.map((r) => ({ id: r.id, kind: r.kind, vector: fromBlob(r.vector) }))
   }
 
+  /** Vectors for just these ids (one indexed lookup each; no full-store read). Unknown ids are left out. */
+  getMany(ids: string[]): StoredVector[] {
+    const out: StoredVector[] = []
+    for (const id of ids) {
+      const v = this.get(id)
+      if (v) out.push(v)
+    }
+    return out
+  }
+
+  /** The image file each id was embedded from (for the look-alike fingerprint). Unknown ids are left out. */
+  pathsOf(ids: string[]): Map<string, string> {
+    const out = new Map<string, string>()
+    const q = this.db.prepare('SELECT path FROM vectors WHERE id = ?')
+    for (const id of ids) {
+      const r = q.get(id) as { path: string } | undefined
+      if (r) out.set(id, r.path)
+    }
+    return out
+  }
+
   count(): number {
     const r = this.db.prepare('SELECT COUNT(*) AS n FROM vectors').get() as { n: number }
     return Number(r.n)

@@ -173,11 +173,16 @@ export class SorterService {
       const both: LabelledPrediction[] = []
       const rulesAlone: LabelledPrediction[] = []
       const scored: Array<{ p: number; keep: boolean }> = []
-      for (const s of test) {
+      // the look-alike signal as it will run: a held-back screenshot against the kept ones it was trained beside
+      const trainKept = trainSet.filter((s) => s.truth === 'keep').map((s) => vectors.get(s.image!.id)!)
+      const testTiers = await job({ kind: 'kept-tiers', vectors: test.map((s) => vectors.get(s.image!.id)!), kept: trainKept }) // in the worker
+      if (ctl.signal.aborted) throw new Error('cancelled')
+      for (const [ti, s] of test.entries()) {
         const rule = applyRules(s.facts)
-        const p = predictKeep(held, vectors.get(s.image!.id)!)
+        const v = vectors.get(s.image!.id)!
+        const p = predictKeep(held, v)
         scored.push({ p, keep: s.truth === 'keep' })
-        both.push({ truth: s.truth!, proposal: decide(rule, p, t).proposal })
+        both.push({ truth: s.truth!, proposal: decide(rule, p, t, testTiers[ti]).proposal })
         rulesAlone.push({ truth: s.truth!, proposal: decide(rule, null, t).proposal })
       }
       // the report measures the procedure on the held-back fifth; the model in use is then retrained on
@@ -233,6 +238,9 @@ export class SorterService {
       let shots = loadUndecided(this.deps.wellRoot())
       if (opts.limit !== undefined) shots = shots.slice(0, Math.max(0, opts.limit))
       const t = this.thresholds()
+      // pictures of everything he kept: a look-alike of one of them leans throwaway
+      const keptShots = loadLabelled(this.deps.wellRoot()).filter((s) => s.truth === 'keep' && s.image)
+      const keptVectors = [...(await this.vectorsFor(keptShots, 'reading pictures of what you kept', ctl.signal)).values()]
       this.set({ phase: 'sorting', done: 0, total: shots.length, message: 'sorting undecided screenshots', error: null }, true)
       const CHUNK = 25
       for (let i = 0; i < shots.length && !ctl.signal.aborted; i += CHUNK) {
@@ -240,12 +248,17 @@ export class SorterService {
         const items = chunk.flatMap((s) => (s.image ? [s.image] : []))
         const vectors = await this.deps.pictures.ensureVectors(items, { signal: ctl.signal })
         const rows: ProposalRow[] = []
+        // the copy-of-kept scan runs in the worker, so the main process stays responsive while sorting
+        const have = chunk.filter((s) => s.image && vectors.has(s.image.id))
+        if (ctl.signal.aborted) break
+        const tiers = have.length ? await (this.deps.runJob ? this.deps.runJob({ kind: 'kept-tiers', vectors: have.map((s) => vectors.get(s.image!.id)!), kept: keptVectors }, ctl.signal) : Promise.resolve(runJob({ kind: 'kept-tiers', vectors: have.map((s) => vectors.get(s.image!.id)!), kept: keptVectors }))) : []
+        const tierOf = new Map(have.map((s, k) => [s, tiers[k]]))
         for (const s of chunk) {
           if (!s.hash) continue
           const v = s.image ? vectors.get(s.image.id) : undefined
           if (s.image && !v && ctl.signal.aborted) continue // not reached before cancel: no proposal
           const rule = applyRules(s.facts)
-          const verdict = decide(rule, v ? predictKeep(rec.model, v) : null, t)
+          const verdict = decide(rule, v ? predictKeep(rec.model, v) : null, t, v ? (tierOf.get(s) ?? null) : null)
           rows.push({ hash: s.hash, proposal: verdict.proposal, confidence: verdict.confidence, pKeep: verdict.pKeep, reason: verdict.reason, rule: rule?.rule ?? null })
           counts[verdict.proposal]++
         }
@@ -256,6 +269,11 @@ export class SorterService {
       this.set({ phase: 'idle', done: 0, total: 0, message: '' }, true)
       return { ok: true, sorted, counts }
     } catch (e) {
+      if (ctl.signal.aborted) {
+        // Stop ended the worker mid-chunk: proposals already written stay, nothing more is recorded
+        this.set({ phase: 'idle', done: 0, total: 0, message: '' }, true)
+        return { ok: true, sorted, counts }
+      }
       const msg = (e as Error)?.message ?? String(e)
       this.set({ phase: 'error', message: '', error: msg }, true)
       return { ok: false, sorted, counts, error: msg }

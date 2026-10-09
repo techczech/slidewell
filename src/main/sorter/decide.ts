@@ -6,13 +6,15 @@
  * everything between is doubtful and goes to the review queue. Pure.
  */
 import type { RuleVerdict } from './rules'
+import type { Tier } from '../look-alike/groups'
 
 /**
  * Stored with every model, report and proposal; bump when rules, combination, classifier, calibration
  * or the evaluation procedure change. Sorting uses only a model trained under the current version.
  * 2: calibrated, near-duplicates grouped, evidence gate.
+ * 3: a copy of a kept screenshot leans throwaway (look-alike signal).
  */
-export const SORTER_VERSION = 'sorter-local-2'
+export const SORTER_VERSION = 'sorter-local-3'
 
 export type Proposal = 'keep' | 'throwaway' | 'doubtful'
 
@@ -22,6 +24,15 @@ export type Thresholds = {
   /** p(keep) at or above this → keep. */
   keep: number
 }
+
+/**
+ * The look-alike signal: the best tier between this screenshot and any screenshot he already kept
+ * (look-alike/groups.ts), or null. It only adds log-odds toward throwaway; it never decides alone:
+ * the throwaway threshold still applies, so no signal can make anything throwaway below it.
+ * PROVISIONAL sizes, to be set from his verdict on the pair sheet.
+ */
+export type KeptCopy = Tier | null
+export const KEPT_COPY_NUDGE: Record<Tier, number> = { 'same-picture': 1.2, 'same-thing': 0.6 }
 
 /** No configuration may let the sorter call something throwaway below this. */
 export const THROWAWAY_FLOOR = 0.85
@@ -51,7 +62,13 @@ const sigmoid = (z: number): number => 1 / (1 + Math.exp(-z))
 const bare = (reason: string): string =>
   reason.replace(/\s+—\s+usually (kept|throwaway)$/, '').replace(/^(Looks|Mentions|Slides)\b/, (w) => w.toLowerCase())
 
-function reasonFor(proposal: Proposal, rule: RuleVerdict | null, pKeepModel: number | null): string {
+function reasonFor(proposal: Proposal, rule: RuleVerdict | null, pKeepModel: number | null, copy: KeptCopy = null): string {
+  const base = reasonBase(proposal, rule, pKeepModel)
+  if (!copy || proposal === 'keep') return base
+  return `${base}; ${copy === 'same-picture' ? 'looks the same as' : 'looks like an edited version of'} one you already kept`
+}
+
+function reasonBase(proposal: Proposal, rule: RuleVerdict | null, pKeepModel: number | null): string {
   const model = pKeepModel === null ? null : pKeepModel >= 0.5 ? 'keep' : 'throwaway'
   const modelWords = model === 'keep' ? 'looks like screenshots you kept before' : 'looks like screenshots you binned before'
   const cap = (s: string): string => s[0].toUpperCase() + s.slice(1)
@@ -75,12 +92,18 @@ function reasonFor(proposal: Proposal, rule: RuleVerdict | null, pKeepModel: num
  * One verdict. `pKeepModel` is null when there is no trained classifier or no embedding for this
  * picture; then the rule alone decides, and only when its own confidence clears the thresholds.
  */
-export function decide(rule: RuleVerdict | null, pKeepModel: number | null, thresholds: Thresholds = DEFAULT_THRESHOLDS): Verdict {
+export function decide(rule: RuleVerdict | null, pKeepModel: number | null, thresholds: Thresholds = DEFAULT_THRESHOLDS, keptCopy: KeptCopy = null): Verdict {
   const t = checkThresholds(thresholds)
   const ruleLogit = rule ? (rule.lean === 'throwaway' ? 1 : -1) * logit(rule.confidence) : 0
   const modelLogit = pKeepModel === null ? 0 : logit(1 - pKeepModel)
   // rule alone: its own confidence, exactly (no log-odds round trip)
-  const pThrow = pKeepModel !== null ? sigmoid(modelLogit + ruleLogit) : rule ? (rule.lean === 'throwaway' ? rule.confidence : 1 - rule.confidence) : 0.5
+  const nudge = keptCopy ? KEPT_COPY_NUDGE[keptCopy] : 0
+  const pThrow =
+    pKeepModel !== null || nudge > 0
+      ? sigmoid(modelLogit + ruleLogit + nudge)
+      : rule
+        ? rule.lean === 'throwaway' ? rule.confidence : 1 - rule.confidence
+        : 0.5
   const pKeep = 1 - pThrow
   let proposal: Proposal
   let confidence: number
@@ -94,5 +117,5 @@ export function decide(rule: RuleVerdict | null, pKeepModel: number | null, thre
     proposal = 'doubtful'
     confidence = Math.max(pKeep, pThrow)
   }
-  return { proposal, confidence, pKeep, reason: reasonFor(proposal, rule, pKeepModel) }
+  return { proposal, confidence, pKeep, reason: reasonFor(proposal, rule, pKeepModel, keptCopy) }
 }

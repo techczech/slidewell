@@ -96,6 +96,24 @@ export class PictureSearchEngine {
     return rank(qv, this.vectors().values(), limit, undefined, opts.kinds ?? SEARCH_KINDS)
   }
 
+  /**
+   * Stored vectors for these ids; ids with no vector are left out. No model needed. Uses the in-memory
+   * copy when it is already loaded, else reads just these ids from the store: a search never triggers
+   * a full-store load for grouping.
+   */
+  vectorsOf(ids: string[]): Map<string, Float32Array> {
+    const out = new Map<string, Float32Array>()
+    if (this.cache) {
+      for (const id of ids) {
+        const v = this.cache.get(id)
+        if (v) out.set(id, v.vector)
+      }
+      return out
+    }
+    for (const v of this.store.getMany(ids)) out.set(v.id, v.vector)
+    return out
+  }
+
   /** Embed one image and store its vector (the indexer's unit of work). A refused write is 'stale'. */
   async embedAndStore(item: IndexItem): Promise<WriteResult> {
     const e = this.embedder()
