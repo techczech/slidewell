@@ -450,8 +450,12 @@ export async function promoteTriageHashes(
     if (!row) continue
     const res = row.kind === 'video' ? await ingestVideo(archiveRoot, wellRoot, row.abs) : await ingestScreenshot(archiveRoot, wellRoot, row.abs, 'screenshot')
     if (res?.id) {
-      // the link from this well copy to its triage decision key, before anything else can change
-      await recordWellSource(wellRoot, res.id, hash)
+      // Link this well copy to its triage decision key only when that key is the hash ingest computed
+      // from the bytes it actually imported. A stale scan hash (file replaced since its scan) would
+      // otherwise let emptying the old content hide this different content. Ingest has already
+      // recorded the real hash either way.
+      if (res.sourceHash === hash) await recordWellSource(wellRoot, res.id, hash)
+      else console.error(`[triage] ${row.abs}: scanned as ${hash} but imported as ${res.sourceHash || 'unknown'} — the file changed since its scan; not linked to the old hash`)
       // Ingest is async: the item may have been emptied from the Bin meanwhile. Like every other
       // decision write, this one never replaces an 'emptied' marker; such an item counts as skipped
       // (its well copy, if one was just made, is hidden by content identity — well.ts hiddenWellIds).

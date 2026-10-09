@@ -66,6 +66,21 @@ function addBinItems(n: number): string[] {
   return hashes
 }
 
+const contentHash = (p: string): string => createHash('sha256').update(readFileSync(p)).digest('hex').slice(0, 12)
+
+/** A doubtful screenshot scanned the way triage scans: its decision key is the file's content hash. */
+async function addScannedItem(name: string, rgb: [number, number, number]): Promise<string> {
+  await png(join(src, name), ...rgb)
+  const hash = contentHash(join(src, name))
+  const db = new DatabaseSync(join(well, 'triage.db'))
+  db.prepare(
+    "INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, poster_rel, offline, ocr_text, scanned_at, source, taken_at, app, window_title) VALUES (?, 'image', ?, ?, 'png', '1', '0', '', '0', '', '', ?, '2026-10-01T10:00:00', 'Preview', ?)"
+  ).run(hash, name, name, src, name)
+  db.prepare("INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, sorter_version, proposed_at) VALUES (?, 'doubtful', 0.5, 0.5, 'unsure', 'test', ?)").run(hash, new Date(T0).toISOString())
+  db.close()
+  return hash
+}
+
 const decision = (hash: string): { state: string; decided_at: string | null; well_id: string | null } | undefined => {
   const db = new DatabaseSync(join(well, 'triage.db'), { readOnly: true })
   try {
@@ -243,12 +258,13 @@ describe('review action layer: no file is ever deleted or moved', () => {
   })
 
   it("a kept-then-binned item's well record is hidden, not deleted", async () => {
-    await svc.act('hk1', 'keep')
-    const wellId = decision('hk1')!.well_id!
-    await svc.act('hk1', 'throwaway')
+    const h = await addScannedItem('kept-binned.png', [70, 20, 200])
+    await svc.act(h, 'keep')
+    const wellId = decision(h)!.well_id!
+    await svc.act(h, 'throwaway')
     clock = T0 + 31 * DAY
     await svc.emptyBin((await svc.piles()).bin.token)
-    expect(decision('hk1')).toMatchObject({ state: 'emptied', well_id: wellId })
+    expect(decision(h)).toMatchObject({ state: 'emptied', well_id: wellId })
     expect(wellRows().map((w) => w.id)).toContain(wellId)
     expect(await wellByIds(well, [wellId])).toEqual([])
     expect((await searchWell(well, '', 60)).map((r) => r.id)).not.toContain(wellId)
@@ -373,14 +389,15 @@ describe('Triage import and the emptied marker', () => {
     mkdirSync(join(slow, 'tools', 'ocr'), { recursive: true })
     writeFileSync(
       join(slow, 'tools', 'ocr', 'vision_ocr'),
-      `#!/bin/sh\n/usr/bin/sqlite3 '${join(well, 'triage.db')}' "UPDATE triage_decisions SET state = 'emptied' WHERE hash = 'hd1'"\necho '{"text":""}'\n`
+      `#!/bin/sh\n/usr/bin/sqlite3 '${join(well, 'triage.db')}' "UPDATE triage_decisions SET state = 'emptied' WHERE hash = '${await addScannedItem('race.png', [5, 90, 160])}'"\necho '{"text":""}'\n`
     )
     chmodSync(join(slow, 'tools', 'ocr', 'vision_ocr'), 0o755)
-    await putTriageDecision(well, 'hd1', { state: 'selected', decidedAt: new Date(T0).toISOString(), wellId: null })
-    const r = await promoteTriageHashes(slow, well, src, ['hd1'])
+    const h = contentHash(join(src, 'race.png'))
+    await putTriageDecision(well, h, { state: 'selected', decidedAt: new Date(T0).toISOString(), wellId: null })
+    const r = await promoteTriageHashes(slow, well, src, [h])
     expect(r.imported).toEqual([])
     expect(r.skipped).toBe(1)
-    expect(decision('hd1')?.state).toBe('emptied')
+    expect(decision(h)?.state).toBe('emptied')
     // the copy ingest made is hidden by content identity, not deleted
     const ids = wellRows().map((w) => w.id)
     expect(ids.length).toBe(1)
@@ -390,14 +407,14 @@ describe('Triage import and the emptied marker', () => {
 })
 
 describe('hidden by content identity, whatever happened to the well id', () => {
-  it('ingest records the content hash of the source file (the same hash triage keys decisions by)', async () => {
-    await svc.act('hd1', 'keep')
+  it('ingest records the content hash of the source file; a decision key that is not that hash is not linked', async () => {
+    await svc.act('hd1', 'keep') // the fixture's key 'hd1' is not the file's content hash
     const wellId = decision('hd1')!.well_id!
     const content = createHash('sha256').update(readFileSync(join(src, 'doubt1.png'))).digest('hex').slice(0, 12)
     const db = new DatabaseSync(join(well, 'well.db'), { readOnly: true })
     const links = db.prepare('SELECT source_hash FROM well_sources WHERE well_id = ?').all(wellId) as Array<{ source_hash: string }>
     db.close()
-    expect(links.map((l) => l.source_hash).sort()).toEqual([content, 'hd1'].sort())
+    expect(links.map((l) => l.source_hash)).toEqual([content])
   })
 
   const hiddenEverywhere = async (wellId: string): Promise<void> => {
@@ -408,29 +425,50 @@ describe('hidden by content identity, whatever happened to the well id', () => {
   }
 
   it('Keep, then Triage exclude (drops the well id), then emptied: hidden from search and picture search', async () => {
-    await svc.act('hd1', 'keep')
-    const wellId = decision('hd1')!.well_id!
-    await setTriageDecision(archive, well, src, 'hd1', 'exclude')
-    expect(decision('hd1')).toMatchObject({ state: 'excluded', well_id: null })
+    const h = await addScannedItem('real1.png', [33, 66, 99])
+    await svc.act(h, 'keep')
+    const wellId = decision(h)!.well_id!
+    await setTriageDecision(archive, well, src, h, 'exclude')
+    expect(decision(h)).toMatchObject({ state: 'excluded', well_id: null })
     clock = Date.now() + 31 * DAY
     const r = await svc.emptyBin((await svc.piles()).bin.token)
     expect(r.ok).toBe(true)
-    expect(decision('hd1')).toMatchObject({ state: 'emptied', well_id: null })
+    expect(decision(h)).toMatchObject({ state: 'emptied', well_id: null })
     await hiddenEverywhere(wellId)
   })
 
   it('Keep, Undo Keep, then throw away, then emptied: hidden from search and picture search', async () => {
-    await svc.act('hd1', 'keep')
-    const wellId = decision('hd1')!.well_id!
+    const h = await addScannedItem('real2.png', [99, 66, 33])
+    await svc.act(h, 'keep')
+    const wellId = decision(h)!.well_id!
     await svc.undo()
-    expect(decision('hd1')).toBeUndefined()
+    expect(decision(h)).toBeUndefined()
     expect((await wellByIds(well, [wellId])).length).toBe(1) // visible while not emptied
-    await svc.act('hd1', 'throwaway')
-    expect(decision('hd1')).toMatchObject({ state: 'excluded', well_id: null })
+    await svc.act(h, 'throwaway')
+    expect(decision(h)).toMatchObject({ state: 'excluded', well_id: null })
     clock = T0 + 30 * DAY
     await svc.emptyBin((await svc.piles()).bin.token)
-    expect(decision('hd1')?.state).toBe('emptied')
+    expect(decision(h)?.state).toBe('emptied')
     await hiddenEverywhere(wellId)
+  })
+
+  it('a stale scan hash: scan A, replace the file with B, import, empty A — B stays visible', async () => {
+    const hA = await addScannedItem('swap.png', [10, 200, 90]) // scanned as A
+    await png(join(src, 'swap.png'), 200, 30, 140) // replaced with B before import
+    const hB = contentHash(join(src, 'swap.png'))
+    expect(hB).not.toBe(hA)
+    await svc.act(hA, 'keep') // imports B's bytes under A's decision key
+    const wellId = decision(hA)!.well_id!
+    const db = new DatabaseSync(join(well, 'well.db'), { readOnly: true })
+    const links = (db.prepare('SELECT source_hash FROM well_sources WHERE well_id = ?').all(wellId) as Array<{ source_hash: string }>).map((l) => l.source_hash)
+    db.close()
+    expect(links).toEqual([hB]) // never linked to A
+    await svc.act(hA, 'throwaway')
+    clock = T0 + 30 * DAY
+    await svc.emptyBin((await svc.piles()).bin.token)
+    expect(decision(hA)?.state).toBe('emptied')
+    expect((await wellByIds(well, [wellId])).map((r) => r.id)).toEqual([wellId])
+    expect((await searchWell(well, '', 60)).map((r) => r.id)).toContain(wellId)
   })
 })
 

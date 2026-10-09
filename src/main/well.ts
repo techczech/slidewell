@@ -40,6 +40,8 @@ export async function ensureWell(root: string): Promise<void> {
  * uses as its decision key. Every ingest records it. Rows from before this table are backfilled by
  * joining through triage_decisions.well_id (what ingest already recorded); the source hash cannot be
  * recomputed from a well copy, which is re-encoded. Regular table beside the FTS index.
+ * No 'emptied' marker can predate this table (Empty Bin arrived with it), and every item emptied from
+ * now on got its well_sources row at ingest, so the backfill misses nothing that hiding depends on.
  */
 const sourcesReady = new Set<string>()
 async function ensureWellSources(root: string): Promise<void> {
@@ -125,7 +127,7 @@ export async function ingestScreenshot(
   root: string,
   srcPath: string,
   source = 'screenshot'
-): Promise<{ id: string; relPath: string; created: boolean } | null> {
+): Promise<{ id: string; relPath: string; created: boolean; sourceHash: string } | null> {
   if (!existsSync(srcPath)) return null
   await ensureWell(root)
   const orig = readFileSync(srcPath)
@@ -159,7 +161,7 @@ export async function ingestScreenshot(
   }
   await upsert(root, { id, slug, ext, relPath, storeRoot: 'well', source, tags: '', notes: '', ocr: text })
   await recordSource(root, id, sourceHash)
-  return { id, relPath, created }
+  return { id, relPath, created, sourceHash }
 }
 
 export function findFfmpeg(): string {
@@ -195,7 +197,7 @@ function hashFileStream(path: string): Promise<string> {
  * discoverable on disk without the app (ADR-0026) and reusable by TalkWeaver. The 20 MB gate is
  * enforced by the caller (triage), so a forced large video still copies here.
  */
-export async function ingestVideo(archiveRoot: string, root: string, srcPath: string): Promise<{ id: string; relPath: string; created: boolean } | null> {
+export async function ingestVideo(archiveRoot: string, root: string, srcPath: string): Promise<{ id: string; relPath: string; created: boolean; sourceHash: string } | null> {
   if (!existsSync(srcPath)) return null
   await ensureWell(root)
   mkdirSync(join(root, 'videos'), { recursive: true })
@@ -218,7 +220,7 @@ export async function ingestVideo(archiveRoot: string, root: string, srcPath: st
     )
   }
   if (full) await recordSource(root, id, full.slice(0, 12))
-  return { id, relPath, created }
+  return { id, relPath, created, sourceHash: full ? full.slice(0, 12) : '' }
 }
 
 function readSidecarField(yml: string, key: string): string {
@@ -266,8 +268,9 @@ export interface WellRow {
 
 /**
  * Well ids hidden because their content was emptied from the review's Bin (ticket 08). Hidden by
- * content identity: any well row whose source content hash (well_sources) has an 'emptied' decision,
- * plus any well id an emptied marker names. Nothing is deleted; the rows stay, hidden from every well
+ * content identity only: any well row whose source content hash (well_sources) has an 'emptied'
+ * decision. Not by the well id a decision names, which can point at other content (a file replaced
+ * after its scan). Nothing is deleted; the rows stay, hidden from every well
  * listing (searchWell, wellByIds — which every picture-search resolve path goes through).
  *
  * picture-search.db still holds vectors for emptied items (`well:<id>`, `triage:<hash>`); SlideWell's
@@ -277,15 +280,15 @@ export interface WellRow {
 async function hiddenWellIds(root: string): Promise<string[]> {
   const tdb = join(root, 'triage.db')
   if (!existsSync(tdb) || !existsSync(wellDb(root))) return []
-  let emptied: Array<{ hash: string; well_id: string | null }>
+  let emptied: Array<{ hash: string }>
   try {
-    emptied = await query<{ hash: string; well_id: string | null }>(tdb, "SELECT hash, well_id FROM triage_decisions WHERE state = 'emptied'", [])
+    emptied = await query<{ hash: string }>(tdb, "SELECT hash FROM triage_decisions WHERE state = 'emptied'", [])
   } catch {
     return [] // no decisions table yet
   }
   if (!emptied.length) return []
   await ensureWellSources(root)
-  const ids = new Set(emptied.map((e) => e.well_id).filter((x): x is string => Boolean(x)))
+  const ids = new Set<string>()
   const hashes = emptied.map((e) => e.hash)
   for (let i = 0; i < hashes.length; i += 400) {
     const chunk = hashes.slice(i, i + 400)
