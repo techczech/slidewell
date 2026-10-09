@@ -18,7 +18,6 @@ import { runJob, type Job, type JobResult } from './jobs'
 import { auc, brier, reliabilityTable, type CalibrationCheck, type ReliabilityRow } from './calibration'
 import { decide, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from './decide'
 import { accuracyReport, enoughToMeasure, holdOutSplit, MIN_HELD_BACK, type AccuracyReport, type LabelledPrediction } from './accuracy'
-import { bestKeptTier } from '../look-alike/groups'
 import { loadLabelled, loadUndecided, SorterStore, type ProposalRow, type Shot } from './store'
 
 export const HOLD_OUT_FRACTION = 0.2
@@ -176,12 +175,14 @@ export class SorterService {
       const scored: Array<{ p: number; keep: boolean }> = []
       // the look-alike signal as it will run: a held-back screenshot against the kept ones it was trained beside
       const trainKept = trainSet.filter((s) => s.truth === 'keep').map((s) => vectors.get(s.image!.id)!)
-      for (const s of test) {
+      const testTiers = await job({ kind: 'kept-tiers', vectors: test.map((s) => vectors.get(s.image!.id)!), kept: trainKept }) // in the worker
+      if (ctl.signal.aborted) throw new Error('cancelled')
+      for (const [ti, s] of test.entries()) {
         const rule = applyRules(s.facts)
         const v = vectors.get(s.image!.id)!
         const p = predictKeep(held, v)
         scored.push({ p, keep: s.truth === 'keep' })
-        both.push({ truth: s.truth!, proposal: decide(rule, p, t, bestKeptTier(v, trainKept)).proposal })
+        both.push({ truth: s.truth!, proposal: decide(rule, p, t, testTiers[ti]).proposal })
         rulesAlone.push({ truth: s.truth!, proposal: decide(rule, null, t).proposal })
       }
       // the report measures the procedure on the held-back fifth; the model in use is then retrained on
@@ -247,12 +248,17 @@ export class SorterService {
         const items = chunk.flatMap((s) => (s.image ? [s.image] : []))
         const vectors = await this.deps.pictures.ensureVectors(items, { signal: ctl.signal })
         const rows: ProposalRow[] = []
+        // the copy-of-kept scan runs in the worker, so the main process stays responsive while sorting
+        const have = chunk.filter((s) => s.image && vectors.has(s.image.id))
+        if (ctl.signal.aborted) break
+        const tiers = have.length ? await (this.deps.runJob ? this.deps.runJob({ kind: 'kept-tiers', vectors: have.map((s) => vectors.get(s.image!.id)!), kept: keptVectors }, ctl.signal) : Promise.resolve(runJob({ kind: 'kept-tiers', vectors: have.map((s) => vectors.get(s.image!.id)!), kept: keptVectors }))) : []
+        const tierOf = new Map(have.map((s, k) => [s, tiers[k]]))
         for (const s of chunk) {
           if (!s.hash) continue
           const v = s.image ? vectors.get(s.image.id) : undefined
           if (s.image && !v && ctl.signal.aborted) continue // not reached before cancel: no proposal
           const rule = applyRules(s.facts)
-          const verdict = decide(rule, v ? predictKeep(rec.model, v) : null, t, v ? bestKeptTier(v, keptVectors) : null)
+          const verdict = decide(rule, v ? predictKeep(rec.model, v) : null, t, v ? (tierOf.get(s) ?? null) : null)
           rows.push({ hash: s.hash, proposal: verdict.proposal, confidence: verdict.confidence, pKeep: verdict.pKeep, reason: verdict.reason, rule: rule?.rule ?? null })
           counts[verdict.proposal]++
         }
@@ -263,6 +269,11 @@ export class SorterService {
       this.set({ phase: 'idle', done: 0, total: 0, message: '' }, true)
       return { ok: true, sorted, counts }
     } catch (e) {
+      if (ctl.signal.aborted) {
+        // Stop ended the worker mid-chunk: proposals already written stay, nothing more is recorded
+        this.set({ phase: 'idle', done: 0, total: 0, message: '' }, true)
+        return { ok: true, sorted, counts }
+      }
       const msg = (e as Error)?.message ?? String(e)
       this.set({ phase: 'error', message: '', error: msg }, true)
       return { ok: false, sorted, counts, error: msg }

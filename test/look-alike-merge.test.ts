@@ -13,12 +13,41 @@ describe('merging result clusters by appearance', () => {
       [cluster(row('d1', 'a')), cluster(row('d2', 'z')), cluster(row('d3', 'a2')), cluster(row('d4', 'a3'), row('d5', 'a3b'))],
       deps({ a: vec(0), a2: vec(3), a3: vec(5), z: vec(90) })
     )
-    expect(out.map((c) => c.representative.id)).toEqual(['a', 'z'])
-    expect(out[0].size).toBe(4)
-    expect(out[0].deckCount).toBe(4)
-    expect(out[0].members.map((m) => m.id)).toEqual(['a', 'a2', 'a3', 'a3b'])
+    // a3b has no embedding: it stays behind as the text fallback
+    expect(out.map((c) => c.representative.id)).toEqual(['a', 'z', 'a3b'])
+    expect(out[0].size).toBe(3)
+    expect(out[0].deckCount).toBe(3)
+    expect(out[0].members.map((m) => m.id)).toEqual(['a', 'a2', 'a3'])
     expect(out[0].lookAlike).toBe('same-picture')
     expect(out[1].lookAlike).toBeUndefined()
+  })
+  it('splits a text cluster: rows are grouped by appearance, not carried along (reviewer case)', async () => {
+    // A and X share their text but look different; B looks like A. Old behaviour showed "3 versions, same picture".
+    const out = await mergeLookAlikeClusters([cluster(row('d1', 'A'), row('d2', 'X')), cluster(row('d3', 'B'))], deps({ A: vec(0), X: vec(90), B: vec(2) }))
+    expect(out.map((c) => c.members.map((m) => m.id))).toEqual([['A', 'B'], ['X']])
+    expect(out[0].lookAlike).toBe('same-picture')
+    expect(out[1].lookAlike).toBeUndefined()
+    expect(out[0].size).toBe(2)
+  })
+  it('every card tier holds for every pair in it (complete-link across text-cluster members)', async () => {
+    const v = { A: vec(0), B: vec(20), C: vec(40) } // A~B and B~C related, A~C not
+    const out = await mergeLookAlikeClusters([cluster(row('1', 'A'), row('2', 'C')), cluster(row('3', 'B'))], deps(v))
+    for (const c of out) for (const x of c.members) for (const y of c.members) {
+      const dot = v[x.id as 'A'].reduce((s, t, i) => s + t * v[y.id as 'A'][i], 0)
+      expect(dot).toBeGreaterThanOrEqual(0.9 - 1e-9)
+    }
+    expect(out.map((c) => c.members.map((m) => m.id))).toEqual([['A', 'B'], ['C']])
+  })
+  it('keeps only non-embedded rows of a split text cluster as the text fallback', async () => {
+    const out = await mergeLookAlikeClusters([cluster(row('1', 'a'), row('2', 'noembed')), cluster(row('3', 'b'))], deps({ a: vec(0), b: vec(1) }))
+    expect(out.map((c) => c.members.map((m) => m.id))).toEqual([['a', 'b'], ['noembed']])
+  })
+  it('asks for vectors of at most `limit` ids, chosen before any lookup', async () => {
+    const asked: string[][] = []
+    const many = Array.from({ length: 30 }, (_, i) => cluster(row(String(i), `r${i}`)))
+    await mergeLookAlikeClusters(many, { idOf: (r: Row) => r.id, vectorsOf: (ids) => (asked.push(ids), new Map()) }, { limit: 10 })
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toHaveLength(10)
   })
   it('marks changed copies as same-thing', async () => {
     const out = await mergeLookAlikeClusters([cluster(row('d1', 'a')), cluster(row('d2', 'b'))], deps({ a: vec(0), b: vec(20) }))
@@ -30,8 +59,8 @@ describe('merging result clusters by appearance', () => {
     const input = [cluster(row('d0', null)), text, cluster(row('d3', 'a')), cluster(row('d4', 'a2'))]
     const out = await mergeLookAlikeClusters(input, deps({ a: vec(0), a2: vec(1) }))
     expect(out).toHaveLength(3)
-    expect(out[1]).toBe(text)
-    expect(out[2].size).toBe(2)
+    expect(out.find((c) => c === text)).toBe(text)
+    expect(out.find((c) => c.members.some((m) => m.id === 'a'))!.size).toBe(2)
   })
   it('groups only the first `limit` embedded clusters', async () => {
     const v: Record<string, Float32Array> = { a: vec(0), b: vec(1), c: vec(2) }

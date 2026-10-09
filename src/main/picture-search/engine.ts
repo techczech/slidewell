@@ -96,14 +96,21 @@ export class PictureSearchEngine {
     return rank(qv, this.vectors().values(), limit, undefined, opts.kinds ?? SEARCH_KINDS)
   }
 
-  /** Stored vectors for these ids (from the in-memory copy); ids with no vector are left out. No model needed. */
+  /**
+   * Stored vectors for these ids; ids with no vector are left out. No model needed. Uses the in-memory
+   * copy when it is already loaded, else reads just these ids from the store: a search never triggers
+   * a full-store load for grouping.
+   */
   vectorsOf(ids: string[]): Map<string, Float32Array> {
-    const all = this.vectors()
     const out = new Map<string, Float32Array>()
-    for (const id of ids) {
-      const v = all.get(id)
-      if (v) out.set(id, v.vector)
+    if (this.cache) {
+      for (const id of ids) {
+        const v = this.cache.get(id)
+        if (v) out.set(id, v.vector)
+      }
+      return out
     }
+    for (const v of this.store.getMany(ids)) out.set(v.id, v.vector)
     return out
   }
 
