@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { nextPreviewIndex } from '../../main/triage-logic'
-import { PictureSearchSettings, PictureSearchStatusBar } from './PictureSearch'
-import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency, FromFilter, KindFilter, FromCounts } from '../../preload'
+import { PictureSearchSettings, PictureSearchStatusBar, usePictureStatus } from './PictureSearch'
+import { RELATED_SHOWN, relatedFold } from './match-fold'
+import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency, FromFilter, KindFilter, FromCounts, MatchMode } from '../../preload'
 
-type SortKey = 'date-desc' | 'date-asc' | 'title'
+type SortKey = 'best' | 'date-desc' | 'date-asc' | 'title'
 
 const FROM_CHIPS: Array<{ value: FromFilter; label: string }> = [
   { value: 'all', label: 'All' },
@@ -62,7 +63,16 @@ export default function App(): JSX.Element {
   const [categories, setCategories] = useState<CategoryCount[]>([])
   const [decks, setDecks] = useState<DeckInfo[]>([])
   const [fromCounts, setFromCounts] = useState<FromCounts>(NO_COUNTS)
-  const [sort, setSort] = useState<SortKey>('date-desc')
+  const [sort, setSort] = useState<SortKey>('best')
+  // Match switch (locked frames 3 and 4): Both by default. `matchRan` is what the last search did.
+  const [match, setMatch] = useState<MatchMode>('both')
+  const [related, setRelated] = useState<SlideClusterResult[]>([])
+  const [matchRan, setMatchRan] = useState<MatchMode>('words')
+  const [collapsed, setCollapsed] = useState({ words: false, related: false })
+  const [relatedAll, setRelatedAll] = useState(false)
+  const pic = usePictureStatus()
+  const modelReady = pic?.model === 'ready'
+  const shownMatch: MatchMode = modelReady ? match : 'words' // without the model, Words is used
   const [groupByDeck, setGroupByDeck] = useState(false)
   const [clusters, setClusters] = useState<SlideClusterResult[]>([])
   const [deckCards, setDeckCards] = useState<DeckCard[]>([])
@@ -134,15 +144,27 @@ export default function App(): JSX.Element {
         setLoading(false)
         return
       }
-      const res = deckFilter
-        ? (await window.sw.archive.deckSlides(deckFilter.pid)).map((s) => ({ representative: s, members: [s], size: 1, deckCount: 1 }))
-        : await window.sw.archive.search(debounced, filters)
+      if (deckFilter) {
+        const res = (await window.sw.archive.deckSlides(deckFilter.pid)).map((s) => ({ representative: s, members: [s], size: 1, deckCount: 1 }))
+        if (id !== reqId.current) return
+        setDeckCards([])
+        setClusters(res)
+        setRelated([])
+        setMatchRan('words')
+        setLoading(false)
+        return
+      }
+      // Words only takes the fast path in the main process: no picture query is made.
+      const res = await window.sw.archive.searchMatched(debounced, filters, shownMatch)
       if (id !== reqId.current) return
       setDeckCards([])
-      setClusters(res)
+      setClusters(res.words)
+      setRelated(res.related)
+      setMatchRan(res.mode)
+      setRelatedAll(false)
       setLoading(false)
     })()
-  }, [debounced, filters, refreshKey, deckFilter])
+  }, [debounced, filters, refreshKey, deckFilter, shownMatch])
 
   // Counts on the From chips follow the query and the other filters (not From itself).
   useEffect(() => {
@@ -203,6 +225,7 @@ export default function App(): JSX.Element {
   const view = useMemo(() => {
     const primary = (a: SlideResult, b: SlideResult): number => {
       if (sort === 'title') return a.title.localeCompare(b.title)
+      if (sort === 'best') return 0 // keep the order the search gave (words by score, then meaning by score)
       const da = a.date || ''
       const db = b.date || ''
       return sort === 'date-asc' ? da.localeCompare(db) : db.localeCompare(da)
@@ -245,10 +268,14 @@ export default function App(): JSX.Element {
   }, [deckCards, sort])
 
   // representatives in render order, so the lightbox steps through what's shown
-  const orderedReps = useMemo(
-    () => (view.groups ? view.groups.flatMap((g) => g.slides.map((c) => c.representative)) : (view.flat ?? []).map((c) => c.representative)),
-    [view]
+  const fold = relatedFold(related.map((c) => c.representative))
+  const relatedShown = useMemo(() => (relatedAll ? related : related.slice(0, RELATED_SHOWN)), [related, relatedAll])
+  const wordReps = useMemo(
+    () => (collapsed.words ? [] : view.groups ? view.groups.flatMap((g) => g.slides.map((c) => c.representative)) : (view.flat ?? []).map((c) => c.representative)),
+    [view, collapsed.words]
   )
+  const relatedReps = useMemo(() => (collapsed.related ? [] : relatedShown.map((c) => c.representative)), [relatedShown, collapsed.related])
+  const orderedReps = useMemo(() => [...wordReps, ...relatedReps], [wordReps, relatedReps])
 
   // keyboard selection model: one list of items (slides/images OR decks), a current selection.
   const deckMode = filters.type === 'decks' && !deckFilter
@@ -628,6 +655,39 @@ export default function App(): JSX.Element {
             ))}
           </div>
         </label>
+        <label className="filter">
+          <span className="filter-label">Match</span>
+          <div className="scope" role="tablist" aria-label="Match">
+            {(['words', 'meaning', 'both'] as const).map((m) => {
+              const off = m !== 'words' && !modelReady
+              return (
+                <button
+                  key={m}
+                  role="tab"
+                  aria-selected={shownMatch === m}
+                  aria-disabled={off}
+                  disabled={off}
+                  className={shownMatch === m ? 'scope-tab active' : 'scope-tab'}
+                  title={
+                    off
+                      ? 'Meaning search needs the picture-search model — download it in Settings'
+                      : m === 'words'
+                        ? 'Words in the slide or picture (fast)'
+                        : m === 'meaning'
+                          ? 'What the picture shows, whatever its words'
+                          : 'Word matches first, then pictures that look related'
+                  }
+                  onClick={() => setMatch(m)}
+                >
+                  {m === 'words' ? 'Words' : m === 'meaning' ? 'Meaning' : 'Both'}
+                </button>
+              )
+            })}
+          </div>
+          {!modelReady && pic && (
+            <button className="link match-settings" onClick={() => setShowSettings(true)}>Meaning search is off · set up in Settings</button>
+          )}
+        </label>
         <Select label="Owner" value={filters.owner} onChange={(v) => patch({ owner: v as SearchFilters['owner'] })}
           options={[
             { value: 'mine', label: 'My presentations' },
@@ -653,7 +713,7 @@ export default function App(): JSX.Element {
         <Select label="Role" value={filters.role} onChange={(v) => patch({ role: v as SearchFilters['role'] })}
           options={[{ value: 'content', label: 'Content only' }, { value: 'all', label: 'Incl. structural' }]} />
         <Select label="Sort" value={sort} onChange={(v) => setSort(v as SortKey)}
-          options={[{ value: 'date-desc', label: 'Newest' }, { value: 'date-asc', label: 'Oldest' }, { value: 'title', label: 'Title A–Z' }]} />
+          options={[{ value: 'best', label: 'Best match' }, { value: 'date-desc', label: 'Newest' }, { value: 'date-asc', label: 'Oldest' }, { value: 'title', label: 'Title A–Z' }]} />
         <button
           className={filters.cluster ? 'toggle on' : 'toggle'}
           onClick={() => patch({ cluster: !filters.cluster })}
@@ -748,7 +808,7 @@ export default function App(): JSX.Element {
           )
         ) : loading ? (
           <div className="results-head">loading…</div>
-        ) : clusters.length === 0 ? (
+        ) : clusters.length === 0 && related.length === 0 ? (
           filters.from === 'screenshots' ? (
             filters.library === 'others' ? (
               <Empty title="Screenshots are your own content." sub="Set Library to “Mine” or “All” — “Others” hides them." />
@@ -767,7 +827,7 @@ export default function App(): JSX.Element {
                 </span>
                 <button className="link" onClick={() => setDeckFilter(null)}>✕ exit context</button>
               </div>
-            ) : (
+            ) : matchRan !== 'words' ? null : (
               <div className="results-head">
                 {debounced
                   ? `${clusters.length} result${clusters.length === 1 ? '' : 's'} for “${debounced}”`
@@ -776,7 +836,24 @@ export default function App(): JSX.Element {
                 {filters.cluster ? ' · near-identical grouped' : ''}
               </div>
             )}
-            {view.groups ? (
+            {!deckFilter && matchRan === 'words' && match === 'words' && modelReady && debounced && (
+              <div className="match-note">Words only — faster; switch to <button className="link" onClick={() => setMatch('both')}>Both</button> to see pictures that look related</div>
+            )}
+            {!deckFilter && matchRan === 'both' && (
+              <div className="band-head">
+                <button className="band-toggle" onClick={() => setCollapsed((c) => ({ ...c, words: !c.words }))}>
+                  {collapsed.words ? '▸' : '▾'} Words match ({clusters.length})
+                </button>
+                {clusters.length === 0 && <span className="band-sub">nothing to show</span>}
+                {clusters.length > 0 && (
+                  <button className="link band-collapse" onClick={() => setCollapsed((c) => ({ ...c, words: !c.words }))}>{collapsed.words ? 'expand' : 'collapse'}</button>
+                )}
+              </div>
+            )}
+            {!deckFilter && matchRan === 'both' && clusters.length === 0 && (
+              <div className="match-note info">No {countNoun(filters.type, 1)} contains these words — showing {countNoun(filters.type, 2)} that look related</div>
+            )}
+            {collapsed.words && matchRan === 'both' ? null : view.groups ? (
               view.groups.map((g) => (
                 <div className="deck-group" key={g.deck}>
                   <div className="deck-group-head">
@@ -821,6 +898,41 @@ export default function App(): JSX.Element {
                   />
                 ))}
               </div>
+            )}
+            {!deckFilter && matchRan !== 'words' && (
+              <>
+                <div className="band-head">
+                  <button className="band-toggle" onClick={() => setCollapsed((c) => ({ ...c, related: !c.related }))}>
+                    {collapsed.related ? '▸' : '▾'} Looks related ({related.length})
+                  </button>
+                  <span className="band-sub">— found by what’s on it, not its words</span>
+                  <button className="link band-collapse" onClick={() => setCollapsed((c) => ({ ...c, related: !c.related }))}>{collapsed.related ? 'expand' : 'collapse'}</button>
+                </div>
+                {!collapsed.related && (
+                  <div className="grid">
+                    {relatedShown.map((c, j) => {
+                      const idx = wordReps.length + j
+                      return (
+                        <Card
+                          key={`rel-${c.representative.deck}-${c.representative.slideOrder}-${c.representative.reference}-${j}`}
+                          cluster={c}
+                          selected={c.representative === selectedRep}
+                          onSelect={() => setSel(idx)}
+                          onThumb={() => {
+                            setSel(idx)
+                            openLightbox(orderedReps, idx)
+                          }}
+                          onMenu={(x, y) => setMenu({ cluster: c, x, y })}
+                          onExpand={() => setExpanded(c)}
+                        />
+                      )
+                    })}
+                  </div>
+                )}
+                {!collapsed.related && fold && !relatedAll && (
+                  <button className="link band-more" onClick={() => setRelatedAll(true)}>Show {fold.more} more · meaning {fold.below} and below</button>
+                )}
+              </>
             )}
           </>
         )}
@@ -2062,6 +2174,7 @@ function Card({
         ) : ocr ? (
           <span className="ocr-tag">OCR</span>
         ) : null}
+        {h.score && <span className={`score-chip ${h.score.kind}`} title={h.score.kind === 'words' ? 'How well the words match, 0 to 1' : 'How closely the picture matches, 0 to 1'}>{h.score.label}</span>}
         {h.library === 'others' && <span className="ocr-tag others" title="From your Others' Library — not your own presentation">OTHERS</span>}
         <button
           className="more"
@@ -2535,7 +2648,7 @@ function SlideInspector({
         <b>{hit.title}</b>
         <button className="copyref" onClick={onClose}>✕</button>
       </div>
-      <div className="inspector-pos">{pos} · ←/→ to navigate</div>
+      <div className="inspector-pos">{pos} · ←/→ to navigate{hit.score && <span className={`score-chip inline ${hit.score.kind}`}>{hit.score.label}</span>}</div>
       {hit.thumbUrl && <img className="deck-sidebar-cover" src={hit.thumbUrl} alt="" />}
       <div className="details-table">
         {rows.map(([k, v]) => (

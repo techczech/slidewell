@@ -241,6 +241,14 @@ export async function searchWell(root: string, raw: string, limit = 60): Promise
   return query<WellRow>(db, `SELECT ${cols} FROM well_fts ORDER BY added_at DESC LIMIT ?`, [limit])
 }
 
+/** Well rows by id (picture-search hits resolve to these). Unknown ids are simply absent. */
+export async function wellByIds(root: string, ids: string[]): Promise<WellRow[]> {
+  const db = wellDb(root)
+  if (!existsSync(db) || ids.length === 0) return []
+  const cols = 'id, slug, ext, rel_path, root, source, tags, notes, ocr_text, added_at'
+  return query<WellRow>(db, `SELECT ${cols} FROM well_fts WHERE id IN (${ids.map(() => '?').join(',')})`, ids)
+}
+
 /** Scan the TalkWeaver vault _assets pool and index any not-yet-indexed images. Returns count added. */
 export async function scanVault(archiveRoot: string, root: string, vaultRoot: string): Promise<number> {
   const assets = join(vaultRoot, '_assets')

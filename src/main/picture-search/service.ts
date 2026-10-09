@@ -56,6 +56,7 @@ export class PictureSearchService {
   private download: PictureSearchStatus['download'] = null
   private error: string | null = null
   private lastBroadcast = 0
+  private queries = 0
 
   constructor(private deps: PictureSearchDeps) {
     this.images = new ImageEnumerator({
@@ -245,7 +246,13 @@ export class PictureSearchService {
 
   /** The main-process query: text → ranked ids, or a stored image id → similar ids. Scores are cosines. */
   pictureQuery(q: PictureQuery, opts?: QueryOptions): Promise<Scored[]> {
+    this.queries++
     return this.openEngine().pictureQuery(q, opts)
+  }
+
+  /** How many picture queries this process has run (the Words-only fast path must leave it unchanged). */
+  queryCount(): number {
+    return this.queries
   }
 
   dispose(): void {
@@ -272,6 +279,7 @@ export function registerPictureSearchIpc(svc: PictureSearchService, allowed: (se
   handle('picture:pause', () => svc.pause())
   handle('picture:resume', () => svc.resume())
   handle('picture:set-include-well', (on: boolean) => svc.setIncludeWell(Boolean(on)))
+  handle('picture:query-count', () => svc.queryCount())
   handle('picture:query', async (q: PictureQuery, opts?: QueryOptions) => {
     try {
       return { ok: true, results: await svc.pictureQuery(q, opts) }

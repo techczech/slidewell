@@ -1511,3 +1511,74 @@ body {
   color: var(--ink);
   cursor: pointer;
 }
+
+/* Match switch: bands, score chips (locked frames 3 and 4) */
+.scope-tab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.match-settings {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.72rem;
+}
+.band-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin: 0.2rem 0 0.7rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.band-head:not(:first-child) {
+  margin-top: 1.4rem;
+}
+.band-toggle {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--oxford);
+  cursor: pointer;
+}
+.band-collapse {
+  margin-left: auto;
+}
+.band-more {
+  display: block;
+  margin-top: 0.8rem;
+}
+.match-note {
+  background: #efe9da;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.55rem 0.8rem;
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.match-note.info {
+  background: #e8eef7;
+  color: var(--ink, #1c2430);
+}
+.score-chip {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+  background: #fff;
+  color: var(--oxford);
+  border: 1px solid var(--oxford);
+  padding: 0 5px;
+  border-radius: 4px;
+}
+.score-chip.inline {
+  position: static;
+  margin-left: 0.4rem;
+  font-size: 0.7rem;
+}
