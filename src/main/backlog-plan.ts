@@ -26,9 +26,13 @@ export type BacklogSource = 'desktop' | 'cleanshot'
 /** One file from a read-only listing. `rel` is relative to the source root, '/'-separated. */
 export type ListedFile = { rel: string; size: number; mtimeMs: number; onlineOnly?: boolean; notRegular?: boolean }
 
-/** One ledger line (hash-keyed): a verified copy of `from` exists at `dest` in `watched`. */
+/**
+ * One ledger line (hash-keyed). `placing` = intent, fsynced before a copy is linked/copied to `dest`;
+ * `copied` = a verified copy of `from` exists at `dest` in `watched`. An intent without a done record
+ * counts as brought in only if `dest` holds that hash.
+ */
 export type LedgerEntry = {
-  step: 'copied'
+  step: 'copied' | 'placing'
   hash: string
   watched: string
   source: BacklogSource
@@ -88,7 +92,7 @@ export type PlanInput = {
   watchedNames: string[]
   stagingNames?: string[]
   ledger: LedgerEntry[]
-  copyStates?: Record<string, CopyState> // keyed by ledger `dest`; absent = missing-or-changed
+  copyStates?: Record<string, CopyState> // keyed by copyStateKey(dest, hash); absent = missing-or-changed
   date: string // YYYY-MM-DD, local
 }
 
@@ -105,6 +109,11 @@ const ext = (name: string): string => {
 }
 const strip = (p: string): string => (p.length > 1 ? p.replace(/\/+$/, '') : p)
 const joinPath = (dir: string, name: string): string => `${strip(dir)}/${name}`
+/** Cache key for a recorded copy's state: the same path can be expected to hold different content. */
+export function copyStateKey(dest: string, hash: string): string {
+  return `${dest}\0${hash}`
+}
+
 /** True when a and b are the same folder or one contains the other. */
 export function foldersOverlap(a: string, b: string): boolean {
   const x = strip(a).toLowerCase()
@@ -141,7 +150,7 @@ export function planBacklogImport(input: PlanInput): BacklogPlan {
     const k = `${e.from}\0${e.size}\0${e.mtimeMs}`
     byFrom.set(k, [...(byFrom.get(k) ?? []), e])
   }
-  const stateOf = (dest: string): CopyState => input.copyStates?.[dest] ?? 'missing-or-changed'
+  const stateOf = (e: LedgerEntry): CopyState => input.copyStates?.[copyStateKey(e.dest, e.hash)] ?? 'missing-or-changed'
   const taken = new Set(input.watchedNames.map((n) => n.toLowerCase()))
   const skipped = { cleanshotProjects: 0, cleanshotOther: 0, empty: 0, notRegular: 0 }
   let onlineOnly = 0
@@ -164,7 +173,7 @@ export function planBacklogImport(input: PlanInput): BacklogPlan {
     }
     const from = joinPath(root, f.rel)
     const prior = byFrom.get(`${from}\0${f.size}\0${f.mtimeMs}`) ?? []
-    const states = prior.map((e) => stateOf(e.dest))
+    const states = prior.map(stateOf)
     if (states.includes('ok')) {
       done++
       return
@@ -176,7 +185,7 @@ export function planBacklogImport(input: PlanInput): BacklogPlan {
     const key = name.toLowerCase()
     const nameTaken = taken.has(key)
     taken.add(key)
-    items.push({ id: from, source, from, name, size: f.size, mtimeMs: f.mtimeMs, copyTo: joinPath(watched, name), nameTaken, recopy: prior.length > 0 })
+    items.push({ id: from, source, from, name, size: f.size, mtimeMs: f.mtimeMs, copyTo: joinPath(watched, name), nameTaken, recopy: prior.some((e) => e.step === 'copied') })
   }
 
   const byRel = (a: ListedFile, b: ListedFile): number => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0)
@@ -236,7 +245,7 @@ export function parseLedger(text: string): LedgerEntry[] {
     if (!line.trim()) continue
     try {
       const e = JSON.parse(line)
-      if (e && e.step === 'copied' && typeof e.hash === 'string' && typeof e.watched === 'string' && typeof e.dest === 'string') out.push(e as LedgerEntry)
+      if (e && (e.step === 'copied' || e.step === 'placing') && typeof e.hash === 'string' && typeof e.watched === 'string' && typeof e.dest === 'string') out.push(e as LedgerEntry)
     } catch {
       /* torn line */
     }

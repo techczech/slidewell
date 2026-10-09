@@ -96,7 +96,7 @@ describe('backlog import (copy only) on scratch folders', () => {
     expect({ ...tree(env.desktopDir), ...tree(env.cleanshotDir!) }).toEqual(originals)
     expect(staged()).toEqual([]) // every staged file unlinked after its verified link
     expect(lstatSync(W(STAGING_DIR)).isDirectory()).toBe(true)
-    expect(parseLedger(readFileSync(ledgerPath(env.stateDir), 'utf8'))).toHaveLength(4)
+    expect(parseLedger(readFileSync(ledgerPath(env.stateDir), 'utf8')).filter((e) => e.step === 'copied')).toHaveLength(4)
     expect(readFileSync(res.logPath, 'utf8')).toContain('"verified":true')
   })
 
@@ -152,7 +152,7 @@ describe('backlog import (copy only) on scratch folders', () => {
       await runImport(await dryRun(env), env, { signal: ac.signal, onProgress: (p) => p.done === 2 && ac.abort() })
       appendFileSync(ledgerPath(env.stateDir), '{"step":"copied","hash":"to') // the process died mid-append
       expect(await runImport(await dryRun(env), env)).toMatchObject({ ok: true, copied: 2 })
-      expect(parseLedger(readFileSync(ledgerPath(env.stateDir), 'utf8'))).toHaveLength(4)
+      expect(parseLedger(readFileSync(ledgerPath(env.stateDir), 'utf8')).filter((e) => e.step === 'copied')).toHaveLength(4)
       expect(await runImport(await dryRun(env), env)).toMatchObject({ copied: 0, reused: 0 })
       expect(watchedHashes()).toHaveLength(4)
     })
@@ -168,6 +168,57 @@ describe('backlog import (copy only) on scratch folders', () => {
       expect(readFileSync(W(C1), 'utf8')).toBe('cs-1')
       expect(readFileSync(W('CleanShot 2026-10-01 at 0901 (2).mp4'), 'utf8')).toBe('cs-2')
       expect(readFileSync(W(C2), 'utf8')).toBe('altered') // never overwritten
+    })
+  })
+
+  describe('re-review P2s', () => {
+    it('P2-1: verification is keyed by (destination, hash): B at the same path does not make A look verified', async () => {
+      const a = join(env.cleanshotDir!, 'media_x', 'x.png')
+      const b = join(env.cleanshotDir!, 'media_y', 'y.png')
+      put(a, 'aaa')
+      put(b, 'bbb')
+      put(W('x.png'), 'bbb') // the path now holds B's content
+      mkdirSync(env.stateDir, { recursive: true })
+      const rec = (from: string, body: string): string =>
+        JSON.stringify({ step: 'copied', hash: sha(body), watched: env.watchedFolder, source: 'cleanshot', from, size: statSync(from).size, mtimeMs: Math.round(statSync(from).mtimeMs), dest: W('x.png'), at: '' })
+      writeFileSync(ledgerPath(env.stateDir), `${rec(b, 'bbb')}\n${rec(a, 'aaa')}\n`) // B verified first, then A
+      const plan = await dryRun(env)
+      if (!plan.ok) throw new Error('expected a plan')
+      expect(plan.items.find((i) => i.from === a)).toMatchObject({ recopy: true })
+      expect(plan.items.find((i) => i.from === b)).toBeUndefined()
+      const res = await runImport(plan, env)
+      expect(res.ok).toBe(true)
+      expect(readFileSync(W('x (2).png'), 'utf8')).toBe('aaa')
+      expect(readFileSync(W('x.png'), 'utf8')).toBe('bbb')
+    })
+
+    it('P2-2: a copy that landed before its done record is not duplicated when the content returns under another name', async () => {
+      let crash = true
+      const dying: BacklogEnv = {
+        ...env,
+        ops: {
+          link: async (a, b) => {
+            await realLink(a, b)
+            if (crash && b === W(C1)) {
+              crash = false
+              throw Object.assign(new Error('process died after the link'), { code: 'EIO' })
+            }
+          }
+        }
+      }
+      const first = await runImport(await dryRun(dying), dying)
+      expect(first).toMatchObject({ failed: 1, copied: 3 })
+      const entries = parseLedger(readFileSync(ledgerPath(env.stateDir), 'utf8'))
+      expect(entries.some((e) => e.step === 'placing' && e.dest === W(C1))).toBe(true)
+      expect(entries.some((e) => e.step === 'copied' && e.dest === W(C1))).toBe(false)
+      // the same capture now sits under another name (test setup), so filename variants cannot find it
+      await fsp.rename(join(env.cleanshotDir!, 'media_a', C1), join(env.cleanshotDir!, 'media_a', 'renamed.png'))
+      const second = await runImport(await dryRun(env), env)
+      expect(second).toMatchObject({ ok: true, copied: 0, alreadyDone: 1 })
+      expect(existsSync(W('renamed.png'))).toBe(false)
+      expect(watchedHashes()).toHaveLength(4)
+      expect(parseLedger(readFileSync(ledgerPath(env.stateDir), 'utf8')).some((e) => e.step === 'copied' && e.dest === W(C1))).toBe(true)
+      expect(readFileSync(second.logPath, 'utf8')).toContain('intent-confirmed')
     })
   })
 

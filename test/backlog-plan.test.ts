@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { planBacklogImport, parseLedger, alternativeName, foldersOverlap, isMovedFolderName, type PlanInput, type LedgerEntry } from '../src/main/backlog-plan'
+import { planBacklogImport, parseLedger, copyStateKey, alternativeName, foldersOverlap, isMovedFolderName, type PlanInput, type LedgerEntry } from '../src/main/backlog-plan'
 
 const base = (over: Partial<PlanInput> = {}): PlanInput => ({
   watchedFolder: '/W/Shots',
@@ -73,7 +73,7 @@ describe('planBacklogImport (copy only)', () => {
       base({
         cleanshot: [f('m1/a.png'), f('m2/b.png'), f('m3/c.png'), f('m4/d.png')],
         ledger,
-        copyStates: { '/W/Shots/a.png': 'ok', '/W/Shots/b.png': 'missing-or-changed' } // c: not checked → treated as missing
+        copyStates: { [copyStateKey('/W/Shots/a.png', 'h')]: 'ok', [copyStateKey('/W/Shots/b.png', 'h')]: 'missing-or-changed' } // c: not checked → treated as missing
       })
     )
     if (!plan.ok) throw new Error('expected a plan')
@@ -86,7 +86,7 @@ describe('planBacklogImport (copy only)', () => {
   })
 
   it('a recorded copy that is online-only is counted as unverified: neither done nor copied again', () => {
-    const plan = planBacklogImport(base({ cleanshot: [f('m1/a.png')], ledger: [entry('/H/CS/media/m1/a.png')], copyStates: { '/W/Shots/a.png': 'online-only' } }))
+    const plan = planBacklogImport(base({ cleanshot: [f('m1/a.png')], ledger: [entry('/H/CS/media/m1/a.png')], copyStates: { [copyStateKey('/W/Shots/a.png', 'h')]: 'online-only' } }))
     if (!plan.ok) throw new Error('expected a plan')
     expect(plan.items).toHaveLength(0)
     expect(plan.summary).toMatchObject({ done: 0, unverifiedOnlineOnly: 1 })
@@ -124,6 +124,11 @@ describe('helpers', () => {
   it('isMovedFolderName', () => {
     expect(isMovedFolderName('Moved by SlideWell 2026-10-09')).toBe(true)
     expect(isMovedFolderName('Moved by SlideWell notes')).toBe(false)
+  })
+  it('a placing intent alone is not a "copied before" (no recopy flag) and its key includes the hash', () => {
+    const intent: LedgerEntry = { ...entry('/H/CS/media/m1/a.png'), step: 'placing' }
+    const plan = planBacklogImport(base({ cleanshot: [f('m1/a.png')], ledger: [intent], copyStates: { [copyStateKey('/W/Shots/a.png', 'other')]: 'ok' } }))
+    expect(plan.ok && plan.items.map((i) => i.recopy)).toEqual([false])
   })
   it('parseLedger skips a torn line and old move records', () => {
     const good = JSON.stringify({ step: 'copied', hash: 'h', watched: '/W', source: 'desktop', from: '/x', size: 1, mtimeMs: 1, dest: '/W/x', at: '' })
