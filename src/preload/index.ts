@@ -150,7 +150,9 @@ export type ReviewPiles = {
 }
 export type ReviewActResult = { ok: boolean; hash: string; message: string; pile?: ReviewPile }
 export type ReviewUndoResult = { ok: boolean; hash?: string; message: string }
-export type EmptyBinResult = { ok: boolean; emptied: number; copiesRemoved: number; copiesRefused: number; message: string }
+// changed: Bin items that changed between his confirm and the write (rescued, re-decided) and were left alone
+export type EmptyBinResult = { ok: boolean; emptied: number; changed: number; message: string }
+export type ReviewPage = { total: number; offset: number; items: ReviewCard[]; nextOffset: number | null }
 export type TriageCounts = { undecided: number; selected: number; included: number; excluded: number; total: number }
 export type DeckInfo = { id: string; title: string; date: string | null }
 export type DeckCard = {
@@ -431,7 +433,8 @@ const api = {
       limit?: number,
       offset?: number
     ): Promise<{ items: TriageItem[]; counts: TriageCounts; hasMore: boolean }> => ipcRenderer.invoke('triage:list', query, state, sort, limit, offset),
-    decide: (hash: string, action: 'select' | 'exclude' | 'reset', force?: boolean): Promise<{ state: string }> =>
+    // refused: the item was emptied from the Bin (permanent); nothing changed
+    decide: (hash: string, action: 'select' | 'exclude' | 'reset', force?: boolean): Promise<{ state: string; refused?: string }> =>
       ipcRenderer.invoke('triage:decide', hash, action, force),
     importSelected: (forceHashes?: string[]): Promise<{ imported: number; skipped: number; gated: number }> =>
       ipcRenderer.invoke('triage:import-selected', forceHashes ?? []),
@@ -450,11 +453,13 @@ const api = {
       return () => ipcRenderer.removeListener('triage:progress', handler)
     }
   },
-  // Review screen (ticket 08). act/undo/emptyBin write his decisions; no action deletes or moves an
-  // original. emptyBin needs the token of the Bin he confirmed and removes only SlideWell's records and copies.
+  // Review screen (ticket 08). act/undo/emptyBin write his decisions; nothing here deletes or moves any
+  // file. emptyBin needs the token of the Bin he confirmed and only hides those items for good.
   review: {
     overview: (opts?: { queue?: number; sample?: number }): Promise<ReviewOverview> => ipcRenderer.invoke('review:overview', opts ?? {}),
     piles: (opts?: { kept?: number; throwaway?: number; bin?: number }): Promise<ReviewPiles> => ipcRenderer.invoke('review:piles', opts ?? {}),
+    // any further page of one pile, by offset (no cap on how far)
+    page: (pile: 'kept' | 'throwaway' | 'bin', offset: number, limit?: number): Promise<ReviewPage> => ipcRenderer.invoke('review:page', pile, offset, limit),
     act: (hash: string, action: 'keep' | 'throwaway' | 'rescue'): Promise<ReviewActResult> => ipcRenderer.invoke('review:act', hash, action),
     undo: (): Promise<ReviewUndoResult> => ipcRenderer.invoke('review:undo'),
     emptyBin: (token: string): Promise<EmptyBinResult> => ipcRenderer.invoke('review:empty-bin', token)

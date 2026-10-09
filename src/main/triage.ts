@@ -17,7 +17,9 @@ import { ocrImage, ingestScreenshot, ingestVideo, makePoster } from './well'
 import { tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
 import { parseScreenshotName } from './screenshot-name'
 import { walk } from './scan-walk'
-import { BIN_AFTER_DAYS } from './review/piles'
+import { DatabaseSync } from 'node:sqlite'
+import { pileOf, type ProposalLabel } from './review/piles'
+import { hiddenFromLists } from './review/store'
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'heic', 'heif', 'tiff', 'tif', 'bmp'])
 const VIDEO_EXT = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv'])
@@ -247,41 +249,29 @@ async function hasProposals(db: string): Promise<boolean> {
 }
 
 /**
- * Review piles in the triage list (ticket 08): an emptied item is gone, and an item in the review's
- * Bin (his throwaway or the sorter's, 30 days on) is no longer findable. Throwaways younger than that
- * stay listed and carry their pile. Items the sorter never looked at are listed as before.
+ * Browse/search the triage index. sort: scanned (default) | date-desc | date-asc (by file mtime).
+ *
+ * Review piles (ticket 08): an emptied item is gone, and an item in the review's Bin is no longer
+ * findable. Which items those are comes from the review's pure clock (piles.ts via hiddenFromLists),
+ * never a second date rule here; an unreadable or missing date keeps an item in Throwaway, listed.
  */
-function reviewClause(withProposals: boolean, cutoffIso: string): { join: string; cols: string; where: string; params: string[] } {
-  const notEmptied = "COALESCE(d.state, 'undecided') != 'emptied'"
-  if (!withProposals) return { join: '', cols: ', d.decided_at, NULL AS proposal, NULL AS proposed_at, NULL AS throwaway_since', where: notEmptied, params: [] }
-  const binned = `p.hash IS NOT NULL AND (
-      (d.state = 'excluded' AND d.decided_at IS NOT NULL AND d.decided_at < ?)
-      OR (d.hash IS NULL AND p.proposal = 'throwaway' AND COALESCE(p.throwaway_since, p.proposed_at) < ?))`
-  return {
-    join: ' LEFT JOIN sorter_proposals p ON p.hash = triage_fts.hash',
-    cols: ', d.decided_at, p.proposal, p.proposed_at, p.throwaway_since',
-    where: `${notEmptied} AND NOT (${binned})`,
-    params: [cutoffIso, cutoffIso]
-  }
-}
-
-/** Browse/search the triage index. sort: scanned (default) | date-desc | date-asc (by file mtime). */
 export async function listTriage(wellRoot: string, raw: string, state: string, sort: TriageSort = 'scanned', limit = 150, offset = 0, now = Date.now()): Promise<TriageRow[]> {
   const db = triageDb(wellRoot)
   if (!existsSync(db)) return []
-  const rv = reviewClause(await hasProposals(db), new Date(now - BIN_AFTER_DAYS * 86_400_000).toISOString())
-  const stateClause = state && state !== 'all' ? `COALESCE(d.state, 'undecided') = '${state.replace(/[^a-z]/g, '')}'` : ''
-  const join = `triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash${rv.join}`
-  const cols = LIST_COLS + rv.cols
+  const withProposals = await hasProposals(db)
+  const hidden = [...hiddenFromLists(wellRoot, now)]
+  const conds = ["COALESCE(d.state, 'undecided') != 'emptied'"]
+  if (hidden.length) conds.push(`triage_fts.hash NOT IN (${hidden.map(() => '?').join(',')})`)
+  if (state && state !== 'all') conds.push(`COALESCE(d.state, 'undecided') = '${state.replace(/[^a-z]/g, '')}'`)
+  const join = `triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash${withProposals ? ' LEFT JOIN sorter_proposals p ON p.hash = triage_fts.hash' : ''}`
+  const cols = LIST_COLS + (withProposals ? ', d.decided_at, p.proposal, p.proposed_at, p.throwaway_since' : ', d.decided_at, NULL AS proposal, NULL AS proposed_at, NULL AS throwaway_since')
   const dateOrder = `ORDER BY CAST(triage_fts.mtime AS INTEGER) ${sort === 'date-asc' ? 'ASC' : 'DESC'}`
   const useDate = sort === 'date-asc' || sort === 'date-desc'
   if (raw && raw.trim().length >= 2) {
     const q = safeFtsQuery(raw)
-    const where = `triage_fts MATCH ? AND ${rv.where}${stateClause ? ` AND ${stateClause}` : ''}`
-    return query<TriageRow>(db, `SELECT ${cols} FROM ${join} WHERE ${where} ${useDate ? dateOrder : 'ORDER BY rank'} LIMIT ? OFFSET ?`, [q, ...rv.params, limit, offset])
+    return query<TriageRow>(db, `SELECT ${cols} FROM ${join} WHERE triage_fts MATCH ? AND ${conds.join(' AND ')} ${useDate ? dateOrder : 'ORDER BY rank'} LIMIT ? OFFSET ?`, [q, ...hidden, limit, offset])
   }
-  const where = `WHERE ${rv.where}${stateClause ? ` AND ${stateClause}` : ''}`
-  return query<TriageRow>(db, `SELECT ${cols} FROM ${join} ${where} ${useDate ? dateOrder : 'ORDER BY triage_fts.scanned_at DESC'} LIMIT ? OFFSET ?`, [...rv.params, limit, offset])
+  return query<TriageRow>(db, `SELECT ${cols} FROM ${join} WHERE ${conds.join(' AND ')} ${useDate ? dateOrder : 'ORDER BY triage_fts.scanned_at DESC'} LIMIT ? OFFSET ?`, [...hidden, limit, offset])
 }
 
 export async function triageCounts(wellRoot: string): Promise<TriageCounts> {
@@ -309,20 +299,25 @@ export async function setTriageDecision(
   hash: string,
   action: 'select' | 'exclude' | 'reset',
   _force = false
-): Promise<{ state: string }> {
+): Promise<{ state: string; refused?: string }> {
   await ensureTriage(wellRoot)
   const db = triageDb(wellRoot)
+  // An 'emptied' marker (Empty Bin) is permanent: every write below is conditioned on it in SQL, so
+  // neither reset nor a new decision can remove it, even if the item was emptied a moment ago.
   if (action === 'reset') {
-    await run(db, 'DELETE FROM triage_decisions WHERE hash = ?', [hash])
-    return { state: 'undecided' }
+    await run(db, "DELETE FROM triage_decisions WHERE hash = ? AND state != 'emptied'", [hash])
+  } else {
+    const state = action === 'exclude' ? 'excluded' : 'selected' // select = stage only; importSelectedTriage promotes
+    await run(
+      db,
+      `INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, NULL)
+       ON CONFLICT(hash) DO UPDATE SET state = excluded.state, decided_at = excluded.decided_at, well_id = NULL WHERE triage_decisions.state != 'emptied'`,
+      [hash, state, new Date().toISOString()]
+    )
   }
-  if (action === 'exclude') {
-    await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, NULL)', [hash, 'excluded', new Date().toISOString()])
-    return { state: 'excluded' }
-  }
-  // select = stage only; nothing reaches the well until importSelectedTriage runs
-  await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, NULL)', [hash, 'selected', new Date().toISOString()])
-  return { state: 'selected' }
+  const now = await query<{ state: string }>(db, 'SELECT state FROM triage_decisions WHERE hash = ?', [hash])
+  if (now[0]?.state === 'emptied') return { state: 'emptied', refused: 'This screenshot was emptied from the Bin; it stays hidden for good and cannot be changed.' }
+  return { state: now[0]?.state ?? 'undecided' }
 }
 
 export type TriageDecisionRow = { state: string; decidedAt: string | null; wellId: string | null }
@@ -344,11 +339,66 @@ export async function getTriageDecision(wellRoot: string, hash: string): Promise
 export async function putTriageDecision(wellRoot: string, hash: string, row: TriageDecisionRow | null): Promise<void> {
   await ensureTriage(wellRoot)
   const db = triageDb(wellRoot)
+  // never over an 'emptied' marker (permanent)
   if (!row) {
-    await run(db, 'DELETE FROM triage_decisions WHERE hash = ?', [hash])
+    await run(db, "DELETE FROM triage_decisions WHERE hash = ? AND state != 'emptied'", [hash])
     return
   }
-  await run(db, 'INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)', [hash, row.state, row.decidedAt, row.wellId])
+  await run(
+    db,
+    `INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)
+     ON CONFLICT(hash) DO UPDATE SET state = excluded.state, decided_at = excluded.decided_at, well_id = excluded.well_id WHERE triage_decisions.state != 'emptied'`,
+    [hash, row.state, row.decidedAt, row.wellId]
+  )
+}
+
+/** One Bin item as Empty Bin saw it: his decision at that moment (null = none). */
+export type BinSnapshot = { hash: string; decision: TriageDecisionRow | null }
+
+/**
+ * Empty Bin's only write: the permanent 'emptied' marker, in one transaction. Each row is written
+ * only if the item is still in the Bin at write time — his decision unchanged since the snapshot and
+ * the 30-day clock (piles.ts) still run out. Anything that changed meanwhile (rescued, re-decided in
+ * Triage) is left alone and reported. No file is touched; the well id is kept so a kept-then-binned
+ * item's well record stays hidden rather than deleted.
+ */
+export function writeEmptiedMarkers(wellRoot: string, snapshot: BinSnapshot[], now: number): { emptied: string[]; changed: string[] } {
+  const out = { emptied: [] as string[], changed: [] as string[] }
+  if (!snapshot.length) return out
+  const db = new DatabaseSync(triageDb(wellRoot))
+  try {
+    db.exec('PRAGMA busy_timeout=5000;')
+    db.exec('CREATE TABLE IF NOT EXISTS triage_decisions (hash TEXT PRIMARY KEY, state TEXT NOT NULL, decided_at TEXT, well_id TEXT)')
+    const hasSince = (db.prepare("SELECT name FROM pragma_table_info('sorter_proposals')").all() as Array<{ name: string }>).some((c) => c.name === 'throwaway_since')
+    const getD = db.prepare('SELECT state, decided_at, well_id FROM triage_decisions WHERE hash = ?')
+    const getP = db.prepare(`SELECT proposal, proposed_at, ${hasSince ? 'throwaway_since' : 'NULL AS throwaway_since'} FROM sorter_proposals WHERE hash = ?`)
+    const put = db.prepare('INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, ?, ?, ?)')
+    const at = new Date(now).toISOString()
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const s of snapshot) {
+        const d = getD.get(s.hash) as { state: string; decided_at: string | null; well_id: string | null } | undefined
+        const was = s.decision
+        const same = !d ? !was : Boolean(was) && d.state === was!.state && (d.decided_at ?? null) === was!.decidedAt && (d.well_id ?? null) === was!.wellId
+        const p = getP.get(s.hash) as { proposal: ProposalLabel; proposed_at: string | null; throwaway_since: string | null } | undefined
+        const stillBin =
+          same && p && pileOf({ proposal: p.proposal, proposedAt: p.proposed_at, throwawaySince: p.throwaway_since, decision: d ? { state: d.state, decidedAt: d.decided_at } : null }, now).pile === 'bin'
+        if (!stillBin) {
+          out.changed.push(s.hash)
+          continue
+        }
+        put.run(s.hash, 'emptied', at, d?.well_id ?? null)
+        out.emptied.push(s.hash)
+      }
+      db.exec('COMMIT')
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+  } finally {
+    db.close()
+  }
+  return out
 }
 
 export type PromoteResult = {

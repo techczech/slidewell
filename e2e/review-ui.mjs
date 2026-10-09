@@ -113,7 +113,9 @@ try {
   const binN = (await page.evaluate(() => window.sw.review.piles())).bin.total
   check('the Bin holds items past 30 days', binN > 0 && (await page.locator('.rv-tr').count()) === binN && (await page.locator('.rv-tr em').first().innerText()) === 'in the Bin')
   await page.locator('.rv-empty-btn').click()
-  check('Empty Bin asks first', (await page.locator('.rv-confirm').count()) === 1 && (await page.locator('.rv-confirm').innerText()).includes('Your original files are not touched'))
+  const confirmText = await page.locator('.rv-confirm').innerText()
+  check('Empty Bin asks first, with the exact count and "SlideWell never deletes your files"', confirmText.includes(`Hide ${binN} screenshot`) && confirmText.includes('Emptying the Bin hides these for good. SlideWell never deletes your files.'))
+  check('the Bin footer says emptying only hides', (await page.locator('.rv-pl-right .rv-pl-note').innerText()).includes('SlideWell never deletes your files'))
   await shoot(page, 'review-ui-3-empty-bin-confirm.png')
   await page.locator('.rv-cancel').click()
   check('Cancel empties nothing', (await page.evaluate(() => window.sw.review.piles())).bin.total === binN)
@@ -128,6 +130,28 @@ try {
   await keyAndSettle('Escape')
   check('Esc goes back to the doubtful queue', (await h1()).endsWith('need a look'))
   check('no page errors', errors.length === 0, errors.join(' | '))
+
+  // a Bin of 602: paged, no cap, and Empty Bin hides exactly what the confirm says
+  const big = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+  big.on('pageerror', (e) => errors.push(e.message))
+  await big.goto(`${url}?reviewBin=600`)
+  await big.locator('.view-switch .scope-tab', { hasText: 'Review' }).click()
+  await big.locator('.rv-pile-btn').click()
+  await big.waitForSelector('.rv-pl-left')
+  await big.locator('.rv-bin-row .rv-link').click()
+  const bigN = (await big.evaluate(() => window.sw.review.piles())).bin.total
+  check('a Bin of more than 500 shows its first page', bigN === 602 && (await big.locator('.rv-tr').count()) === 60)
+  for (let i = 0; i < 12 && (await big.locator('.rv-pl-right .rv-more').count()); i++) {
+    await big.locator('.rv-pl-right .rv-more').click()
+    await big.waitForTimeout(80)
+  }
+  check('"Show more" pages through every Bin item, past 500', (await big.locator('.rv-tr').count()) === 602)
+  await big.locator('.rv-empty-btn').click()
+  check('the confirm names the exact count', (await big.locator('.rv-confirm h3').innerText()) === 'Hide 602 screenshots for good?')
+  await big.locator('.rv-danger').click()
+  await big.waitForTimeout(300)
+  check('Empty Bin hid all 602', (await big.evaluate(() => window.sw.review.piles())).bin.total === 0)
+  check('no page errors at scale', errors.length === 0, errors.join(' | '))
 } finally {
   await browser.close()
   await server.close()

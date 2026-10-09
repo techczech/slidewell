@@ -231,24 +231,44 @@ export interface WellRow {
   added_at: string
 }
 
+/**
+ * Well ids kept and later emptied from the review's Bin (ticket 08): their records stay, hidden from
+ * every well listing. Nothing is deleted. Read from triage.db beside well.db.
+ */
+async function hiddenWellIds(root: string): Promise<string[]> {
+  const tdb = join(root, 'triage.db')
+  if (!existsSync(tdb)) return []
+  try {
+    const r = await query<{ well_id: string }>(tdb, "SELECT well_id FROM triage_decisions WHERE state = 'emptied' AND well_id IS NOT NULL", [])
+    return r.map((x) => x.well_id)
+  } catch {
+    return [] // no decisions table yet
+  }
+}
+
 /** Search the well (FTS over ocr/tags/notes); empty query lists newest first. */
 export async function searchWell(root: string, raw: string, limit = 60): Promise<WellRow[]> {
   const db = wellDb(root)
   if (!existsSync(db)) return []
   const cols = 'id, slug, ext, rel_path, root, source, tags, notes, ocr_text, added_at'
+  const hidden = await hiddenWellIds(root)
+  const notHidden = hidden.length ? `id NOT IN (${hidden.map(() => '?').join(',')})` : ''
   if (raw && raw.trim().length >= 2) {
     const q = safeFtsQuery(raw)
-    return query<WellRow>(db, `SELECT ${cols} FROM well_fts WHERE well_fts MATCH ? ORDER BY rank LIMIT ?`, [q, limit])
+    return query<WellRow>(db, `SELECT ${cols} FROM well_fts WHERE well_fts MATCH ?${notHidden ? ` AND ${notHidden}` : ''} ORDER BY rank LIMIT ?`, [q, ...hidden, limit])
   }
-  return query<WellRow>(db, `SELECT ${cols} FROM well_fts ORDER BY added_at DESC LIMIT ?`, [limit])
+  return query<WellRow>(db, `SELECT ${cols} FROM well_fts${notHidden ? ` WHERE ${notHidden}` : ''} ORDER BY added_at DESC LIMIT ?`, [...hidden, limit])
 }
 
-/** Well rows by id (picture-search hits resolve to these). Unknown ids are simply absent. */
+/** Well rows by id (picture-search hits resolve to these). Unknown and hidden ids are simply absent. */
 export async function wellByIds(root: string, ids: string[]): Promise<WellRow[]> {
   const db = wellDb(root)
   if (!existsSync(db) || ids.length === 0) return []
+  const hidden = new Set(await hiddenWellIds(root))
+  const want = ids.filter((id) => !hidden.has(id))
+  if (!want.length) return []
   const cols = 'id, slug, ext, rel_path, root, source, tags, notes, ocr_text, added_at'
-  return query<WellRow>(db, `SELECT ${cols} FROM well_fts WHERE id IN (${ids.map(() => '?').join(',')})`, ids)
+  return query<WellRow>(db, `SELECT ${cols} FROM well_fts WHERE id IN (${want.map(() => '?').join(',')})`, want)
 }
 
 /** Scan the TalkWeaver vault _assets pool and index any not-yet-indexed images. Returns count added. */
@@ -290,9 +310,3 @@ export async function drainInbox(archiveRoot: string, root: string): Promise<num
   return n
 }
 
-/** Forget one well record (FTS row only; files are removed by the caller through review/owned-copy.ts). */
-export async function deleteWellRecord(root: string, id: string): Promise<void> {
-  const db = wellDb(root)
-  if (!existsSync(db)) return
-  await run(db, 'DELETE FROM well_fts WHERE id = ?', [id])
-}

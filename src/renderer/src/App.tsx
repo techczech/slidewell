@@ -1230,6 +1230,11 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
   const decide = useCallback(
     async (item: TriageItem, action: 'select' | 'exclude' | 'reset') => {
       const r = await window.sw.triage.decide(item.hash, action)
+      if (r.refused) {
+        onToast(r.refused)
+        await refresh()
+        return
+      }
       const newState = (r.state as TriageItem['state']) || 'undecided'
       setItems((prev) => prev.map((it) => (it.hash === item.hash ? { ...it, state: newState } : it)))
       // Counts come from the main process: it counts DISTINCT hashes per bucket, so two files with

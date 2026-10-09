@@ -2,7 +2,7 @@
 // real pile state machine (src/main/review/piles.ts), so the piles, the 30-day clock, rescue, undo and
 // Empty Bin behave as in the app; only storage and the well are pretend. Never used in the packaged app.
 import { binToken, pileOf, planAction, summarise, type PileView, type ProposalLabel, type ReviewAction } from '../../main/review/piles'
-import type { ReviewCard, ReviewOverview, ReviewPiles, ReviewActResult, ReviewUndoResult, EmptyBinResult, SwApi } from '../../preload'
+import type { ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewActResult, ReviewUndoResult, EmptyBinResult, SwApi } from '../../preload'
 
 type MockItem = {
   hash: string
@@ -64,6 +64,9 @@ function seed(now: number): MockItem[] {
   for (const [app, win, days] of toss) out.push(item('throwaway', app, win, 'Looks like screenshots you binned before.', days))
   // one he already kept from an earlier session
   out[8].decision = { state: 'included', decidedAt: new Date(now - DAY).toISOString() }
+  // ?reviewBin=N adds N more items past 30 days (paging and Empty Bin at scale in the UI test)
+  const extra = Number(new URLSearchParams(globalThis.location?.search ?? '').get('reviewBin')) || 0
+  for (let i = 0; i < extra; i++) out.push(item('throwaway', 'Finder', `Old download ${i + 1}`, 'Looks like screenshots you binned before.', 31 + (i % 60)))
   return out
 }
 
@@ -82,6 +85,10 @@ export function reviewMock(): SwApi['review'] {
     const s = summarise(live().map((i) => ({ view: view(i), proposal: i.proposal, decided: Boolean(i.decision) })))
     return { needALook: s.needALook, kept: s.confidentKept, throwaway: s.confidentThrowaway }
   }
+  const ordered = (p: 'kept' | 'throwaway' | 'bin'): MockItem[] => {
+    const xs = live().filter((i) => view(i).pile === p)
+    return p === 'throwaway' ? xs.sort((a, b) => (view(b).binInDays ?? 0) - (view(a).binInDays ?? 0) || newest(a, b)) : xs.sort(newest)
+  }
   const lastSortedAt = (): string | null => items.reduce<string | null>((m, i) => (!m || i.proposedAt > m ? i.proposedAt : m), null)
   return {
     overview: async (opts?: { queue?: number; sample?: number }): Promise<ReviewOverview> => {
@@ -99,10 +106,10 @@ export function reviewMock(): SwApi['review'] {
     piles: async (opts?: { kept?: number; throwaway?: number; bin?: number }): Promise<ReviewPiles> => {
       const h = head()
       const all = live()
-      const of = (p: string): MockItem[] => all.filter((i) => view(i).pile === p)
-      const kept = of('kept').sort(newest)
-      const toss = of('throwaway').sort((a, b) => (view(b).binInDays ?? 0) - (view(a).binInDays ?? 0))
-      const bin = of('bin').sort(newest)
+      void all
+      const kept = ordered('kept')
+      const toss = ordered('throwaway')
+      const bin = ordered('bin')
       return {
         needALook: h.needALook,
         confidentTotal: h.kept + h.throwaway,
@@ -112,6 +119,12 @@ export function reviewMock(): SwApi['review'] {
         bin: { total: bin.length, items: bin.slice(0, opts?.bin ?? 60).map(card), token: binToken(bin.map((i) => i.hash)) },
         canUndo: undo.length > 0
       }
+    },
+    page: async (pile: 'kept' | 'throwaway' | 'bin', offset: number, limit?: number): Promise<ReviewPage> => {
+      const xs = ordered(pile)
+      const items = xs.slice(offset, offset + Math.min(limit ?? 60, 500)).map(card)
+      const next = offset + items.length
+      return { total: xs.length, offset, items, nextOffset: next < xs.length ? next : null }
     },
     act: async (hash: string, action: ReviewAction): Promise<ReviewActResult> => {
       const it = items.find((i) => i.hash === hash)
@@ -132,11 +145,11 @@ export function reviewMock(): SwApi['review'] {
     },
     emptyBin: async (token: string): Promise<EmptyBinResult> => {
       const bin = live().filter((i) => view(i).pile === 'bin')
-      if (binToken(bin.map((i) => i.hash)) !== token) return { ok: false, emptied: 0, copiesRemoved: 0, copiesRefused: 0, message: 'The Bin changed since you looked; nothing was emptied.' }
+      if (binToken(bin.map((i) => i.hash)) !== token) return { ok: false, emptied: 0, changed: 0, message: 'The Bin changed since you looked; nothing was emptied.' }
       const gone = new Set(bin.map((i) => i.hash))
       items = items.map((i) => (gone.has(i.hash) ? { ...i, decision: { state: 'emptied', decidedAt: new Date(now()).toISOString() } } : i))
       undo.length = 0
-      return { ok: true, emptied: bin.length, copiesRemoved: 0, copiesRefused: 0, message: bin.length ? `Emptied ${bin.length} from the Bin. Your original files are not touched.` : 'The Bin is already empty.' }
+      return { ok: true, emptied: bin.length, changed: 0, message: bin.length ? `Emptied ${bin.length} from the Bin. SlideWell never deletes your files.` : 'The Bin is already empty.' }
     }
   }
 }

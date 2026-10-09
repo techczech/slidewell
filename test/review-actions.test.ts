@@ -1,14 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import sharp from 'sharp'
 import { ReviewService } from '../src/main/review/service'
-import { removeOwnedCopy } from '../src/main/review/owned-copy'
+import { guardedHandle } from '../src/main/ipc-guard'
+import { wellByIds, searchWell } from '../src/main/well'
 import { SorterStore, loadUndecided } from '../src/main/sorter/store'
-import { listTriage, triageCounts } from '../src/main/triage'
+import { listTriage, triageCounts, putTriageDecision, setTriageDecision, writeEmptiedMarkers } from '../src/main/triage'
 
 const DAY = 86_400_000
 const T0 = Date.parse('2026-10-09T08:00:00Z')
@@ -35,6 +36,34 @@ function snapshot(): Record<string, string> {
     out[f] = `${createHash('sha256').update(readFileSync(p)).digest('hex')}:${st.size}:${st.mtimeMs}:${st.ino}`
   }
   return out
+}
+
+/** Every file under the scratch folder (originals, the well, posters): nothing may disappear or change. */
+function treeSnapshot(dir = work, out: Record<string, string> = {}): Record<string, string> {
+  for (const f of readdirSync(dir)) {
+    const p = join(dir, f)
+    const st = statSync(p)
+    if (st.isDirectory()) treeSnapshot(p, out)
+    else if (!/\.db(-journal)?$/.test(f)) out[p] = `${st.size}:${st.mtimeMs}:${st.ino}`
+  }
+  return out
+}
+
+/** n more items the sorter called throwaway long enough ago to be in the Bin. */
+function addBinItems(n: number): string[] {
+  const db = new DatabaseSync(join(well, 'triage.db'))
+  const put = db.prepare("INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, sorter_version, proposed_at, throwaway_since) VALUES (?, 'throwaway', 0.95, 0.05, 'old', 'test', ?, ?)")
+  const old = new Date(T0 - 40 * DAY).toISOString()
+  const hashes: string[] = []
+  db.exec('BEGIN')
+  for (let i = 0; i < n; i++) {
+    const h = `hb${String(i).padStart(4, '0')}`
+    put.run(h, old, old)
+    hashes.push(h)
+  }
+  db.exec('COMMIT')
+  db.close()
+  return hashes
 }
 
 const decision = (hash: string): { state: string; decided_at: string | null; well_id: string | null } | undefined => {
@@ -159,36 +188,41 @@ describe('review action layer: his choices', () => {
     expect((await svc.act('hd1', 'rescue')).ok).toBe(false) // not in Throwaway or the Bin
   })
 
-  it('Undo restores the exact earlier decision and answer, and removes only the well copy that Keep created', async () => {
+  it('Undo restores the exact earlier decision and answer; the well copy and record a Keep made stay', async () => {
     await svc.act('hd1', 'keep')
-    const copy = join(well, wellRows()[0].rel_path)
-    expect(existsSync(copy)).toBe(true)
+    const rel = wellRows()[0].rel_path
     await svc.act('hd2', 'throwaway')
     expect((await svc.undo()).hash).toBe('hd2')
     expect(decision('hd2')).toBeUndefined()
     expect(proposal('hd2')).toMatchObject({ answer: null, answered_at: null })
     expect((await svc.undo()).hash).toBe('hd1')
     expect(decision('hd1')).toBeUndefined()
-    expect(existsSync(copy)).toBe(false)
-    expect(wellRows()).toEqual([])
+    expect(existsSync(join(well, rel))).toBe(true) // review never deletes a file
+    expect(wellRows().length).toBe(1) // nor a well record
     expect((await svc.overview()).needALook).toBe(2)
     expect((await svc.undo()).ok).toBe(false)
   })
 
-  it('Undo of a Keep leaves a well copy that existed before it', async () => {
-    await svc.act('hd1', 'keep') // creates the well copy
-    const rel = wellRows()[0].rel_path
-    await svc.act('hd1', 'throwaway') // his throwaway carries the well id
-    expect(decision('hd1')).toMatchObject({ state: 'excluded', well_id: wellRows()[0].id })
-    await svc.act('hd1', 'rescue') // the copy already exists: this Keep created nothing
-    await svc.undo()
-    expect(existsSync(join(well, rel))).toBe(true)
-    expect(decision('hd1')).toMatchObject({ state: 'excluded', well_id: wellRows()[0].id })
+  it('Undo keeps its history entry when the restore fails, so ⌘Z can retry', async () => {
+    await svc.act('hd2', 'throwaway')
+    const db = join(well, 'triage.db')
+    chmodSync(db, 0o444) // a write failure
+    try {
+      const r = await svc.undo()
+      expect(r.ok).toBe(false)
+      expect(decision('hd2')?.state).toBe('excluded')
+      expect((await svc.overview()).canUndo).toBe(true)
+    } finally {
+      chmodSync(db, 0o644)
+    }
+    expect(await svc.undo()).toMatchObject({ ok: true, hash: 'hd2' })
+    expect(decision('hd2')).toBeUndefined()
+    expect((await svc.overview()).canUndo).toBe(false)
   })
 })
 
-describe('review action layer: no original is ever deleted or moved', () => {
-  it('keep, throwaway, rescue, undo, the 30-day move and Empty Bin leave every original byte-identical in place', async () => {
+describe('review action layer: no file is ever deleted or moved', () => {
+  it('keep, throwaway, rescue, undo, the 30-day move and Empty Bin delete or move no file at all; originals byte-identical', async () => {
     const before = snapshot()
     expect(Object.keys(before).sort()).toEqual([...ORIGINALS].sort())
     await svc.act('hd1', 'keep')
@@ -196,19 +230,28 @@ describe('review action layer: no original is ever deleted or moved', () => {
     await svc.act('hk1', 'throwaway') // the sorter's keep, overridden
     await svc.undo()
     await svc.act('hk1', 'keep')
-    await svc.act('hk1', 'throwaway') // kept into the well, then thrown away: its well copy is SlideWell's
+    await svc.act('hk1', 'throwaway') // kept into the well, then thrown away
     await svc.act('ht1', 'rescue')
     clock = T0 + 45 * DAY
     const piles = await svc.piles()
     expect(piles.bin.items.map((c) => c.hash).sort()).toEqual(['hclip', 'hd2', 'hk1', 'ht2'])
-    const hk1Copy = join(well, wellRows().find((w) => w.id === decision('hk1')!.well_id)!.rel_path)
-    expect(existsSync(hk1Copy)).toBe(true)
+    const tree = treeSnapshot()
     const res = await svc.emptyBin(piles.bin.token)
-    expect(res).toMatchObject({ ok: true, emptied: 4, copiesRefused: 0 })
-    expect(res.copiesRemoved).toBeGreaterThanOrEqual(3) // hk1's well copy + sidecar, hclip's poster
-    expect(existsSync(hk1Copy)).toBe(false)
-    expect(existsSync(join(well, '_triage-posters', 'hclip.jpg'))).toBe(false)
+    expect(res).toMatchObject({ ok: true, emptied: 4, changed: 0 })
+    expect(treeSnapshot()).toEqual(tree) // well copies, sidecars, posters: all still there
     expect(snapshot()).toEqual(before)
+  })
+
+  it("a kept-then-binned item's well record is hidden, not deleted", async () => {
+    await svc.act('hk1', 'keep')
+    const wellId = decision('hk1')!.well_id!
+    await svc.act('hk1', 'throwaway')
+    clock = T0 + 31 * DAY
+    await svc.emptyBin((await svc.piles()).bin.token)
+    expect(decision('hk1')).toMatchObject({ state: 'emptied', well_id: wellId })
+    expect(wellRows().map((w) => w.id)).toContain(wellId)
+    expect(await wellByIds(well, [wellId])).toEqual([])
+    expect((await searchWell(well, '', 60)).map((r) => r.id)).not.toContain(wellId)
   })
 })
 
@@ -223,40 +266,79 @@ describe('review action layer: Empty Bin', () => {
     expect(decision('ht2')).toBeUndefined()
   })
 
-  it('removes SlideWell records only: proposal gone, hash-only emptied marker, never proposed again, out of every pile', async () => {
+  it('writes only the permanent emptied marker: never proposed again, out of every pile', async () => {
     clock = T0 + 30 * DAY
-    const piles = await svc.piles()
-    await svc.emptyBin(piles.bin.token)
-    for (const h of ['ht1', 'ht2', 'hclip']) {
-      expect(decision(h)).toMatchObject({ state: 'emptied', well_id: null })
-      expect(proposal(h)).toBeUndefined()
-    }
+    await svc.emptyBin((await svc.piles()).bin.token)
+    for (const h of ['ht1', 'ht2', 'hclip']) expect(decision(h)).toMatchObject({ state: 'emptied' })
+    expect(proposal('ht1')).toBeDefined() // records stay; the marker hides them
     expect(loadUndecided(well).map((s) => s.hash)).not.toContain('ht1')
     const after = await svc.piles()
     expect(after.bin.total + after.throwaway.total).toBe(0)
     expect(after.kept.items.map((c) => c.hash)).toEqual(['hk1'])
     expect((await svc.act('ht1', 'rescue')).ok).toBe(false)
-    expect(existsSync(join(src, 'toss1.png'))).toBe(true)
   })
 
-  it('a well record that points outside the copy folders is not followed: the original stays', async () => {
-    const t = new DatabaseSync(join(well, 'triage.db'))
-    t.prepare("INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES ('ht1', 'excluded', ?, 'evil1')").run(new Date(T0).toISOString())
-    t.close()
-    const w = new DatabaseSync(join(well, 'well.db'))
-    w.exec('CREATE VIRTUAL TABLE well_fts USING fts5(id UNINDEXED, slug UNINDEXED, ext UNINDEXED, rel_path UNINDEXED, root UNINDEXED, source UNINDEXED, tags, notes, ocr_text, added_at UNINDEXED)')
-    w.prepare("INSERT INTO well_fts (id, rel_path, root, source) VALUES ('evil1', ?, 'well', 'screenshot')").run(join('..', 'originals', 'toss1.png'))
-    w.close()
-    const before = snapshot()
+  it('race: a Bin item changed to selected during Empty Bin is left alone and reported', async () => {
     clock = T0 + 30 * DAY
-    const res = await svc.emptyBin((await svc.piles()).bin.token)
-    expect(res.ok).toBe(true)
-    expect(res.copiesRefused).toBeGreaterThanOrEqual(1)
-    expect(snapshot()).toEqual(before)
+    const bin = (await svc.piles()).bin.items.map((c) => ({ hash: c.hash, decision: null }))
+    expect(bin.map((b) => b.hash).sort()).toEqual(['hclip', 'ht1', 'ht2'])
+    // Empty Bin has taken its snapshot; meanwhile Triage selects one of them
+    await putTriageDecision(well, 'ht1', { state: 'selected', decidedAt: new Date(clock).toISOString(), wellId: null })
+    const r = writeEmptiedMarkers(well, bin, clock)
+    expect(r.emptied.sort()).toEqual(['hclip', 'ht2'])
+    expect(r.changed).toEqual(['ht1'])
+    expect(decision('ht1')?.state).toBe('selected')
+  })
+
+  it('race: an item whose clock no longer says Bin at write time is left alone', async () => {
+    await svc.act('hd2', 'throwaway')
+    clock = T0 + 30 * DAY
+    const snap = [{ hash: 'hd2', decision: { state: 'excluded', decidedAt: new Date(T0).toISOString(), wellId: null } }]
+    expect(writeEmptiedMarkers(well, snap, T0 + 29 * DAY)).toEqual({ emptied: [], changed: ['hd2'] })
+    expect(writeEmptiedMarkers(well, snap, T0 + 30 * DAY)).toEqual({ emptied: ['hd2'], changed: [] })
   })
 })
 
-describe('Triage list: throwaways stay findable until binned', () => {
+describe('review: more than 500 items', () => {
+  it('pages through every item of a 600-item Bin and Empty Bin hides exactly that many', async () => {
+    const extra = addBinItems(600)
+    clock = T0 + 1 * DAY
+    const piles = await svc.piles()
+    expect(piles.bin.total).toBe(600)
+    expect(piles.bin.items.length).toBe(60)
+    const seen = new Set(piles.bin.items.map((c) => c.hash))
+    let next: number | null = piles.bin.items.length
+    while (next !== null) {
+      const pg = await svc.page('bin', next, 500)
+      pg.items.forEach((c) => seen.add(c.hash))
+      next = pg.nextOffset
+    }
+    expect(seen.size).toBe(600)
+    expect([...seen].sort()).toEqual(extra.sort())
+    const r = await svc.emptyBin(piles.bin.token)
+    expect(r).toMatchObject({ ok: true, emptied: 600, changed: 0 })
+    expect((await svc.piles()).bin.total).toBe(0)
+  })
+
+  it('pages the kept pile past 500 the same way', async () => {
+    const db = new DatabaseSync(join(well, 'triage.db'))
+    const put = db.prepare("INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, sorter_version, proposed_at) VALUES (?, 'keep', 0.9, 0.9, 'kept', 'test', ?)")
+    db.exec('BEGIN')
+    for (let i = 0; i < 700; i++) put.run(`hkp${i}`, new Date(T0).toISOString())
+    db.exec('COMMIT')
+    db.close()
+    let got = 0
+    let next: number | null = 0
+    while (next !== null) {
+      const pg = await svc.page('kept', next, 500)
+      got += pg.items.length
+      next = pg.nextOffset
+    }
+    expect(got).toBe(701)
+  })
+})
+
+describe('Triage list: throwaways stay findable until binned (same clock as the piles)', () => {
   it('lists young throwaways with their proposal, hides binned and emptied items', async () => {
     await svc.act('hd2', 'throwaway')
     let hashes = (await listTriage(well, '', 'all', 'scanned', 50, 0, T0 + DAY)).map((r) => r.hash)
@@ -271,38 +353,60 @@ describe('Triage list: throwaways stay findable until binned', () => {
     expect(hashes.sort()).toEqual(['hd1', 'hk1'])
     expect((await triageCounts(well)).total).toBe(2)
   })
+
+  it('unreadable or missing dates stay in Throwaway and stay findable', async () => {
+    const db = new DatabaseSync(join(well, 'triage.db'))
+    db.prepare("UPDATE sorter_proposals SET throwaway_since = 'garbage', proposed_at = 'garbage' WHERE hash = 'ht1'").run()
+    db.prepare("UPDATE sorter_proposals SET throwaway_since = NULL, proposed_at = '' WHERE hash = 'ht2'").run()
+    db.prepare("INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES ('hd2', 'excluded', 'not a date', NULL)").run()
+    db.close()
+    const far = T0 + 400 * DAY
+    const hashes = (await listTriage(well, '', 'all', 'scanned', 50, 0, far)).map((r) => r.hash)
+    expect(hashes).toEqual(expect.arrayContaining(['ht1', 'ht2', 'hd2']))
+    clock = far
+    const piles = await svc.piles()
+    expect(piles.throwaway.items.map((c) => c.hash)).toEqual(expect.arrayContaining(['ht1', 'ht2', 'hd2']))
+    expect(piles.bin.items.map((c) => c.hash)).toEqual(['hclip'])
+  })
 })
 
-describe('removeOwnedCopy: the only file deletion in review', () => {
-  it('deletes a regular file inside a copy folder', () => {
-    mkdirSync(join(well, 'images'), { recursive: true })
-    writeFileSync(join(well, 'images', 'a--1.webp'), 'x')
-    expect(removeOwnedCopy(join(well, 'images', 'a--1.webp'), [join(well, 'images')])).toMatchObject({ removed: true })
+describe('Triage: an emptied marker is permanent', () => {
+  it('reset, select and exclude are refused and say so; the marker stays', async () => {
+    clock = T0 + 30 * DAY
+    await svc.emptyBin((await svc.piles()).bin.token)
+    for (const action of ['reset', 'select', 'exclude'] as const) {
+      const r = await setTriageDecision(archive, well, src, 'ht1', action)
+      expect(r.state).toBe('emptied')
+      expect(r.refused).toMatch(/emptied from the Bin/)
+      expect(decision('ht1')?.state).toBe('emptied')
+    }
+    await putTriageDecision(well, 'ht1', null) // review's own write path cannot remove it either
+    expect(decision('ht1')?.state).toBe('emptied')
+    expect(await setTriageDecision(archive, well, src, 'hd1', 'select')).toEqual({ state: 'selected' }) // others unaffected
+  })
+})
+
+describe('IPC guard: Triage answers the main window only', () => {
+  it('runs the handler for the main window and refuses any other sender', async () => {
+    const handlers = new Map<string, (e: unknown, ...a: unknown[]) => unknown>()
+    const ipc = { handle: (ch: string, fn: (e: unknown, ...a: unknown[]) => unknown) => void handlers.set(ch, fn) }
+    const main = { id: 1 }
+    let ran = 0
+    guardedHandle(ipc as never, (s) => s === (main as never), 'triage:decide', (_e, hash: string) => {
+      ran++
+      return hash
+    })
+    expect(handlers.get('triage:decide')!({ sender: main }, 'h1')).toBe('h1')
+    expect(() => handlers.get('triage:decide')!({ sender: { id: 2 } }, 'h1')).toThrow(/not allowed/)
+    expect(ran).toBe(1)
   })
 
-  it('refuses a symlink to an original, a hard link to an original, a path escaping with .., a folder, and anything outside', () => {
-    const images = join(well, 'images')
-    mkdirSync(images, { recursive: true })
-    const before = snapshot()
-    symlinkSync(join(src, 'keep1.png'), join(images, 'link.png'))
-    linkSync(join(src, 'doubt1.png'), join(images, 'hard.png'))
-    mkdirSync(join(images, 'sub'))
-    expect(removeOwnedCopy(join(images, 'link.png'), [images])).toMatchObject({ removed: false, reason: 'symlink' })
-    expect(removeOwnedCopy(join(images, 'hard.png'), [images])).toMatchObject({ removed: false, reason: 'linked' })
-    expect(removeOwnedCopy(join(images, '..', '..', 'originals', 'toss1.png'), [images])).toMatchObject({ removed: false, reason: 'outside' })
-    expect(removeOwnedCopy(join(src, 'toss2.png'), [images])).toMatchObject({ removed: false, reason: 'outside' })
-    expect(removeOwnedCopy(join(images, 'sub'), [images])).toMatchObject({ removed: false, reason: 'not-a-file' })
-    expect(removeOwnedCopy(images, [images])).toMatchObject({ removed: false })
-    expect(snapshot()).toEqual(before)
-  })
-
-  it('refuses a file reached through a symlinked folder that resolves outside the copy folder', () => {
-    const images = join(well, 'images')
-    mkdirSync(images, { recursive: true })
-    symlinkSync(src, join(images, 'dir'))
-    const before = snapshot()
-    expect(removeOwnedCopy(join(images, 'dir', 'toss1.png'), [images])).toMatchObject({ removed: false, reason: 'outside' })
-    expect(snapshot()).toEqual(before)
+  it('every Triage handler in the main process goes through the guard', () => {
+    const text = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
+    expect(text).not.toMatch(/ipcMain\.handle\('triage:/)
+    for (const ch of ['triage:scan', 'triage:list', 'triage:decide', 'triage:import-selected', 'well:add-from-clipboard']) {
+      expect(text).toContain(`guardedHandle(ipcMain, fromMainWindow, '${ch}'`)
+    }
   })
 })
 

@@ -3,6 +3,20 @@
 // column. Every write goes through window.sw.review; skipping writes nothing (the item stays kept).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReviewCard, ReviewOverview, ReviewPiles } from '../../preload'
+
+type PileName = 'kept' | 'throwaway' | 'bin'
+const PAGE = 60
+
+/** Page through one pile until `want` items (or all of them) are in hand. No cap. */
+async function fetchUpTo(pile: PileName, first: ReviewCard[], total: number, want: number): Promise<ReviewCard[]> {
+  let items = first
+  while (items.length < Math.min(want, total)) {
+    const pg = await window.sw.review.page(pile, items.length, 500)
+    if (!pg.items.length) break
+    items = items.concat(pg.items)
+  }
+  return items
+}
 import './review.css'
 
 type Mode = 'doubtful' | 'piles'
@@ -65,7 +79,7 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
   const [stripOpen, setStripOpen] = useState(false)
   const [right, setRight] = useState<'throwaway' | 'bin'>('throwaway')
   const [focus, setFocus] = useState<{ col: Column; index: number }>({ col: 'kept', index: 0 })
-  const [keptLimit, setKeptLimit] = useState(60)
+  const [shown, setShown] = useState<Record<PileName, number>>({ kept: PAGE, throwaway: PAGE, bin: PAGE })
   const [confirmEmpty, setConfirmEmpty] = useState(false)
   const busy = useRef(false)
 
@@ -73,8 +87,14 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
     const o = await window.sw.review.overview({ queue: 50, sample: 12 })
     setOv(o)
     onCount(o.needALook)
-    if (mode === 'piles') setPiles(await window.sw.review.piles({ kept: keptLimit, throwaway: 60, bin: 60 }))
-  }, [mode, keptLimit, onCount])
+    if (mode === 'piles') {
+      const p = await window.sw.review.piles({ kept: PAGE, throwaway: PAGE, bin: PAGE })
+      const [kept, throwaway, bin] = await Promise.all(
+        (['kept', 'throwaway', 'bin'] as const).map((k) => fetchUpTo(k, p[k].items, p[k].total, shown[k]))
+      )
+      setPiles({ ...p, kept: { ...p.kept, items: kept }, throwaway: { ...p.throwaway, items: throwaway }, bin: { ...p.bin, items: bin } })
+    }
+  }, [mode, shown, onCount])
 
   useEffect(() => {
     void load()
@@ -270,7 +290,7 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
               ))}
             </div>
             {piles && piles.kept.total > keptItems.length && (
-              <button className="rv-more" onClick={() => setKeptLimit((n) => n + 60)}>
+              <button className="rv-more" onClick={() => setShown((s) => ({ ...s, kept: keptItems.length + PAGE }))}>
                 Show more ({piles.kept.total - keptItems.length} not shown)
               </button>
             )}
@@ -291,7 +311,7 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
                   <span className="rv-count">{piles?.bin.total ?? 0}</span>
                   <button className="rv-link" onClick={() => { setRight('throwaway'); setFocus({ col: 'right', index: 0 }) }}>‹ Throwaway</button>
                 </div>
-                <p className="rv-pl-note">Still here for you to rescue until you empty the Bin. Emptying removes only SlideWell’s records and copies; your original files are not touched.</p>
+                <p className="rv-pl-note">Still here for you to rescue until you empty the Bin. Emptying the Bin hides these for good. SlideWell never deletes your files.</p>
               </>
             )}
             <div className="rv-tlist">
@@ -313,6 +333,11 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
                   )}
                 </div>
               ))}
+              {piles && piles[right].total > rightItems.length && (
+                <button className="rv-more" onClick={() => setShown((s) => ({ ...s, [right]: rightItems.length + PAGE }))}>
+                  Show more ({piles[right].total - rightItems.length} not shown)
+                </button>
+              )}
               {rightItems.length === 0 && <div className="rv-quiet">{right === 'throwaway' ? 'Nothing in Throwaway.' : 'The Bin is empty.'}</div>}
             </div>
             <div className="rv-bin-row">
@@ -339,15 +364,14 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
         {confirmEmpty && piles && (
           <div className="overlay rv-confirm-overlay" onClick={() => setConfirmEmpty(false)}>
             <div className="rv-confirm" role="dialog" aria-label="Empty the Bin" onClick={(e) => e.stopPropagation()}>
-              <h3>Empty the Bin?</h3>
+              <h3>Hide {piles.bin.total} {piles.bin.total === 1 ? 'screenshot' : 'screenshots'} for good?</h3>
               <p>
-                {piles.bin.total} {piles.bin.total === 1 ? 'screenshot leaves' : 'screenshots leave'} SlideWell for good: their records and SlideWell’s own copies are removed, and they cannot be rescued
-                afterwards.
+                <b>Emptying the Bin hides these for good. SlideWell never deletes your files.</b>
               </p>
-              <p><b>Your original files are not touched.</b> They stay where they are; delete them yourself if you want them gone.</p>
+              <p>They disappear from Review, Triage and search and cannot be rescued afterwards. The files stay where they are; delete them yourself if you want them gone.</p>
               <div className="rv-confirm-btns">
                 <button className="rv-cancel" autoFocus onClick={() => setConfirmEmpty(false)}>Cancel</button>
-                <button className="rv-danger" onClick={() => void emptyBin()}>Empty Bin</button>
+                <button className="rv-danger" onClick={() => void emptyBin()}>Hide {piles.bin.total} for good</button>
               </div>
             </div>
           </div>

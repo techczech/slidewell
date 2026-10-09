@@ -9,7 +9,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import type { PileFacts, ProposalLabel } from './piles'
+import { pileOf, type PileFacts, type ProposalLabel } from './piles'
 
 export type ReviewFile = {
   source: string
@@ -121,4 +121,35 @@ export function newestFirst(a: ReviewRow, b: ReviewRow): number {
   const ta = a.file?.takenAt ? Date.parse(a.file.takenAt) : a.file?.mtime ?? 0
   const tb = b.file?.takenAt ? Date.parse(b.file.takenAt) : b.file?.mtime ?? 0
   return (tb || 0) - (ta || 0)
+}
+
+/**
+ * Hashes that lists outside review must not show: items in the Bin or emptied, decided by the same
+ * pure clock as the piles (piles.ts). Reads proposals and decisions only.
+ */
+export function hiddenFromLists(wellRoot: string, now: number): Set<string> {
+  const out = new Set<string>()
+  const file = join(wellRoot, 'triage.db')
+  if (!existsSync(file)) return out
+  const db = new DatabaseSync(file, { readOnly: true })
+  db.exec('PRAGMA busy_timeout=5000;')
+  try {
+    if (!hasTable(db, 'sorter_proposals')) return out
+    const decisions = hasTable(db, 'triage_decisions')
+    const since = hasColumn(db, 'sorter_proposals', 'throwaway_since') ? 'p.throwaway_since' : "CASE WHEN p.proposal = 'throwaway' THEN p.proposed_at END"
+    const rows = db
+      .prepare(
+        `SELECT p.hash AS hash, p.proposal AS proposal, p.proposed_at AS proposed_at, ${since} AS throwaway_since,
+           ${decisions ? 'd.state AS state, d.decided_at AS decided_at' : 'NULL AS state, NULL AS decided_at'}
+         FROM sorter_proposals p ${decisions ? 'LEFT JOIN triage_decisions d ON d.hash = p.hash' : ''}`
+      )
+      .all() as Array<{ hash: string; proposal: ProposalLabel; proposed_at: string | null; throwaway_since: string | null; state: string | null; decided_at: string | null }>
+    for (const r of rows) {
+      const pile = pileOf({ proposal: r.proposal, proposedAt: r.proposed_at, throwawaySince: r.throwaway_since, decision: r.state ? { state: r.state, decidedAt: r.decided_at } : null }, now).pile
+      if (pile === 'bin' || pile === 'gone') out.add(r.hash)
+    }
+    return out
+  } finally {
+    db.close()
+  }
 }

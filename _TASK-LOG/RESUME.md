@@ -35,16 +35,19 @@ Code: `src/main/sorter/` — `rules.ts` (app/window/OCR → lean + reason), `cla
 - Caveat: throwaway precision rests on 2 held-back proposals, too few to confirm the 0.95 bar either way.
 - An earlier copy that embedded most kept pictures from the well's re-encoded copies looked better than it was (file format); disregard it.
 
-## Review screen (ticket 08, 2026-10-09)
+## Review screen (ticket 08, 2026-10-09; review fixes same night)
 
-Code: `src/main/review/` — `piles.ts` (pure state machine: doubtful / kept / throwaway / bin / gone, 30-day clock, keep/throwaway/rescue plans; also compiled into the renderer via `tsconfig.web.json`), `store.ts` (read model: proposals + decisions + triage facts), `service.ts` (action layer: act, undo, emptyBin), `owned-copy.ts` (the only file deletion: realpath containment in `images/`, `videos/`, `_triage-posters/`, regular file, not a symlink, single link), `ipc.ts`. Renderer: `Review.tsx` + `review.css`; title bar Search | Review switch in `App.tsx`; browser mock `review-mock.ts` uses the real `piles.ts`.
+Code: `src/main/review/` — `piles.ts` (pure state machine: doubtful / kept / throwaway / bin / gone, 30-day clock, keep/throwaway/rescue plans; also compiled into the renderer via `tsconfig.web.json`), `store.ts` (read model; `hiddenFromLists` = Bin + emptied by the same clock, used by the Triage list), `service.ts` (action layer: act, page, undo, emptyBin), `ipc.ts`. Renderer: `Review.tsx` + `review.css`; title bar Search | Review switch in `App.tsx`; browser mock `review-mock.ts` uses the real `piles.ts` (`?reviewBin=N` adds a large Bin).
 
-- Piles are derived, never stored. His decision (triage_decisions) wins: selected/included = kept by you; excluded = throwaway, clock from decided_at; emptied = gone. Without one, the proposal: doubtful = queue, keep = kept, throwaway = throwaway, clock from `sorter_proposals.throwaway_since` (first throwaway proposal, kept across re-sorts). 30 days on → Bin. Missing date → stays in Throwaway (when unsure, keep).
+- **Review deletes no file and no record.** Decided by the driver after an independent review reproduced deletion of an original through a symlinked copy root: the capability was removed, not guarded. Empty Bin writes a permanent `emptied` decision and the items are hidden everywhere (Review, Triage list, well search for a kept-then-binned item's well row via its kept well id). UI wording: "Emptying the Bin hides these for good. SlideWell never deletes your files." Undo of a Keep leaves the well copy and well row in place.
+- Piles are derived, never stored. His decision (triage_decisions) wins: selected/included = kept by you; excluded = throwaway, clock from decided_at; emptied = gone. Without one, the proposal: doubtful = queue, keep = kept, throwaway = throwaway, clock from `sorter_proposals.throwaway_since` (first throwaway proposal, kept across re-sorts). 30 days on → Bin. Missing or unreadable date → stays in Throwaway and findable (when unsure, keep).
 - Keep = `selected` then `promoteTriageHashes` (the Triage Import path, one hash) → `included` + well id. Throwaway = `excluded`. Both via `putTriageDecision` in triage.ts; the proposal gets `answer` + `answered_at`. Skip writes nothing (session-only reorder).
-- Undo (⌘Z): in-memory stack in the service, restores the exact prior decision row and answer; removes a well copy only if that Keep created it.
-- Empty Bin: needs the token of the Bin shown (refused if it changed); removes proposal rows, well records/copies of binned items, video posters; writes a hash-only `emptied` decision so the item never returns. Scan index rows (triage_fts) stay, hidden. Originals are never touched.
-- Triage panel list hides emptied and binned items; young throwaways carry a "throwaway · bin in N days" label.
-- Tests: `test/review-piles.test.ts`, `test/review-actions.test.ts` (scratch originals, real ingest with a stand-in OCR script); `npm run test:review-ui` (renderer mock, headless shell); `npm run test:review` (hidden Electron, `SLIDEWELL_REVIEW_SCRATCH`).
+- Empty Bin: needs the token of the Bin shown; `writeEmptiedMarkers` writes all markers in one transaction, each only if the item is still in the Bin at write time (decision unchanged since the snapshot, clock still run out); changed rows are left alone and reported.
+- `emptied` is permanent: every triage_decisions write (Triage reset/select/exclude, review's own writes) is conditioned on it in SQL; Triage says so when refused.
+- Undo (⌘Z): in-memory stack; restores the exact prior decision row and answer; the entry is popped only after the restore succeeded.
+- Paging: `review.piles` returns first pages + totals; `review.page(pile, offset, limit)` returns any further page (≤ 500 per request, no cap overall). Kept, Throwaway and Bin all have "Show more".
+- Triage IPC handlers (scan, list, decide, import-selected, paste) answer the main window only (`ipc-guard.ts`).
+- Tests: `test/review-piles.test.ts`, `test/review-actions.test.ts`; `npm run test:review-ui` (renderer mock, headless shell); `npm run test:review` (hidden Electron, `SLIDEWELL_REVIEW_SCRATCH`).
 
 ## Decided (2026-06-18 grill — presentation-system)
 
