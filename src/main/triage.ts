@@ -454,7 +454,8 @@ export async function promoteTriageHashes(
       // from the bytes it actually imported. A stale scan hash (file replaced since its scan) would
       // otherwise let emptying the old content hide this different content. Ingest has already
       // recorded the real hash either way.
-      if (res.sourceHash === hash) await recordWellSource(wellRoot, res.id, hash)
+      const matches = res.sourceHash === hash
+      if (matches) await recordWellSource(wellRoot, res.id, hash)
       else console.error(`[triage] ${row.abs}: scanned as ${hash} but imported as ${res.sourceHash || 'unknown'} — the file changed since its scan; not linked to the old hash`)
       // Ingest is async: the item may have been emptied from the Bin meanwhile. Like every other
       // decision write, this one never replaces an 'emptied' marker; such an item counts as skipped
@@ -463,7 +464,8 @@ export async function promoteTriageHashes(
         db,
         `INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, 'included', ?, ?)
          ON CONFLICT(hash) DO UPDATE SET state = excluded.state, decided_at = excluded.decided_at, well_id = excluded.well_id WHERE triage_decisions.state != 'emptied'`,
-        [hash, new Date().toISOString(), res.id]
+        // the decision names the well copy only when its key is the imported content; otherwise no well id
+        [hash, new Date().toISOString(), matches ? res.id : null]
       )
       const now = await query<{ state: string }>(db, 'SELECT state FROM triage_decisions WHERE hash = ?', [hash])
       if (now[0]?.state === 'included') imported.push({ hash, wellId: res.id, relPath: res.relPath, created: res.created })

@@ -44,15 +44,37 @@ export async function ensureWell(root: string): Promise<void> {
  * now on got its well_sources row at ingest, so the backfill misses nothing that hiding depends on.
  */
 const sourcesReady = new Set<string>()
+const BACKFILL_FLAG = 'well_sources_backfilled'
 async function ensureWellSources(root: string): Promise<void> {
   if (sourcesReady.has(root)) return
   const db = wellDb(root)
-  await run(db, 'CREATE TABLE IF NOT EXISTS well_sources (well_id TEXT NOT NULL, source_hash TEXT NOT NULL, PRIMARY KEY (well_id, source_hash))')
-  const tdb = join(root, 'triage.db')
-  if (existsSync(tdb)) {
-    await run(db, "ATTACH ? AS t; INSERT OR IGNORE INTO well_sources (well_id, source_hash) SELECT well_id, hash FROM t.triage_decisions WHERE well_id IS NOT NULL AND well_id != ''; DETACH t", [tdb]).catch(
-      () => undefined // no decisions table yet
-    )
+  await run(
+    db,
+    `CREATE TABLE IF NOT EXISTS well_sources (well_id TEXT NOT NULL, source_hash TEXT NOT NULL, PRIMARY KEY (well_id, source_hash));
+     CREATE TABLE IF NOT EXISTS well_meta (key TEXT PRIMARY KEY, value TEXT)`
+  )
+  // The backfill runs once per well, ever: a flag in well_meta, set in the same transaction and
+  // checked inside it (two processes cannot both run it). Later decisions are never re-linked here,
+  // because a decision's well id can name content other than its key (a file replaced after its scan).
+  const done = await query<{ x: number }>(db, `SELECT 1 AS x FROM well_meta WHERE key = '${BACKFILL_FLAG}'`)
+  if (!done.length) {
+    const tdb = join(root, 'triage.db')
+    const hasDecisions = existsSync(tdb) && Number((await query<{ n: number }>(tdb, "SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'triage_decisions'"))[0]?.n) > 0
+    const at = new Date().toISOString()
+    if (hasDecisions) {
+      await run(
+        db,
+        `ATTACH ? AS t; BEGIN IMMEDIATE;
+         INSERT OR IGNORE INTO well_sources (well_id, source_hash)
+           SELECT well_id, hash FROM t.triage_decisions WHERE well_id IS NOT NULL AND well_id != ''
+           AND NOT EXISTS (SELECT 1 FROM well_meta WHERE key = '${BACKFILL_FLAG}');
+         INSERT OR IGNORE INTO well_meta (key, value) VALUES ('${BACKFILL_FLAG}', ?);
+         COMMIT; DETACH t`,
+        [tdb, at]
+      )
+    } else {
+      await run(db, `INSERT OR IGNORE INTO well_meta (key, value) VALUES ('${BACKFILL_FLAG}', ?)`, [at])
+    }
   }
   sourcesReady.add(root)
 }

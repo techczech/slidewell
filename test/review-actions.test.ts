@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -162,16 +162,17 @@ describe('review action layer: his choices', () => {
   })
 
   it('Keep writes his decision, promotes into the well through the ingest path and marks the proposal answered', async () => {
-    const r = await svc.act('hd1', 'keep')
+    const h = await addScannedItem('scanned.png', [140, 140, 20]) // keyed by its content hash, as triage keys it
+    const r = await svc.act(h, 'keep')
     expect(r).toMatchObject({ ok: true, pile: 'kept' })
-    const d = decision('hd1')!
+    const d = decision(h)!
     expect(d.state).toBe('included')
     expect(d.well_id).toBeTruthy()
     expect(wellRows().map((w) => w.id)).toEqual([d.well_id])
     expect(existsSync(join(well, wellRows()[0].rel_path))).toBe(true)
-    expect(proposal('hd1')).toMatchObject({ answer: 'keep', answered_at: new Date(T0).toISOString() })
+    expect(proposal(h)).toMatchObject({ answer: 'keep', answered_at: new Date(T0).toISOString() })
     const o = await svc.overview()
-    expect(o.needALook).toBe(1)
+    expect(o.needALook).toBe(2)
     expect(o.confident).toEqual({ kept: 1, throwaway: 3 }) // his answer is not counted as the sorter's
   })
 
@@ -409,7 +410,8 @@ describe('Triage import and the emptied marker', () => {
 describe('hidden by content identity, whatever happened to the well id', () => {
   it('ingest records the content hash of the source file; a decision key that is not that hash is not linked', async () => {
     await svc.act('hd1', 'keep') // the fixture's key 'hd1' is not the file's content hash
-    const wellId = decision('hd1')!.well_id!
+    expect(decision('hd1')).toMatchObject({ state: 'included', well_id: null }) // so the decision names no well copy
+    const wellId = wellRows()[0].id
     const content = createHash('sha256').update(readFileSync(join(src, 'doubt1.png'))).digest('hex').slice(0, 12)
     const db = new DatabaseSync(join(well, 'well.db'), { readOnly: true })
     const links = db.prepare('SELECT source_hash FROM well_sources WHERE well_id = ?').all(wellId) as Array<{ source_hash: string }>
@@ -452,24 +454,42 @@ describe('hidden by content identity, whatever happened to the well id', () => {
     await hiddenEverywhere(wellId)
   })
 
-  it('a stale scan hash: scan A, replace the file with B, import, empty A — B stays visible', async () => {
+  it('a stale scan hash: scan A, replace the file with B, import, empty A — B stays visible, also after a restart', async () => {
     const hA = await addScannedItem('swap.png', [10, 200, 90]) // scanned as A
     await png(join(src, 'swap.png'), 200, 30, 140) // replaced with B before import
     const hB = contentHash(join(src, 'swap.png'))
     expect(hB).not.toBe(hA)
+    const before = new Set(wellRows().map((w) => w.id))
     await svc.act(hA, 'keep') // imports B's bytes under A's decision key
-    const wellId = decision(hA)!.well_id!
-    const db = new DatabaseSync(join(well, 'well.db'), { readOnly: true })
-    const links = (db.prepare('SELECT source_hash FROM well_sources WHERE well_id = ?').all(wellId) as Array<{ source_hash: string }>).map((l) => l.source_hash)
-    db.close()
-    expect(links).toEqual([hB]) // never linked to A
+    const wellId = wellRows().find((w) => !before.has(w.id))!.id
+    expect(decision(hA)).toMatchObject({ state: 'included', well_id: null }) // A's decision does not name B's copy
+    const links = (): string[] => {
+      const db = new DatabaseSync(join(well, 'well.db'), { readOnly: true })
+      try {
+        return (db.prepare('SELECT source_hash FROM well_sources WHERE well_id = ?').all(wellId) as Array<{ source_hash: string }>).map((l) => l.source_hash)
+      } finally {
+        db.close()
+      }
+    }
+    expect(links()).toEqual([hB]) // never linked to A
     await svc.act(hA, 'throwaway')
     clock = T0 + 30 * DAY
     await svc.emptyBin((await svc.piles()).bin.token)
     expect(decision(hA)?.state).toBe('emptied')
     expect((await wellByIds(well, [wellId])).map((r) => r.id)).toEqual([wellId])
     expect((await searchWell(well, '', 60)).map((r) => r.id)).toContain(wellId)
+    // a decision that names B's copy under another key (as older builds wrote) must not be linked by a restart
+    const t = new DatabaseSync(join(well, 'triage.db'))
+    t.prepare("INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES ('hstale', 'emptied', ?, ?)").run(new Date(T0).toISOString(), wellId)
+    t.close()
+    // restart: fresh modules, so nothing is remembered in memory
+    vi.resetModules()
+    const fresh = await import('../src/main/well')
+    expect((await fresh.wellByIds(well, [wellId])).map((r) => r.id)).toEqual([wellId])
+    expect((await fresh.searchWell(well, '', 60)).map((r) => r.id)).toContain(wellId)
+    expect(links()).toEqual([hB])
   })
+
 })
 
 describe('Triage list: throwaways stay findable until binned (same clock as the piles)', () => {
