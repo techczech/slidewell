@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isBatchDue, latestSlot, nextSlot, normaliseBatchTime, parseBatchTime } from '../src/main/sorter/cloud/schedule'
+import { isBatchDue, latestSlot, nextSlot, nightOf, normaliseBatchTime, parseBatchTime } from '../src/main/sorter/cloud/schedule'
 
 const at = (d: number, h: number, m = 0): Date => new Date(2026, 9, d, h, m, 0, 0) // local time, October 2026
 const iso = (d: Date): string => d.toISOString()
@@ -53,5 +53,16 @@ describe('is a batch due', () => {
     const lastRunAt = iso(at(10, 2, 0))
     expect(isBatchDue({ ...base, batchTime: '22:30', since: iso(at(1, 9)), lastRunAt, now: at(10, 22, 29) })).toBe(false)
     expect(isBatchDue({ ...base, batchTime: '22:30', since: iso(at(1, 9)), lastRunAt, now: at(10, 22, 30) })).toBe(true)
+  })
+})
+
+describe('night window (the per-night limit)', () => {
+  it('runs from local noon to the next local noon, whatever the batch time', () => {
+    expect(nightOf(at(10, 12, 0))).toBe('2026-10-10')
+    expect(nightOf(at(10, 23, 30))).toBe('2026-10-10')
+    expect(nightOf(at(11, 2, 0))).toBe('2026-10-10')
+    expect(nightOf(at(11, 11, 59))).toBe('2026-10-10')
+    expect(nightOf(at(11, 12, 0))).toBe('2026-10-11')
+    expect(nightOf(new Date(2026, 0, 1, 3, 0))).toBe('2025-12-31')
   })
 })

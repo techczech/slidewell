@@ -38,7 +38,7 @@ import type { Job, JobResult } from './sorter/jobs'
 import type { FetchLike } from './picture-search/model-store'
 import { ReviewService } from './review/service'
 import { registerReviewIpc } from './review/ipc'
-import { CloudSorter, normaliseCloudSettings, registerCloudIpc, type CloudRunSummary, type CloudSettings } from './sorter/cloud/service'
+import { CloudSorter, normaliseCloudSettings, registerCloudIpc, type CloudRunSummary, type CloudSettings, type StoredCloudSettings } from './sorter/cloud/service'
 import { ApiKeyStore } from './sorter/cloud/key-store'
 import { shrinkForLuna } from './sorter/cloud/images'
 import type { HttpPost } from './sorter/cloud/client'
@@ -81,8 +81,9 @@ type Config = {
   storage?: Partial<Record<'archive' | 'others' | 'well', { backend?: 'local' | 'r2' }>> // per-store backend (spec 2026-06-24)
   ownerNames?: string[] // "My decks": authors that count as the user (unset → the OS account's names; owners.ts)
   pictureSearch?: PictureSearchSettings // picture search: well images on/off, indexing paused (survives restart)
-  // sorter cloud step (ticket 07): the OpenAI key only as safeStorage ciphertext (keyEnc), never in plain text
-  sorterCloud?: Partial<CloudSettings> & { keyEnc?: string; lastRunAt?: string | null; since?: string | null; lastRun?: CloudRunSummary | null }
+  // sorter cloud step (ticket 07): the OpenAI key only as safeStorage ciphertext (keyEnc), never in plain text;
+  // optedInAt = when he turned the cloud step on (absent = off); the per-night limit is fixed in code
+  sorterCloud?: StoredCloudSettings & { keyEnc?: string; lastRunAt?: string | null; since?: string | null; lastRun?: CloudRunSummary | null }
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -301,7 +302,21 @@ async function serveLocalOrR2(abs: string): Promise<string | null> {
   return ok ? abs : null
 }
 
+// One SlideWell per profile: a second launch focuses the open window and quits, so two processes never
+// run the nightly cloud batch (or any other writer) side by side. The cloud batch also claims its
+// screenshots in one database transaction (sorter/store.ts claimForCloud) as a second guard.
+const singleInstance = app.requestSingleInstanceLock()
+if (!singleInstance) app.quit()
+else
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  })
+
 app.whenReady().then(() => {
+  if (!singleInstance) return
   protocol.handle('swarchive', async (request) => {
     const abs = decodeSwUrlPath(request.url)
     const served = abs ? await serveLocalOrR2(abs) : null
@@ -385,7 +400,7 @@ app.whenReady().then(() => {
     key: lunaKey,
     online: () => net.isOnline(),
     http: lunaHttp,
-    shrink: (p) => shrinkForLuna(p),
+    shrink: (bytes) => shrinkForLuna(bytes),
     settings: cloudSettings,
     state: () => {
       const c = cloudCfg()
@@ -397,7 +412,7 @@ app.whenReady().then(() => {
     },
     log: (line) => console.warn(line)
   })
-  registerCloudIpc(cloud, lunaKey, (s) => saveCloudCfg(s), cloudSettings, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+  registerCloudIpc(cloud, lunaKey, (s) => saveCloudCfg(s), () => cloudCfg(), (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
   // the nightly batch runs only while the app is open: checked shortly after launch (a missed night runs then) and every minute
   const cloudTick = (): void => void cloud.tick().catch((e) => console.warn(`[sorter-cloud] nightly check failed: ${(e as Error)?.name ?? 'error'}`))
   const cloudFirst = setTimeout(cloudTick, 30_000)

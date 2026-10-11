@@ -1,38 +1,67 @@
 /**
  * The sorter's cloud step as one main-process service: the nightly batch and the manual "Sort now".
  *
- *   Nightly (tick() finds a batch due, schedule.ts): run the local sorter (when it may run
- *     unattended), then ask Luna about the screenshots it left doubtful, at most `nightlyCap`.
- *   Sort now: prepare() runs the local sorter and returns how many screenshots would be sent and an
- *     estimated cost; nothing leaves the Mac until send(n) is called from his click.
+ * Consent lives here, not in the renderer:
+ *   - The cloud step is off until he turns it on in Settings; main records the moment (optedInAt in
+ *     config.json). Saving a key does not turn it on. Off means no nightly upload and no Sort now upload.
+ *   - Sort now: prepare() runs the local sorter, picks the batch and returns its count, cost and a
+ *     one-time token; send(token) sends exactly that batch (less anything no longer eligible), and
+ *     refuses without the token of the batch prepared last, or once it is PREPARED_TTL_MS old.
+ *   - At most NIGHTLY_LIMIT screenshots go to Luna per night window (schedule.ts nightOf), nightly
+ *     and Sort now together. The count is kept in triage.db and checked when a run claims its batch
+ *     (store.ts claimForCloud), so moving the batch time or pressing Sort now cannot exceed it.
  *
- * Only doubtful proposals that Luna has not already answered (for this model and prompt) are sent,
- * newest first, shrunk (images.ts), in chunks with at most LUNA.concurrency requests at a time.
- * Luna's answers go through the keep-bias in cascade.ts and are recorded per screenshot with
- * decided_by 'luna'. With no key, or offline, the cloud step is skipped and items stay doubtful.
+ * What is sent: doubtful screenshots (screenshot file names only, luna.ts isScreenshotFile) Luna has
+ * not answered for this model and prompt, newest first. A run claims them in one transaction, so two
+ * processes never send the same one. Just before each request, each one is re-read and must still hash
+ * to the hash it was classified under (a regular file, not a link; images.ts readVerified), and must
+ * still be eligible (no decision of his, not answered in review); otherwise it is not sent.
+ * Luna's answers are redacted (no key) before they are stored or shown, then go through the keep-bias
+ * in cascade.ts and are recorded with decided_by 'luna'. No key, or offline: skipped, items stay doubtful.
  *
  * The key comes from ApiKeyStore (key-store.ts) at call time; nothing here stores, returns or logs it,
- * and every message that may reach a log or the renderer goes through redact().
+ * and every message that may reach a log, the database or the renderer goes through redact().
  */
 import { ipcMain } from 'electron'
-import { loadUndecided, SorterStore, type CloudAnswerRow, type CloudPending } from '../store'
+import { randomUUID } from 'node:crypto'
+import { loadUndecided, SorterStore, type CloudAnswerRow, type CloudPending, type CloudScope } from '../store'
 import { DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from '../decide'
 import { applyLuna, type CascadeRow } from './cascade'
 import { buildLunaRequest, estimateCost, LUNA, LunaResponseError, parseLunaResponse, planChunks, selectForCloud, type CloudCandidate, type CostEstimate, type LunaItem } from './luna'
 import { LunaHttpError, pool, postLuna, redact, type HttpPost } from './client'
-import { DEFAULT_BATCH_TIME, isBatchDue, nextSlot, normaliseBatchTime } from './schedule'
+import { readVerified, type VerifyRefusal } from './images'
+import { DEFAULT_BATCH_TIME, isBatchDue, nextSlot, nightOf, normaliseBatchTime } from './schedule'
 
-export type CloudSettings = { enabled: boolean; batchTime: string; nightlyCap: number }
-export const DEFAULT_NIGHTLY_CAP = 300
-export const MAX_CAP = 5000
+/** Screenshots sent to Luna per night window, nightly and Sort now together. Fixed; not a setting. */
+export const NIGHTLY_LIMIT = 300
+/** How long a prepared Sort now batch can be sent. */
+export const PREPARED_TTL_MS = 10 * 60 * 1000
 
-export function normaliseCloudSettings(raw: Partial<Record<keyof CloudSettings, unknown>> | undefined): CloudSettings {
-  const r = raw ?? {}
-  const cap = typeof r.nightlyCap === 'number' && Number.isFinite(r.nightlyCap) ? Math.min(MAX_CAP, Math.max(0, Math.floor(r.nightlyCap))) : DEFAULT_NIGHTLY_CAP
-  return { enabled: r.enabled === undefined ? true : r.enabled === true, batchTime: normaliseBatchTime(r.batchTime ?? DEFAULT_BATCH_TIME), nightlyCap: cap }
+/** The settings as the service reads them. `enabled` is true only after his recorded opt-in. */
+export type CloudSettings = { enabled: boolean; batchTime: string }
+/** What config.json stores for them. */
+export type StoredCloudSettings = { optedInAt?: string | null; batchTime?: string }
+
+export function normaliseCloudSettings(raw: StoredCloudSettings | Record<string, unknown> | undefined): CloudSettings {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const opted = typeof r.optedInAt === 'string' && Number.isFinite(Date.parse(r.optedInAt))
+  return { enabled: opted, batchTime: normaliseBatchTime(r.batchTime ?? DEFAULT_BATCH_TIME) }
 }
 
-export type CloudSkip = 'no-key' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled'
+/**
+ * A settings change from the renderer, as what to store: `enabled: true` records the opt-in now
+ * (kept if already on), `enabled: false` clears it; `batchTime` is normalised. Nothing else is read.
+ */
+export function applySettingsPatch(cur: StoredCloudSettings, patch: unknown, now: Date): StoredCloudSettings {
+  const p = patch && typeof patch === 'object' ? (patch as Record<string, unknown>) : {}
+  const out: StoredCloudSettings = { optedInAt: normaliseCloudSettings(cur).enabled ? (cur.optedInAt ?? null) : null, batchTime: normaliseBatchTime(cur.batchTime ?? DEFAULT_BATCH_TIME) }
+  if (p.enabled === true && !out.optedInAt) out.optedInAt = now.toISOString()
+  if (p.enabled === false) out.optedInAt = null
+  if (p.batchTime !== undefined) out.batchTime = normaliseBatchTime(p.batchTime)
+  return out
+}
+
+export type CloudSkip = 'off' | 'no-key' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared'
 
 export type CloudRunSummary = {
   at: string
@@ -53,12 +82,17 @@ export type CloudPreview = {
   local: { ok: boolean; message: string }
   /** Doubtful screenshots Luna has not answered yet. */
   doubtful: number
-  /** How many a send would ask about (doubtful, capped). */
+  /** How many a send would ask about (doubtful, within what is left tonight). */
   toSend: number
+  /** The per-night limit. */
   cap: number
+  /** What is left of tonight's limit. */
+  leftTonight: number
   estimate: CostEstimate
-  /** Why nothing can be sent now; null when send() may go ahead. */
-  blocked: 'no-key' | 'offline' | 'busy' | 'nothing-doubtful' | null
+  /** Why nothing can be sent now; null when send(token) may go ahead. */
+  blocked: 'off' | 'no-key' | 'offline' | 'busy' | 'nothing-doubtful' | 'limit-reached' | null
+  /** One-time token for send(); null when blocked. */
+  token: string | null
   message: string
 }
 
@@ -69,6 +103,7 @@ export type CloudStatus = {
   hasKey: boolean
   encryptionAvailable: boolean
   settings: CloudSettings
+  nightlyLimit: number
   lastRun: CloudRunSummary | null
   nextRunAt: string | null
   model: string
@@ -86,7 +121,8 @@ export type CloudDeps = {
   key: { get(): string | null; has(): boolean; encryptionAvailable(): boolean }
   online: () => boolean
   http: HttpPost
-  shrink: (path: string) => Promise<{ mime: string; base64: string }>
+  /** Shrink verified bytes for sending (images.ts shrinkForLuna). */
+  shrink: (bytes: Buffer) => Promise<{ mime: string; base64: string }>
   settings: () => CloudSettings
   state: () => CloudState
   saveState: (patch: Partial<CloudState>) => void
@@ -99,12 +135,14 @@ export type CloudDeps = {
 }
 
 const plural = (n: number, one: string, many = `${one}s`): string => `${n.toLocaleString('en-GB')} ${n === 1 ? one : many}`
+const SCOPE: CloudScope = { sorterVersion: SORTER_VERSION, model: LUNA.model, promptVersion: LUNA.promptVersion }
 
 export class CloudSorter {
   private phase: CloudStatus['phase'] = 'idle'
   private done = 0
   private total = 0
   private abort: AbortController | null = null
+  private prepared: { token: string; hashes: string[]; expiresAt: number } | null = null
 
   constructor(private deps: CloudDeps) {}
 
@@ -142,6 +180,7 @@ export class CloudSorter {
       hasKey: this.deps.key.has(),
       encryptionAvailable: this.deps.key.encryptionAvailable(),
       settings,
+      nightlyLimit: NIGHTLY_LIMIT,
       lastRun: this.deps.state().lastRun,
       nextRunAt: settings.enabled ? nextSlot(this.now(), settings.batchTime).toISOString() : null,
       model: LUNA.model,
@@ -163,15 +202,16 @@ export class CloudSorter {
 
   /** Doubtful screenshots Luna has not answered, with a readable picture on this Mac. */
   private candidates(): { list: CloudCandidate[]; pending: Map<string, CloudPending> } {
-    const pendingRows = this.withStore((s) => s.cloudPending(SORTER_VERSION, LUNA.model, LUNA.promptVersion))
+    const pendingRows = this.withStore((s) => s.cloudPending(SCOPE.sorterVersion, SCOPE.model, SCOPE.promptVersion))
     const pending = new Map(pendingRows.map((p) => [p.hash, p]))
     if (!pending.size) return { list: [], pending }
     const list: CloudCandidate[] = []
     for (const s of loadUndecided(this.deps.wellRoot())) {
       if (!s.hash || !s.image || !pending.has(s.hash)) continue
-      list.push({ hash: s.hash, proposal: 'doubtful', path: s.image.path, app: s.facts.app ?? '', windowTitle: s.facts.windowTitle ?? '', takenAt: s.takenAt ?? '' })
+      list.push({ hash: s.hash, proposal: 'doubtful', path: s.image.path, filename: s.facts.filename ?? '', app: s.facts.app ?? '', windowTitle: s.facts.windowTitle ?? '', takenAt: s.takenAt ?? '' })
     }
-    return { list, pending }
+    // screenshots only (by file name); anything else never counts as waiting for Luna
+    return { list: selectForCloud(list, Number.MAX_SAFE_INTEGER), pending }
   }
 
   private async runLocal(): Promise<{ ok: boolean; message: string }> {
@@ -186,10 +226,11 @@ export class CloudSorter {
     }
   }
 
-  /** Sort now, step 1: the local sorter, then what a send would cost. Sends nothing. */
+  /** Sort now, step 1: the local sorter, then the batch a send would ask about and its cost. Sends nothing. */
   async prepare(): Promise<CloudPreview> {
-    const cap = this.deps.settings().nightlyCap
-    if (this.busy()) return { local: { ok: false, message: '' }, doubtful: 0, toSend: 0, cap, estimate: estimateCost(0), blocked: 'busy', message: 'The sorter is already running.' }
+    this.prepared = null
+    const none = (patch: Partial<CloudPreview>): CloudPreview => ({ local: { ok: false, message: '' }, doubtful: 0, toSend: 0, cap: NIGHTLY_LIMIT, leftTonight: 0, estimate: estimateCost(0), blocked: null, token: null, message: '', ...patch })
+    if (this.busy()) return none({ blocked: 'busy', message: 'The sorter is already running.' })
     let local: { ok: boolean; message: string }
     try {
       local = await this.runLocal()
@@ -198,29 +239,70 @@ export class CloudSorter {
       this.push()
     }
     const { list } = this.candidates()
-    const toSend = Math.min(list.length, cap)
-    const blocked: CloudPreview['blocked'] = !list.length ? 'nothing-doubtful' : !this.deps.key.has() ? 'no-key' : !this.deps.online() ? 'offline' : null
+    const leftTonight = Math.max(0, NIGHTLY_LIMIT - this.withStore((s) => s.allowanceUsed(nightOf(this.now()))))
+    const batch = selectForCloud(list, leftTonight)
+    const toSend = batch.length
+    const blocked: CloudPreview['blocked'] = !list.length
+      ? 'nothing-doubtful'
+      : !this.deps.settings().enabled
+        ? 'off'
+        : !this.deps.key.has()
+          ? 'no-key'
+          : !this.deps.online()
+            ? 'offline'
+            : !toSend
+              ? 'limit-reached'
+              : null
+    const waiting = plural(list.length, 'screenshot')
     const message =
       blocked === 'nothing-doubtful'
         ? 'Nothing doubtful is waiting for Luna.'
-        : blocked === 'no-key'
-          ? `${plural(list.length, 'screenshot')} stay in Review: no OpenAI key is saved.`
-          : blocked === 'offline'
-            ? `${plural(list.length, 'screenshot')} stay in Review: this Mac is offline.`
-            : `Ask Luna about ${plural(toSend, 'screenshot')}${toSend < list.length ? ` of ${list.length.toLocaleString('en-GB')} (the limit per run)` : ''}?`
-    return { local, doubtful: list.length, toSend, cap, estimate: estimateCost(toSend), blocked, message }
+        : blocked === 'off'
+          ? `${waiting} stay in Review: asking Luna is turned off.`
+          : blocked === 'no-key'
+            ? `${waiting} stay in Review: no OpenAI key is saved.`
+            : blocked === 'offline'
+              ? `${waiting} stay in Review: this Mac is offline.`
+              : blocked === 'limit-reached'
+                ? `${waiting} stay in Review: Luna has had ${NIGHTLY_LIMIT.toLocaleString('en-GB')} screenshots tonight, the most per night.`
+                : `Ask Luna about ${plural(toSend, 'screenshot')}${toSend < list.length ? ` of ${list.length.toLocaleString('en-GB')} (${leftTonight.toLocaleString('en-GB')} left of tonight’s ${NIGHTLY_LIMIT.toLocaleString('en-GB')})` : ''}?`
+    let token: string | null = null
+    if (!blocked) {
+      token = randomUUID()
+      this.prepared = { token, hashes: batch.map((c) => c.hash), expiresAt: this.now().getTime() + PREPARED_TTL_MS }
+    }
+    return { local, doubtful: list.length, toSend, cap: NIGHTLY_LIMIT, leftTonight, estimate: estimateCost(toSend), blocked, token, message }
   }
 
-  /** Sort now, step 2 (after his click): ask Luna about at most `max` doubtful screenshots. */
-  async send(max: number): Promise<CloudRunSummary> {
-    const n = typeof max === 'number' && Number.isFinite(max) ? Math.max(0, Math.floor(max)) : 0
-    const summary = await this.runCloud(Math.min(n, this.deps.settings().nightlyCap), 'manual', null)
+  /**
+   * Sort now, step 2 (after his click): send the batch prepare() showed him. Refused without the
+   * token of the batch prepared last, or once it is PREPARED_TTL_MS old; a token is used once.
+   */
+  async send(token: unknown): Promise<CloudRunSummary> {
+    const p = this.prepared
+    let summary: CloudRunSummary
+    if (!p || typeof token !== 'string' || token !== p.token) {
+      summary = this.refused('manual', 'This send was not prepared here. Press Sort now and confirm the count first.')
+    } else {
+      this.prepared = null
+      summary =
+        this.now().getTime() > p.expiresAt
+          ? this.refused('manual', 'The prepared batch is too old. Press Sort now again to see the current count.')
+          : await this.runCloud({ trigger: 'manual', local: null, only: p.hashes })
+    }
     this.deps.saveState({ lastRun: summary })
     this.push()
     return summary
   }
 
-  /** The nightly batch: local sorter, then Luna for what it left doubtful (capped). */
+  private refused(trigger: CloudRunSummary['trigger'], error: string): CloudRunSummary {
+    this.log(`${trigger} send refused: not prepared`)
+    const s: CloudRunSummary = { at: this.now().toISOString(), trigger, local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, skipped: 'not-prepared', error, message: '' }
+    s.message = describe(s)
+    return s
+  }
+
+  /** The nightly batch: local sorter, then Luna for what it left doubtful (within tonight's limit). */
   async runNightly(): Promise<CloudRunSummary> {
     this.deps.saveState({ lastRunAt: this.now().toISOString() }) // first, so a crash mid-run is not retried every minute
     let local: { ok: boolean; message: string }
@@ -229,7 +311,7 @@ export class CloudSorter {
     } finally {
       this.phase = 'idle'
     }
-    const summary = await this.runCloud(this.deps.settings().nightlyCap, 'nightly', local)
+    const summary = await this.runCloud({ trigger: 'nightly', local })
     this.deps.saveState({ lastRun: summary })
     this.push()
     return summary
@@ -248,7 +330,8 @@ export class CloudSorter {
     return this.runNightly()
   }
 
-  private async runCloud(limit: number, trigger: CloudRunSummary['trigger'], local: CloudRunSummary['local']): Promise<CloudRunSummary> {
+  private async runCloud(o: { trigger: CloudRunSummary['trigger']; local: CloudRunSummary['local']; only?: string[] }): Promise<CloudRunSummary> {
+    const { trigger, local } = o
     const at = this.now().toISOString()
     const base: CloudRunSummary = { at, trigger, local, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, skipped: null, error: null, message: '' }
     const finish = (patch: Partial<CloudRunSummary>): CloudRunSummary => {
@@ -259,12 +342,26 @@ export class CloudSorter {
     }
     if (this.busy()) return finish({ error: 'The sorter is already running.' })
     const { list, pending } = this.candidates()
-    if (!list.length) return finish({ skipped: 'nothing-doubtful' })
+    let pool0 = list
+    if (o.only) {
+      const byHash = new Map(list.map((c) => [c.hash, c]))
+      pool0 = o.only.map((h) => byHash.get(h)).filter((c): c is CloudCandidate => Boolean(c))
+    }
+    if (!pool0.length) return finish({ skipped: 'nothing-doubtful', stayedDoubtful: list.length })
+    if (!this.deps.settings().enabled) return finish({ skipped: 'off', stayedDoubtful: list.length })
     const key = this.deps.key.get()
     if (!key) return finish({ skipped: 'no-key', stayedDoubtful: list.length })
     if (!this.deps.online()) return finish({ skipped: 'offline', stayedDoubtful: list.length })
-    const selected = selectForCloud(list, limit)
-    if (!selected.length) return finish({ skipped: 'nothing-doubtful', stayedDoubtful: list.length })
+    const wanted = selectForCloud(pool0, NIGHTLY_LIMIT)
+    if (!wanted.length) return finish({ skipped: 'nothing-doubtful', stayedDoubtful: list.length })
+
+    // claim the batch in one transaction: tonight's limit and other runs (other processes too) are checked there
+    const night = nightOf(this.now())
+    const runId = randomUUID()
+    const { claimed, leftBefore } = this.withStore((s) => s.claimForCloud(wanted.map((c) => c.hash), { ...SCOPE, night, limit: NIGHTLY_LIMIT, runId, now: this.now() }))
+    if (!claimed.length) return finish({ skipped: leftBefore === 0 ? 'limit-reached' : 'nothing-doubtful', stayedDoubtful: list.length })
+    const claimedSet = new Set(claimed)
+    const selected = wanted.filter((c) => claimedSet.has(c.hash))
 
     const t = this.deps.thresholds ?? DEFAULT_THRESHOLDS
     const ctl = new AbortController()
@@ -275,6 +372,9 @@ export class CloudSorter {
     this.push()
     let fatal: LunaHttpError | null = null
     let chunkError: string | null = null
+    let sent = 0
+    const refused = new Map<VerifyRefusal | 'no-longer-eligible', number>()
+    const refuse = (why: VerifyRefusal | 'no-longer-eligible', n = 1): void => void refused.set(why, (refused.get(why) ?? 0) + n)
     const counts = { asked: 0, answered: 0, keep: 0, throwaway: 0 }
     try {
       await pool(
@@ -284,15 +384,27 @@ export class CloudSorter {
           const items: LunaItem[] = []
           for (const c of chunk) {
             if (ctl.signal.aborted) return
+            // the bytes read are the bytes sent: same file, same hash it was classified under, not a link
+            const v = await readVerified(c.path, c.hash)
+            if (!v.ok) {
+              refuse(v.why)
+              continue
+            }
             try {
-              items.push({ hash: c.hash, proposal: c.proposal, app: c.app, windowTitle: c.windowTitle, image: await this.deps.shrink(c.path) })
+              items.push({ hash: c.hash, proposal: c.proposal, app: c.app, windowTitle: c.windowTitle, image: await this.deps.shrink(v.bytes) })
             } catch {
-              /* unreadable picture: it stays doubtful */
+              refuse('unreadable')
             }
           }
           if (!items.length || ctl.signal.aborted) return
-          const req = buildLunaRequest(items)
+          // eligibility again, just before the request: he may have decided or answered one meanwhile
+          const live = this.withStore((s) => s.stillEligible(items.map((i) => i.hash), runId, SCOPE))
+          const sendable = items.filter((i) => live.has(i.hash))
+          if (sendable.length < items.length) refuse('no-longer-eligible', items.length - sendable.length)
+          if (!sendable.length) return
+          const req = buildLunaRequest(sendable)
           counts.asked += req.ids.size
+          sent += req.ids.size
           try {
             const json = await postLuna(req.body, {
               key,
@@ -306,17 +418,23 @@ export class CloudSorter {
             const askedAt = new Date().toISOString()
             const answers: CloudAnswerRow[] = []
             const proposals: Array<CascadeRow & { hash: string }> = []
-            for (const [hash, a] of parsed.answers) {
+            for (const [hash, raw] of parsed.answers) {
+              // whatever the model wrote, the key never reaches the database or the renderer
+              const a = { ...raw, reason: redact(raw.reason, key) }
               answers.push({ hash, ...a, model: LUNA.model, promptVersion: LUNA.promptVersion, askedAt })
               const p = pending.get(hash)
               if (!p) continue
               const row = applyLuna({ proposal: 'doubtful', confidence: p.confidence, pKeep: p.pKeep, reason: p.reason, decidedBy: null }, a, t)
               proposals.push({ hash, ...row })
-              counts.answered++
-              if (row.proposal === 'keep') counts.keep++
-              else if (row.proposal === 'throwaway') counts.throwaway++
             }
-            this.withStore((s) => s.saveCloudResults(answers, proposals))
+            // the proposal write re-checks eligibility in SQL (store.ts saveCloudResults)
+            const written = new Set(this.withStore((s) => s.saveCloudResults(answers, proposals)))
+            for (const pr of proposals) {
+              if (!written.has(pr.hash)) continue
+              counts.answered++
+              if (pr.proposal === 'keep') counts.keep++
+              else if (pr.proposal === 'throwaway') counts.throwaway++
+            }
             if (parsed.missing.length) this.log(`${parsed.missing.length} screenshot(s) in a request got no usable answer; they stay doubtful`)
           } catch (e) {
             if (e instanceof LunaHttpError && (e.kind === 'offline' || e.kind === 'auth' || e.kind === 'rate' || e.kind === 'cancelled')) {
@@ -338,7 +456,10 @@ export class CloudSorter {
       this.phase = 'idle'
       this.done = 0
       this.total = 0
+      // claims go; screenshots that never went into a request are given back to tonight's limit
+      this.withStore((s) => s.releaseClaims(runId, night, selected.length - sent))
     }
+    for (const [why, n] of refused) this.log(`${n} screenshot(s) not sent: ${REFUSAL_WORDS[why]}`)
     const stayedDoubtful = list.length - counts.keep - counts.throwaway
     const f = fatal as LunaHttpError | null
     if (f) {
@@ -349,10 +470,26 @@ export class CloudSorter {
   }
 }
 
+/** Log words for a screenshot that was not sent (never its path or name). */
+const REFUSAL_WORDS: Record<VerifyRefusal | 'no-longer-eligible', string> = {
+  changed: 'the file changed since it was scanned',
+  symlink: 'the path is a link, not the file',
+  'not-a-file': 'the path is not a regular file',
+  'too-large': 'the file is too large',
+  unreadable: 'the file could not be read',
+  'no-longer-eligible': 'decided or answered meanwhile'
+}
+
 /** One plain sentence for Settings. */
 export function describe(s: CloudRunSummary): string {
   const waiting = s.stayedDoubtful ? ` ${plural(s.stayedDoubtful, 'screenshot')} still need${s.stayedDoubtful === 1 ? 's' : ''} a look.` : ''
   switch (s.skipped) {
+    case 'not-prepared':
+      return `Nothing was sent. ${s.error ?? ''}`.trim()
+    case 'off':
+      return `Luna was not asked: asking Luna is turned off.${waiting}`
+    case 'limit-reached':
+      return `Luna was not asked: it has had ${NIGHTLY_LIMIT.toLocaleString('en-GB')} screenshots tonight, the most per night.${waiting}`
     case 'nothing-doubtful':
       return 'Nothing doubtful was waiting for Luna.'
     case 'no-key':
@@ -372,8 +509,8 @@ export function describe(s: CloudRunSummary): string {
 export function registerCloudIpc(
   svc: CloudSorter,
   key: { set(k: unknown): { ok: boolean; saved: boolean; error?: string }; clear(): void },
-  saveSettings: (s: CloudSettings) => void,
-  current: () => CloudSettings,
+  saveSettings: (s: StoredCloudSettings) => void,
+  current: () => StoredCloudSettings,
   allowed: (sender: Electron.WebContents) => boolean
 ): void {
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -384,19 +521,19 @@ export function registerCloudIpc(
   }
   handle('cloud:status', () => svc.status())
   handle('cloud:set-key', (k: unknown) => {
-    const r = key.set(k)
+    const r = key.set(k) // saving a key never turns the cloud step on
     return { ok: r.ok, saved: r.saved, error: r.error, status: svc.status() }
   })
   handle('cloud:clear-key', () => {
     key.clear()
     return svc.status()
   })
+  // only on/off (his opt-in, recorded here with its time) and the batch time can be set; the limit is fixed
   handle('cloud:set-settings', (patch: unknown) => {
-    const p = patch && typeof patch === 'object' ? (patch as Record<string, unknown>) : {}
-    saveSettings(normaliseCloudSettings({ ...current(), ...p }))
+    saveSettings(applySettingsPatch(current(), patch, new Date()))
     return svc.status()
   })
   handle('cloud:prepare', () => svc.prepare())
-  handle('cloud:send', (n: unknown) => svc.send(typeof n === 'number' ? n : 0))
+  handle('cloud:send', (token: unknown) => svc.send(token))
   handle('cloud:cancel', () => svc.cancel())
 }

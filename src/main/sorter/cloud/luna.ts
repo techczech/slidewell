@@ -9,10 +9,13 @@
  * Nothing here does I/O. The HTTP client is client.ts; the run is service.ts.
  *
  * Privacy: a screenshot is sent only when the local steps left it doubtful (the builder drops
- * anything else). Each request carries a short per-request id (s1, s2, …), the app and window title
+ * anything else) and only when it is a screenshot: its file name is a CleanShot or macOS screenshot
+ * name (screenshot-name.ts), so photographs or scans in a Triage folder never leave the Mac. Each request carries a short per-request id (s1, s2, …), the app and window title
  * read from the file name, and the shrunk picture. Content hashes and paths stay on this Mac.
  * `store: false` asks OpenAI not to keep the response.
  */
+
+import { parseScreenshotName } from '../../screenshot-name'
 
 /** Everything about the Luna call in one place. */
 export const LUNA = {
@@ -30,11 +33,12 @@ export const LUNA = {
   maxAttempts: 4,
   maxOutputTokensPerItem: 120,
   /**
-   * Inputs to the cost estimate. PROVISIONAL: the per-token prices are placeholders until checked
-   * against OpenAI's price list for gpt-6-luna; the token counts follow OpenAI's image-token rules
-   * for a 1456 × ~820 picture at high detail (about 1,100–1,200 tokens).
+   * Inputs to the cost estimate. Prices: OpenAI's list prices for gpt-6-luna, short context
+   * (≤272K), from developers.openai.com/api/docs/pricing, checked 2026-10-11: input $0.10, cached
+   * input $0.01, output $0.50 per million tokens (the estimate assumes no cached input). Token counts
+   * follow OpenAI's image-token rules for a 1456 × ~820 picture at high detail (about 1,100–1,200).
    */
-  estimate: { tokensPerImage: 1200, tokensPerRequest: 450, outputTokensPerItem: 45, usdPerMillionInput: 0.25, usdPerMillionOutput: 2.0 }
+  estimate: { tokensPerImage: 1200, tokensPerRequest: 450, outputTokensPerItem: 45, usdPerMillionInput: 0.1, usdPerMillionCachedInput: 0.01, usdPerMillionOutput: 0.5 }
 } as const
 
 export const LUNA_SCHEMA_NAME = 'screenshot_verdicts'
@@ -78,6 +82,8 @@ export type CloudCandidate = {
   hash: string
   proposal: 'keep' | 'throwaway' | 'doubtful'
   path: string
+  /** The file's name; only a screenshot name (isScreenshotFile) is ever sent. */
+  filename: string
   app: string
   windowTitle: string
   /** Local time from the file name, '' when unknown (newest are asked first). */
@@ -114,11 +120,20 @@ export class LunaResponseError extends Error {
 
 const isDoubtful = <T extends { proposal: string }>(c: T): boolean => c.proposal === 'doubtful'
 
-/** Doubtful candidates only, newest first, at most `cap`. */
+/**
+ * A screenshot by provenance: the file name is one a screen-capture tool gave it (CleanShot or
+ * macOS, screenshot-name.ts). Anything else in a Triage folder (photographs, scans, renamed files)
+ * is not a screenshot for the cloud step and never leaves the Mac.
+ */
+export function isScreenshotFile(filename: string): boolean {
+  return typeof filename === 'string' && parseScreenshotName(filename) !== null
+}
+
+/** Doubtful screenshots only, newest first, at most `cap`. */
 export function selectForCloud(candidates: CloudCandidate[], cap: number): CloudCandidate[] {
   const n = Number.isFinite(cap) ? Math.max(0, Math.floor(cap)) : 0
   return candidates
-    .filter(isDoubtful)
+    .filter((c) => isDoubtful(c) && isScreenshotFile(c.filename))
     .slice()
     .sort((a, b) => (b.takenAt || '').localeCompare(a.takenAt || '') || a.hash.localeCompare(b.hash))
     .slice(0, n)

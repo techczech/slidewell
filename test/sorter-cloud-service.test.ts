@@ -1,16 +1,17 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { rmSync } from 'node:fs'
+import { readFileSync, rmSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import sharp from 'sharp'
 
 vi.mock('electron', () => ({ ipcMain: { handle: () => undefined } }))
-const { CloudSorter, normaliseCloudSettings } = await import('../src/main/sorter/cloud/service')
+const { CloudSorter, normaliseCloudSettings, applySettingsPatch, NIGHTLY_LIMIT, PREPARED_TTL_MS } = await import('../src/main/sorter/cloud/service')
 const { SorterStore } = await import('../src/main/sorter/store')
 const { shrinkForLuna } = await import('../src/main/sorter/cloud/images')
 const { LUNA } = await import('../src/main/sorter/cloud/luna')
-const { makeCloudWell, readProposal, lunaStub, cloudDeps } = await import('./sorter-cloud-fixture')
+const { makeCloudWell, readProposal, lunaStub, cloudDeps, hashOf } = await import('./sorter-cloud-fixture')
 
 let wells: string[] = []
 afterEach(() => {
@@ -96,10 +97,12 @@ describe('cloud step: what is sent and what comes back', () => {
     expect(again.skipped).toBe('nothing-doubtful')
   })
 
-  it('the nightly cap limits how many are sent, newest first', async () => {
+  it('what is left of the night limit caps how many are sent, newest first', async () => {
     const w = mixed()
     const stub = lunaStub()
-    const s = await new CloudSorter(cloudDeps(w, { http: stub.http, settings: { nightlyCap: 2 } })).runNightly()
+    const d = cloudDeps(w, { http: stub.http, now: () => new Date(2026, 9, 11, 2, 0) })
+    useAllowance(w, '2026-10-10', NIGHTLY_LIMIT - 2)
+    const s = await new CloudSorter(d).runNightly()
     expect(stub.seen.flatMap((r) => r.windows)).toEqual(['keep-chart', 'toss-wifi'])
     expect(s.stayedDoubtful).toBe(2) // d3 and d4 were not sent and still need a look
   })
@@ -128,7 +131,7 @@ describe('cloud step: what is sent and what comes back', () => {
     const stub = lunaStub()
     const http: typeof stub.http = async (u, init) => {
       const st = new SorterStore(w)
-      st.setAnswer('d1', { answer: 'throwaway', answeredAt: '2026-10-09' })
+      st.setAnswer(hashOf('d1'), { answer: 'throwaway', answeredAt: '2026-10-09' })
       st.close()
       return stub.http(u, init)
     }
@@ -138,7 +141,7 @@ describe('cloud step: what is sent and what comes back', () => {
 })
 
 describe('Sort now: count and cost first, send only on his click', () => {
-  it('prepare runs the local sorter and sends nothing; send(n) sends at most n', async () => {
+  it('prepare runs the local sorter and sends nothing; send(token) sends the prepared batch', async () => {
     const w = mixed()
     const stub = lunaStub()
     const d = cloudDeps(w, { http: stub.http })
@@ -146,12 +149,13 @@ describe('Sort now: count and cost first, send only on his click', () => {
     const p = await svc.prepare()
     expect(d.localRuns).toBe(1)
     expect(stub.seen).toHaveLength(0)
-    expect(p).toMatchObject({ doubtful: 4, toSend: 4, blocked: null })
+    expect(p).toMatchObject({ doubtful: 4, toSend: 4, blocked: null, cap: 300, leftTonight: 300 })
+    expect(typeof p.token).toBe('string')
     expect(p.estimate.screenshots).toBe(4)
     expect(p.estimate.usd).toBeGreaterThan(0)
-    const s = await svc.send(1)
-    expect(stub.seen.flatMap((r) => r.windows)).toEqual(['keep-chart'])
-    expect(s).toMatchObject({ trigger: 'manual', asked: 1 })
+    const s = await svc.send(p.token)
+    expect(stub.seen.flatMap((r) => r.windows).sort()).toEqual(['blurry', 'keep-chart', 'toss-wifi', 'weak-picker'])
+    expect(s).toMatchObject({ trigger: 'manual', asked: 4 })
   })
 
   it('prepare says why nothing can be sent: no key, offline', async () => {
@@ -188,12 +192,20 @@ describe('nightly schedule', () => {
     expect(d.localRuns).toBe(1)
   })
 
-  it('settings are normalised', () => {
-    expect(normaliseCloudSettings(undefined)).toEqual({ enabled: true, batchTime: '02:00', nightlyCap: 300 })
-    expect(normaliseCloudSettings({ enabled: false, batchTime: '7:30', nightlyCap: 99999 })).toEqual({ enabled: false, batchTime: '07:30', nightlyCap: 5000 })
-    expect(normaliseCloudSettings({ nightlyCap: -3, batchTime: 'x' })).toEqual({ enabled: true, batchTime: '02:00', nightlyCap: 0 })
+  it('settings are normalised; the cloud step is off unless an opt-in time is recorded', () => {
+    expect(normaliseCloudSettings(undefined)).toEqual({ enabled: false, batchTime: '02:00' })
+    expect(normaliseCloudSettings({ enabled: true, batchTime: '7:30', nightlyCap: 99999 } as never)).toEqual({ enabled: false, batchTime: '07:30' }) // an old enabled flag is not an opt-in
+    expect(normaliseCloudSettings({ optedInAt: '2026-10-11T09:00:00.000Z', batchTime: 'x' })).toEqual({ enabled: true, batchTime: '02:00' })
   })
 })
+
+function useAllowance(w: string, night: string, sent: number): void {
+  const st = new SorterStore(w)
+  st.close() // creates the tables
+  const db = new DatabaseSync(join(w, 'triage.db'))
+  db.prepare('INSERT INTO sorter_cloud_allowance (night, sent) VALUES (?, ?) ON CONFLICT(night) DO UPDATE SET sent = excluded.sent').run(night, sent)
+  db.close()
+}
 
 describe('shrinking', () => {
   it('a wide screenshot is sent at 1456 px on its long edge, as JPEG', async () => {
@@ -201,13 +213,13 @@ describe('shrinking', () => {
     wells.push(dir)
     const p = join(dir, 'wide.png')
     await sharp({ create: { width: 3024, height: 1964, channels: 4, background: { r: 10, g: 20, b: 30, alpha: 0.5 } } }).png().toFile(p)
-    const r = await shrinkForLuna(p)
+    const r = await shrinkForLuna(readFileSync(p))
     expect(r.mime).toBe('image/jpeg')
     expect(Math.max(r.width, r.height)).toBe(1456)
     const meta = await sharp(Buffer.from(r.base64, 'base64')).metadata()
     expect(meta.format).toBe('jpeg')
     const small = join(dir, 'small.png')
     await sharp({ create: { width: 800, height: 600, channels: 3, background: '#fff' } }).png().toFile(small)
-    expect((await shrinkForLuna(small)).width).toBe(800) // never enlarged
+    expect((await shrinkForLuna(readFileSync(small))).width).toBe(800) // never enlarged
   })
 })

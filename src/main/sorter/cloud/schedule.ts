@@ -56,3 +56,15 @@ export function isBatchDue(s: ScheduleInput): boolean {
   const slot = latestSlot(s.now, s.batchTime).getTime()
   return slot > anchor && slot <= s.now.getTime()
 }
+
+/**
+ * The night window `now` falls in, as the local date the night starts on ('YYYY-MM-DD'): a night runs
+ * from local noon to the next local noon, so a 02:00 batch, a run after the batch time was moved and
+ * a Sort now that evening or the next morning all count against the same night's limit. Fixed, not
+ * tied to the batch time, so moving the batch time never opens a new window.
+ */
+export function nightOf(now: Date): string {
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() - 12, now.getMinutes(), now.getSeconds())
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${start.getFullYear()}-${p(start.getMonth() + 1)}-${p(start.getDate())}`
+}

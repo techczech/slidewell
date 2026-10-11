@@ -308,7 +308,8 @@ export type SorterStatus = {
 }
 
 // Screenshot sorter, cloud step (ticket 07). Same shapes as src/main/sorter/cloud/service.ts.
-export type CloudSettings = { enabled: boolean; batchTime: string; nightlyCap: number }
+// enabled = his recorded opt-in (main stores when); the per-night limit is fixed in main (nightlyLimit)
+export type CloudSettings = { enabled: boolean; batchTime: string }
 export type CloudRunSummary = {
   at: string
   trigger: 'nightly' | 'manual'
@@ -318,7 +319,7 @@ export type CloudRunSummary = {
   keep: number
   throwaway: number
   stayedDoubtful: number
-  skipped: 'no-key' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | null
+  skipped: 'off' | 'no-key' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | null
   error: string | null
   message: string
 }
@@ -328,8 +329,11 @@ export type CloudPreview = {
   doubtful: number
   toSend: number
   cap: number
+  leftTonight: number
   estimate: CloudCostEstimate
-  blocked: 'no-key' | 'offline' | 'busy' | 'nothing-doubtful' | null
+  blocked: 'off' | 'no-key' | 'offline' | 'busy' | 'nothing-doubtful' | 'limit-reached' | null
+  /** One-time token for send(): main sends only the batch it prepared and showed. */
+  token: string | null
   message: string
 }
 export type CloudStatus = {
@@ -339,6 +343,7 @@ export type CloudStatus = {
   hasKey: boolean // the key itself never crosses to the renderer
   encryptionAvailable: boolean
   settings: CloudSettings
+  nightlyLimit: number
   lastRun: CloudRunSummary | null
   nextRunAt: string | null
   model: string
@@ -385,7 +390,7 @@ const api = {
     clearKey: (): Promise<CloudStatus> => ipcRenderer.invoke('cloud:clear-key'),
     setSettings: (patch: Partial<CloudSettings>): Promise<CloudStatus> => ipcRenderer.invoke('cloud:set-settings', patch),
     prepare: (): Promise<CloudPreview> => ipcRenderer.invoke('cloud:prepare'),
-    send: (max: number): Promise<CloudRunSummary> => ipcRenderer.invoke('cloud:send', max),
+    send: (token: string): Promise<CloudRunSummary> => ipcRenderer.invoke('cloud:send', token),
     cancel: (): Promise<void> => ipcRenderer.invoke('cloud:cancel'),
     onStatus: (cb: (s: CloudStatus) => void): (() => void) => {
       const handler = (_e: Electron.IpcRendererEvent, s: CloudStatus): void => cb(s)

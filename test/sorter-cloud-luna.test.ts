@@ -1,13 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { buildLunaRequest, estimateCost, LUNA, LUNA_SCHEMA, LunaResponseError, parseLunaResponse, planChunks, selectForCloud, type CloudCandidate, type LunaItem } from '../src/main/sorter/cloud/luna'
+import { buildLunaRequest, estimateCost, isScreenshotFile, LUNA, LUNA_SCHEMA, LunaResponseError, parseLunaResponse, planChunks, selectForCloud, type CloudCandidate, type LunaItem } from '../src/main/sorter/cloud/luna'
 
 const fixture = (name: string): unknown => JSON.parse(readFileSync(join(__dirname, 'fixtures', 'luna', name), 'utf8'))
 
 const img = { mime: 'image/jpeg', base64: 'AAAA' }
 const item = (hash: string, proposal: LunaItem['proposal'], app = '', windowTitle = ''): LunaItem => ({ hash, proposal, app, windowTitle, image: img })
-const cand = (hash: string, proposal: CloudCandidate['proposal'], takenAt = ''): CloudCandidate => ({ hash, proposal, path: `/pics/${hash}.png`, app: '', windowTitle: '', takenAt })
+const cand = (hash: string, proposal: CloudCandidate['proposal'], takenAt = '', filename = `CleanShot 2026-10-01 at 10.00.00 from Test App with ${hash}.png`): CloudCandidate => ({ hash, proposal, path: `/pics/${hash}.png`, filename, app: '', windowTitle: '', takenAt })
 
 type Part = { type: string; text?: string; image_url?: string; detail?: string }
 const parts = (body: Record<string, unknown>): Part[] => (body.input as Array<{ content: Part[] }>)[0].content
@@ -33,6 +33,15 @@ describe('request builder: only doubtful screenshots are sent', () => {
     expect(selectForCloud(mixed, 10).map((c) => c.hash)).toEqual(['d', 'b']) // newest first
     expect(selectForCloud(mixed, 1).map((c) => c.hash)).toEqual(['d']) // capped
     expect(selectForCloud(mixed, 0)).toEqual([])
+  })
+
+  it('selectForCloud keeps screenshots only: a CleanShot or macOS screenshot name', () => {
+    expect(isScreenshotFile('CleanShot 2026-10-08 at 0801 from Test App with Some Window.png')).toBe(true)
+    expect(isScreenshotFile('Screenshot 2026-10-08 at 10.05.01.png')).toBe(true)
+    expect(isScreenshotFile('IMG_0042.jpg')).toBe(false)
+    expect(isScreenshotFile('holiday photo.png')).toBe(false)
+    const mixed = [cand('shot', 'doubtful', '2026-10-02T09:00:00'), cand('photo', 'doubtful', '2026-10-03T09:00:00', 'IMG_0042.jpg'), cand('blank', 'doubtful', '2026-10-04T09:00:00', '')]
+    expect(selectForCloud(mixed, 10).map((c) => c.hash)).toEqual(['shot'])
   })
 
   it('chunks at the chunk size', () => {
@@ -121,5 +130,7 @@ describe('cost estimate', () => {
     expect(e.outputTokens).toBe(31 * LUNA.estimate.outputTokensPerItem)
     expect(e.usd).toBeCloseTo((e.inputTokens * LUNA.estimate.usdPerMillionInput + e.outputTokens * LUNA.estimate.usdPerMillionOutput) / 1e6, 10)
     expect(estimateCost(0)).toMatchObject({ requests: 0, usd: 0 })
+    // gpt-6-luna list prices per million tokens (short context), checked 2026-10-11
+    expect(LUNA.estimate).toMatchObject({ usdPerMillionInput: 0.1, usdPerMillionCachedInput: 0.01, usdPerMillionOutput: 0.5 })
   })
 })

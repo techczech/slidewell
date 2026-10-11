@@ -2,7 +2,9 @@
 // the OpenAI Responses API. Synthetic data only: a scratch well whose triage.db holds five generated
 // screenshots with sorter proposals (three doubtful, one keep, one throwaway).
 //
-//   1. Settings › Ask Luna: save a made-up key; config.json holds only ciphertext.
+//   1. Settings › Ask Luna: save a made-up key; config.json holds only ciphertext; saving the key
+//      does not turn asking Luna on; a send from the renderer without a prepared batch is refused;
+//      then he turns it on (main records the time).
 //   2. Sort now while "offline" (every https request fails): the confirm dialog shows count + cost;
 //      after Send the run completes with the cloud step skipped and the items stay doubtful.
 //   3. Sort now online: only the three doubtful screenshots reach the stub, shrunk to ≤ 1456 px; the
@@ -20,6 +22,7 @@
 import { _electron as electron } from 'playwright'
 import { DatabaseSync } from 'node:sqlite'
 import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
@@ -52,7 +55,14 @@ const shots = [
   { hash: 'e2e-local-keep', proposal: 'keep', window: 'local-keep', colour: '#2f855a', takenAt: '2026-10-08T10:00:00' },
   { hash: 'e2e-local-toss', proposal: 'throwaway', window: 'local-toss', colour: '#444444', takenAt: '2026-10-08T09:00:00' }
 ]
-for (const s of shots) await sharp({ create: { width: 3024, height: 1964, channels: 3, background: s.colour } }).png().toFile(join(source, `${s.hash}.png`))
+// invented CleanShot names (the cloud step sends screenshots only) and real content hashes (it re-hashes before sending)
+const nameOf = (s) => `CleanShot ${s.takenAt.slice(0, 10)} at ${s.takenAt.slice(11, 19).replaceAll(':', '.')} from Test App with ${s.window}.png`
+const realHash = new Map()
+for (const s of shots) {
+  const f = join(source, nameOf(s))
+  await sharp({ create: { width: 3024, height: 1964, channels: 3, background: s.colour } }).png().toFile(f)
+  realHash.set(s.hash, createHash('sha256').update(readFileSync(f)).digest('hex').slice(0, 12))
+}
 {
   const t = new DatabaseSync(join(well, 'triage.db'))
   t.exec(`CREATE VIRTUAL TABLE triage_fts USING fts5(hash UNINDEXED, kind UNINDEXED, rel_path UNINDEXED, filename, ext UNINDEXED, size UNINDEXED, mtime UNINDEXED,
@@ -64,11 +74,11 @@ for (const s of shots) await sharp({ create: { width: 3024, height: 1964, channe
   const prop = t.prepare('INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, rule, sorter_version, model_id, proposed_at, throwaway_since, decided_by) VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)')
   const now = new Date().toISOString()
   for (const s of shots) {
-    const f = join(source, `${s.hash}.png`)
+    const f = join(source, nameOf(s))
     const st = statSync(f)
-    fts.run(s.hash, `${s.hash}.png`, `${s.hash}.png`, String(st.size), String(Math.round(st.mtimeMs)), source, s.takenAt, s.window)
+    fts.run(realHash.get(s.hash), nameOf(s), nameOf(s), String(st.size), String(Math.round(st.mtimeMs)), source, s.takenAt, s.window)
     const local = s.proposal === 'doubtful' ? null : 'history'
-    prop.run(s.hash, s.proposal, 0.6, s.proposal === 'keep' ? 0.9 : 0.4, s.proposal === 'doubtful' ? `Not sure: local reason for ${s.window}` : 'Looks like screenshots you kept before', SORTER_VERSION, now, s.proposal === 'throwaway' ? now : null, local)
+    prop.run(realHash.get(s.hash), s.proposal, 0.6, s.proposal === 'keep' ? 0.9 : 0.4, s.proposal === 'doubtful' ? `Not sure: local reason for ${s.window}` : 'Looks like screenshots you kept before', SORTER_VERSION, now, s.proposal === 'throwaway' ? now : null, local)
   }
   t.close()
 }
@@ -80,7 +90,7 @@ writeFileSync(
 const proposal = (hash) => {
   const db = new DatabaseSync(join(well, 'triage.db'), { readOnly: true })
   try {
-    return db.prepare('SELECT proposal, decided_by, reason FROM sorter_proposals WHERE hash = ?').get(hash)
+    return db.prepare('SELECT proposal, decided_by, reason FROM sorter_proposals WHERE hash = ?').get(realHash.get(hash))
   } finally {
     db.close()
   }
@@ -168,6 +178,15 @@ try {
   const cfgText = readFileSync(join(userData, 'config.json'), 'utf8')
   const cfg = JSON.parse(cfgText)
   check('config.json holds the key only as ciphertext', !cfgText.includes(FAKE_KEY) && !cfgText.includes('E2ELEAKCHECK') && typeof cfg.sorterCloud?.keyEnc === 'string' && cfg.sorterCloud.keyEnc.length > 20)
+  check('saving the key does not turn asking Luna on', st.settings.enabled === false && !cfg.sorterCloud?.optedInAt, JSON.stringify(st.settings))
+  const forged = await win.evaluate(() => window.sw.cloud.send(300))
+  check('a send without a prepared batch is refused by main', forged.skipped === 'not-prepared' && forged.asked === 0, JSON.stringify(forged))
+  const offPrep = await win.evaluate(() => window.sw.cloud.prepare())
+  check('while off, Sort now offers nothing to send', offPrep.blocked === 'off' && offPrep.token === null, JSON.stringify(offPrep))
+  await section.locator('input.sorter-cloud-enabled').click() // controlled input: it ticks once main answers
+  await win.waitForFunction(async () => (await window.sw.cloud.status()).settings.enabled === true)
+  const optedIn = JSON.parse(readFileSync(join(userData, 'config.json'), 'utf8')).sorterCloud?.optedInAt
+  check('turning it on is recorded in main with its time', typeof optedIn === 'string' && Number.isFinite(Date.parse(optedIn)), String(optedIn))
   await section.screenshot({ path: join(screens, 'sorter-cloud-settings.png') })
 
   // 2. offline
@@ -176,6 +195,7 @@ try {
   await dialog.waitFor({ timeout: 20000 })
   const dialogText = await dialog.innerText()
   check('Sort now asks first: count and estimated cost', /Ask Luna about 3 screenshots\?/.test(dialogText) && /Estimated cost: (about \$|under \$)/.test(dialogText), dialogText)
+  check('the dialog says the app name and window title go with each picture', /app name and window title/.test(dialogText) && !/Nothing else leaves this Mac/.test(dialogText), dialogText)
   await win.screenshot({ path: join(screens, 'sorter-cloud-confirm.png') })
   check('nothing was sent before the click', seen.length === 0 && (await app.evaluate(() => globalThis.__cloudE2E.calls)) === 0)
   await dialog.locator('button.sorter-cloud-send').click()

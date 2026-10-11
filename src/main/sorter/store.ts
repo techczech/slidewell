@@ -20,6 +20,15 @@
  *                                                      Luna's answer per screenshot, so a screenshot is asked
  *                                                      once per model + prompt and its answer re-applied on
  *                                                      later local sorts (cloud/service.ts)
+ *   sorter_cloud_claims(hash TEXT PRIMARY KEY, run_id TEXT, claimed_at TEXT)
+ *                                                      screenshots a cloud run has claimed and is sending now;
+ *                                                      claimed in one write transaction, so two processes can
+ *                                                      never send the same screenshot; released when the run
+ *                                                      ends (a crashed run's claims go stale after CLAIM_STALE_MS)
+ *   sorter_cloud_allowance(night TEXT PRIMARY KEY, sent INTEGER)
+ *                                                      how many screenshots were sent to Luna in each night
+ *                                                      window (schedule.ts nightOf), nightly and Sort now alike;
+ *                                                      the per-night limit is checked against it in the claim
  *   sorter_models(id TEXT PRIMARY KEY, trained_at TEXT, sorter_version TEXT,
  *                 model TEXT (classifier JSON), report TEXT (accuracy report JSON))
  *
@@ -58,6 +67,12 @@ export type ProposalRow = { hash: string; proposal: Proposal; confidence: number
 export type CloudPending = { hash: string; confidence: number; pKeep: number; reason: string }
 
 export type CloudAnswerRow = LunaAnswer & { hash: string; model: string; promptVersion: string; askedAt: string }
+
+/** Which proposals and answers count for the cloud step: the current sorter, Luna model and prompt. */
+export type CloudScope = { sorterVersion: string; model: string; promptVersion: string }
+
+/** A claim older than this belongs to a run that crashed; it no longer blocks the screenshot. */
+export const CLAIM_STALE_MS = 6 * 60 * 60 * 1000
 
 export type ModelRecord<R> = { id: string; trainedAt: string; sorterVersion: string; model: Classifier; report: R }
 
@@ -242,6 +257,15 @@ export class SorterStore {
         prompt_version TEXT NOT NULL,
         asked_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS sorter_cloud_claims (
+        hash TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        claimed_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS sorter_cloud_allowance (
+        night TEXT PRIMARY KEY,
+        sent INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS sorter_models (
         id TEXT PRIMARY KEY,
         trained_at TEXT NOT NULL,
@@ -289,21 +313,91 @@ export class SorterStore {
   }
 
   /**
-   * Doubtful proposals the cloud step may ask about: made under `sorterVersion`, not answered in
-   * review, no decision of his, and no Luna answer yet for this model + prompt.
+   * The cloud eligibility test for proposal `p`, as SQL: doubtful, made under the current sorter, not
+   * answered in review, no decision of his (kept or excluded in Triage), no Luna answer yet for this
+   * model + prompt. Parameters: sorterVersion, model, promptVersion.
    */
+  private eligibleSql(): string {
+    const decisions = hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = p.hash)' : ''
+    return `p.proposal = 'doubtful' AND p.answered_at IS NULL AND p.sorter_version = ?
+      AND NOT EXISTS (SELECT 1 FROM sorter_cloud_answers c WHERE c.hash = p.hash AND c.model = ? AND c.prompt_version = ?) ${decisions}`
+  }
+
+  /** Doubtful proposals the cloud step may ask about (eligibleSql), whether or not a run holds them. */
   cloudPending(sorterVersion: string, model: string, promptVersion: string): CloudPending[] {
-    const decisions = hasTable(this.db, 'triage_decisions')
     return (
       this.db
-        .prepare(
-          `SELECT p.hash AS hash, p.confidence AS confidence, p.p_keep AS p_keep, p.reason AS reason FROM sorter_proposals p
-           ${decisions ? 'LEFT JOIN triage_decisions d ON d.hash = p.hash' : ''}
-           LEFT JOIN sorter_cloud_answers c ON c.hash = p.hash AND c.model = ? AND c.prompt_version = ?
-           WHERE p.proposal = 'doubtful' AND p.answered_at IS NULL AND p.sorter_version = ? AND c.hash IS NULL ${decisions ? 'AND d.hash IS NULL' : ''}`
-        )
-        .all(model, promptVersion, sorterVersion) as Array<{ hash: string; confidence: number; p_keep: number; reason: string }>
+        .prepare(`SELECT p.hash AS hash, p.confidence AS confidence, p.p_keep AS p_keep, p.reason AS reason FROM sorter_proposals p WHERE ${this.eligibleSql()}`)
+        .all(sorterVersion, model, promptVersion) as Array<{ hash: string; confidence: number; p_keep: number; reason: string }>
     ).map((r) => ({ hash: r.hash, confidence: Number(r.confidence), pKeep: Number(r.p_keep), reason: r.reason }))
+  }
+
+  /** Screenshots sent to Luna in this night window so far. */
+  allowanceUsed(night: string): number {
+    const r = this.db.prepare('SELECT sent FROM sorter_cloud_allowance WHERE night = ?').get(night) as { sent: number } | undefined
+    return r ? Number(r.sent) : 0
+  }
+
+  /**
+   * Claim screenshots for one cloud run, in one write transaction (BEGIN IMMEDIATE, so a second
+   * process waits and then sees these claims): of `hashes`, in order, those still eligible and not
+   * held by another live run, at most what is left of `limit` for `night`. The claimed count is added
+   * to the night's allowance in the same transaction. Returns the claimed hashes.
+   */
+  claimForCloud(hashes: string[], o: CloudScope & { night: string; limit: number; runId: string; now: Date }): { claimed: string[]; leftBefore: number } {
+    const nowIso = o.now.toISOString()
+    const staleBefore = new Date(o.now.getTime() - CLAIM_STALE_MS).toISOString()
+    const eligible = this.db.prepare(
+      `SELECT 1 FROM sorter_proposals p WHERE p.hash = ? AND ${this.eligibleSql()} AND NOT EXISTS (SELECT 1 FROM sorter_cloud_claims k WHERE k.hash = p.hash)`
+    )
+    const claim = this.db.prepare('INSERT INTO sorter_cloud_claims (hash, run_id, claimed_at) VALUES (?, ?, ?)')
+    const claimed: string[] = []
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('DELETE FROM sorter_cloud_claims WHERE claimed_at < ?').run(staleBefore)
+      const used = this.allowanceUsed(o.night)
+      const leftBefore = Math.max(0, Math.floor(o.limit) - used)
+      for (const h of hashes) {
+        if (claimed.length >= leftBefore) break
+        if (claimed.includes(h) || !eligible.get(h, o.sorterVersion, o.model, o.promptVersion)) continue
+        claim.run(h, o.runId, nowIso)
+        claimed.push(h)
+      }
+      if (claimed.length) {
+        this.db
+          .prepare('INSERT INTO sorter_cloud_allowance (night, sent) VALUES (?, ?) ON CONFLICT(night) DO UPDATE SET sent = sorter_cloud_allowance.sent + excluded.sent')
+          .run(o.night, claimed.length)
+      }
+      this.db.exec('COMMIT')
+      return { claimed, leftBefore }
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
+  /** Of `hashes`, those this run still holds and that are still eligible (checked just before a request). */
+  stillEligible(hashes: string[], runId: string, scope: CloudScope): Set<string> {
+    const q = this.db.prepare(
+      `SELECT 1 FROM sorter_proposals p JOIN sorter_cloud_claims k ON k.hash = p.hash AND k.run_id = ? WHERE p.hash = ? AND ${this.eligibleSql()}`
+    )
+    return new Set(hashes.filter((h) => q.get(runId, h, scope.sorterVersion, scope.model, scope.promptVersion)))
+  }
+
+  /**
+   * End of a run: its claims go, and the night's allowance gets back `unsent` (claimed screenshots
+   * that never went into a request, so never left the Mac).
+   */
+  releaseClaims(runId: string, night: string, unsent: number): void {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('DELETE FROM sorter_cloud_claims WHERE run_id = ?').run(runId)
+      if (unsent > 0) this.db.prepare('UPDATE sorter_cloud_allowance SET sent = MAX(0, sent - ?) WHERE night = ?').run(Math.floor(unsent), night)
+      this.db.exec('COMMIT')
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
   }
 
   /** Luna's answers for this model + prompt, by hash. */
@@ -314,10 +408,12 @@ export class SorterStore {
 
   /**
    * Record Luna's answers and, in the same transaction, the proposals they lead to. A proposal is
-   * changed only while it is still doubtful and unanswered (review may have got there first).
+   * changed only while it is still doubtful, unanswered and without a decision of his in Triage
+   * (review or Triage may have got there first). Reasons arrive already redacted (cloud/service.ts).
+   * Returns the hashes whose proposal changed.
    */
-  saveCloudResults(answers: CloudAnswerRow[], proposals: Array<Pick<ProposalRow, 'hash' | 'proposal' | 'confidence' | 'pKeep' | 'reason' | 'decidedBy'>>): number {
-    if (!answers.length && !proposals.length) return 0
+  saveCloudResults(answers: CloudAnswerRow[], proposals: Array<Pick<ProposalRow, 'hash' | 'proposal' | 'confidence' | 'pKeep' | 'reason' | 'decidedBy'>>): string[] {
+    if (!answers.length && !proposals.length) return []
     const now = new Date().toISOString()
     const putAnswer = this.db.prepare(
       `INSERT INTO sorter_cloud_answers (hash, verdict, confidence, reason, model, prompt_version, asked_at) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -327,13 +423,14 @@ export class SorterStore {
     const putProposal = this.db.prepare(
       `UPDATE sorter_proposals SET proposal = ?, confidence = ?, p_keep = ?, reason = ?, decided_by = ?, proposed_at = ?,
          throwaway_since = CASE WHEN ? = 'throwaway' THEN ? END
-       WHERE hash = ? AND proposal = 'doubtful' AND answered_at IS NULL`
+       WHERE hash = ? AND proposal = 'doubtful' AND answered_at IS NULL
+         ${hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = sorter_proposals.hash)' : ''}`
     )
-    let changed = 0
+    const changed: string[] = []
     this.db.exec('BEGIN IMMEDIATE')
     try {
       for (const a of answers) putAnswer.run(a.hash, a.verdict, a.confidence, a.reason, a.model, a.promptVersion, a.askedAt)
-      for (const p of proposals) changed += Number(putProposal.run(p.proposal, p.confidence, p.pKeep, p.reason, p.decidedBy ?? null, now, p.proposal, now, p.hash).changes)
+      for (const p of proposals) if (Number(putProposal.run(p.proposal, p.confidence, p.pKeep, p.reason, p.decidedBy ?? null, now, p.proposal, now, p.hash).changes)) changed.push(p.hash)
       this.db.exec('COMMIT')
     } catch (e) {
       this.db.exec('ROLLBACK')

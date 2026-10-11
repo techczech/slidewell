@@ -1,7 +1,9 @@
 // Settings › Screenshot sorter › Ask Luna (ticket 07): the OpenAI key (write-only: saved or not),
-// the nightly batch (time, on/off, per-night limit) and "Sort now", which runs the sorter on this
-// Mac, then shows how many screenshots would go to Luna and an estimated cost, and sends only on a
-// click. The main process owns all of it (src/main/sorter/cloud/); the key never comes back here.
+// asking Luna on or off (off until he turns it on; main records when), the nightly batch time, and
+// "Sort now", which runs the sorter on this Mac, then shows how many screenshots would go to Luna,
+// what is sent with each and an estimated cost, and sends only that batch on a click (main checks
+// the batch's one-time token). The main process owns all of it (src/main/sorter/cloud/); the key
+// never comes back here, and the per-night limit is fixed there.
 import { useCallback, useEffect, useState } from 'react'
 import type { CloudPreview, CloudStatus } from '../../preload'
 
@@ -55,10 +57,10 @@ export function SorterCloudSettings(): JSX.Element {
     }
   }, [])
   const send = useCallback(async () => {
-    if (!preview) return
-    const count = preview.toSend
+    if (!preview?.token) return
+    const token = preview.token
     setPreview(null)
-    const r = await window.sw.cloud.send(count)
+    const r = await window.sw.cloud.send(token)
     setResult(r.message)
   }, [preview])
 
@@ -70,9 +72,11 @@ export function SorterCloudSettings(): JSX.Element {
     <div className="pic-settings sorter-cloud" data-phase={st.phase}>
       <h3 className="pic-title">Ask Luna about the doubtful ones</h3>
       <p>
-        When the sorter on this Mac is unsure, it can ask OpenAI’s Luna. Only the screenshots it could not call leave this Mac, shrunk to {n(st.longEdge)} pixels, and only for
-        this step. Luna’s throwaway counts only when it is as sure as the sorter must be; if Luna is unsure, the screenshot waits for you in Review.
+        When the sorter on this Mac is unsure about a screenshot, it can ask OpenAI’s Luna. This is off until you turn it on. Only screenshots the sorter could not call are
+        sent. For each one, OpenAI receives the picture, shrunk to {n(st.longEdge)} pixels, and the app name and window title from its file name. Window titles can name
+        documents, people or folders.
       </p>
+      <p>Luna’s throwaway counts only when it is as sure as the sorter must be; if Luna is unsure, the screenshot waits for you in Review.</p>
 
       <div className="settings-row sorter-cloud-key">
         <span className="settings-row-label">OpenAI key</span>
@@ -105,32 +109,16 @@ export function SorterCloudSettings(): JSX.Element {
       {keyMsg && <div className="pic-note sorter-cloud-key-msg">{keyMsg}</div>}
 
       <label className="pic-check">
-        <input type="checkbox" checked={st.settings.enabled} onChange={(e) => void set({ enabled: e.target.checked })} />
+        <input type="checkbox" className="sorter-cloud-enabled" checked={st.settings.enabled} onChange={(e) => void set({ enabled: e.target.checked })} />
         <span>
-          Sort every night at{' '}
-          <input type="time" className="sorter-cloud-time" value={st.settings.batchTime} onChange={(e) => e.target.value && void set({ batchTime: e.target.value })} />
-        </span>
-      </label>
-      <label className="pic-check">
-        <span>
-          Ask Luna about at most{' '}
-          <input
-            type="number"
-            className="sorter-cloud-cap"
-            min={0}
-            max={5000}
-            step={10}
-            value={st.settings.nightlyCap}
-            onChange={(e) => {
-              const v = Number(e.target.value)
-              if (Number.isFinite(v)) void set({ nightlyCap: v })
-            }}
-          />{' '}
-          screenshots a night (and per Sort now)
+          Ask Luna every night at{' '}
+          <input type="time" className="sorter-cloud-time" value={st.settings.batchTime} onChange={(e) => e.target.value && void set({ batchTime: e.target.value })} /> and
+          when I press Sort now
         </span>
       </label>
       <div className="pic-note">
-        The nightly sort runs only while SlideWell is open; if the time passes while it is closed, it runs at the next launch.
+        At most {n(st.nightlyLimit)} screenshots a night go to Luna, nightly and Sort now together. The nightly sort runs only while SlideWell is open; if the time
+        passes while it is closed, it runs at the next launch.
         {st.settings.enabled && st.nextRunAt ? ` Next: ${when(st.nextRunAt)}.` : ''}
         {st.hasKey ? '' : ' Without a key, it sorts on this Mac only.'}
       </div>
@@ -172,10 +160,14 @@ export function SorterCloudSettings(): JSX.Element {
             <h3>{preview.message}</h3>
             {preview.local.message && <p>{preview.local.message}</p>}
             <p>
-              {n(preview.toSend)} screenshot{preview.toSend === 1 ? '' : 's'} the sorter could not call will be sent to OpenAI ({st.model}), shrunk to {n(st.longEdge)} pixels, in{' '}
-              {n(preview.estimate.requests)} request{preview.estimate.requests === 1 ? '' : 's'}. Estimated cost: <b>{usd(preview.estimate.usd)}</b>.
+              {n(preview.toSend)} screenshot{preview.toSend === 1 ? '' : 's'} the sorter could not call will be sent to OpenAI ({st.model}) in {n(preview.estimate.requests)} request
+              {preview.estimate.requests === 1 ? '' : 's'}. Estimated cost: <b>{usd(preview.estimate.usd)}</b>.
             </p>
-            <p>Nothing else leaves this Mac. If Luna is unsure, they stay in Review.</p>
+            <p className="sorter-cloud-what">
+              With each picture, shrunk to {n(st.longEdge)} pixels, OpenAI receives the app name and window title from the file name. Window titles can name documents,
+              people or folders. The file’s folder and the text read from the picture are not sent.
+            </p>
+            <p>If Luna is unsure, they stay in Review.</p>
             <div className="sorter-cloud-confirm-btns">
               <button className="copyref" onClick={() => setPreview(null)}>
                 Not now
