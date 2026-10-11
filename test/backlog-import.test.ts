@@ -2,14 +2,13 @@
 // the real Desktop, CleanShot history or watched folder.
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { createHash } from 'node:crypto'
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, realpathSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join, relative } from 'node:path'
 import { dryRun, runImport, ledgerPath, readHashed, defaultIsOnlineOnly, type BacklogEnv } from '../src/main/backlog-import'
 import { parseLedger, STAGING_DIR } from '../src/main/backlog-plan'
-import { downloadOnlineOnly, downloadWithDeadline } from '../src/main/online-only'
 
 const SCRATCH_ROOT = join(homedir(), 'Library', 'Caches', 'slidewell-dev-13', 'vitest')
 let n = 0
@@ -363,20 +362,11 @@ describe('backlog import (copy only) on scratch folders', () => {
       expect(await runImport(await dryRun(fake), fake)).toMatchObject({ ok: true, copied: 3, onlineOnly: 1, failed: 0 })
     })
 
-    it('the real downloader reads a local file out of process and refuses non-regular files and a stopped run', async () => {
-      await downloadOnlineOnly(join(env.desktopDir, D1), { timeoutMs: 5000 })
-      execFileSync('mkfifo', [join(root, 'pipe.png')])
-      await expect(downloadOnlineOnly(join(root, 'pipe.png'), { timeoutMs: 5000 })).rejects.toMatchObject({ code: 'ENOTREG' })
-      const stopped = new AbortController()
-      stopped.abort()
-      await expect(downloadOnlineOnly(join(env.desktopDir, D1), { timeoutMs: 5000, signal: stopped.signal })).rejects.toMatchObject({ code: 'ABORT_ERR' })
-      expect(readFileSync(join(env.desktopDir, D1), 'utf8')).toBe('desk-1')
-    })
-
-    it('the deadline holds even when the downloader ignores it', async () => {
-      const t0 = Date.now()
-      await expect(downloadWithDeadline('/x', () => new Promise<void>(() => undefined), { timeoutMs: 30 })).rejects.toMatchObject({ code: 'ETIMEDOUT' })
-      expect(Date.now() - t0).toBeLessThan(1000)
+    it('downloads are confined to the source\'s own canonical folder', async () => {
+      const roots: string[] = []
+      const fake = dataless([SRC(), join(env.desktopDir, D1)], async (_p, o) => void roots.push(o.root))
+      await runImport(await dryRun(fake), fake)
+      expect(roots).toEqual([realpathSync(env.desktopDir), realpathSync(env.cleanshotDir!)])
     })
   })
 

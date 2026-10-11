@@ -106,9 +106,15 @@ describe('planBacklogImport (copy only)', () => {
 
   it('recognises Desktop names with CleanShot\'s own template', () => {
     const tpl = compileNameTemplate(['CleanShot ', '%y', '-', '%m', '-', '%d', ' at ', '%H', '%M', 'from ', '%a', ' with ', '%t'])
-    const mine = 'CleanShot 2026-10-10 at 1147from TalkWeaver with TalkWeaver.png'
+    const mine = 'CleanShot 2026-10-10 at 1147from Notes with Shopping list.png'
     const plan = planBacklogImport(base({ desktop: [f(mine), f('notes.png')], nameTemplate: tpl }))
     expect(plan.ok && plan.items.map((i) => i.name)).toEqual([mine])
+  })
+
+  it('a template without a leading word gives no Desktop authority: a dated photo is not planned', () => {
+    const bare = compileNameTemplate(['%y', '-', '%m', '-', '%d', ' ', '%t'])
+    const plan = planBacklogImport(base({ desktop: [{ ...f('2026-10-10 holiday.png'), onlineOnly: true }], nameTemplate: bare }))
+    expect(plan.ok && plan.items).toEqual([])
   })
 
   it('counts staged files left by an interrupted run', () => {

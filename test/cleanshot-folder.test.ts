@@ -71,7 +71,7 @@ describe('CleanShot name template (fake reader only)', () => {
     const { cleanShotNameTemplate } = await import('../src/main/cleanshot-folder')
     const { parseScreenshotName } = await import('../src/main/screenshot-name')
     const tpl = await cleanShotNameTemplate(async () => HIS_RAW)
-    expect(parseScreenshotName('CleanShot 2026-10-10 at 1147from TalkWeaver with TalkWeaver.png', tpl)).toMatchObject({ app: 'TalkWeaver', window: 'TalkWeaver' })
+    expect(parseScreenshotName('CleanShot 2026-10-10 at 1147from Notes with Shopping list.png', tpl)).toMatchObject({ app: 'Notes', window: 'Shopping list' })
     expect(await cleanShotNameTemplate(async () => null)).toBeNull()
     expect(await cleanShotNameTemplate(async () => { throw new Error('no defaults') })).toBeNull()
   })

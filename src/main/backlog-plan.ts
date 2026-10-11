@@ -190,9 +190,11 @@ export function planBacklogImport(input: PlanInput): BacklogPlan {
   }
 
   const byRel = (a: ListedFile, b: ListedFile): number => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0)
+  // a trailing " 2" counts as a duplicate counter only when the name without it is also on the Desktop
+  const desktopNames = new Set(input.desktop.map((f) => f.rel.toLowerCase()))
   for (const f of [...input.desktop].sort(byRel)) {
     if (f.rel.includes('/') || f.rel.startsWith('.')) continue
-    if (!MEDIA_EXT.has(ext(f.rel)) || !parseScreenshotName(f.rel, input.nameTemplate)) continue
+    if (!MEDIA_EXT.has(ext(f.rel)) || !parseScreenshotName(f.rel, input.nameTemplate, { siblings: desktopNames })) continue
     add('desktop', input.desktopDir, f, f.rel)
   }
   if (input.cleanshotDir) {

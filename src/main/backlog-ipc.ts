@@ -3,7 +3,7 @@
  * exact plan it was shown, by id, (3) cancel, (4) read / change CleanShot's export folder on a click.
  * A run without a fresh plan id from a dry run is refused, so a real run always follows a shown plan.
  */
-import { ipcMain, shell, type WebContents } from 'electron'
+import { app, ipcMain, shell, type WebContents } from 'electron'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -25,6 +25,7 @@ export function registerBacklogIpc(deps: {
   afterRun: () => void // e.g. one explicit scan of the capture sources
   writer?: DefaultsWriter
   nameTemplateReader?: DefaultsReader // CleanShot's mediaNameTemplate (default: `defaults read`)
+  onStop?: () => void // Stop also stops the capture watcher's downloads (they share the Desktop)
 }): void {
   let shown: { id: string; plan: BacklogPlan; at: number } | null = null
   let running: AbortController | null = null
@@ -67,8 +68,11 @@ export function registerBacklogIpc(deps: {
 
   ipcMain.handle('backlog:cancel', () => {
     running?.abort()
+    deps.onStop?.()
     return Boolean(running)
   })
+  // quitting stops a run: its download child is killed, never left behind
+  app.on('will-quit', () => running?.abort())
 
   // Opens the folder holding the run logs (one JSONL file per real run).
   ipcMain.handle('backlog:show-logs', async () => {

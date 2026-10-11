@@ -10,8 +10,8 @@
  * record (triage_fts) is keyed by source-relative path and skipped on re-scan when size+mtime match.
  */
 import { createHash } from 'node:crypto'
-import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs'
-import { join, relative, extname, basename } from 'node:path'
+import { createReadStream, existsSync, lstatSync, mkdirSync, statSync } from 'node:fs'
+import { join, relative, extname, basename, dirname } from 'node:path'
 import { query, run, safeFtsQuery } from './sqlite'
 import { ocrImage, ingestScreenshot, ingestVideo, makePoster, recordWellSource } from './well'
 import { tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
@@ -102,12 +102,19 @@ export interface ScanOptions {
   /** CleanShot's own name template (cleanshot-folder.ts): Desktop names, date, app and window. */
   nameTemplate?: NameTemplate | null
   /**
-   * Download online-only files before reading them (ticket 15: the Desktop and CleanShot's folder only,
-   * never the primary Triage folder). One at a time, out of process, with a per-file timeout; after the
-   * first file that does not arrive, the rest of this scan indexes online-only files as not downloaded.
+   * Download authority (ticket 15): the canonical folder this source may download online-only files in
+   * (online-only.ts captureDownloadRoot: the Desktop or CleanShot's export folder, never the primary
+   * Triage folder). Null/absent = never download. One file at a time, out of process, with a per-file
+   * timeout. A failed file does not stop later ones; downloading ends for this scan after
+   * `downloadFailLimit` failures in a row, after `downloadBudgetMs` spent downloading, or on `signal`.
+   * Newest files are tried first.
    */
-  downloadOnlineOnly?: boolean
+  downloadRoot?: string | null
   downloadTimeoutMs?: number // default 60 s
+  downloadFailLimit?: number // default 3
+  downloadBudgetMs?: number // default 10 min
+  /** Owned by the caller: aborting it (app quit, backlog Stop) kills the active download and ends downloading. */
+  signal?: AbortSignal
   /** Test seam: the downloader (default: online-only.ts, a killable child process). */
   download?: (path: string, opts: DownloadOptions) => Promise<void>
 }
@@ -126,7 +133,7 @@ let scanChain: Promise<unknown> = Promise.resolve()
  * OneDrive **online-only placeholders** (size > 0 but zero allocated blocks) are indexed from their
  * stat alone and NEVER read — reading would force a slow download (the "stuck on nothing" symptom).
  * They are flagged `offline` so the UI can show them as "not downloaded" and skip their thumbnails.
- * Exception (ticket 15): a source scanned with `downloadOnlineOnly` (Desktop, CleanShot's folder) has
+ * Exception (ticket 15): a source scanned with a `downloadRoot` (Desktop, CleanShot's folder) has
  * its online-only files downloaded first, one at a time, out of process and with a timeout; earlier
  * "not downloaded" rows of such a source are tried again.
  */
@@ -155,16 +162,29 @@ async function scanTriageSourceNow(
   const prior = await query<ScanRow>(db, 'SELECT source, rel_path, size, mtime, offline FROM triage_fts', [])
   const seen = new Map(prior.map((r) => [`${r.source}\0${r.rel_path}`, `${r.size}:${r.mtime}`]))
   const wasOffline = new Set(prior.filter((r) => r.offline === '1').map((r) => `${r.source}\0${r.rel_path}`))
-  let downloads = Boolean(opts.downloadOnlineOnly) // switched off for the rest of this scan after one failure
+  const downloadRoot = opts.downloadRoot ?? null
+  let downloads = Boolean(downloadRoot) // ends for this scan on Stop, the failure limit or the time budget
+  let failuresInARow = 0
+  const failLimit = opts.downloadFailLimit ?? 3
+  let downloadMs = 0
   const download = opts.download ?? downloadInChild
 
   // Phase 0 — enumerate (stat only).
+  const walked = [...walk(sourceRoot, !opts.namedOnly)].map((w) => w.abs)
+  // lower-case names per folder: a trailing " 2" is a duplicate counter only when the plain name is there too
+  const siblings = new Map<string, Set<string>>()
+  for (const abs of walked) {
+    const d = dirname(abs)
+    if (!siblings.has(d)) siblings.set(d, new Set())
+    siblings.get(d)!.add(basename(abs).toLowerCase())
+  }
+  const parseName = (abs: string): ReturnType<typeof parseScreenshotName> => parseScreenshotName(basename(abs), opts.nameTemplate, { siblings: siblings.get(dirname(abs)) })
   const files: ScanItem[] = []
-  for (const { abs } of walk(sourceRoot, !opts.namedOnly)) {
+  for (const abs of walked) {
     const ext = extname(abs).slice(1).toLowerCase()
     const kind = VIDEO_EXT.has(ext) ? 'video' : IMAGE_EXT.has(ext) ? 'image' : null
     if (!kind) continue
-    if (opts.namedOnly && !parseScreenshotName(basename(abs), opts.nameTemplate)) continue
+    if (opts.namedOnly && !parseName(abs)) continue
     try {
       const st = statSync(abs)
       files.push({ abs, rel: relative(sourceRoot, abs), kind, ext, size: st.size, mtime: Math.round(st.mtimeMs), offline: st.size > 0 && st.blocks === 0 })
@@ -174,6 +194,7 @@ async function scanTriageSourceNow(
     if (files.length % 200 === 0) onProgress?.(`found ${files.length} media files…`)
   }
   onProgress?.(`found ${files.length} media files — reading…`)
+  files.sort((a, b) => b.mtime - a.mtime || (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0)) // newest first
 
   // Phase 1 — process new/changed files one at a time, committing + reporting per file.
   let indexed = 0
@@ -187,15 +208,24 @@ async function scanTriageSourceNow(
       if (f.offline) offlineN++
       continue
     }
-    if (f.offline && downloads) {
-      try {
-        onProgress?.(`downloading ${basename(f.abs)}…`)
-        await downloadWithDeadline(f.abs, download, { timeoutMs: opts.downloadTimeoutMs ?? 60_000 })
-        const st = statSync(f.abs)
-        if (st.isFile() && st.blocks > 0) f.offline = false
-        else downloads = false
-      } catch {
-        downloads = false // offline or stuck: do not wait on every other file in this scan
+    if (f.offline && downloads && downloadRoot) {
+      if (opts.signal?.aborted || downloadMs >= (opts.downloadBudgetMs ?? 600_000)) downloads = false
+      else {
+        const t0 = Date.now()
+        try {
+          onProgress?.(`downloading ${basename(f.abs)}…`)
+          await downloadWithDeadline(f.abs, download, { timeoutMs: opts.downloadTimeoutMs ?? 60_000, signal: opts.signal, root: downloadRoot })
+          const st = lstatSync(f.abs) // the very path, never through a link
+          if (st.isFile() && st.blocks > 0) {
+            f.offline = false
+            failuresInARow = 0
+          } else failuresInARow++
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException)?.code === 'ABORT_ERR') downloads = false
+          else failuresInARow++ // this file stays "not downloaded"; later files are still tried
+        }
+        downloadMs += Date.now() - t0
+        if (failuresInARow >= failLimit) downloads = false // offline: do not wait on every file in turn
       }
     }
     const pathId = (): string => 'p:' + createHash('sha256').update(`${f.rel}:${sig}`).digest('hex').slice(0, 11)
@@ -228,7 +258,7 @@ async function scanTriageSourceNow(
       }
     }
     const name = f.abs.split('/').pop() || f.rel
-    const parsed = parseScreenshotName(name, opts.nameTemplate)
+    const parsed = parseName(f.abs)
     await run(
       db,
       `DELETE FROM triage_fts WHERE rel_path = ? AND source = ?;

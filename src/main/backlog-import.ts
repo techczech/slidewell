@@ -35,7 +35,8 @@
  * on cancel.
  *
  * Online-only SOURCES (ticket 15; reverses the earlier "never hydrate" rule for the Desktop and CleanShot
- * history only): one at a time, the file is downloaded by a child process (online-only.ts) with a
+ * history only): one at a time, the file is downloaded by a child process (online-only.ts: it reads only the very file checked here,
+ * inside the source's canonical folder) with a
  * per-file timeout (default 120 s) and Stop, then re-checked; only once its bytes are on disk is it read
  * and copied as above. A file that does not arrive in time is left out and reported; the next run tries
  * again. Recorded copies in the watched folder are still never downloaded.
@@ -574,8 +575,11 @@ export async function runImport(
   async function downloadSource(item: PlanItem): Promise<void> {
     const timeoutMs = env.downloadTimeoutMs ?? DOWNLOAD_TIMEOUT_MS
     await log('downloading', { source: item.source, from: item.from, size: item.size })
+    // download authority: the source's own canonical folder (Desktop or CleanShot history), resolved for this run
+    const root = item.source === 'desktop' ? dirs.desktop : dirs.cleanshot
+    if (!root) throw new Skip('online-only, and its folder is gone; left out', 'online-only')
     try {
-      await downloadWithDeadline(item.from, ops.download, { timeoutMs, signal })
+      await downloadWithDeadline(item.from, ops.download, { timeoutMs, signal, root })
     } catch (e) {
       const code = errCode(e)
       if (code === 'ABORT_ERR') throw e
