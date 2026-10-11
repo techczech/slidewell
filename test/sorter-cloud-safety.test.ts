@@ -11,13 +11,13 @@ import { tmpdir } from 'node:os'
 vi.mock('electron', () => ({ ipcMain: { handle: () => undefined } }))
 const { CloudSorter, applySettingsPatch, normaliseCloudSettings, NIGHTLY_LIMIT, PREPARED_TTL_MS } = await import('../src/main/sorter/cloud/service')
 const { SorterStore, CLAIM_STALE_MS } = await import('../src/main/sorter/store')
-const { SORTER_VERSION } = await import('../src/main/sorter/decide')
+const { DEFAULT_THRESHOLDS, SORTER_VERSION } = await import('../src/main/sorter/decide')
 const { LUNA } = await import('../src/main/sorter/cloud/luna')
 const { readVerified, contentHash } = await import('../src/main/sorter/cloud/images')
 const { makeCloudWell, readProposal, lunaStub, cloudDeps, hashOf, bytesOf, relOf, sourceOf } = await import('./sorter-cloud-fixture')
 
 const KEY = 'sk-test-FAKEKEY0123456789abcdefWXYZ'
-const SCOPE = { sorterVersion: SORTER_VERSION, model: LUNA.model, promptVersion: LUNA.promptVersion }
+const SCOPE = { sorterVersion: SORTER_VERSION, provider: 'openai' as const, model: LUNA.model, promptVersion: LUNA.promptVersion, throwawayAt: DEFAULT_THRESHOLDS.throwaway }
 
 let dirs: string[] = []
 afterEach(() => {

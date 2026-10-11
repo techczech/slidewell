@@ -11,6 +11,10 @@
  *     the floor); unsure, or a less confident throwaway → stays doubtful for the review screen. The
  *     row records who answered: decidedBy names the provider's model ('luna' = OpenAI's Luna,
  *     'haiku' = Anthropic's Haiku) and decidedModel the exact model id.
+ *   isConfident(): whether an answer is a decision (applyCloud would act on it) or leaves the
+ *     screenshot unsure. store.ts states the same test in SQL (CONFIDENT_SQL); the two must agree.
+ *   settledAnswer(): of the answers the providers gave for one screenshot (at most one each), the one
+ *     a local re-sort applies: a confident keep, else a confident throwaway, else the one asked last.
  *   applyLuna(): applyCloud for Luna.
  */
 import { checkThresholds, decide, DEFAULT_THRESHOLDS, type Proposal, type Thresholds, type Verdict } from '../decide'
@@ -36,6 +40,29 @@ const pct = (x: number): string => `${Math.round(x * 100)}%`
 const lower = (s: string): string => (s ? s[0].toLowerCase() + s.slice(1) : s)
 const stop = (s: string): string => s.replace(/[.\s]+$/, '')
 
+/**
+ * Whether a cloud model's answer is a decision: keep always, throwaway only at the throwaway
+ * threshold. Anything else (unsure, or a less confident throwaway) leaves the screenshot unsure.
+ */
+export function isConfident(answer: Pick<LunaAnswer, 'verdict' | 'confidence'>, thresholds: Thresholds = DEFAULT_THRESHOLDS): boolean {
+  return answer.verdict === 'keep' || (answer.verdict === 'throwaway' && answer.confidence >= checkThresholds(thresholds).throwaway)
+}
+
+/**
+ * The one answer that stands for a screenshot more than one provider has answered. A second provider
+ * is asked only about what the first left unsure, so at most one answer is a decision; should the
+ * thresholds have moved since and two now are, keep wins (the keep-bias). With no decision, the
+ * answer asked last stands, as it did when it arrived. Null when there is none.
+ */
+export function settledAnswer<A extends Pick<LunaAnswer, 'verdict' | 'confidence'> & { askedAt: string }>(answers: readonly A[], thresholds: Thresholds = DEFAULT_THRESHOLDS): A | null {
+  const rank = (a: A): number => (!isConfident(a, thresholds) ? 0 : a.verdict === 'keep' ? 2 : 1)
+  let best: A | null = null
+  for (const a of answers) {
+    if (!best || rank(a) > rank(best) || (rank(a) === rank(best) && a.askedAt > best.askedAt)) best = a
+  }
+  return best
+}
+
 /** The proposal after a cloud model's answer. A proposal that is not doubtful is returned unchanged. */
 export function applyCloud(local: CascadeRow, answer: LunaAnswer, who: CloudVoice, thresholds: Thresholds = DEFAULT_THRESHOLDS): CascadeRow {
   if (local.proposal !== 'doubtful') return local
@@ -45,7 +72,7 @@ export function applyCloud(local: CascadeRow, answer: LunaAnswer, who: CloudVoic
   if (answer.verdict === 'keep') {
     return { proposal: 'keep', confidence: answer.confidence, pKeep: answer.confidence, reason: said, ...by }
   }
-  if (answer.verdict === 'throwaway' && answer.confidence >= t.throwaway) {
+  if (answer.verdict === 'throwaway' && isConfident(answer, t)) {
     return { proposal: 'throwaway', confidence: answer.confidence, pKeep: 1 - answer.confidence, reason: said, ...by }
   }
   const reason =

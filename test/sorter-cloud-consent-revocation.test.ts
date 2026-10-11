@@ -13,14 +13,14 @@ const ipc = vi.hoisted(() => new Map<string, (e: { sender: unknown }, ...args: u
 vi.mock('electron', () => ({ ipcMain: { handle: (channel: string, fn: (e: { sender: unknown }, ...args: unknown[]) => unknown) => void ipc.set(channel, fn) } }))
 const { CloudSorter, changeSettings, normaliseCloudSettings, registerCloudIpc } = await import('../src/main/sorter/cloud/service')
 const { SorterStore } = await import('../src/main/sorter/store')
-const { SORTER_VERSION } = await import('../src/main/sorter/decide')
+const { DEFAULT_THRESHOLDS, SORTER_VERSION } = await import('../src/main/sorter/decide')
 const { LUNA } = await import('../src/main/sorter/cloud/luna')
 const { readVerified } = await import('../src/main/sorter/cloud/images')
 const { makeCloudWell, lunaStub, cloudDeps, hashOf } = await import('./sorter-cloud-fixture')
 type HttpPost = import('../src/main/sorter/cloud/client').HttpPost
 type StoredCloudSettings = import('../src/main/sorter/cloud/service').StoredCloudSettings
 
-const SCOPE = { sorterVersion: SORTER_VERSION, model: LUNA.model, promptVersion: LUNA.promptVersion }
+const SCOPE = { sorterVersion: SORTER_VERSION, provider: 'openai' as const, model: LUNA.model, promptVersion: LUNA.promptVersion, throwawayAt: DEFAULT_THRESHOLDS.throwaway }
 
 let dirs: string[] = []
 afterEach(() => {

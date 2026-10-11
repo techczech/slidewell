@@ -17,7 +17,12 @@
 //      own ciphertext, and an OpenAI-shaped key is refused there; Sort now shows the list-price estimate
 //      and the free-credits line; only the two new doubtful screenshots go, to /v1/messages with
 //      x-api-key and no Bearer token; the answers are recorded with decided_by 'haiku' and the model.
-//   5. Neither made-up key appears in config.json, the app's stdout/stderr or the profile folder.
+//   5. A second opinion (ticket 17): the scratch triage.db starts with the answers table as it was
+//      before there was a row per provider, holding one row; the app migrates it on open and the row
+//      survives. The Haiku run in step 4 also gets the screenshot Luna was unsure about, shown as its
+//      own number in the app's confirm box and in main's dialogs. Back with Luna, the one Haiku was
+//      unsure about goes once; after that neither provider is offered anything, whichever is selected.
+//   6. Neither made-up key appears in config.json, the app's stdout/stderr or the profile folder.
 //
 // Run after `npm run build` (or `npx electron-vite build`):  node e2e/sorter-cloud.mjs
 // Optional: SLIDEWELL_CLOUD_SCRATCH (default ~/Library/Caches/slidewell-e2e-sorter-cloud),
@@ -80,6 +85,10 @@ for (const s of shots) {
           CREATE TABLE triage_decisions (hash TEXT PRIMARY KEY, state TEXT NOT NULL, decided_at TEXT, well_id TEXT);
           CREATE TABLE sorter_proposals (hash TEXT PRIMARY KEY, proposal TEXT NOT NULL, confidence REAL NOT NULL, p_keep REAL NOT NULL, reason TEXT NOT NULL, rule TEXT,
             sorter_version TEXT NOT NULL, model_id TEXT, proposed_at TEXT NOT NULL, throwaway_since TEXT, answered_at TEXT, answer TEXT, decided_by TEXT);`)
+  // the answers table as it was before ticket 17 (one row per screenshot), with one row to carry over
+  t.exec(`CREATE TABLE sorter_cloud_answers (hash TEXT PRIMARY KEY, verdict TEXT NOT NULL CHECK (verdict IN ('keep', 'throwaway', 'unsure')), confidence REAL NOT NULL,
+            reason TEXT NOT NULL, model TEXT NOT NULL, prompt_version TEXT NOT NULL, asked_at TEXT NOT NULL);`)
+  t.prepare("INSERT INTO sorter_cloud_answers (hash, verdict, confidence, reason, model, prompt_version, asked_at) VALUES ('e2e-old-answer', 'unsure', 0.5, 'An earlier answer', 'gpt-6-luna', 'luna-prompt-1', '2026-10-08T02:00:00.000Z')").run()
   const fts = t.prepare("INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, offline, ocr_text, source, taken_at, app, window_title) VALUES (?, 'image', ?, ?, 'png', ?, ?, '0', '', ?, ?, 'Test App', ?)")
   const prop = t.prepare('INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, rule, sorter_version, model_id, proposed_at, throwaway_since, decided_by) VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)')
   const now = new Date().toISOString()
@@ -97,6 +106,14 @@ writeFileSync(
   JSON.stringify({ archiveRoot: join(scratch, 'no-archive'), wellRoot: well, othersArchiveRoot: join(scratch, 'others'), vaultRoot: join(scratch, 'no-vault'), pictureSearch: { paused: true, includeWell: false }, sorterCloud: { since: new Date().toISOString() } }, null, 2),
   'utf8'
 )
+const answerRows = (where = '1') => {
+  const db = new DatabaseSync(join(well, 'triage.db'), { readOnly: true })
+  try {
+    return { columns: db.prepare("SELECT name, pk FROM pragma_table_info('sorter_cloud_answers')").all(), rows: db.prepare(`SELECT * FROM sorter_cloud_answers WHERE ${where} ORDER BY hash, provider`).all() }
+  } finally {
+    db.close()
+  }
+}
 const proposal = (hash) => {
   const db = new DatabaseSync(join(well, 'triage.db'), { readOnly: true })
   try {
@@ -220,6 +237,7 @@ try {
   const openaiRow = section.locator('.sorter-cloud-key-openai')
   const anthropicRow = section.locator('.sorter-cloud-key-anthropic')
   check('Settings shows the Luna section with no key yet, and a key field for each provider', (await openaiRow.locator('.sorter-cloud-key-input').count()) === 1 && (await anthropicRow.locator('.sorter-cloud-key-input').count()) === 1)
+  check('Settings says the other provider can be asked once about what the first left unsure', /When one was unsure about a screenshot, the other can be asked about it once/.test(await section.innerText()) && !/is not sent to the other/.test(await section.innerText()))
   check('Luna is the provider until he chooses otherwise', (await section.locator('input.sorter-cloud-provider-openai').isChecked()) && !(await section.locator('input.sorter-cloud-provider-anthropic').isChecked()))
   await section.screenshot({ path: join(screens, 'sorter-cloud-settings-no-key.png') })
   await openaiRow.locator('.sorter-cloud-key-input').fill(FAKE_KEY)
@@ -306,7 +324,7 @@ try {
   await sleep(300)
   await win.screenshot({ path: join(screens, 'sorter-cloud-review.png') })
 
-  // 4. Haiku as the second provider. Two new doubtful screenshots arrive (Luna has answered the first three).
+  // 4. Haiku as the second provider. Two new doubtful screenshots arrive; of the first three, Luna decided two and was unsure about one.
   const more = [
     { hash: 'e2e-haiku-keep', proposal: 'doubtful', window: 'keep-diagram', colour: '#7b3fb3', takenAt: '2026-10-10T10:00:00' },
     { hash: 'e2e-haiku-unsure', proposal: 'doubtful', window: 'blurry-page', colour: '#b36d3f', takenAt: '2026-10-10T09:00:00' }
@@ -340,6 +358,7 @@ try {
   await sleep(300)
   const switchDialog = (await dialogsShown()).at(-1)
   check('choosing Haiku while asking is on raises main’s own dialog, naming Anthropic and what it receives', Boolean(switchDialog?.parent) && /Ask Haiku instead of Luna\?/.test(switchDialog?.message ?? '') && /Anthropic \(claude-haiku-5-5\) receives the picture/.test(switchDialog?.detail ?? '') && /app name and window title/.test(switchDialog?.detail ?? '') && /Estimated cost at list price/.test(switchDialog?.detail ?? '') && /free monthly Anthropic API credits/.test(switchDialog?.detail ?? ''), JSON.stringify(switchDialog))
+  check('that dialog counts the one Luna was unsure about as its own number', /3 doubtful screenshots are waiting now, 1 of them one Luna was unsure about; 3 screenshots would go at the next sort\./.test(switchDialog?.detail ?? ''), switchDialog?.detail)
   const afterDecline = await win.evaluate(() => window.sw.cloud.status())
   check('declined: Luna is still the provider, still on, and Anthropic has no opt-in', afterDecline.settings.provider === 'openai' && afterDecline.settings.enabled === true && !readCfg().anthropicOptedInAt && (await section.locator('input.sorter-cloud-provider-openai').isChecked()), JSON.stringify(afterDecline.settings))
   await section.locator('input.sorter-cloud-provider-anthropic').click() // confirmed
@@ -364,22 +383,27 @@ try {
   await section.locator('button.sorter-cloud-sort').click()
   await dialog.waitFor({ timeout: 20000 })
   const haikuText = await dialog.innerText()
-  check('Sort now with Haiku: count, list-price estimate, the free-credits line and the company', /Ask Haiku about 2 screenshots\?/.test(haikuText) && /Estimated cost at list price: (about \$|under \$)/.test(haikuText) && /free monthly Anthropic API credits/.test(haikuText) && /sent to Anthropic \(claude-haiku-5-5\)/.test(haikuText) && !/OpenAI|Luna/.test(haikuText), haikuText)
+  check('Sort now with Haiku: count, list-price estimate, the free-credits line and the company', /Ask Haiku about 3 screenshots, 1 of them one Luna was unsure about\?/.test(haikuText) && /Estimated cost at list price: (about \$|under \$)/.test(haikuText) && /free monthly Anthropic API credits/.test(haikuText) && /sent to Anthropic \(claude-haiku-5-5\)/.test(haikuText) && !/OpenAI/.test(haikuText), haikuText)
+  check('the confirm box gives the second opinion as its own number', /3 screenshots the sorter could not call, 1 of them one Luna was unsure about, will be sent to Anthropic \(claude-haiku-5-5\) in 1 request\./.test(haikuText.replace(/\s+/g, ' ')), haikuText)
   await win.screenshot({ path: join(screens, 'sorter-cloud-confirm-haiku.png') })
   await answerDialogs([true])
   await dialog.locator('button.sorter-cloud-send').click()
   await win.waitForFunction(() => /Asked Haiku about/.test(document.querySelector('.sorter-cloud-result')?.textContent ?? ''), null, { timeout: 60000 })
   const haikuResult = await result.innerText()
   const haikuSend = (await dialogsShown()).at(-1)
-  check('main’s send dialog names Haiku and Anthropic', /Send 2 screenshots to Haiku\?/.test(haikuSend?.message ?? '') && /will go to Anthropic/.test(haikuSend?.detail ?? '') && !/OpenAI/.test(haikuSend?.detail ?? ''), JSON.stringify(haikuSend))
-  check('the run reports what Haiku said', /Asked Haiku about 2 screenshots: 1 keep, 0 throwaway\. 1 screenshot still needs a look\./.test(haikuResult), haikuResult)
-  check('only the two new doubtful screenshots went to Anthropic; nothing more went to OpenAI', JSON.stringify(seenHaiku.flatMap((s) => s.windows).sort()) === JSON.stringify(['blurry-page', 'keep-diagram']) && seen.length === lunaCalls, JSON.stringify(seenHaiku.map((s) => s.windows)))
+  check('main’s send dialog names Haiku and Anthropic', /Send 3 screenshots to Haiku\?/.test(haikuSend?.message ?? '') && /^3 screenshots the sorter could not call, 1 of them one Luna was unsure about, will go to Anthropic in 1 request\./.test(haikuSend?.detail ?? '') && !/OpenAI/.test(haikuSend?.detail ?? ''), JSON.stringify(haikuSend))
+  check('the run reports what Haiku said', /Asked Haiku about 3 screenshots: 1 keep, 0 throwaway\. 2 screenshots still need a look\./.test(haikuResult), haikuResult)
+  check('the two new doubtful screenshots and the one Luna was unsure about went to Anthropic, not the two Luna decided; nothing more went to OpenAI', JSON.stringify(seenHaiku.flatMap((s) => s.windows).sort()) === JSON.stringify(['blurry-chat', 'blurry-page', 'keep-diagram']) && seen.length === lunaCalls, JSON.stringify(seenHaiku.map((s) => s.windows)))
   check('the request: Messages API path, claude-haiku-5-5, forced answer tool, x-api-key and version headers, no Bearer token', seenHaiku.length === 1 && seenHaiku.every((s) => s.path === '/v1/messages' && s.model === 'claude-haiku-5-5' && s.toolChoice?.type === 'tool' && s.toolChoice?.name === s.tool && s.apiKey === FAKE_ANT_KEY && s.version === '2023-06-01' && s.auth === undefined && s.maxTokens >= 512), JSON.stringify(seenHaiku.map((s) => ({ ...s, apiKey: s.apiKey === FAKE_ANT_KEY }))))
-  check('each picture went as a base64 JPEG block, shrunk to 1456 px on its long edge', seenHaiku.flatMap((s) => s.dims).length === 2 && seenHaiku.flatMap((s) => s.dims).every((d) => d.format === 'jpeg' && d.long === 1456 && d.declared === 'base64:image/jpeg'), JSON.stringify(seenHaiku.map((s) => s.dims)))
+  check('each picture went as a base64 JPEG block, shrunk to 1456 px on its long edge', seenHaiku.flatMap((s) => s.dims).length === 3 && seenHaiku.flatMap((s) => s.dims).every((d) => d.format === 'jpeg' && d.long === 1456 && d.declared === 'base64:image/jpeg'), JSON.stringify(seenHaiku.map((s) => s.dims)))
   const hk = proposal('e2e-haiku-keep')
   const hu = proposal('e2e-haiku-unsure')
   check("Haiku's keep became keep, recorded as haiku with its model", hk.proposal === 'keep' && hk.decided_by === 'haiku' && hk.decided_model === 'claude-haiku-5-5', JSON.stringify(hk))
   check("Haiku's unsure stays doubtful, in Haiku's name", hu.proposal === 'doubtful' && hu.decided_by === 'haiku' && /Haiku was not sure either/.test(hu.reason), JSON.stringify(hu))
+  const second = proposal('e2e-doubt-unsure')
+  check('the one both were unsure about still waits in Review, with Haiku’s words', second.proposal === 'doubtful' && second.decided_by === 'haiku' && /Haiku was not sure either/.test(second.reason), JSON.stringify(second))
+  const both = answerRows(`hash = '${realHash.get('e2e-doubt-unsure')}'`).rows
+  check('its answers are kept per provider: Luna’s row beside Haiku’s', JSON.stringify(both.map((r) => [r.provider, r.model, r.verdict])) === JSON.stringify([['anthropic', 'claude-haiku-5-5', 'unsure'], ['openai', 'gpt-6-luna', 'unsure']]), JSON.stringify(both))
   check("Luna's earlier decisions are untouched", proposal('e2e-doubt-keep').decided_by === 'luna' && proposal('e2e-doubt-keep').decided_model === 'gpt-6-luna' && proposal('e2e-doubt-toss').proposal === 'throwaway' && proposal('e2e-local-keep').decided_model === null, JSON.stringify(proposal('e2e-doubt-keep')))
   const hosts = await app.evaluate(() => globalThis.__cloudE2E.hosts ?? [])
   check('the Haiku run called api.anthropic.com only', hosts.at(-1) === 'api.anthropic.com' && hosts.filter((h) => h === 'api.anthropic.com').length === 1, JSON.stringify(hosts))
@@ -395,6 +419,28 @@ try {
   check('Review names Haiku where Haiku was asked, beside Luna’s', stripHaiku.includes('asked Haiku') && stripHaiku.includes('asked Luna'), stripHaiku)
   await sleep(300)
   await win.screenshot({ path: join(screens, 'sorter-cloud-review-haiku.png') })
+
+  // 5. back with Luna (already agreed to, so no dialog): the one Haiku was unsure about goes, once
+  const dialogsBefore = (await dialogsShown()).length
+  await win.evaluate(() => window.sw.cloud.setSettings({ provider: 'openai' }))
+  const backPrep = await win.evaluate(() => window.sw.cloud.prepare())
+  check('back with Luna: only the one Haiku was unsure about is offered, as a second opinion', backPrep.provider === 'openai' && backPrep.blocked === null && backPrep.toSend === 1 && backPrep.secondOpinions === 1 && backPrep.message === 'Ask Luna about 1 screenshot, one Haiku was unsure about?', JSON.stringify(backPrep))
+  await answerDialogs([true])
+  const backRun = await win.evaluate((token) => window.sw.cloud.send(token), backPrep.token)
+  check('it went to OpenAI and nothing else did', backRun.asked === 1 && seen.length === lunaCalls + 1 && JSON.stringify(seen.at(-1).windows) === JSON.stringify(['blurry-page']) && seenHaiku.length === 1, JSON.stringify(backRun))
+  const stubCalls = seen.length + seenHaiku.length
+  let quiet = true
+  for (const provider of ['openai', 'anthropic', 'openai', 'anthropic']) {
+    await win.evaluate((provider) => window.sw.cloud.setSettings({ provider }), provider)
+    const p = await win.evaluate(() => window.sw.cloud.prepare())
+    if (p.provider !== provider || p.blocked !== 'nothing-doubtful' || p.toSend !== 0 || p.token !== null) quiet = false
+  }
+  check('once both have answered, neither is offered anything, whichever is selected', quiet && seen.length + seenHaiku.length === stubCalls && (await dialogsShown()).length === dialogsBefore + 1)
+  const table = answerRows()
+  check('the answers table was migrated to one row per screenshot and provider', JSON.stringify(table.columns.filter((c) => c.pk).map((c) => c.name)) === JSON.stringify(['hash', 'provider']), JSON.stringify(table.columns))
+  const carried = table.rows.find((r) => r.hash === 'e2e-old-answer')
+  check('the row stored before the upgrade survived, attributed to OpenAI', carried?.provider === 'openai' && carried?.verdict === 'unsure' && carried?.reason === 'An earlier answer' && carried?.model === 'gpt-6-luna' && carried?.asked_at === '2026-10-08T02:00:00.000Z', JSON.stringify(carried))
+  check('no screenshot has more than one answer per provider or more than two in all', Object.values(Object.groupBy(table.rows, (r) => r.hash)).every((rs) => rs.length <= 2 && new Set(rs.map((r) => r.provider)).size === rs.length), JSON.stringify(table.rows.map((r) => [r.hash, r.provider])))
 } catch (e) {
   failed++
   console.log(`FAIL  ${e?.stack ?? e}`)
@@ -403,7 +449,7 @@ try {
   server.close()
 }
 
-// 5. leakage: config.json, the app's output, every file in the profile
+// 6. leakage: config.json, the app's output, every file in the profile
 const logs = output.join('')
 check('the app log has no key of either provider', !logs.includes(FAKE_KEY) && !logs.includes(FAKE_ANT_KEY) && !logs.includes('LEAKCHECK') && !/sk-ant|sk-test/.test(logs))
 check('the app log names the Haiku run', /\[sorter-cloud\] manual run \(Haiku\)/.test(logs), logs.slice(0, 400))

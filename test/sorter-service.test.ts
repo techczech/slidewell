@@ -204,9 +204,9 @@ describe('sorter service: the cascade on re-sort (ticket 07)', () => {
     const st = new SorterStore(w)
     st.saveCloudResults(
       [
-        { hash: 'new0', verdict: 'keep', confidence: 0.9, reason: 'A chart worth keeping.', model: 'gpt-6-luna', promptVersion: 'luna-prompt-1', askedAt: '2026-10-09T02:00:00Z' },
-        { hash: 'new1', verdict: 'throwaway', confidence: 0.9995, reason: 'A settings pane.', model: 'gpt-6-luna', promptVersion: 'luna-prompt-1', askedAt: '2026-10-09T02:00:00Z' },
-        { hash: 'new2', verdict: 'throwaway', confidence: 0.99, reason: 'A file picker.', model: 'an-older-model', promptVersion: 'luna-prompt-1', askedAt: '2026-10-09T02:00:00Z' }
+        { hash: 'new0', verdict: 'keep', confidence: 0.9, reason: 'A chart worth keeping.', provider: 'openai', model: 'gpt-6-luna', promptVersion: 'luna-prompt-1', askedAt: '2026-10-09T02:00:00Z' },
+        { hash: 'new1', verdict: 'throwaway', confidence: 0.9995, reason: 'A settings pane.', provider: 'openai', model: 'gpt-6-luna', promptVersion: 'luna-prompt-1', askedAt: '2026-10-09T02:00:00Z' },
+        { hash: 'new2', verdict: 'throwaway', confidence: 0.99, reason: 'A file picker.', provider: 'openai', model: 'an-older-model', promptVersion: 'luna-prompt-1', askedAt: '2026-10-09T02:00:00Z' }
       ],
       []
     )
@@ -247,10 +247,10 @@ describe('sorter service: the cascade on re-sort (ticket 07)', () => {
     const st = new SorterStore(w)
     st.saveCloudResults(
       [
-        { hash: 'new0', verdict: 'keep', confidence: 0.9, reason: 'A chart worth keeping.', model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1', askedAt: '2026-10-11T02:00:00Z' },
-        { hash: 'new1', verdict: 'unsure', confidence: 0.5, reason: 'Hard to tell.', model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1', askedAt: '2026-10-11T02:00:00Z' },
+        { hash: 'new0', verdict: 'keep', confidence: 0.9, reason: 'A chart worth keeping.', provider: 'anthropic', model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1', askedAt: '2026-10-11T02:00:00Z' },
+        { hash: 'new1', verdict: 'unsure', confidence: 0.5, reason: 'Hard to tell.', provider: 'anthropic', model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1', askedAt: '2026-10-11T02:00:00Z' },
         // Haiku's model under Luna's prompt version is not an answer either provider gave
-        { hash: 'new2', verdict: 'keep', confidence: 0.9, reason: 'A chart.', model: 'claude-haiku-5-5', promptVersion: 'luna-prompt-1', askedAt: '2026-10-11T02:00:00Z' }
+        { hash: 'new2', verdict: 'keep', confidence: 0.9, reason: 'A chart.', provider: 'anthropic', model: 'claude-haiku-5-5', promptVersion: 'luna-prompt-1', askedAt: '2026-10-11T02:00:00Z' }
       ],
       []
     )
@@ -262,6 +262,42 @@ describe('sorter service: the cascade on re-sort (ticket 07)', () => {
       expect(row('new0')).toMatchObject({ proposal: 'keep', decided_by: 'haiku', decided_model: 'claude-haiku-5-5', reason: 'A chart worth keeping' })
       expect(row('new1')).toMatchObject({ proposal: 'doubtful', decided_by: 'haiku', decided_model: 'claude-haiku-5-5', reason: 'Not sure, and Haiku was not sure either: hard to tell' })
       expect(row('new2')).toMatchObject({ proposal: 'doubtful', decided_by: null, decided_model: null })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('re-applies the answer that stands when both providers have answered a screenshot (ticket 17)', async () => {
+    const w = well(70, 30)
+    const svc = new SorterService(deps(w, { thresholds: { throwaway: 0.999, keep: 0.999 } }))
+    expect((await svc.trainAndTest()).ok).toBe(true)
+    expect(await svc.sortUndecided()).toMatchObject({ ok: true, counts: { doubtful: 3 } })
+    const luna = { provider: 'openai' as const, model: 'gpt-6-luna', promptVersion: 'luna-prompt-1', askedAt: '2026-10-10T02:00:00Z' }
+    const haiku = { provider: 'anthropic' as const, model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1', askedAt: '2026-10-11T02:00:00Z' }
+    const st = new SorterStore(w)
+    st.saveCloudResults(
+      [
+        // Luna unsure first, then Haiku's keep: Haiku's decision stands
+        { hash: 'new0', verdict: 'unsure', confidence: 0.5, reason: 'Hard to tell.', ...luna },
+        { hash: 'new0', verdict: 'keep', confidence: 0.9, reason: 'A chart worth keeping.', ...haiku },
+        // both unsure: the one asked last (Haiku) gives the words
+        { hash: 'new1', verdict: 'unsure', confidence: 0.5, reason: 'Hard to tell.', ...luna },
+        { hash: 'new1', verdict: 'unsure', confidence: 0.4, reason: 'Could be either.', ...haiku },
+        // Haiku unsure first, then Luna's sure throwaway a day later: Luna's decision stands
+        { hash: 'new2', verdict: 'unsure', confidence: 0.5, reason: 'Hard to tell.', ...haiku, askedAt: '2026-10-09T02:00:00Z' },
+        { hash: 'new2', verdict: 'throwaway', confidence: 0.9995, reason: 'A settings pane.', ...luna }
+      ],
+      []
+    )
+    st.close()
+    await svc.sortUndecided()
+    const db = new DatabaseSync(join(w, 'triage.db'), { readOnly: true })
+    try {
+      const row = (h: string): unknown => db.prepare('SELECT proposal, decided_by, decided_model, reason FROM sorter_proposals WHERE hash = ?').get(h)
+      expect(row('new0')).toMatchObject({ proposal: 'keep', decided_by: 'haiku', decided_model: 'claude-haiku-5-5', reason: 'A chart worth keeping' })
+      expect(row('new1')).toMatchObject({ proposal: 'doubtful', decided_by: 'haiku', decided_model: 'claude-haiku-5-5', reason: 'Not sure, and Haiku was not sure either: could be either' })
+      expect(row('new2')).toMatchObject({ proposal: 'throwaway', decided_by: 'luna', decided_model: 'gpt-6-luna', reason: 'A settings pane' })
+      expect(db.prepare('SELECT COUNT(*) AS n FROM sorter_cloud_answers').get()).toEqual({ n: 6 }) // a re-sort leaves both rows of each
     } finally {
       db.close()
     }

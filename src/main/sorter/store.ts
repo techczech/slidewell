@@ -18,14 +18,16 @@
  *                                                      OpenAI's Luna, haiku = Anthropic's Haiku
  *                    decided_model TEXT)               the model id when a cloud model made the call
  *                                                      (gpt-6-luna, claude-haiku-5-5); NULL otherwise
- *   sorter_cloud_answers(hash TEXT PRIMARY KEY, verdict TEXT, confidence REAL, reason TEXT,
- *                    model TEXT, prompt_version TEXT, asked_at TEXT)
- *                                                      the cloud model's answer per screenshot (Luna's or
- *                                                      Haiku's; model says which), so a screenshot is asked
- *                                                      once and its answer re-applied on later local sorts
- *                                                      (cloud/service.ts). An answer under either provider's
- *                                                      current model + prompt counts: a screenshot one of them
- *                                                      has answered is not sent to the other
+ *   sorter_cloud_answers(hash TEXT, provider TEXT,    one row per screenshot AND provider (PRIMARY KEY
+ *                    verdict TEXT, confidence REAL,    (hash, provider)): what that provider's model answered,
+ *                    reason TEXT, model TEXT,          so a provider is asked about a screenshot once and the
+ *                    prompt_version TEXT,              answer is re-applied on later local sorts. provider is
+ *                    asked_at TEXT)                    'openai' | 'anthropic', or 'unknown' for a row stored
+ *                                                      before the column existed whose model id is neither
+ *                                                      provider's (migrateCloudAnswers). A row counts as that
+ *                                                      provider's answer only under its current model + prompt.
+ *                                                      Who may be asked: eligibleSql. Until ticket 17 the table
+ *                                                      was keyed by hash alone (one row per screenshot)
  *   sorter_cloud_claims(hash TEXT PRIMARY KEY, run_id TEXT, claimed_at TEXT, counted INTEGER)
  *                                                      screenshots a cloud run has claimed and is sending now;
  *                                                      claimed in one write transaction, so two processes can
@@ -53,6 +55,7 @@ import type { Classifier } from './classifier'
 import type { Proposal } from './decide'
 import type { DecidedBy } from './cloud/cascade'
 import type { LunaAnswer } from './cloud/luna'
+import { providerOfModel, type AnswerScope, type ProviderId } from './cloud/provider'
 
 const IMAGE_EXT = /\.(webp|png|jpe?g|gif|bmp|tiff?)$/i
 
@@ -72,20 +75,32 @@ export type Shot = {
 
 export type ProposalRow = { hash: string; proposal: Proposal; confidence: number; pKeep: number; reason: string; rule: string | null; decidedBy?: DecidedBy | null; decidedModel?: string | null }
 
-/** A doubtful proposal the cloud step may ask about (undecided, unanswered, current sorter version). */
-export type CloudPending = { hash: string; confidence: number; pKeep: number; reason: string }
+/**
+ * A doubtful proposal the cloud step may ask the selected provider about (eligibleSql).
+ * `secondOpinion`: another provider has answered it and was unsure; false when no provider has.
+ */
+export type CloudPending = { hash: string; confidence: number; pKeep: number; reason: string; secondOpinion: boolean }
 
-export type CloudAnswerRow = LunaAnswer & { hash: string; model: string; promptVersion: string; askedAt: string }
+export type CloudAnswerRow = LunaAnswer & { hash: string; provider: ProviderId; model: string; promptVersion: string; askedAt: string }
 
 /**
- * Which proposals and answers count for the cloud step: the current sorter, and the model and prompt
- * of the provider that is asking. `others` are further model + prompt pairs (the other provider's)
- * whose answer also means a screenshot has been answered and is not asked again.
+ * Which proposals and answers count for the cloud step: the current sorter; the provider that is
+ * asking, with its current model and prompt; `others`, the other providers with theirs; and
+ * `throwawayAt`, the confidence from which a throwaway answer is a decision (the sorter's throwaway
+ * threshold, cascade.ts isConfident).
  */
-export type CloudScope = { sorterVersion: string; model: string; promptVersion: string; others?: ReadonlyArray<{ model: string; promptVersion: string }> }
+export type CloudScope = AnswerScope & { sorterVersion: string; others?: ReadonlyArray<AnswerScope>; throwawayAt: number }
 
-/** A stored answer with the model + prompt it was given under. */
-export type StoredCloudAnswer = LunaAnswer & { model: string; promptVersion: string }
+/** A stored answer with who gave it, the model + prompt it was given under, and when. */
+export type StoredCloudAnswer = LunaAnswer & { provider: ProviderId; model: string; promptVersion: string; askedAt: string }
+
+/** The answers table could not be brought to its current shape, so nothing may be read from or written to it. */
+export class CloudAnswersUnavailable extends Error {
+  constructor() {
+    super('The cloud answers stored on this Mac could not be read')
+    this.name = 'CloudAnswersUnavailable'
+  }
+}
 
 /** A claim older than this belongs to a run that crashed; it no longer blocks the screenshot. */
 export const CLAIM_STALE_MS = 6 * 60 * 60 * 1000
@@ -241,9 +256,76 @@ export function migrateProposalColumns(db: DatabaseSync): void {
   if (!cols.has('decided_model')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN decided_model TEXT')
 }
 
+const answersTableSql = (name: string): string => `
+  CREATE TABLE ${name} (
+    hash TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    verdict TEXT NOT NULL CHECK (verdict IN ('keep', 'throwaway', 'unsure')),
+    confidence REAL NOT NULL,
+    reason TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    asked_at TEXT NOT NULL,
+    PRIMARY KEY (hash, provider)
+  )`
+
+const hasColumn = (db: DatabaseSync, table: string, column: string): boolean =>
+  (db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all() as Array<{ name: string }>).some((c) => c.name === column)
+
+/**
+ * sorter_cloud_answers from one row per screenshot to one row per screenshot and provider (ticket 17),
+ * in place. Every existing row is kept, with the provider its model id belongs to (the model id was
+ * the one record of who answered: provider.ts providerOfModel); a row whose model id is neither
+ * provider's is kept as provider 'unknown', which counts as nobody's answer, exactly as before.
+ *
+ * One write transaction: the new table is built beside the old one, filled, checked to hold as many
+ * rows, and only then takes its place. Anything that goes wrong (the database is busy, a row the new
+ * table refuses, a count that differs) rolls all of it back and throws: the old table is untouched.
+ * Does nothing when the table already has the provider column, so running it again is harmless.
+ * Returns the number of rows carried over, or null when there was nothing to do.
+ */
+export function migrateCloudAnswers(db: DatabaseSync): number | null {
+  const current = (): boolean => !hasTable(db, 'sorter_cloud_answers') || hasColumn(db, 'sorter_cloud_answers', 'provider')
+  if (current()) return null
+  const NEXT = 'sorter_cloud_answers_by_provider'
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    // read again inside the transaction: another process may have done it while this one waited
+    if (current()) {
+      db.exec('COMMIT')
+      return null
+    }
+    db.exec(answersTableSql(NEXT))
+    const put = db.prepare(`INSERT INTO ${NEXT} (hash, provider, verdict, confidence, reason, model, prompt_version, asked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    const old = db.prepare('SELECT hash, verdict, confidence, reason, model, prompt_version, asked_at FROM sorter_cloud_answers').all() as Array<Record<string, string | number | null>>
+    for (const r of old) put.run(r.hash, providerOfModel(String(r.model)) ?? 'unknown', r.verdict, r.confidence, r.reason, r.model, r.prompt_version, r.asked_at)
+    const count = (table: string): number => Number((db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n)
+    const before = count('sorter_cloud_answers')
+    if (count(NEXT) !== before) throw new Error('cloud answers: the copy does not hold every row')
+    db.exec(`DROP TABLE sorter_cloud_answers; ALTER TABLE ${NEXT} RENAME TO sorter_cloud_answers`)
+    db.exec('COMMIT')
+    return before
+  } catch (e) {
+    try {
+      db.exec('ROLLBACK')
+    } catch {
+      /* the failed statement already ended the transaction */
+    }
+    throw e
+  }
+}
+
+/** One provider's row, by its current model + prompt (alias c). Three parameters: scopeArgs. */
+const ANSWERED_BY = '(c.provider = ? AND c.model = ? AND c.prompt_version = ?)'
+/** An answer that is a decision (alias c): the same test as cascade.ts isConfident. One parameter: the throwaway threshold. */
+const CONFIDENT_SQL = "(c.verdict = 'keep' OR (c.verdict = 'throwaway' AND c.confidence >= ?))"
+const scopeArgs = (x: AnswerScope): string[] => [x.provider, x.model, x.promptVersion]
+
 /** The sorter's own tables in triage.db: proposals and trained models. */
 export class SorterStore {
   private db: DatabaseSync
+  /** False when sorter_cloud_answers could not be migrated: its old rows are left as they are and the cloud methods refuse. */
+  private answersReady = true
 
   constructor(wellRoot: string) {
     this.db = new DatabaseSync(join(wellRoot, 'triage.db'))
@@ -266,15 +348,7 @@ export class SorterStore {
         decided_by TEXT,
         decided_model TEXT
       );
-      CREATE TABLE IF NOT EXISTS sorter_cloud_answers (
-        hash TEXT PRIMARY KEY,
-        verdict TEXT NOT NULL CHECK (verdict IN ('keep', 'throwaway', 'unsure')),
-        confidence REAL NOT NULL,
-        reason TEXT NOT NULL,
-        model TEXT NOT NULL,
-        prompt_version TEXT NOT NULL,
-        asked_at TEXT NOT NULL
-      );
+      ${answersTableSql('IF NOT EXISTS sorter_cloud_answers')};
       CREATE TABLE IF NOT EXISTS sorter_cloud_claims (
         hash TEXT PRIMARY KEY,
         run_id TEXT NOT NULL,
@@ -296,6 +370,21 @@ export class SorterStore {
     migrateProposalColumns(this.db)
     const claimCols = new Set((this.db.prepare("SELECT name FROM pragma_table_info('sorter_cloud_claims')").all() as Array<{ name: string }>).map((c) => c.name))
     if (!claimCols.has('counted')) this.db.exec('ALTER TABLE sorter_cloud_claims ADD COLUMN counted INTEGER NOT NULL DEFAULT 0')
+    try {
+      migrateCloudAnswers(this.db)
+    } catch {
+      // the old rows stay where they are; proposals, review and models still work, the cloud step does not
+      this.answersReady = false
+    }
+  }
+
+  /** Whether the cloud answers can be read and written (false: the table is still in its old shape). */
+  cloudAnswersReady(): boolean {
+    return this.answersReady
+  }
+
+  private needAnswers(): void {
+    if (!this.answersReady) throw new CloudAnswersUnavailable()
   }
 
   saveModel<R>(rec: ModelRecord<R>): void {
@@ -334,29 +423,42 @@ export class SorterStore {
   }
 
   /**
-   * The cloud eligibility test for proposal `p`, as SQL: doubtful, made under the current sorter, not
-   * answered in review, no decision of his (kept or excluded in Triage), no cloud answer yet under
-   * this model + prompt or any of the scope's `others`. Parameters: eligibleArgs(scope).
+   * The cloud eligibility test for proposal `p` and the scope's provider, as SQL. Eligible: doubtful,
+   * made under the current sorter, not answered in review, no decision of his (kept or excluded in
+   * Triage), and among the answers stored for it
+   *   - none from this provider (so a provider is asked about a screenshot once), and
+   *   - none from another provider that is a decision (CONFIDENT_SQL).
+   * That leaves two kinds: screenshots no provider has answered, and screenshots another provider
+   * answered and was unsure about (a second opinion). Once every provider has answered one, it is
+   * never eligible again, whichever is selected. An answer counts only under its provider's current
+   * model + prompt. Parameters: eligibleArgs(scope).
    */
   private eligibleSql(o: CloudScope): string {
     const decisions = hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = p.hash)' : ''
-    const pairs = Array.from({ length: 1 + (o.others?.length ?? 0) }, () => '(c.model = ? AND c.prompt_version = ?)').join(' OR ')
+    const others = (o.others ?? []).map(() => ANSWERED_BY).join(' OR ')
+    const decidedElsewhere = others ? ` OR ((${others}) AND ${CONFIDENT_SQL})` : ''
     return `p.proposal = 'doubtful' AND p.answered_at IS NULL AND p.sorter_version = ?
-      AND NOT EXISTS (SELECT 1 FROM sorter_cloud_answers c WHERE c.hash = p.hash AND (${pairs})) ${decisions}`
+      AND NOT EXISTS (SELECT 1 FROM sorter_cloud_answers c WHERE c.hash = p.hash AND (${ANSWERED_BY}${decidedElsewhere})) ${decisions}`
   }
 
-  private eligibleArgs(o: CloudScope): string[] {
-    return [o.sorterVersion, o.model, o.promptVersion, ...(o.others ?? []).flatMap((x) => [x.model, x.promptVersion])]
+  private eligibleArgs(o: CloudScope): Array<string | number> {
+    const others = o.others ?? []
+    return [o.sorterVersion, ...scopeArgs(o), ...others.flatMap(scopeArgs), ...(others.length ? [o.throwawayAt] : [])]
   }
 
-  /** Doubtful proposals the cloud step may ask about (eligibleSql), whether or not a run holds them. */
-  cloudPending(sorterVersion: string, model: string, promptVersion: string, others: CloudScope['others'] = []): CloudPending[] {
-    const scope: CloudScope = { sorterVersion, model, promptVersion, others }
+  /**
+   * Doubtful proposals the cloud step may ask the scope's provider about (eligibleSql), whether or not
+   * a run holds them; each says whether it would be a second opinion (another provider has answered it).
+   */
+  cloudPending(scope: CloudScope): CloudPending[] {
+    this.needAnswers()
+    const others = scope.others ?? []
+    const second = others.length ? `EXISTS (SELECT 1 FROM sorter_cloud_answers c WHERE c.hash = p.hash AND (${others.map(() => ANSWERED_BY).join(' OR ')}))` : '0'
     return (
       this.db
-        .prepare(`SELECT p.hash AS hash, p.confidence AS confidence, p.p_keep AS p_keep, p.reason AS reason FROM sorter_proposals p WHERE ${this.eligibleSql(scope)}`)
-        .all(...this.eligibleArgs(scope)) as Array<{ hash: string; confidence: number; p_keep: number; reason: string }>
-    ).map((r) => ({ hash: r.hash, confidence: Number(r.confidence), pKeep: Number(r.p_keep), reason: r.reason }))
+        .prepare(`SELECT p.hash AS hash, p.confidence AS confidence, p.p_keep AS p_keep, p.reason AS reason, ${second} AS second FROM sorter_proposals p WHERE ${this.eligibleSql(scope)}`)
+        .all(...others.flatMap(scopeArgs), ...this.eligibleArgs(scope)) as Array<{ hash: string; confidence: number; p_keep: number; reason: string; second: number }>
+    ).map((r) => ({ hash: r.hash, confidence: Number(r.confidence), pKeep: Number(r.p_keep), reason: r.reason, secondOpinion: Number(r.second) === 1 }))
   }
 
   /** Screenshots sent to a cloud model in this night window so far, both providers together. */
@@ -372,6 +474,7 @@ export class SorterStore {
    * admitForRequest counts each screenshot when it goes into a request. Returns the claimed hashes.
    */
   claimForCloud(hashes: string[], o: CloudScope & { night: string; limit: number; runId: string; now: Date }): { claimed: string[]; leftBefore: number } {
+    this.needAnswers()
     const nowIso = o.now.toISOString()
     const staleBefore = new Date(o.now.getTime() - CLAIM_STALE_MS).toISOString()
     const eligible = this.db.prepare(
@@ -406,6 +509,7 @@ export class SorterStore {
    * Returns the hashes that may go into this request, in order.
    */
   admitForRequest(hashes: string[], o: CloudScope & { runId: string; night: string; limit: number }): { admitted: string[]; overLimit: number } {
+    this.needAnswers()
     const q = this.db.prepare(
       `SELECT k.counted AS counted FROM sorter_proposals p JOIN sorter_cloud_claims k ON k.hash = p.hash AND k.run_id = ? WHERE p.hash = ? AND ${this.eligibleSql(o)}`
     )
@@ -455,29 +559,38 @@ export class SorterStore {
     }
   }
 
-  /** The stored answers given under any of these model + prompt pairs, by hash, each with its pair. */
-  cloudAnswersIn(scopes: ReadonlyArray<{ model: string; promptVersion: string }>): Map<string, StoredCloudAnswer> {
-    const out = new Map<string, StoredCloudAnswer>()
+  /** The stored answers that count for these providers (each under its current model + prompt), by hash: at most one per provider. */
+  cloudAnswersIn(scopes: ReadonlyArray<AnswerScope>): Map<string, StoredCloudAnswer[]> {
+    this.needAnswers()
+    const out = new Map<string, StoredCloudAnswer[]>()
     if (!scopes.length) return out
     const rows = this.db
-      .prepare(`SELECT hash, verdict, confidence, reason, model, prompt_version FROM sorter_cloud_answers WHERE ${scopes.map(() => '(model = ? AND prompt_version = ?)').join(' OR ')}`)
-      .all(...scopes.flatMap((x) => [x.model, x.promptVersion])) as Array<{ hash: string; verdict: LunaAnswer['verdict']; confidence: number; reason: string; model: string; prompt_version: string }>
-    for (const r of rows) out.set(r.hash, { verdict: r.verdict, confidence: Number(r.confidence), reason: r.reason, model: r.model, promptVersion: r.prompt_version })
+      .prepare(`SELECT c.hash AS hash, c.provider AS provider, c.verdict AS verdict, c.confidence AS confidence, c.reason AS reason, c.model AS model, c.prompt_version AS prompt_version, c.asked_at AS asked_at
+                FROM sorter_cloud_answers c WHERE ${scopes.map(() => ANSWERED_BY).join(' OR ')} ORDER BY c.asked_at, c.provider`)
+      .all(...scopes.flatMap(scopeArgs)) as Array<{ hash: string; provider: ProviderId; verdict: LunaAnswer['verdict']; confidence: number; reason: string; model: string; prompt_version: string; asked_at: string }>
+    for (const r of rows) {
+      const a: StoredCloudAnswer = { provider: r.provider, verdict: r.verdict, confidence: Number(r.confidence), reason: r.reason, model: r.model, promptVersion: r.prompt_version, askedAt: r.asked_at }
+      const list = out.get(r.hash)
+      if (list) list.push(a)
+      else out.set(r.hash, [a])
+    }
     return out
   }
 
   /**
-   * Record a cloud model's answers and, in the same transaction, the proposals they lead to. A proposal is
-   * changed only while it is still doubtful, unanswered and without a decision of his in Triage
-   * (review or Triage may have got there first). Reasons arrive already redacted (cloud/service.ts).
-   * Returns the hashes whose proposal changed.
+   * Record a cloud model's answers and, in the same transaction, the proposals they lead to. An answer
+   * takes its own provider's row for that screenshot; another provider's row for it is left as it is.
+   * A proposal is changed only while it is still doubtful, unanswered and without a decision of his in
+   * Triage (review or Triage may have got there first). Reasons arrive already redacted
+   * (cloud/service.ts). Returns the hashes whose proposal changed.
    */
   saveCloudResults(answers: CloudAnswerRow[], proposals: Array<Pick<ProposalRow, 'hash' | 'proposal' | 'confidence' | 'pKeep' | 'reason' | 'decidedBy' | 'decidedModel'>>): string[] {
+    this.needAnswers()
     if (!answers.length && !proposals.length) return []
     const now = new Date().toISOString()
     const putAnswer = this.db.prepare(
-      `INSERT INTO sorter_cloud_answers (hash, verdict, confidence, reason, model, prompt_version, asked_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(hash) DO UPDATE SET verdict = excluded.verdict, confidence = excluded.confidence, reason = excluded.reason,
+      `INSERT INTO sorter_cloud_answers (hash, provider, verdict, confidence, reason, model, prompt_version, asked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(hash, provider) DO UPDATE SET verdict = excluded.verdict, confidence = excluded.confidence, reason = excluded.reason,
          model = excluded.model, prompt_version = excluded.prompt_version, asked_at = excluded.asked_at`
     )
     const putProposal = this.db.prepare(
@@ -489,7 +602,7 @@ export class SorterStore {
     const changed: string[] = []
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      for (const a of answers) putAnswer.run(a.hash, a.verdict, a.confidence, a.reason, a.model, a.promptVersion, a.askedAt)
+      for (const a of answers) putAnswer.run(a.hash, a.provider, a.verdict, a.confidence, a.reason, a.model, a.promptVersion, a.askedAt)
       for (const p of proposals) if (Number(putProposal.run(p.proposal, p.confidence, p.pKeep, p.reason, p.decidedBy ?? null, p.decidedModel ?? null, now, p.proposal, now, p.hash).changes)) changed.push(p.hash)
       this.db.exec('COMMIT')
     } catch (e) {

@@ -108,8 +108,8 @@ export function SorterCloudSettings(): JSX.Element {
         ))}
       </div>
       <div className="pic-note">
-        Each has its own key and its own agreement: turning on one sends nothing to the other, and choosing the other while asking is on asks you again. A screenshot one
-        has answered is not sent to the other.
+        Each has its own key and its own agreement: turning on one sends nothing to the other, and choosing the other while asking is on asks you again. When one
+        was unsure about a screenshot, the other can be asked about it once; a screenshot both have answered is not sent again.
         {st.settings.provider === 'anthropic' ? ' Haiku calls draw on the free monthly Anthropic API credits where they are available.' : ''}
       </div>
 
@@ -201,7 +201,8 @@ export function SorterCloudSettings(): JSX.Element {
             <h3>{preview.message}</h3>
             {preview.local.message && <p>{preview.local.message}</p>}
             <p>
-              {n(preview.toSend)} screenshot{preview.toSend === 1 ? '' : 's'} the sorter could not call will be sent to {prepared.company} ({prepared.model}) in{' '}
+              {n(preview.toSend)} screenshot{preview.toSend === 1 ? '' : 's'} the sorter could not call
+              {preview.secondNote ? <span className="sorter-cloud-second">, {preview.secondNote},</span> : null} will be sent to {prepared.company} ({prepared.model}) in{' '}
               {n(preview.estimate.requests)} request
               {preview.estimate.requests === 1 ? '' : 's'}. {preview.costLabel}: <b>{usd(preview.estimate.usd)}</b>.{preview.costNote ? ` ${preview.costNote}` : ''}
             </p>
