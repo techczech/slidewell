@@ -216,7 +216,7 @@ export type BacklogPlanView =
         recopy: number
         done: number
         unverifiedOnlineOnly: number
-        onlineOnly: number
+        needDownloading: { count: number; bytes: number } // online-only, in the plan: downloaded one at a time during the run
         nameTaken: number
         totalBytes: number
         skipped: { cleanshotProjects: number; cleanshotOther: number; empty: number; notRegular: number }
@@ -230,6 +230,7 @@ export type BacklogRunResult = {
   copied: number
   reused: number
   alreadyDone: number
+  downloaded: number
   unverifiedOnlineOnly: number
   onlineOnly: number
   notRegular: number

@@ -17,8 +17,11 @@ import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, 
 import { loadDeckMeta, categoryList, invalidateDeckMeta, setOwnerNames, type DeckMetaIndex } from './deckmeta'
 import { resolveOwnerNames, cleanOwnerNames } from './owners'
 import { ensureWell, drainInbox, scanVault, searchWell, wellByIds, wellAbsPath, ingestScreenshot, findFfmpeg, type WellRow } from './well'
-import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow } from './triage'
-import { cleanShotFolder } from './cleanshot-folder'
+import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow, type ScanOptions } from './triage'
+import { cleanShotFolder, cleanShotNameTemplate } from './cleanshot-folder'
+import { captureDownloadRoot } from './online-only'
+import { createCaptureDownloads } from './capture-downloads'
+import { realpath } from 'node:fs/promises'
 import { createSourceWatcher } from './source-watcher'
 import { registerBacklogIpc } from './backlog-ipc'
 import { talkAbsPath, isVaultChangeRelevant } from './talk-usage'
@@ -187,6 +190,29 @@ function triageSources(): CaptureSource[] {
     if (s && typeof s.path === 'string' && existsSync(s.path) && !out.some((o) => o.path === s.path)) out.push({ path: s.path, namedOnly: Boolean(s.namedOnly) })
   }
   return out
+}
+
+// Capture-watcher downloads are owned here: quitting SlideWell or pressing Stop on the backlog import
+// aborts them (the active download child is killed) and they stay off until the next explicit user
+// action (Scan, a new backlog run) or app start (capture-downloads.ts).
+const captureDownloads = createCaptureDownloads()
+
+// How one capture source is scanned (ticket 15). Names are read with CleanShot's own template.
+// Download authority is decided on canonical paths (captureDownloadRoot), never from namedOnly: only a
+// source that IS the Desktop (scanned screenshot names only) or CleanShot's export folder may download
+// online-only files; the primary Triage folder never does, under any alias (it can hold thousands).
+// Every other source skips the primary folder's subtree (walk and download) when it is nested inside.
+async function scanOptionsFor(s: CaptureSource, o: { downloads?: boolean } = {}): Promise<ScanOptions> {
+  const [nameTemplate, cleanshotExport] = await Promise.all([cleanShotNameTemplate(), cleanShotFolder()])
+  const desktop = join(homedir(), 'Desktop')
+  const primary = screenshotRootResolved()
+  let downloadRoot = await captureDownloadRoot(s.path, { desktop, cleanshotExport, primary })
+  // the whole Desktop is never downloaded: only when the source is scanned for screenshot names alone
+  if (downloadRoot && !s.namedOnly && downloadRoot === (await captureDownloadRoot(desktop, { desktop, cleanshotExport: null, primary: null }))) downloadRoot = null
+  const [src, primaryReal] = await Promise.all([s.path, primary].map((p) => (p ? realpath(p).catch(() => null) : Promise.resolve(null))))
+  const excludeDir = primaryReal && src !== primaryReal ? primaryReal : null
+  const dl = captureDownloads.options(o.downloads === false ? null : downloadRoot)
+  return { namedOnly: s.namedOnly, nameTemplate, excludeDir, ...dl }
 }
 
 // The default destination for throwaway conversions (Settings-chosen). Pre-fills the save dialog;
@@ -943,16 +969,18 @@ app.whenReady().then(() => {
   const fromMainWindow = (sender: Electron.WebContents): boolean => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents)
   const onTriageProgress = (m: string): void => void mainWindow?.webContents.send('triage:progress', m)
   guardedHandle(ipcMain, fromMainWindow, 'triage:scan', async () => {
+    captureDownloads.resume() // an explicit Scan turns downloading back on after a Stop
     return scanAllSources()
   })
-  // One scan of every capture source, through the one-at-a-time scan queue.
-  async function scanAllSources(): Promise<{ ok: boolean; indexed: number; total: number; offline?: number }> {
+  // One scan of every capture source, through the one-at-a-time scan queue. `downloads: false` = this
+  // scan never downloads (the follow-up of a stopped backlog run), whatever the gate says.
+  async function scanAllSources(o: { downloads?: boolean } = {}): Promise<{ ok: boolean; indexed: number; total: number; offline?: number }> {
     const sources = triageSources()
     if (sources.length === 0) return { ok: false, indexed: 0, total: 0 }
     const sum = { indexed: 0, total: 0, offline: 0 }
     try {
       for (const s of sources) {
-        const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, { namedOnly: s.namedOnly })
+        const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, await scanOptionsFor(s, o))
         sum.indexed += res.indexed
         sum.total += res.total
         sum.offline += res.offline
@@ -972,20 +1000,25 @@ app.whenReady().then(() => {
   const watcher = createSourceWatcher((path) => {
     const s = triageSources().find((x) => x.path === path)
     if (!s) return
-    void scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, { namedOnly: s.namedOnly })
+    void scanOptionsFor(s)
+      .then((o) => scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, o))
       .then(() => mainWindow?.webContents.send('triage:changed'))
       .catch(() => undefined)
   })
   refreshWatchers = (): void => watcher.setSources(triageSources().map((s) => ({ path: s.path, recursive: !s.namedOnly })))
   refreshWatchers()
-  app.on('will-quit', () => watcher.close())
+  app.on('will-quit', () => {
+    watcher.close()
+    captureDownloads.stop() // kill any active download child
+  })
   // One-off backlog import (Desktop + CleanShot history → the Triage source folder). After a run,
   // one explicit scan; the import itself never waits on watcher events from the (OneDrive) folder.
   registerBacklogIpc({
     watchedFolder: screenshotRootResolved,
     stateDir: () => join(app.getPath('userData'), 'backlog-import'),
     isMainWindow: (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents),
-    afterRun: () => void scanAllSources().then(() => mainWindow?.webContents.send('triage:changed'))
+    afterRun: ({ stopped }) => void scanAllSources({ downloads: !stopped }).then(() => mainWindow?.webContents.send('triage:changed')),
+    captureDownloads
   })
   guardedHandle(ipcMain, fromMainWindow, 'triage:list', async (_e, q: string, state: string, sort?: string, limit?: number, offset?: number) => {
     const src = triageSources()[0]?.path ?? null
