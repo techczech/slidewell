@@ -82,6 +82,26 @@ describe('parseScreenshotName with CleanShot\'s template', () => {
     expect(parseScreenshotName('CleanShot 2026-10-08 at 10.39.03 2.png')).toMatchObject({ takenAt: '2026-10-08T10:39:03' })
   })
 
+  it('a counter straight after the time accepts any number; the 2–99 rule is only for window titles', () => {
+    // built-in default CleanShot and macOS styles, with and without his template in place
+    for (const t of [undefined, tpl]) {
+      expect(parseScreenshotName('CleanShot 2026-10-01 at 09.00.00 100.png', t)).toMatchObject({ origin: 'cleanshot', takenAt: '2026-10-01T09:00:00', window: null })
+      expect(parseScreenshotName('CleanShot 2026-10-01 at 09.00.00 (100).png', t)).toMatchObject({ takenAt: '2026-10-01T09:00:00' })
+      expect(parseScreenshotName('CleanShot 2026-10-01 at 09.00.00 1.png', t)).toMatchObject({ takenAt: '2026-10-01T09:00:00' })
+      expect(parseScreenshotName('Screenshot 2026-10-01 at 09.00.00 (100).png', t)).toMatchObject({ origin: 'macos', takenAt: '2026-10-01T09:00:00' })
+      expect(parseScreenshotName('Screenshot 2026-10-01 at 09.00.00 100.png', t)).toMatchObject({ origin: 'macos', takenAt: '2026-10-01T09:00:00' })
+    }
+    // a template that ends in a time field: the counter is outside any title
+    const timed = compileNameTemplate(['Shot ', '%y', '-', '%m', '-', '%d', ' ', '%H', '%M'])
+    expect(parseScreenshotName('Shot 2026-10-01 0900 100.png', timed)).toMatchObject({ takenAt: '2026-10-01T09:00:00' })
+    // a number ending a window title stays part of it, with or without the plain sibling
+    const results = 'CleanShot 2026-10-01 at 0900from Numbers with Quarterly results'
+    const withPlain = new Set([`${results}.png`.toLowerCase(), `${results} 2026.png`.toLowerCase()])
+    expect(parseScreenshotName(`${results} 2026.png`, tpl, { siblings: withPlain })).toMatchObject({ window: 'Quarterly results 2026' })
+    expect(parseScreenshotName(`${results} 2026.png`, tpl)).toMatchObject({ window: 'Quarterly results 2026' })
+    expect(parseScreenshotName(`${results} 2026.png`)).toMatchObject({ window: 'Quarterly results 2026' })
+  })
+
   it('the default CleanShot style and macOS names still parse with his template in place', () => {
     expect(parseScreenshotName('CleanShot 2026-10-08 at 10.39.03.png', tpl)).toEqual({ origin: 'cleanshot', takenAt: '2026-10-08T10:39:03', date: '2026-10-08', app: null, window: null })
     expect(parseScreenshotName('CleanShot 2026-10-08 at 10.39.03@2x.png', tpl)?.takenAt).toBe('2026-10-08T10:39:03')

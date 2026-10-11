@@ -146,6 +146,59 @@ describe('capture scan: online-only files', () => {
     expect(asked.slice(2)).toEqual([['bad1.png', 'bad2.png', 'bad3.png'], []])
   })
 
+  it('scans a day apart: a healthy older file is downloaded on the first scan that reaches it and never starved', async () => {
+    for (let i = 1; i <= 3; i++) placeholder(`never${i}.png`, i) // the three newest never download
+    const healthy = placeholder('healthy.png', 30)
+    const t = Date.now()
+    const asked: string[][] = []
+    const afterScan: string[] = []
+    for (let s = 0; s < 5; s++) {
+      const mine: string[] = []
+      asked.push(mine)
+      await scanTriageSource('/nonexistent', well, src, undefined, {
+        downloadRoot: src,
+        downloadFailLimit: 3,
+        now: () => t + s * 25 * 3_600_000, // every backoff, even the one-day maximum, has passed
+        download: async (p) => {
+          mine.push(p.slice(src.length + 1))
+          if (p !== healthy) throw Object.assign(new Error('unavailable'), { code: 'EDOWNLOAD' })
+          arrive(p)
+        }
+      })
+      afterScan.push((await rows())['healthy.png'])
+    }
+    // scan 1 spends its three failures on the newest; scan 2 reaches the never-tried file first
+    expect(asked[0]).toEqual(['never1.png', 'never2.png', 'never3.png'])
+    expect(asked[1][0]).toBe('healthy.png')
+    expect(afterScan).toEqual(['1', '0', '0', '0', '0'])
+    expect(asked.flat().filter((x) => x === 'healthy.png')).toHaveLength(1)
+  })
+
+  it('retries go to the file waiting longest: failing files take turns across scans', async () => {
+    for (let i = 1; i <= 5; i++) placeholder(`never${i}.png`, i)
+    const t = Date.now()
+    const asked: string[][] = []
+    for (let s = 0; s < 3; s++) {
+      const mine: string[] = []
+      asked.push(mine)
+      let clock = t + s * 25 * 3_600_000
+      await scanTriageSource('/nonexistent', well, src, undefined, {
+        downloadRoot: src,
+        downloadFailLimit: 3,
+        now: () => clock++, // each attempt is recorded at a distinct moment
+        download: async (p) => {
+          mine.push(p.slice(src.length + 1))
+          throw Object.assign(new Error('unavailable'), { code: 'EDOWNLOAD' })
+        }
+      })
+    }
+    expect(asked).toEqual([
+      ['never1.png', 'never2.png', 'never3.png'],
+      ['never4.png', 'never5.png', 'never1.png'], // never tried first, then the oldest attempt
+      ['never2.png', 'never3.png', 'never4.png']
+    ])
+  })
+
   it('the primary Triage folder nested inside the source is neither walked nor downloaded in', async () => {
     placeholder('Triage/in-primary.png', 1)
     placeholder('Triage/deeper/also.png', 1)

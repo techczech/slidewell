@@ -41,10 +41,12 @@ export const MAX_NAME_LENGTH = 255
 const CLEANSHOT =
   /^CleanShot (\d{4})-(\d{2})-(\d{2}) at (\d{2})[.:]?(\d{2})(?:[.:]?(\d{2}))?(?:@\d+x)?(?: ?from (.+?))?(?: with ?(.*))?$/
 const MACOS = /^Screen ?[Ss]hot (\d{4})-(\d{2})-(\d{2}) at (\d{1,2})\.(\d{2})\.(\d{2})(?:[\s ]*([AaPp][Mm]))?(?: \(\d+\))?$/
-// Finder / CleanShot duplicate counter at the very end: `name 2`, `name (2)`. Counters run 2–99; a
-// larger number (`… results 2026`) is never read as one.
-const COUNTER = '(?:[2-9]|[1-9]\\d)'
-const DUPLICATE = new RegExp(`^(.*\\S)(?: ${COUNTER}| \\(${COUNTER}\\))$`)
+// Finder / CleanShot duplicate counter at the very end: `name 2`, `name (2)`.
+// After a time field (no free text at the end) any number is a counter: `… at 09.00.00 100.png`.
+const DUPLICATE = /^(.*\S)(?: \d+| \(\d+\))$/
+// After a window title the counter runs 2–99 only; a larger number (`… results 2026`) stays in the title.
+const TITLE_COUNTER = '(?:[2-9]|[1-9]\\d)'
+const TITLE_DUPLICATE = new RegExp(`^(.*\\S)(?: ${TITLE_COUNTER}| \\(${TITLE_COUNTER}\\))$`)
 
 // CleanShot template tokens. Any other `%x` makes the template unusable (it is not guessed at).
 const TOKEN: Record<string, { field: Field; re: string } | undefined> = {
@@ -125,20 +127,24 @@ function matchTemplate(base: string, t: NameTemplate): ParsedScreenshotName | nu
 }
 
 /**
- * A trailing ` 2` / ` (2)` (2–99) is a duplicate counter only when it cannot be part of the window
- * title (the template does not end in text), or when the same name without it is in the folder
- * listing. Otherwise the digits stay: `… with Quarterly results 2026` keeps its year, even when
- * `… with Quarterly results` is in the same folder.
+ * A trailing ` N` / ` (N)` is a duplicate counter, any N, when it cannot be part of the window title
+ * (the template does not end in text). When the template ends in a window title, only a 2–99 counter
+ * whose plain name is in the folder listing is one. Otherwise the digits stay: `… with Quarterly
+ * results 2026` keeps its year, even when `… with Quarterly results` is in the same folder.
  */
 function parseWithTemplate(base: string, ext: string, t: NameTemplate, ctx: ParseContext): ParsedScreenshotName | null {
-  const dup = DUPLICATE.exec(base)
-  if (dup && t.endsWithText && ctx.siblings?.has(`${dup[1]}${ext}`.toLowerCase())) {
-    const p = matchTemplate(dup[1], t)
-    if (p) return p
+  if (t.endsWithText) {
+    const dup = TITLE_DUPLICATE.exec(base)
+    if (dup && ctx.siblings?.has(`${dup[1]}${ext}`.toLowerCase())) {
+      const p = matchTemplate(dup[1], t)
+      if (p) return p
+    }
+    return matchTemplate(base, t)
   }
   const p = matchTemplate(base, t)
-  if (p || !dup || t.endsWithText) return p
-  return matchTemplate(dup[1], t)
+  if (p) return p
+  const dup = DUPLICATE.exec(base)
+  return dup ? matchTemplate(dup[1], t) : null
 }
 
 function parseBuiltIn(base: string): ParsedScreenshotName | null {

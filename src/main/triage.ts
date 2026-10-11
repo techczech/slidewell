@@ -247,7 +247,22 @@ async function scanTriageSourceNow(
     if (files.length % 200 === 0) onProgress?.(`found ${files.length} media files…`)
   }
   onProgress?.(`found ${files.length} media files — reading…`)
-  files.sort((a, b) => b.mtime - a.mtime || (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0)) // newest first
+  // Download order, fair across scans: files with no recorded failure first (newest first), then files
+  // that failed before, the one waiting longest (oldest last attempt) first. A few files that never
+  // download therefore cannot use up every scan's failure limit ahead of an older healthy file.
+  const lastFailure = (f: ScanItem): number | null => {
+    const b = f.offline ? backoff.get(f.rel) : undefined
+    return b && b.sig === `${f.size}:${f.mtime}` ? b.last : null
+  }
+  const failedAt = new Map(files.map((f) => [f, lastFailure(f)]))
+  files.sort((a, b) => {
+    const la = failedAt.get(a) ?? null
+    const lb = failedAt.get(b) ?? null
+    if (la === null && lb !== null) return -1
+    if (la !== null && lb === null) return 1
+    if (la !== null && lb !== null && la !== lb) return la - lb
+    return b.mtime - a.mtime || (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0) // newest first
+  })
 
   // Phase 1 — process new/changed files one at a time, committing + reporting per file.
   let indexed = 0
