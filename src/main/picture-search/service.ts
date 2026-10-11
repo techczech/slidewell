@@ -15,6 +15,7 @@ import { coveragePercent, estimateText, statusText, type IndexProgress } from '.
 import { archiveRenders, wellImages } from './sources'
 import { STORE_FILE, VectorStore, type IndexItem } from './vector-store'
 import { ImageEnumerator } from './enumeration'
+import type { PictureQueryEngine } from './query-socket'
 
 export type PictureSearchSettings = { includeWell?: boolean; paused?: boolean }
 
@@ -299,6 +300,18 @@ export class PictureSearchService {
   lookAlikeInputs(ids: string[]): { vectors: Map<string, Float32Array>; paths: () => Map<string, string> } {
     if (!this.store && !existsSync(join(this.deps.wellRoot(), STORE_FILE))) return { vectors: new Map(), paths: () => new Map() }
     return { vectors: this.openEngine().vectorsOf(ids), paths: () => this.openStore().pathsOf(ids) }
+  }
+
+  /**
+   * The local query endpoint's seam (query-socket.ts, ticket 10: TalkWeaver asks over a Unix socket).
+   * Ready only when the model is verified and an index exists, so an outside query never creates the
+   * store. Ranks slides, well images and triage screenshots (contract v1 names all three id kinds).
+   */
+  queryEndpoint(): PictureQueryEngine {
+    return {
+      ready: () => this.modelReady() && (Boolean(this.store) || existsSync(join(this.deps.wellRoot(), STORE_FILE))),
+      query: (text, limit) => this.pictureQuery({ text }, { limit, kinds: ['slide', 'well-image', 'triage'] })
+    }
   }
 
   /** How many picture queries this process has run (the Words-only fast path must leave it unchanged). */

@@ -29,6 +29,7 @@ import { slugify } from './outline'
 import { testR2, type R2Settings, type R2Creds } from './r2'
 import { pickStore, keyForPath, fetchFromR2, syncDirToR2, type StoreName } from './storage'
 import { PictureSearchService, registerPictureSearchIpc, type PictureSearchSettings } from './picture-search/service'
+import { startPictureQueryServer, PICTURE_QUERY_SOCKET, type QueryServer } from './picture-search/query-socket'
 import { WebGpuEmbedder } from './picture-search/webgpu-embedder'
 import { electronEmbedHost, registerEmbedProtocol, EMBED_SCHEME } from './picture-search/electron-embed-host'
 import { modelDir as pictureModelDir } from './picture-search/model-store'
@@ -325,6 +326,25 @@ app.whenReady().then(() => {
   // picture IPC answers the main window only (never the hidden picture-search window)
   registerPictureSearchIpc(pictureSearch, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
   app.on('will-quit', () => pictureSearch?.dispose())
+
+  // --- local picture query for TalkWeaver (picture-search/query-socket.ts, contract v1) ---
+  // A Unix socket in the user-data folder, 0600 in a 0700 folder: this user only, no network.
+  // Ids and scores only; no query text is logged. Closed and unlinked on quit.
+  let pictureQueryServer: QueryServer | null = null
+  let quitting = false
+  void startPictureQueryServer({
+    socketPath: join(app.getPath('userData'), PICTURE_QUERY_SOCKET),
+    engine: pictureSearch.queryEndpoint(),
+    log: (msg) => console.warn(msg)
+  }).then((res) => {
+    if (!res.ok) return console.warn(`picture query endpoint not started: ${res.reason}`)
+    if (quitting) void res.server.close()
+    else pictureQueryServer = res.server
+  })
+  app.on('will-quit', () => {
+    quitting = true
+    void pictureQueryServer?.close()
+  })
 
   // --- screenshot sorter, local part (sorter/service.ts): proposals only, never decisions or moves ---
   const pics = pictureSearch
