@@ -149,9 +149,15 @@ export function planChunks<T extends { proposal: string }>(candidates: T[], size
 }
 
 /** Text that goes beside a picture: at most one line, no control characters. */
-function clean(s: string, max: number): string {
+function clean(s: string, max = Infinity): string {
   return (s ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max)
 }
+
+/**
+ * The longest reason stored or shown. parseLunaResponse returns the reason whole: it is shortened
+ * only after redaction (service.ts, clipRedacted), so a cut can never leave part of a key behind.
+ */
+export const REASON_MAX = 200
 
 /** One Responses API request for these items. Anything not doubtful is left out. */
 export function buildLunaRequest(items: LunaItem[]): LunaRequest {
@@ -227,7 +233,7 @@ export function parseLunaResponse(body: unknown, ids: Map<string, string>): Luna
     const verdict = typeof r.verdict === 'string' && VERDICTS.has(r.verdict as Verdict) ? (r.verdict as Verdict) : null
     const c = typeof r.confidence === 'number' && Number.isFinite(r.confidence) ? r.confidence : null
     if (!verdict || c === null) continue
-    answers.set(hash, { verdict, confidence: Math.min(1, Math.max(0, c)), reason: clean(typeof r.reason === 'string' ? r.reason : '', 200) })
+    answers.set(hash, { verdict, confidence: Math.min(1, Math.max(0, c)), reason: clean(typeof r.reason === 'string' ? r.reason : '') })
   }
   const usageRaw = json.usage as { input_tokens?: unknown; output_tokens?: unknown } | undefined
   const usage =

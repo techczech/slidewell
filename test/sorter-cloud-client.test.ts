@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { LunaHttpError, pool, postLuna, redact, type HttpPost, type HttpResponse } from '../src/main/sorter/cloud/client'
+import { clipRedacted, LunaHttpError, pool, postLuna, redact, type HttpPost, type HttpResponse } from '../src/main/sorter/cloud/client'
 
 const KEY = 'sk-test-FAKEKEY0123456789abcdefWXYZ'
 const res = (status: number, body: unknown, headers: Record<string, string> = {}): HttpResponse => ({
@@ -82,12 +82,24 @@ describe('postLuna', () => {
 describe('redact', () => {
   it('removes the key, masked keys and bearer tokens', () => {
     expect(redact(`a ${KEY} b`, KEY)).toBe('a [key] b')
-    expect(redact('Incorrect API key provided: sk-test-****WXYZ.')).toBe('Incorrect API key provided: [key]')
+    expect(redact('Incorrect API key provided: sk-test-****WXYZ.')).toBe('Incorrect API key provided: [key].')
     expect(redact('Authorization: Bearer abc.def')).toBe('Authorization: Bearer [key]')
     expect(redact('echosk-proj-SYNTH0123456789abcdef')).toBe('echo[key]') // a key glued to a word
     expect(redact('x', null)).toBe('x')
     // ordinary words ending in "sk-" stay intact; a 20+ character key glued to a word does not
     expect(redact('A risk-free, task-based view; echosk-proj-SYNTHabcdefghij0123456789 end')).toBe('A risk-free, task-based view; echo[key] end')
+  })
+
+  it('leaves ordinary words alone: no digit, or no masked run of asterisks', () => {
+    const plain = 'A task-based-classification diagram and a risk-free** chart.'
+    expect(redact(plain)).toBe(plain)
+    expect(redact('Incorrect API key provided: sk-proj-********************abcd')).toBe('Incorrect API key provided: [key]')
+    expect(redact('echosk-proj-SYNTH0a1b2c3d4e5f6g7h8i9')).toBe('echo[key]')
+  })
+
+  it('clipRedacted: a key fragment cut at the edge cannot survive', () => {
+    expect(clipRedacted('x'.repeat(186) + 'sk-proj-SYNTH0123456789', 200)).toBe('x'.repeat(186) + '[key]')
+    expect(clipRedacted('short and plain', 200)).toBe('short and plain')
   })
 })
 

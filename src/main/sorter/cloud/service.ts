@@ -37,8 +37,8 @@ import { randomUUID } from 'node:crypto'
 import { loadUndecided, SorterStore, type CloudAnswerRow, type CloudPending, type CloudScope } from '../store'
 import { DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from '../decide'
 import { applyLuna, type CascadeRow } from './cascade'
-import { buildLunaRequest, estimateCost, LUNA, LunaResponseError, parseLunaResponse, planChunks, selectForCloud, type CloudCandidate, type CostEstimate, type LunaItem } from './luna'
-import { LunaHttpError, pool, postLuna, redact, type HttpPost } from './client'
+import { buildLunaRequest, estimateCost, LUNA, LunaResponseError, REASON_MAX, parseLunaResponse, planChunks, selectForCloud, type CloudCandidate, type CostEstimate, type LunaItem } from './luna'
+import { clipRedacted, LunaHttpError, pool, postLuna, redact, type HttpPost } from './client'
 import type { LunaRequest } from './luna'
 import { readVerified, type VerifyRefusal } from './images'
 import { DEFAULT_BATCH_TIME, isBatchDue, nextSlot, nightOf, normaliseBatchTime } from './schedule'
@@ -553,7 +553,7 @@ export class CloudSorter {
             const proposals: Array<CascadeRow & { hash: string }> = []
             for (const [hash, raw] of parsed.answers) {
               // whatever the model wrote, the key never reaches the database or the renderer
-              const a = { ...raw, reason: scrub(raw.reason) }
+              const a = { ...raw, reason: clipRedacted(scrub(raw.reason), REASON_MAX) } // redact first, then shorten
               answers.push({ hash, ...a, model: LUNA.model, promptVersion: LUNA.promptVersion, askedAt })
               const p = pending.get(hash)
               if (!p) continue

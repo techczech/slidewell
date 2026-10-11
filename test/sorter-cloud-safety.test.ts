@@ -199,7 +199,7 @@ describe("finding 4: the key never comes back in Luna's words", () => {
     const stub = lunaStub()
     const http: typeof stub.http = async (url, init) => {
       const res = await stub.http(url, init)
-      const text = (await res.text()).split('A chart worth keeping.').join(`The screen shows the key ${KEY} and sk-other-0123456789.`)
+      const text = (await res.text()).split('A chart worth keeping.').join(`The screen shows the key ${KEY} and sk-other-SYNTH0123456789abc.`)
       return { status: 200, headers: res.headers, text: async () => text }
     }
     await new CloudSorter(cloudDeps(w, { http, keyValue: KEY })).runNightly()
@@ -213,6 +213,25 @@ describe("finding 4: the key never comes back in Luna's words", () => {
       db.close()
     }
     expect(readProposal(w, 'd1')).toMatchObject({ proposal: 'keep', decided_by: 'luna', reason: 'The screen shows the key [key] and [key]' })
+  })
+
+  it('a key echoed at character 186 leaves no sk- text in what is stored', async () => {
+    const w = four()
+    const stub = lunaStub()
+    const http: typeof stub.http = async (url, init) => {
+      const res = await stub.http(url, init)
+      const text = (await res.text()).split('A chart worth keeping.').join('x'.repeat(186) + KEY + ' then more words')
+      return { status: 200, headers: res.headers, text: async () => text }
+    }
+    await new CloudSorter(cloudDeps(w, { http, keyValue: KEY })).runNightly()
+    const db = new DatabaseSync(join(w, 'triage.db'), { readOnly: true })
+    try {
+      const dump = JSON.stringify([db.prepare('SELECT * FROM sorter_cloud_answers').all(), db.prepare('SELECT * FROM sorter_proposals').all()])
+      expect(dump).not.toContain('sk-')
+      expect(dump).toContain('x'.repeat(186) + '[key]')
+    } finally {
+      db.close()
+    }
   })
 })
 

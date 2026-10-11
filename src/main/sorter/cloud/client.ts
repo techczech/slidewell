@@ -25,18 +25,27 @@ export class LunaHttpError extends Error {
 }
 
 /**
- * Remove the given keys and anything shaped like an OpenAI key: 16+ characters after sk- (also one glued
- * to a preceding word such as echosk-proj-…, hence no leading word boundary), or a masked one such as
- * sk-pro****abcd. Ordinary words ending in "sk-" (risk-free, task-based) are left alone.
+ * Remove the given keys and anything shaped like an OpenAI key: 20+ key characters after sk- with at
+ * least one digit among them (also one glued to a preceding word such as echosk-proj-…, hence no
+ * leading word boundary), or a masked one: 2+ key characters, a run of 2+ asterisks, 2+ alphanumerics
+ * (sk-test-****WXYZ). Ordinary words ending in "sk-" (task-based-classification, risk-free**) have
+ * neither shape and are left alone.
  */
 export function redact(text: string, ...keys: Array<string | null | undefined>): string {
   let out = String(text ?? '')
   for (const key of keys) if (key && key.length >= 4) out = out.split(key).join('[key]')
-  // a full key has 16+ characters after sk-; a masked one (any length) has an asterisk; "risk-free" has neither
   return out
-    .replace(/sk-[A-Za-z0-9_*\-.]{16,}/g, '[key]')
-    .replace(/sk-[A-Za-z0-9_\-.]*\*[A-Za-z0-9_*\-.]*/g, '[key]')
+    .replace(/sk-(?=[A-Za-z0-9_*\-.]*\d)[A-Za-z0-9_*\-.]{20,}/g, '[key]')
+    .replace(/sk-[A-Za-z0-9_\-.]{2,}\*{2,}[A-Za-z0-9]{2,}/g, '[key]')
     .replace(/Bearer\s+\S+/gi, 'Bearer [key]')
+}
+
+/**
+ * Shorten text that has already been redacted. A key fragment cut off at the edge would no longer
+ * match any key shape, so an sk- tail left there is replaced too.
+ */
+export function clipRedacted(text: string, max: number): string {
+  return text.slice(0, max).replace(/sk-[A-Za-z0-9_\-]*$/, '[key]')
 }
 
 export type PostOptions = {
