@@ -305,11 +305,21 @@ export class PictureSearchService {
   /**
    * Under the app's own authority (launch, before the local query endpoint starts): open and
    * initialise an existing picture index, so a later outside query only reads. Creates nothing when
-   * there is no index or no model.
+   * there is no index or no model. Never throws: a corrupt or unwritable index is reported (the reason
+   * names only the index file and an error code, no user paths) and the endpoint stays unavailable,
+   * so launch carries on.
    */
-  prepareForQueries(): void {
-    if (this.store || !this.modelReady()) return
-    if (existsSync(join(this.deps.wellRoot(), STORE_FILE))) this.openStore()
+  prepareForQueries(): { ok: true } | { ok: false; reason: string } {
+    if (this.store || !this.modelReady()) return { ok: true }
+    try {
+      if (existsSync(join(this.deps.wellRoot(), STORE_FILE))) this.openStore()
+      return { ok: true }
+    } catch (e) {
+      this.store = null
+      const err = e as NodeJS.ErrnoException & { errcode?: number }
+      const code = typeof err?.code === 'string' ? err.code : (err?.name ?? 'error')
+      return { ok: false, reason: `${STORE_FILE} could not be opened (${code})` }
+    }
   }
 
   /**

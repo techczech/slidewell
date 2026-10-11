@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -84,6 +84,32 @@ describe('picture query endpoint over the real service: no store writes on accou
     svc.prepareForQueries()
     expect(await ask(res.server.socketPath, 'robots')).toEqual({ v: 1, ok: true, hits: [{ id: 'well:abc1234', score: expect.closeTo(1, 5) }] })
     await res.server.close()
+    svc.dispose()
+  })
+
+  it('a corrupt index: preparation reports failure without throwing, the endpoint answers model-not-ready', async () => {
+    writeFileSync(join(wellRoot, STORE_FILE), 'this is not a SQLite database '.repeat(200))
+    const svc = service()
+    let prep: ReturnType<typeof svc.prepareForQueries> | undefined
+    expect(() => (prep = svc.prepareForQueries())).not.toThrow()
+    expect(prep).toEqual({ ok: false, reason: expect.stringMatching(/^picture-search\.db could not be opened/) })
+    expect((prep as { reason: string }).reason).not.toContain(base) // no user paths in the logged reason
+    const res = await startPictureQueryServer({ socketPath: join(ud, 'picture-query.sock'), engine: svc.queryEndpoint() })
+    if (!res.ok) throw new Error(res.reason)
+    expect(await ask(res.server.socketPath, 'robots')).toEqual({ v: 1, ok: false, reason: 'model-not-ready' })
+    await res.server.close()
+    svc.dispose()
+  })
+
+  it('an injected throwing open (unwritable folder): reported, not thrown; the caller carries on', () => {
+    const svc = service()
+    writeFileSync(join(wellRoot, STORE_FILE), '')
+    ;(svc as unknown as { openStore: () => never }).openStore = () => {
+      throw Object.assign(new Error(`EACCES: permission denied, open '${wellRoot}/picture-search.db'`), { code: 'EACCES' })
+    }
+    const prep = svc.prepareForQueries()
+    expect(prep).toEqual({ ok: false, reason: 'picture-search.db could not be opened (EACCES)' })
+    expect(svc.queryEndpoint().ready()).toBe(false)
     svc.dispose()
   })
 

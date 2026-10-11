@@ -332,7 +332,9 @@ app.whenReady().then(() => {
   // Ids and scores only; no query text is logged. Closed and unlinked on quit.
   let pictureQueryServer: QueryServer | null = null
   let quitting = false
-  pictureSearch.prepareForQueries() // open the index here, so outside queries only read
+  // open the index here, so outside queries only read; a broken index leaves the endpoint unavailable
+  const prepared = pictureSearch.prepareForQueries()
+  if (!prepared.ok) console.warn(`picture query endpoint unavailable: ${prepared.reason}`)
   void startPictureQueryServer({
     socketPath: join(app.getPath('userData'), PICTURE_QUERY_SOCKET),
     engine: pictureSearch.queryEndpoint(),
