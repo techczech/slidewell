@@ -324,7 +324,7 @@ export type CloudRunSummary = {
   keep: number
   throwaway: number
   stayedDoubtful: number
-  skipped: 'off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | null
+  skipped: 'unavailable' | 'off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | null
   error: string | null
   message: string
 }
@@ -334,12 +334,14 @@ export type CloudPreview = {
   provider: CloudProviderId // the batch is bound to it: main refuses the send when another is selected by then
   doubtful: number
   toSend: number
+  secondOpinions: number // how many of toSend the other provider answered and was unsure about; the estimate covers all of toSend
+  secondNote: string // those in words ('5 of them ones Luna was unsure about'); '' when none
   cap: number
   leftTonight: number
   estimate: CloudCostEstimate
   costLabel: string // the words before the cost figure
   costNote: string // a sentence after it ('' when none)
-  blocked: 'off' | 'no-key' | 'offline' | 'busy' | 'nothing-doubtful' | 'limit-reached' | null
+  blocked: 'unavailable' | 'off' | 'no-key' | 'offline' | 'busy' | 'nothing-doubtful' | 'limit-reached' | null
   /** One-time token for send(): main sends only the batch it prepared and showed. */
   token: string | null
   message: string

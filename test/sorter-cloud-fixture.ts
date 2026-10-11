@@ -70,8 +70,13 @@ export function readProposal(well: string, name: string): { proposal: string; de
 type Part = { type: string; text?: string; image_url?: string }
 export type SeenRequest = { windows: string[]; images: number; headers: Record<string, string>; body: string; url: string }
 
-/** The verdict both stubs give for a window title. */
-function verdictFor(id: string, w: string): { id: string; verdict: string; confidence: number; reason: string } {
+/** What a stub answers for a window title, when a test gives a stub its own answers (ticket 17: the two providers may disagree). */
+export type Says = (window: string) => { verdict: string; confidence: number; reason: string }
+export type StubOpts = { delayMs?: number; says?: Says }
+
+/** The verdict both stubs give for a window title, unless the stub has its own `says`. */
+function verdictFor(id: string, w: string, says?: Says): { id: string; verdict: string; confidence: number; reason: string } {
+  if (says) return { id, ...says(w) }
   if (w.startsWith('keep')) return { id, verdict: 'keep', confidence: 0.93, reason: 'A chart worth keeping.' }
   if (w.startsWith('toss')) return { id, verdict: 'throwaway', confidence: 0.97, reason: 'A settings pane.' }
   if (w.startsWith('weak')) return { id, verdict: 'throwaway', confidence: 0.7, reason: 'Probably a file picker.' }
@@ -82,7 +87,7 @@ function verdictFor(id: string, w: string): { id: string; verdict: string; confi
  * Answers like Luna: the verdict comes from the window title sent beside each picture
  * ('keep…' keep 0.93, 'toss…' throwaway 0.97, 'weak…' throwaway 0.7, anything else unsure).
  */
-export function lunaStub(opts: { delayMs?: number } = {}): { http: HttpPost; seen: SeenRequest[]; peak: () => number } {
+export function lunaStub(opts: StubOpts = {}): { http: HttpPost; seen: SeenRequest[]; peak: () => number } {
   const seen: SeenRequest[] = []
   let inFlight = 0
   let peak = 0
@@ -96,7 +101,7 @@ export function lunaStub(opts: { delayMs?: number } = {}): { http: HttpPost; see
       const lines = parts.filter((p) => p.type === 'input_text' && p.text?.startsWith('id: ')).map((p) => p.text as string)
       const windows = lines.map((l) => /window: ([^·]+)/.exec(l)?.[1].trim() ?? '')
       seen.push({ windows, images: parts.filter((p) => p.type === 'input_image').length, headers: init.headers, body: init.body, url })
-      const items = lines.map((l, i) => verdictFor(/^id: (s\d+)/.exec(l)![1], windows[i]))
+      const items = lines.map((l, i) => verdictFor(/^id: (s\d+)/.exec(l)![1], windows[i], opts.says))
       const text = JSON.stringify({ items })
       return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text }] }] }) }
     } finally {
@@ -112,7 +117,7 @@ type HaikuPart = { type: string; text?: string; source?: { type: string; media_t
  * Answers like Haiku on the Messages API: one forced tool call whose input holds the verdicts, by the
  * same window-title rule as lunaStub.
  */
-export function haikuStub(opts: { delayMs?: number } = {}): { http: HttpPost; seen: SeenRequest[] } {
+export function haikuStub(opts: StubOpts = {}): { http: HttpPost; seen: SeenRequest[] } {
   const seen: SeenRequest[] = []
   const http: HttpPost = async (url, init) => {
     if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs))
@@ -121,7 +126,7 @@ export function haikuStub(opts: { delayMs?: number } = {}): { http: HttpPost; se
     const lines = parts.filter((p) => p.type === 'text' && p.text?.startsWith('id: ')).map((p) => p.text as string)
     const windows = lines.map((l) => /window: ([^·]+)/.exec(l)?.[1].trim() ?? '')
     seen.push({ windows, images: parts.filter((p) => p.type === 'image').length, headers: init.headers, body: init.body, url })
-    const items = lines.map((l, i) => verdictFor(/^id: (s\d+)/.exec(l)![1], windows[i]))
+    const items = lines.map((l, i) => verdictFor(/^id: (s\d+)/.exec(l)![1], windows[i], opts.says))
     const reply = { id: 'msg_synthetic', type: 'message', role: 'assistant', model: 'claude-haiku-5-5', content: [{ type: 'tool_use', id: 'toolu_synthetic', name: body.tools[0].name, input: { items } }], stop_reason: 'tool_use', usage: { input_tokens: 100, output_tokens: 20 } }
     return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify(reply) }
   }
@@ -134,10 +139,13 @@ export const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
 export const FAKE_OPENAI_KEY = 'sk-test-FAKEKEY0123456789abcdefWXYZ'
 export const FAKE_ANTHROPIC_KEY = 'sk-ant-api03-FAKEKEY0123456789abcdefWXYZ-synthetic'
 
-/** One transport for both providers: each stub answers only at its own provider's address; any other address fails the test. */
-export function bothStubs(opts: { delayMs?: number } = {}): { http: HttpPost; luna: ReturnType<typeof lunaStub>; haiku: ReturnType<typeof haikuStub>; urls: string[] } {
-  const luna = lunaStub(opts)
-  const haiku = haikuStub(opts)
+/**
+ * One transport for both providers: each stub answers only at its own provider's address; any other
+ * address fails the test. `lunaSays` / `haikuSays` give one of them its own answers.
+ */
+export function bothStubs(opts: { delayMs?: number; lunaSays?: Says; haikuSays?: Says } = {}): { http: HttpPost; luna: ReturnType<typeof lunaStub>; haiku: ReturnType<typeof haikuStub>; urls: string[] } {
+  const luna = lunaStub({ delayMs: opts.delayMs, says: opts.lunaSays })
+  const haiku = haikuStub({ delayMs: opts.delayMs, says: opts.haikuSays })
   const urls: string[] = []
   const http: HttpPost = async (url, init) => {
     urls.push(url)

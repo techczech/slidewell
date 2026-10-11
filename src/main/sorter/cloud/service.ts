@@ -29,17 +29,22 @@
  *     admitForRequest), never at the claim: a run that dies before sending uses none of it, and moving
  *     the batch time, pressing Sort now or changing provider cannot exceed it.
  *
- * What is sent: doubtful screenshots (screenshot file names only, luna.ts isScreenshotFile) that
- * neither provider has answered under its current model and prompt, newest first; a screenshot one
- * provider has answered is not sent to the other. A run claims them in one transaction, so two
- * processes never send the same one. Just before each request, each one is re-read and must still hash
+ * What is sent to the selected provider: doubtful screenshots (screenshot file names only, luna.ts
+ * isScreenshotFile), newest first, of two kinds: those no provider has answered, and those the other
+ * provider answered and was unsure about (a second opinion; counted and shown as their own number).
+ * Never sent: one the selected provider has answered, one any provider answered with a decision, one
+ * he has decided. So a screenshot goes to each provider at most once, and never again once both have
+ * answered (store.ts eligibleSql); an answer counts under its provider's current model and prompt.
+ * Second opinions use tonight's allowance like any other. A run claims them in one transaction, so
+ * two processes never send the same one. Just before each request, each one is re-read and must still hash
  * to the hash it was classified under (a regular file, not a link; images.ts readVerified), and must
  * still be eligible (no decision of his, not answered in review); otherwise it is not sent. A retry
  * re-checks eligibility the same way and drops what is no longer eligible; if nothing is left, it is
  * not made.
  * The model's answers are redacted (no key of either provider) before they are stored or shown, then
  * go through the keep-bias in cascade.ts and are recorded with decided_by 'luna' or 'haiku' and the
- * model id. No key, or offline: skipped, items stay doubtful.
+ * model id, each in its own provider's row; a second opinion never replaces the first provider's row.
+ * No key, or offline: skipped, items stay doubtful.
  *
  * A key comes from its provider's ApiKeyStore (key-store.ts, deps.keys) at call time and from nowhere
  * else; nothing here stores, returns or logs it, and every message that may reach a log, the database
@@ -47,13 +52,13 @@
  */
 import { ipcMain } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { loadUndecided, SorterStore, type CloudAnswerRow, type CloudPending, type CloudScope } from '../store'
-import { DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from '../decide'
+import { CloudAnswersUnavailable, loadUndecided, SorterStore, type CloudAnswerRow, type CloudPending, type CloudScope } from '../store'
+import { checkThresholds, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from '../decide'
 import { applyCloud, type CascadeRow } from './cascade'
 import { LunaResponseError, REASON_MAX, planChunks, selectForCloud, type CloudCandidate, type CostEstimate, type LunaItem } from './luna'
 import { clipRedacted, LunaHttpError, pool, postCloud, redact, type HttpPost } from './client'
 import type { LunaRequest } from './luna'
-import { DEFAULT_PROVIDER, isProviderId, PROVIDER_IDS, providerOf, PROVIDERS, type CloudProvider, type ProviderId } from './provider'
+import { DEFAULT_PROVIDER, isProviderId, otherProviders, PROVIDER_IDS, providerOf, PROVIDERS, type CloudProvider, type ProviderId } from './provider'
 import { readVerified, type VerifyRefusal } from './images'
 import { DEFAULT_BATCH_TIME, isBatchDue, nextSlot, nightOf, normaliseBatchTime } from './schedule'
 
@@ -118,13 +123,13 @@ export function applySettingsPatch(cur: StoredCloudSettings, patch: unknown, now
   return out
 }
 
-export type CloudSkip = 'off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed'
+export type CloudSkip = 'unavailable' | 'off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed'
 
 /**
  * What main's native confirm dialog shows (index.ts raises it with dialog.showMessageBox on the main
  * window). `provider` is the one the dialog names and the only one a confirmation counts for.
  */
-export type ConsentPrompt = { kind: 'turn-on' | 'send'; provider: ProviderId; count: number; estimate: CostEstimate; message: string; detail: string; confirmLabel: string }
+export type ConsentPrompt = { kind: 'turn-on' | 'send'; provider: ProviderId; count: number; /** How many of those the dialog counts the other provider answered and was unsure about. */ secondOpinions: number; estimate: CostEstimate; message: string; detail: string; confirmLabel: string }
 
 export type CloudRunSummary = {
   at: string
@@ -147,10 +152,14 @@ export type CloudPreview = {
   local: { ok: boolean; message: string }
   /** The provider this batch was prepared for; send(token) refuses when another is selected by then. */
   provider: ProviderId
-  /** Doubtful screenshots no cloud model has answered yet. */
+  /** Doubtful screenshots this provider may be asked about: unanswered ones and the other provider's unsure ones. */
   doubtful: number
   /** How many a send would ask about (doubtful, within what is left tonight). */
   toSend: number
+  /** How many of `toSend` the other provider answered and was unsure about. The estimate covers all of `toSend`. */
+  secondOpinions: number
+  /** Those in words, for the sentence that gives the count ('5 of them ones Luna was unsure about'); '' when none. */
+  secondNote: string
   /** The per-night limit. */
   cap: number
   /** What is left of tonight's limit. */
@@ -160,7 +169,7 @@ export type CloudPreview = {
   costLabel: string
   costNote: string
   /** Why nothing can be sent now; null when send(token) may go ahead. */
-  blocked: 'off' | 'no-key' | 'offline' | 'busy' | 'nothing-doubtful' | 'limit-reached' | null
+  blocked: 'unavailable' | 'off' | 'no-key' | 'offline' | 'busy' | 'nothing-doubtful' | 'limit-reached' | null
   /** One-time token for send(); null when blocked. */
   token: string | null
   message: string
@@ -221,13 +230,31 @@ const usd = (x: number): string => (x < 0.01 ? 'under $0.01' : `about $${x.toFix
 const disclosure = (p: CloudProvider): string =>
   `For each screenshot, ${p.company} (${p.model}) receives the picture, resized to ${p.longEdge} pixels on its long edge, with the app name and window title from its file name. Window titles can name documents, people or folders. The file’s folder and the text read from the picture are not sent.`
 const costNote = (p: CloudProvider): string => (p.costNote ? ` ${p.costNote}` : '')
+/** Shown when the stored answers cannot be read (store.ts CloudAnswersUnavailable). Nothing is sent then. */
+const UNAVAILABLE = 'The answers stored on this Mac could not be read, so nothing can be sent. The stored answers were left as they are.'
+
+/**
+ * The second opinions among `count` screenshots, in words: '5 of them ones Luna was unsure about';
+ * '' when there are none. `provider` is the one being asked; the words name the other one.
+ */
+export function secondOpinionNote(count: number, second: number, provider: CloudProvider): string {
+  if (second <= 0) return ''
+  const who = otherProviders(provider.id).map((p) => p.name).join(' or ')
+  if (count === 1) return `one ${who} was unsure about`
+  return `${second.toLocaleString('en-GB')} of them ${second === 1 ? 'one' : 'ones'} ${who} was unsure about`
+}
+const andSecond = (count: number, second: number, provider: CloudProvider): string => {
+  const note = secondOpinionNote(count, second, provider)
+  return note ? `, ${note}` : ''
+}
 
 /**
  * The dialog for turning the cloud step on for a provider: what is waiting now and what a night can
  * cost. `insteadOf` is the provider being asked until now, when this is a change of provider while
- * the cloud step is on.
+ * the cloud step is on. `secondOpinions` is how many of those waiting the other provider answered
+ * and was unsure about.
  */
-export function turnOnPrompt(waiting: number, leftTonight: number, provider: CloudProvider = PROVIDERS[DEFAULT_PROVIDER], insteadOf: CloudProvider | null = null): ConsentPrompt {
+export function turnOnPrompt(waiting: number, leftTonight: number, provider: CloudProvider = PROVIDERS[DEFAULT_PROVIDER], insteadOf: CloudProvider | null = null, secondOpinions = 0): ConsentPrompt {
   const now = Math.min(waiting, leftTonight)
   const estimate = provider.estimateCost(now)
   const change = insteadOf ? `Until now ${insteadOf.company}’s ${insteadOf.name} was asked. From now on the screenshots go to ${provider.company} instead; this is a separate agreement.\n\n` : ''
@@ -235,30 +262,46 @@ export function turnOnPrompt(waiting: number, leftTonight: number, provider: Clo
     kind: 'turn-on',
     provider: provider.id,
     count: now,
+    secondOpinions,
     estimate,
     message: insteadOf ? `Ask ${provider.name} instead of ${insteadOf.name}?` : `Turn on asking ${provider.name}?`,
-    detail: `${change}${plural(waiting, 'doubtful screenshot')} ${waiting === 1 ? 'is' : 'are'} waiting now; ${plural(now, 'screenshot')} would go at the next sort. ${provider.costLabel}: ${usd(estimate.usd)}. At most ${NIGHTLY_LIMIT.toLocaleString('en-GB')} screenshots a night (${usd(provider.estimateCost(NIGHTLY_LIMIT).usd)}).${costNote(provider)}\n\n${disclosure(provider)}`,
+    detail: `${change}${plural(waiting, 'doubtful screenshot')} ${waiting === 1 ? 'is' : 'are'} waiting now${andSecond(waiting, secondOpinions, provider)}; ${plural(now, 'screenshot')} would go at the next sort. ${provider.costLabel}: ${usd(estimate.usd)}. At most ${NIGHTLY_LIMIT.toLocaleString('en-GB')} screenshots a night (${usd(provider.estimateCost(NIGHTLY_LIMIT).usd)}).${costNote(provider)}\n\n${disclosure(provider)}`,
     confirmLabel: insteadOf ? `Ask ${provider.name}` : 'Turn on'
   }
 }
 
-/** The dialog before a Sort now send: this batch's count and estimated cost, and the company it goes to. */
-export function sendPrompt(count: number, provider: CloudProvider = PROVIDERS[DEFAULT_PROVIDER]): ConsentPrompt {
+/**
+ * The dialog before a Sort now send: this batch's count and estimated cost, and the company it goes
+ * to. `secondOpinions` is how many of `count` the other provider answered and was unsure about; the
+ * estimate is for all of `count`.
+ */
+export function sendPrompt(count: number, provider: CloudProvider = PROVIDERS[DEFAULT_PROVIDER], secondOpinions = 0): ConsentPrompt {
   const estimate = provider.estimateCost(count)
   return {
     kind: 'send',
     provider: provider.id,
     count,
+    secondOpinions,
     estimate,
     message: `Send ${plural(count, 'screenshot')} to ${provider.name}?`,
-    detail: `${plural(count, 'screenshot')} the sorter could not call will go to ${provider.company} in ${plural(estimate.requests, 'request')}. ${provider.costLabel}: ${usd(estimate.usd)}.${costNote(provider)}\n\n${disclosure(provider)}`,
+    detail: `${plural(count, 'screenshot')} the sorter could not call${secondOpinions > 0 ? `${andSecond(count, secondOpinions, provider)},` : ''} will go to ${provider.company} in ${plural(estimate.requests, 'request')}. ${provider.costLabel}: ${usd(estimate.usd)}.${costNote(provider)}\n\n${disclosure(provider)}`,
     confirmLabel: `Send ${count.toLocaleString('en-GB')}`
   }
 }
 
-/** What counts for a provider's run: its own model + prompt, and the other provider's as already answered. */
-function scopeOf(p: CloudProvider): CloudScope {
-  return { sorterVersion: SORTER_VERSION, model: p.model, promptVersion: p.promptVersion, others: PROVIDER_IDS.filter((id) => id !== p.id).map((id) => ({ model: PROVIDERS[id].model, promptVersion: PROVIDERS[id].promptVersion })) }
+/**
+ * What counts for a provider's run: its own answers (under its model + prompt), the other provider's
+ * (under its own), and the confidence from which a throwaway answer is a decision.
+ */
+function scopeOf(p: CloudProvider, t: Thresholds): CloudScope {
+  return {
+    sorterVersion: SORTER_VERSION,
+    provider: p.id,
+    model: p.model,
+    promptVersion: p.promptVersion,
+    others: otherProviders(p.id).map((o) => ({ provider: o.id, model: o.model, promptVersion: o.promptVersion })),
+    throwawayAt: checkThresholds(t).throwaway
+  }
 }
 
 /** Why a run stops before its next request. */
@@ -309,6 +352,14 @@ export class CloudSorter {
   /** The provider selected in Settings now. */
   private selected(): CloudProvider {
     return providerOf(this.deps.settings().provider)
+  }
+
+  private thresholds(): Thresholds {
+    return this.deps.thresholds ?? DEFAULT_THRESHOLDS
+  }
+
+  private scope(provider: CloudProvider): CloudScope {
+    return scopeOf(provider, this.thresholds())
   }
 
   private withStore<T>(fn: (s: SorterStore) => T): T {
@@ -385,9 +436,15 @@ export class CloudSorter {
    */
   async consentToTurnOn(id: ProviderId = this.selected().id, insteadOf: ProviderId | null = null): Promise<boolean> {
     const provider = providerOf(id)
-    const waiting = this.candidates(provider).list.length
+    const found = this.waiting(provider)
+    if (!found) {
+      // without the stored answers nobody can say what would be sent: it is not turned on
+      this.log(`turning on asking ${provider.name}: not possible, the stored answers could not be read`)
+      return false
+    }
+    const waiting = found.list.length
     const leftTonight = Math.max(0, NIGHTLY_LIMIT - this.withStore((s) => s.allowanceUsed(nightOf(this.now()))))
-    const ok = await this.deps.confirm(turnOnPrompt(waiting, leftTonight, provider, insteadOf && insteadOf !== id ? providerOf(insteadOf) : null)).catch(() => false)
+    const ok = await this.deps.confirm(turnOnPrompt(waiting, leftTonight, provider, insteadOf && insteadOf !== id ? providerOf(insteadOf) : null, secondOf(found.list, found.pending))).catch(() => false)
     this.log(`turning on asking ${provider.name}: ${ok ? 'confirmed' : 'not confirmed'}`)
     return ok === true
   }
@@ -412,10 +469,13 @@ export class CloudSorter {
     return key === runKey ? { ok: true } : { revoked: 'revoked' }
   }
 
-  /** Doubtful screenshots no cloud model has answered, with a readable picture on this Mac. */
-  private candidates(provider: CloudProvider): { list: CloudCandidate[]; pending: Map<string, CloudPending> } {
-    const scope = scopeOf(provider)
-    const pendingRows = this.withStore((s) => s.cloudPending(scope.sorterVersion, scope.model, scope.promptVersion, scope.others))
+  /**
+   * Doubtful screenshots this provider may be asked about (store.ts eligibleSql), with a readable
+   * picture on this Mac. `pending` says of each whether it would be a second opinion.
+   */
+  private candidates(provider: CloudProvider): Candidates {
+    const scope = this.scope(provider)
+    const pendingRows = this.withStore((s) => s.cloudPending(scope))
     const pending = new Map(pendingRows.map((p) => [p.hash, p]))
     if (!pending.size) return { list: [], pending }
     const list: CloudCandidate[] = []
@@ -425,6 +485,16 @@ export class CloudSorter {
     }
     // screenshots only (by file name); anything else never counts as waiting for a cloud model
     return { list: selectForCloud(list, Number.MAX_SAFE_INTEGER), pending }
+  }
+
+  /** candidates(), or null when the stored answers cannot be read (store.ts CloudAnswersUnavailable): nothing may be sent then. */
+  private waiting(provider: CloudProvider): Candidates | null {
+    try {
+      return this.candidates(provider)
+    } catch (e) {
+      if (e instanceof CloudAnswersUnavailable) return null
+      throw e
+    }
   }
 
   private async runLocal(): Promise<{ ok: boolean; message: string }> {
@@ -443,7 +513,7 @@ export class CloudSorter {
   async prepare(): Promise<CloudPreview> {
     this.prepared = null
     const first = this.selected()
-    const none = (patch: Partial<CloudPreview>): CloudPreview => ({ local: { ok: false, message: '' }, provider: first.id, doubtful: 0, toSend: 0, cap: NIGHTLY_LIMIT, leftTonight: 0, estimate: first.estimateCost(0), costLabel: first.costLabel, costNote: first.costNote, blocked: null, token: null, message: '', ...patch })
+    const none = (patch: Partial<CloudPreview>): CloudPreview => ({ local: { ok: false, message: '' }, provider: first.id, doubtful: 0, toSend: 0, secondOpinions: 0, secondNote: '', cap: NIGHTLY_LIMIT, leftTonight: 0, estimate: first.estimateCost(0), costLabel: first.costLabel, costNote: first.costNote, blocked: null, token: null, message: '', ...patch })
     if (this.busy()) return none({ blocked: 'busy', message: 'The sorter is already running.' })
     let local: { ok: boolean; message: string }
     try {
@@ -456,10 +526,14 @@ export class CloudSorter {
     const settings = this.deps.settings()
     const provider = providerOf(settings.provider)
     const { name, company } = provider
-    const { list } = this.candidates(provider)
+    const found = this.waiting(provider)
+    if (!found) return none({ local, provider: provider.id, estimate: provider.estimateCost(0), costLabel: provider.costLabel, costNote: provider.costNote, blocked: 'unavailable', message: UNAVAILABLE })
+    const { list } = found
     const leftTonight = Math.max(0, NIGHTLY_LIMIT - this.withStore((s) => s.allowanceUsed(nightOf(this.now()))))
     const batch = selectForCloud(list, leftTonight)
     const toSend = batch.length
+    const secondOpinions = secondOf(batch, found.pending)
+    const secondNote = secondOpinionNote(toSend, secondOpinions, provider)
     const blocked: CloudPreview['blocked'] = !list.length
       ? 'nothing-doubtful'
       : !settings.enabled
@@ -483,13 +557,13 @@ export class CloudSorter {
               ? `${waiting} stay in Review: this Mac is offline.`
               : blocked === 'limit-reached'
                 ? `${waiting} stay in Review: ${NIGHTLY_LIMIT.toLocaleString('en-GB')} screenshots have been sent tonight, the most per night.`
-                : `Ask ${name} about ${plural(toSend, 'screenshot')}${toSend < list.length ? ` of ${list.length.toLocaleString('en-GB')} (${leftTonight.toLocaleString('en-GB')} left of tonight’s ${NIGHTLY_LIMIT.toLocaleString('en-GB')})` : ''}?`
+                : `Ask ${name} about ${plural(toSend, 'screenshot')}${toSend < list.length ? ` of ${list.length.toLocaleString('en-GB')} (${leftTonight.toLocaleString('en-GB')} left of tonight’s ${NIGHTLY_LIMIT.toLocaleString('en-GB')})` : ''}${secondNote ? `, ${secondNote}` : ''}?`
     let token: string | null = null
     if (!blocked) {
       token = randomUUID()
       this.prepared = { token, hashes: batch.map((c) => c.hash), expiresAt: this.now().getTime() + PREPARED_TTL_MS, provider: provider.id }
     }
-    return { local, provider: provider.id, doubtful: list.length, toSend, cap: NIGHTLY_LIMIT, leftTonight, estimate: provider.estimateCost(toSend), costLabel: provider.costLabel, costNote: provider.costNote, blocked, token, message }
+    return { local, provider: provider.id, doubtful: list.length, toSend, secondOpinions, secondNote, cap: NIGHTLY_LIMIT, leftTonight, estimate: provider.estimateCost(toSend), costLabel: provider.costLabel, costNote: provider.costNote, blocked, token, message }
   }
 
   /**
@@ -559,7 +633,7 @@ export class CloudSorter {
   private async runCloud(o: { trigger: CloudRunSummary['trigger']; local: CloudRunSummary['local']; provider: ProviderId; only?: string[]; confirm?: boolean }): Promise<CloudRunSummary> {
     const { trigger, local } = o
     const provider = providerOf(o.provider)
-    const scope = scopeOf(provider)
+    const scope = this.scope(provider)
     const at = this.now().toISOString()
     const base: CloudRunSummary = { at, trigger, provider: provider.id, local, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, skipped: null, error: null, message: '' }
     const finish = (patch: Partial<CloudRunSummary>): CloudRunSummary => {
@@ -569,7 +643,9 @@ export class CloudSorter {
       return s
     }
     if (this.busy()) return finish({ error: 'The sorter is already running.' })
-    const { list, pending } = this.candidates(provider)
+    const found = this.waiting(provider)
+    if (!found) return finish({ skipped: 'unavailable' })
+    const { list, pending } = found
     let pool0 = list
     if (o.only) {
       const byHash = new Map(list.map((c) => [c.hash, c]))
@@ -590,7 +666,7 @@ export class CloudSorter {
       // a manual send goes only after main's own dialog, which names this provider, returns OK
       const providerChanges = this.providerChanges
       const keyChanges = this.keyChanges[provider.id]
-      const ok = await this.deps.confirm(sendPrompt(wanted.length, provider)).catch(() => false)
+      const ok = await this.deps.confirm(sendPrompt(wanted.length, provider, secondOf(wanted, pending))).catch(() => false)
       if (ok !== true) return finish({ skipped: 'not-confirmed', stayedDoubtful: list.length })
       if (this.busy()) return finish({ error: 'The sorter is already running.' })
       // the dialog may have stood open a while: the confirmation counts only for the provider it named
@@ -614,7 +690,7 @@ export class CloudSorter {
     const claimedSet = new Set(claimed)
     const selected = wanted.filter((c) => claimedSet.has(c.hash))
 
-    const t = this.deps.thresholds ?? DEFAULT_THRESHOLDS
+    const t = this.thresholds()
     const ctl = new AbortController()
     this.abort = ctl
     this.phase = 'asking'
@@ -714,7 +790,7 @@ export class CloudSorter {
             for (const [hash, raw] of parsed.answers) {
               // whatever the model wrote, no key reaches the database or the renderer
               const a = { ...raw, reason: clipRedacted(scrub(raw.reason), REASON_MAX) } // redact first, then shorten
-              answers.push({ hash, ...a, model: provider.model, promptVersion: provider.promptVersion, askedAt })
+              answers.push({ hash, ...a, provider: provider.id, model: provider.model, promptVersion: provider.promptVersion, askedAt })
               const p = pending.get(hash)
               if (!p) continue
               const row = applyCloud({ proposal: 'doubtful', confidence: p.confidence, pKeep: p.pKeep, reason: p.reason, decidedBy: null }, a, provider, t)
@@ -773,6 +849,10 @@ const REVOKED_WORDS: Record<Revoked, (p: CloudProvider) => string> = {
   'provider-changed': () => 'Another provider was selected'
 }
 
+type Candidates = { list: CloudCandidate[]; pending: Map<string, CloudPending> }
+/** How many of these the other provider answered and was unsure about. */
+const secondOf = (batch: ReadonlyArray<{ hash: string }>, pending: Map<string, CloudPending>): number => batch.filter((c) => pending.get(c.hash)?.secondOpinion).length
+
 type NotSent = VerifyRefusal | 'no-longer-eligible' | 'limit-reached'
 /** Log words for a screenshot that was not sent (never its path or name). */
 const REFUSAL_WORDS: Record<NotSent, string> = {
@@ -790,6 +870,8 @@ export function describe(s: CloudRunSummary): string {
   const { name, company } = providerOf(s.provider)
   const waiting = s.stayedDoubtful ? ` ${plural(s.stayedDoubtful, 'screenshot')} still need${s.stayedDoubtful === 1 ? 's' : ''} a look.` : ''
   switch (s.skipped) {
+    case 'unavailable':
+      return `${name} was not asked. ${UNAVAILABLE}`
     case 'not-prepared':
       return `Nothing was sent. ${s.error ?? ''}`.trim()
     case 'not-confirmed':

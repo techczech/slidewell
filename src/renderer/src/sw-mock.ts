@@ -31,7 +31,7 @@ function cloudMock(): SwApi['cloud'] {
       st.settings = { ...st.settings, ...patch }
       return sync()
     },
-    prepare: async () => ({ local: { ok: false, message: 'not available in the browser preview' }, provider: st.settings.provider, doubtful: 0, toSend: 0, cap: st.nightlyLimit, leftTonight: st.nightlyLimit, estimate: { screenshots: 0, requests: 0, inputTokens: 0, outputTokens: 0, usd: 0 }, costLabel: 'Estimated cost', costNote: '', blocked: 'nothing-doubtful' as const, token: null, message: `Nothing doubtful is waiting for ${st.name}.` }),
+    prepare: async () => ({ local: { ok: false, message: 'not available in the browser preview' }, provider: st.settings.provider, doubtful: 0, toSend: 0, secondOpinions: 0, secondNote: '', cap: st.nightlyLimit, leftTonight: st.nightlyLimit, estimate: { screenshots: 0, requests: 0, inputTokens: 0, outputTokens: 0, usd: 0 }, costLabel: 'Estimated cost', costNote: '', blocked: 'nothing-doubtful' as const, token: null, message: `Nothing doubtful is waiting for ${st.name}.` }),
     send: async () => ({ at: new Date().toISOString(), trigger: 'manual' as const, provider: st.settings.provider, local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, skipped: 'nothing-doubtful' as const, error: null, message: `Nothing doubtful was waiting for ${st.name}.` }),
     cancel: async () => undefined,
     onStatus: () => () => undefined

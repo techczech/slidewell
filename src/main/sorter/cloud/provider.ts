@@ -9,8 +9,11 @@
  *
  *   PROVIDERS / providerOf(id)   the two, by id ('openai' is the default)
  *   isProviderId(x)              the only two ids there are; anything else is not a provider
- *   answerScopes()               each provider's current model + prompt (store.ts: an answer under
- *                                any of them means the screenshot is not asked again)
+ *   answerScopes()               each provider with its current model + prompt; a stored answer
+ *                                counts for a provider only under these (store.ts)
+ *   otherProviders(id)           every provider but this one (the ones a second opinion follows)
+ *   providerOfModel(model)       whose model id this is, for answer rows stored before the provider
+ *                                was recorded with each (store.ts migrateCloudAnswers)
  *   voiceOfAnswer(model, prompt) whose stored answer this is (sorter/service.ts re-applies it)
  *
  * Nothing here does I/O or holds a key.
@@ -101,11 +104,24 @@ export function providerOf(id: unknown): CloudProvider {
   return PROVIDERS[isProviderId(id) ? id : DEFAULT_PROVIDER]
 }
 
-export type AnswerScope = { model: string; promptVersion: string }
+export type AnswerScope = { provider: ProviderId; model: string; promptVersion: string }
 
-/** Each provider's current model + prompt. */
+/** Each provider with its current model + prompt. */
 export function answerScopes(): AnswerScope[] {
-  return PROVIDER_IDS.map((id) => ({ model: PROVIDERS[id].model, promptVersion: PROVIDERS[id].promptVersion }))
+  return PROVIDER_IDS.map((id) => ({ provider: id, model: PROVIDERS[id].model, promptVersion: PROVIDERS[id].promptVersion }))
+}
+
+/** Every provider but this one. */
+export function otherProviders(id: ProviderId): CloudProvider[] {
+  return PROVIDER_IDS.filter((x) => x !== id).map((x) => PROVIDERS[x])
+}
+
+/**
+ * The provider whose model id this is; null for any other id. Only for answer rows stored before
+ * the provider was recorded with each row, when the model id was the one record of who answered.
+ */
+export function providerOfModel(model: string): ProviderId | null {
+  return PROVIDER_IDS.find((id) => PROVIDERS[id].model === model) ?? null
 }
 
 /** The provider whose current model + prompt a stored answer was given under; null for any other (it does not count). */

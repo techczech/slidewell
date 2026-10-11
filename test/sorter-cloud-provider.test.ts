@@ -10,9 +10,8 @@ import { join } from 'node:path'
 vi.mock('electron', () => ({ ipcMain: { handle: () => undefined } }))
 const { CloudSorter, NIGHTLY_LIMIT, normaliseCloudSettings, sendPrompt, turnOnPrompt } = await import('../src/main/sorter/cloud/service')
 const { SorterStore } = await import('../src/main/sorter/store')
-const { SORTER_VERSION } = await import('../src/main/sorter/decide')
 const { DEFAULT_PROVIDER, HAIKU_PROVIDER, LUNA_PROVIDER, PROVIDERS, answerScopes, isProviderId, providerOf, voiceOfAnswer } = await import('../src/main/sorter/cloud/provider')
-const { makeCloudWell, readProposal, bothStubs, cloudDeps, hashOf, ANTHROPIC_URL, OPENAI_URL, FAKE_ANTHROPIC_KEY, FAKE_OPENAI_KEY } = await import('./sorter-cloud-fixture')
+const { makeCloudWell, readProposal, bothStubs, cloudDeps, ANTHROPIC_URL, OPENAI_URL, FAKE_ANTHROPIC_KEY, FAKE_OPENAI_KEY } = await import('./sorter-cloud-fixture')
 
 let dirs: string[] = []
 afterEach(() => {
@@ -190,8 +189,8 @@ describe('decided_by records the provider’s model for each item', () => {
 
   it('a stored answer belongs to the provider whose current model and prompt it was given under, or to none', () => {
     expect(answerScopes()).toEqual([
-      { model: 'gpt-6-luna', promptVersion: 'luna-prompt-1' },
-      { model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1' }
+      { provider: 'openai', model: 'gpt-6-luna', promptVersion: 'luna-prompt-1' },
+      { provider: 'anthropic', model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1' }
     ])
     expect(voiceOfAnswer('gpt-6-luna', 'luna-prompt-1')).toBe(LUNA_PROVIDER)
     expect(voiceOfAnswer('claude-haiku-5-5', 'haiku-prompt-1')).toBe(HAIKU_PROVIDER)
@@ -238,9 +237,12 @@ describe('one nightly allowance, shared by both providers', () => {
     expect(net.luna.seen).toHaveLength(0)
     expect(net.haiku.seen.reduce((n, r) => n + r.images, 0)).toBe(5)
     expect(rows(w, 'SELECT night, sent FROM sorter_cloud_allowance')).toEqual([{ night, sent: NIGHTLY_LIMIT }])
-    // the next night has a fresh allowance, whichever provider asks
+    // the next night has a fresh allowance, whichever provider asks: Luna gets the one Haiku never saw
+    // and, since ticket 17, the five Haiku was unsure about
     const tomorrow = (): Date => new Date(2026, 9, 12, 2, 0)
-    expect(await new CloudSorter(cloudDeps(w, { http: net.http, now: tomorrow })).runNightly()).toMatchObject({ provider: 'openai', asked: 1 })
+    expect(await new CloudSorter(cloudDeps(w, { http: net.http, now: tomorrow })).runNightly()).toMatchObject({ provider: 'openai', asked: 6 })
+    expect(net.luna.seen.reduce((n, r) => n + r.images, 0)).toBe(6)
+    expect(rows(w, 'SELECT night, sent FROM sorter_cloud_allowance ORDER BY night')).toEqual([{ night, sent: NIGHTLY_LIMIT }, { night: '2026-10-11', sent: 6 }])
   })
 
   it('the allowance table has no provider in it', () => {
@@ -250,43 +252,7 @@ describe('one nightly allowance, shared by both providers', () => {
   })
 })
 
-describe('a screenshot one provider has answered is not sent to the other', () => {
-  it('after a Luna run, a Haiku run finds nothing waiting; and the other way round', async () => {
-    for (const [first, second] of [
-      ['openai', 'anthropic'],
-      ['anthropic', 'openai']
-    ] as const) {
-      const w = four()
-      const net = bothStubs()
-      expect(await new CloudSorter(cloudDeps(w, { http: net.http, settings: { provider: first } })).runNightly()).toMatchObject({ asked: 4 })
-      const before = net.urls.length
-      const svc = new CloudSorter(cloudDeps(w, { http: net.http, settings: { provider: second } }))
-      expect(await svc.runNightly()).toMatchObject({ provider: second, skipped: 'nothing-doubtful', asked: 0 })
-      expect(await svc.prepare()).toMatchObject({ blocked: 'nothing-doubtful', doubtful: 0 })
-      expect(net.urls.length).toBe(before)
-      // the two it left doubtful keep the first provider's name
-      expect(readProposal(w, 'd4')?.decided_by).toBe(first === 'openai' ? 'luna' : 'haiku')
-    }
-  })
-
-  it('claims and the eligibility test in the store count the other provider’s answers', () => {
-    const w = four()
-    const st = new SorterStore(w)
-    try {
-      const luna = { sorterVersion: SORTER_VERSION, model: 'gpt-6-luna', promptVersion: 'luna-prompt-1', others: [{ model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1' }] }
-      st.saveCloudResults([{ hash: hashOf('d1'), verdict: 'unsure', confidence: 0.5, reason: 'x', model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1', askedAt: '2026-10-11T00:00:00Z' }], [])
-      st.saveCloudResults([{ hash: hashOf('d2'), verdict: 'unsure', confidence: 0.5, reason: 'x', model: 'claude-haiku-4', promptVersion: 'haiku-prompt-0', askedAt: '2026-10-11T00:00:00Z' }], [])
-      const pending = st.cloudPending(luna.sorterVersion, luna.model, luna.promptVersion, luna.others).map((p) => p.hash)
-      expect(pending).not.toContain(hashOf('d1')) // answered by Haiku under its current model and prompt
-      expect(pending).toContain(hashOf('d2')) // an answer under an older model or prompt does not count
-      const claimed = st.claimForCloud([hashOf('d1'), hashOf('d2')], { ...luna, night: 'n', limit: 10, runId: 'r', now: new Date('2026-10-11T01:00:00Z') }).claimed
-      expect(claimed).toEqual([hashOf('d2')])
-      expect(st.admitForRequest([hashOf('d1'), hashOf('d2')], { ...luna, runId: 'r', night: 'n', limit: 10 })).toEqual({ admitted: [hashOf('d2')], overLimit: 0 })
-    } finally {
-      st.close()
-    }
-  })
-})
+// What one provider has answered and what the other may then be asked (ticket 17): sorter-cloud-second-opinion.test.ts.
 
 describe('the dialogs name the company that receives the pictures', () => {
   it('Luna’s dialogs are worded as before', () => {

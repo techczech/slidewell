@@ -22,7 +22,7 @@ import { auc, brier, reliabilityTable, type CalibrationCheck, type ReliabilityRo
 import { decide, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from './decide'
 import { accuracyReport, enoughToMeasure, holdOutSplit, MIN_HELD_BACK, type AccuracyReport, type LabelledPrediction } from './accuracy'
 import { loadLabelled, loadUndecided, SorterStore, type ProposalRow, type Shot } from './store'
-import { applyCloud, decidedByLocal } from './cloud/cascade'
+import { applyCloud, decidedByLocal, settledAnswer } from './cloud/cascade'
 import { answerScopes, voiceOfAnswer } from './cloud/provider'
 
 export const HOLD_OUT_FRACTION = 0.2
@@ -267,7 +267,8 @@ export class SorterService {
           const rule = applyRules(s.facts)
           const verdict = decide(rule, v ? predictKeep(rec.model, v) : null, t, v ? (tierOf.get(s) ?? null) : null)
           const local = { proposal: verdict.proposal, confidence: verdict.confidence, pKeep: verdict.pKeep, reason: verdict.reason, decidedBy: decidedByLocal(verdict, rule, t) }
-          const answer = verdict.proposal === 'doubtful' ? asked.get(s.hash) : undefined
+          // more than one provider may have answered it: the answer that is a decision stands, else the one asked last
+          const answer = verdict.proposal === 'doubtful' ? settledAnswer(asked.get(s.hash) ?? [], t) : null
           const who = answer ? voiceOfAnswer(answer.model, answer.promptVersion) : null
           const row = answer && who ? applyCloud(local, answer, who, t) : local
           rows.push({ hash: s.hash, ...row, rule: rule?.rule ?? null })
