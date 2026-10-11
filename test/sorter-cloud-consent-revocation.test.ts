@@ -9,8 +9,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-vi.mock('electron', () => ({ ipcMain: { handle: () => undefined } }))
-const { CloudSorter, changeSettings, normaliseCloudSettings } = await import('../src/main/sorter/cloud/service')
+const ipc = vi.hoisted(() => new Map<string, (e: { sender: unknown }, ...args: unknown[]) => unknown>())
+vi.mock('electron', () => ({ ipcMain: { handle: (channel: string, fn: (e: { sender: unknown }, ...args: unknown[]) => unknown) => void ipc.set(channel, fn) } }))
+const { CloudSorter, changeSettings, normaliseCloudSettings, registerCloudIpc } = await import('../src/main/sorter/cloud/service')
 const { SorterStore } = await import('../src/main/sorter/store')
 const { SORTER_VERSION } = await import('../src/main/sorter/decide')
 const { LUNA } = await import('../src/main/sorter/cloud/luna')
@@ -218,6 +219,86 @@ describe('D: the allowance counts only what went into a request', () => {
     await new CloudSorter(cloudDeps(w, { http: t.http, now: () => now })).runNightly()
     expect(t.bodies).toHaveLength(2)
     expect(allowance(w, '2026-10-10')).toBe(4)
+  })
+})
+
+describe('F: a run is bound to the key it started with', () => {
+  const OLD = 'sk-test-SYNTHOLD0123456789abcdefWXYZ'
+  const NEW = 'sk-proj-SYNTHNEW9876543210zyxwvuQRST'
+  const shots32 = (): string =>
+    well(Array.from({ length: 32 }, (_, i) => ({ hash: `h${i}`, proposal: 'doubtful' as const, window: `keep-${i}`, takenAt: `2026-10-01T10:${String(59 - i).padStart(2, '0')}:00` })))
+
+  it('replacing the key during a retry’s wait: no further request, the run ends revoked', async () => {
+    const w = four()
+    const t = failOnce()
+    let key: string | null = OLD
+    const d = cloudDeps(w, {
+      http: t.http,
+      key: { get: () => key, has: () => Boolean(key), encryptionAvailable: () => true },
+      sleep: async () => void (key = NEW) // removed and a new one saved before the backoff ends
+    })
+    const s = await new CloudSorter(d).runNightly()
+    expect(t.bodies).toHaveLength(1)
+    expect(s.skipped).toBe('revoked')
+    expect(s.message).toMatch(/the OpenAI key was changed/)
+    expect(claimsLeft(w)).toBe(0)
+  })
+
+  for (const [channel, after, skipped] of [
+    ['cloud:set-key', NEW, 'revoked'],
+    ['cloud:clear-key', null, 'no-key']
+  ] as const) {
+    it(`${channel} while a request is out stops the run at once: no further request, claims go, skipped ${skipped}`, async () => {
+      const w = shots32()
+      const stub = lunaStub({ delayMs: 20 })
+      let key: string | null = OLD
+      const d = cloudDeps(w, { key: { get: () => key, has: () => Boolean(key), encryptionAvailable: () => true } })
+      const svc = new CloudSorter(d)
+      ipc.clear()
+      registerCloudIpc(
+        svc,
+        { set: (k) => ((key = String(k)), { ok: true, saved: true }), clear: () => void (key = null) },
+        () => undefined,
+        () => ({}),
+        () => true
+      )
+      let calls = 0
+      d.http = async (u, init) => {
+        calls++
+        if (calls === 1) await ipc.get(channel)!({ sender: null }, after) // he changes the key while the first request is out
+        const r = await stub.http(u, init)
+        if (init.signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' }) // as net.fetch does
+        return r
+      }
+      const s = await svc.runNightly()
+      expect(calls).toBeLessThanOrEqual(2) // the two already started together (concurrency 2); the third never went
+      expect(s.skipped).toBe(skipped)
+      expect(s.answered).toBe(0) // the aborted requests' answers are not stored
+      expect(claimsLeft(w)).toBe(0)
+    })
+  }
+
+  it('a reason carrying a key glued to a word is stored redacted, against the run’s key and the current one', async () => {
+    const w = four()
+    const stub = lunaStub()
+    let key: string | null = OLD
+    const http: HttpPost = async (url, init) => {
+      const res = await stub.http(url, init)
+      key = NEW // the stored key changes under the run without the change being signalled
+      const text = (await res.text()).split('A chart worth keeping.').join(`echo${NEW} and echosk-proj-SYNTHOTHER0123456789 and x${OLD}`)
+      return { status: 200, headers: res.headers, text: async () => text }
+    }
+    await new CloudSorter(cloudDeps(w, { http, key: { get: () => key, has: () => Boolean(key), encryptionAvailable: () => true } })).runNightly()
+    const db = new DatabaseSync(join(w, 'triage.db'), { readOnly: true })
+    try {
+      const dump = JSON.stringify([db.prepare('SELECT * FROM sorter_cloud_answers').all(), db.prepare('SELECT * FROM sorter_proposals').all()])
+      expect(dump).not.toContain('SYNTHNEW')
+      expect(dump).not.toContain('SYNTHOTHER')
+      expect(dump).not.toContain('SYNTHOLD')
+      expect(dump).toContain('echo[key]')
+    } finally {
+      db.close()
+    }
   })
 })
 

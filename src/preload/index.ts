@@ -319,7 +319,7 @@ export type CloudRunSummary = {
   keep: number
   throwaway: number
   stayedDoubtful: number
-  skipped: 'off' | 'no-key' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | null
+  skipped: 'off' | 'no-key' | 'revoked' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | null
   error: string | null
   message: string
 }

@@ -24,11 +24,19 @@ export class LunaHttpError extends Error {
   }
 }
 
-/** Remove the key and anything shaped like an OpenAI key (also masked ones such as sk-pro****abcd). */
-export function redact(text: string, key?: string | null): string {
+/**
+ * Remove the given keys and anything shaped like an OpenAI key: 16+ characters after sk- (also one glued
+ * to a preceding word such as echosk-proj-…, hence no leading word boundary), or a masked one such as
+ * sk-pro****abcd. Ordinary words ending in "sk-" (risk-free, task-based) are left alone.
+ */
+export function redact(text: string, ...keys: Array<string | null | undefined>): string {
   let out = String(text ?? '')
-  if (key && key.length >= 4) out = out.split(key).join('[key]')
-  return out.replace(/\bsk-[A-Za-z0-9_*\-.]{3,}/g, '[key]').replace(/Bearer\s+\S+/gi, 'Bearer [key]')
+  for (const key of keys) if (key && key.length >= 4) out = out.split(key).join('[key]')
+  // a full key has 16+ characters after sk-; a masked one (any length) has an asterisk; "risk-free" has neither
+  return out
+    .replace(/sk-[A-Za-z0-9_*\-.]{16,}/g, '[key]')
+    .replace(/sk-[A-Za-z0-9_\-.]*\*[A-Za-z0-9_*\-.]*/g, '[key]')
+    .replace(/Bearer\s+\S+/gi, 'Bearer [key]')
 }
 
 export type PostOptions = {

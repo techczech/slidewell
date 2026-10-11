@@ -84,6 +84,10 @@ describe('redact', () => {
     expect(redact(`a ${KEY} b`, KEY)).toBe('a [key] b')
     expect(redact('Incorrect API key provided: sk-test-****WXYZ.')).toBe('Incorrect API key provided: [key]')
     expect(redact('Authorization: Bearer abc.def')).toBe('Authorization: Bearer [key]')
+    expect(redact('echosk-proj-SYNTH0123456789abcdef')).toBe('echo[key]') // a key glued to a word
+    expect(redact('x', null)).toBe('x')
+    // ordinary words ending in "sk-" stay intact; a 20+ character key glued to a word does not
+    expect(redact('A risk-free, task-based view; echosk-proj-SYNTHabcdefghij0123456789 end')).toBe('A risk-free, task-based view; echo[key] end')
   })
 })
 

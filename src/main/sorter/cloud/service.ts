@@ -72,7 +72,7 @@ export function applySettingsPatch(cur: StoredCloudSettings, patch: unknown, now
   return out
 }
 
-export type CloudSkip = 'off' | 'no-key' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed'
+export type CloudSkip = 'off' | 'no-key' | 'revoked' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed'
 
 /** What main's native confirm dialog shows (index.ts raises it with dialog.showMessageBox on the main window). */
 export type ConsentPrompt = { kind: 'turn-on' | 'send'; count: number; estimate: CostEstimate; message: string; detail: string; confirmLabel: string }
@@ -188,6 +188,8 @@ export class CloudSorter {
   private done = 0
   private total = 0
   private abort: AbortController | null = null
+  /** Stops the running batch because the key changed ('no-key' removed, 'revoked' replaced); null when idle. */
+  private revokeRun: ((why: 'no-key' | 'revoked') => void) | null = null
   private prepared: { token: string; hashes: string[]; expiresAt: number } | null = null
 
   constructor(private deps: CloudDeps) {}
@@ -246,6 +248,16 @@ export class CloudSorter {
     this.abort?.abort()
   }
 
+  /**
+   * The key was removed or a key was saved (Settings). A run is bound to the key it started with, so
+   * the running batch, if any, stops at once: no further request or retry, its claims released.
+   */
+  keyChanged(change: 'cleared' | 'saved'): void {
+    if (!this.revokeRun) return
+    this.log(`the OpenAI key was ${change === 'cleared' ? 'removed' : 'changed'}: stopping the run`)
+    this.revokeRun(change === 'cleared' ? 'no-key' : 'revoked')
+  }
+
   /** Turning the cloud step on: main's own dialog with what is waiting and the cost; true when he confirms. */
   async consentToTurnOn(): Promise<boolean> {
     const waiting = this.candidates().list.length
@@ -256,10 +268,11 @@ export class CloudSorter {
   }
 
   /**
-   * The opt-in and the key, read again from main's state; null (and why) when asking Luna was turned
-   * off or the key is gone. Read before every request and every retry.
+   * The opt-in and the key, read again from main's state; the reason to stop when asking Luna was
+   * turned off, the key is gone, or it is no longer the key the run started with. Read before every
+   * request and every retry.
    */
-  private liveConsent(): { key: string } | { revoked: 'off' | 'no-key' } {
+  private liveConsent(runKey: string): { ok: true } | { revoked: 'off' | 'no-key' | 'revoked' } {
     let enabled = false
     try {
       enabled = this.deps.settings().enabled === true
@@ -268,7 +281,8 @@ export class CloudSorter {
     }
     if (!enabled) return { revoked: 'off' }
     const key = this.safeKey()
-    return key ? { key } : { revoked: 'no-key' }
+    if (!key) return { revoked: 'no-key' }
+    return key === runKey ? { ok: true } : { revoked: 'revoked' }
   }
 
   /** Doubtful screenshots Luna has not answered, with a readable picture on this Mac. */
@@ -452,18 +466,26 @@ export class CloudSorter {
     this.total = selected.length
     this.push()
     let fatal: LunaHttpError | null = null
-    let revoked: 'off' | 'no-key' | null = null
+    let revoked: 'off' | 'no-key' | 'revoked' | null = null
     let chunkError: string | null = null
     const refused = new Map<NotSent, number>()
     const refuse = (why: NotSent, n = 1): void => void refused.set(why, (refused.get(why) ?? 0) + n)
-    // revocation: the opt-in and the key from main's state; when either has gone, stop the whole run
-    const consent = (): string => {
-      const c = this.liveConsent()
-      if ('key' in c) return c.key
+    // revocation: the opt-in and the key from main's state; when either has gone, or the key is no
+    // longer the one this run started with, stop the whole run (requests only ever carry `key`)
+    const consent = (): void => {
+      const c = this.liveConsent(key)
+      if ('ok' in c) return
       revoked ??= c.revoked
       ctl.abort()
-      throw new LunaHttpError(c.revoked === 'off' ? 'Asking Luna was turned off' : 'The OpenAI key was removed', 'revoked')
+      throw new LunaHttpError(c.revoked === 'off' ? 'Asking Luna was turned off' : c.revoked === 'no-key' ? 'The OpenAI key was removed' : 'The OpenAI key was changed', 'revoked')
     }
+    // a key change signalled from Settings stops the run at once, in-flight requests included
+    this.revokeRun = (why) => {
+      revoked ??= why
+      ctl.abort()
+    }
+    // anything that may be stored, shown or logged is redacted against the run's key and the stored one
+    const scrub = (text: string): string => redact(text, key, this.safeKey())
     const counts = { asked: 0, answered: 0, keep: 0, throwaway: 0 }
     try {
       await pool(
@@ -506,7 +528,7 @@ export class CloudSorter {
               // then eligibility per item (he may have decided or answered one meanwhile), and tonight's
               // allowance, counted here for what goes into the request (store.ts admitForRequest)
               before: (attempt) => {
-                const liveKey = consent()
+                consent()
                 const { admitted, overLimit } = this.withStore((s) => s.admitForRequest(current.map((i) => i.hash), { ...SCOPE, runId, night, limit: NIGHTLY_LIMIT }))
                 const keep = new Set(admitted)
                 const next = current.filter((i) => keep.has(i.hash))
@@ -520,7 +542,7 @@ export class CloudSorter {
                 }
                 last.req = buildLunaRequest(current)
                 if (attempt === 1) counts.asked += last.req.ids.size
-                return { body: last.req.body, key: liveKey }
+                return { body: last.req.body, key }
               }
             })
             const req = last.req as LunaRequest | null
@@ -531,7 +553,7 @@ export class CloudSorter {
             const proposals: Array<CascadeRow & { hash: string }> = []
             for (const [hash, raw] of parsed.answers) {
               // whatever the model wrote, the key never reaches the database or the renderer
-              const a = { ...raw, reason: redact(raw.reason, key) }
+              const a = { ...raw, reason: scrub(raw.reason) }
               answers.push({ hash, ...a, model: LUNA.model, promptVersion: LUNA.promptVersion, askedAt })
               const p = pending.get(hash)
               if (!p) continue
@@ -552,7 +574,7 @@ export class CloudSorter {
               fatal ??= e
               ctl.abort()
             } else {
-              chunkError = redact(e instanceof LunaHttpError || e instanceof LunaResponseError ? e.message : 'Luna’s answer could not be read', key)
+              chunkError = scrub(e instanceof LunaHttpError || e instanceof LunaResponseError ? e.message : 'Luna’s answer could not be read')
               this.log(`a request failed: ${chunkError}`)
             }
           } finally {
@@ -564,6 +586,7 @@ export class CloudSorter {
       )
     } finally {
       this.abort = null
+      this.revokeRun = null
       this.phase = 'idle'
       this.done = 0
       this.total = 0
@@ -572,12 +595,12 @@ export class CloudSorter {
     }
     for (const [why, n] of refused) this.log(`${n} screenshot(s) not sent: ${REFUSAL_WORDS[why]}`)
     const stayedDoubtful = list.length - counts.keep - counts.throwaway
-    const r = revoked as 'off' | 'no-key' | null
+    const r = revoked as 'off' | 'no-key' | 'revoked' | null
     if (r) return finish({ ...counts, stayedDoubtful, skipped: r })
     const f = fatal as LunaHttpError | null
     if (f) {
       const skipped: CloudSkip | null = f.kind === 'offline' ? 'offline' : f.kind === 'auth' ? 'key-rejected' : f.kind === 'cancelled' ? 'cancelled' : null
-      return finish({ ...counts, stayedDoubtful, skipped, error: skipped === 'offline' || skipped === 'cancelled' ? null : redact(f.message, key) })
+      return finish({ ...counts, stayedDoubtful, skipped, error: skipped === 'offline' || skipped === 'cancelled' ? null : scrub(f.message) })
     }
     return finish({ ...counts, stayedDoubtful, error: chunkError })
   }
@@ -615,6 +638,8 @@ export function describe(s: CloudRunSummary): string {
       return s.asked
         ? `Stopped after asking Luna about ${plural(s.asked, 'screenshot')}: the OpenAI key was removed.${waiting}`
         : `Luna was not asked: no OpenAI key is saved.${waiting}`
+    case 'revoked':
+      return `Stopped${s.asked ? ` after asking Luna about ${plural(s.asked, 'screenshot')}` : ''}: the OpenAI key was changed. The next run uses the new key.${waiting}`
     case 'offline':
       return `Luna was not asked${s.answered ? ' about all of them' : ''}: this Mac was offline.${waiting}`
     case 'key-rejected':
@@ -656,10 +681,12 @@ export function registerCloudIpc(
   handle('cloud:status', () => svc.status())
   handle('cloud:set-key', (k: unknown) => {
     const r = key.set(k) // saving a key never turns the cloud step on
+    if (r.saved) svc.keyChanged('saved') // a running batch is bound to the key it started with
     return { ok: r.ok, saved: r.saved, error: r.error, status: svc.status() }
   })
   handle('cloud:clear-key', () => {
     key.clear()
+    svc.keyChanged('cleared')
     return svc.status()
   })
   // only on/off (his opt-in, recorded here with its time after main's own dialog) and the batch time can be set; the limit is fixed
