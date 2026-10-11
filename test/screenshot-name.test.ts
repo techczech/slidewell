@@ -69,6 +69,13 @@ describe('parseScreenshotName with CleanShot\'s template', () => {
     const siblings = new Set(['cleanshot 2026-10-01 at 0900from notes with shopping list.png', dupe.toLowerCase()])
     expect(parseScreenshotName(dupe, tpl, { siblings })).toMatchObject({ window: 'Shopping list' })
     expect(parseScreenshotName('CleanShot 2026-10-01 at 0900from Notes with Shopping list (3).png', tpl, { siblings })).toMatchObject({ window: 'Shopping list' })
+    // a number outside 2–99 is never a duplicate counter, even with the plain name in the same folder
+    const results = 'CleanShot 2026-10-01 at 0900from Numbers with Quarterly results'
+    const withPlain = new Set([`${results}.png`.toLowerCase(), `${results} 2026.png`.toLowerCase(), `${results} 1.png`.toLowerCase()])
+    expect(parseScreenshotName(`${results} 2026.png`, tpl, { siblings: withPlain })).toMatchObject({ window: 'Quarterly results 2026' })
+    expect(parseScreenshotName(`${results} (2026).png`, tpl, { siblings: withPlain })).toMatchObject({ window: 'Quarterly results (2026)' })
+    expect(parseScreenshotName(`${results} 1.png`, tpl, { siblings: withPlain })).toMatchObject({ window: 'Quarterly results 1' })
+    expect(parseScreenshotName(`${results} 99.png`, tpl, { siblings: withPlain })).toMatchObject({ window: 'Quarterly results' })
     // a counter after a time field is outside any title: always a duplicate counter
     const t = compileNameTemplate(['Shot ', '%y', '-', '%m', '-', '%d', ' ', '%H', '%M'])
     expect(parseScreenshotName('Shot 2026-10-01 0900 2.png', t)).toMatchObject({ takenAt: '2026-10-01T09:00:00' })

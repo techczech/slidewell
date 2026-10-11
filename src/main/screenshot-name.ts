@@ -41,8 +41,10 @@ export const MAX_NAME_LENGTH = 255
 const CLEANSHOT =
   /^CleanShot (\d{4})-(\d{2})-(\d{2}) at (\d{2})[.:]?(\d{2})(?:[.:]?(\d{2}))?(?:@\d+x)?(?: ?from (.+?))?(?: with ?(.*))?$/
 const MACOS = /^Screen ?[Ss]hot (\d{4})-(\d{2})-(\d{2}) at (\d{1,2})\.(\d{2})\.(\d{2})(?:[\s ]*([AaPp][Mm]))?(?: \(\d+\))?$/
-// Finder / CleanShot duplicate counter at the very end: `name 2`, `name (2)`
-const DUPLICATE = /^(.*\S)(?: \d+| \(\d+\))$/
+// Finder / CleanShot duplicate counter at the very end: `name 2`, `name (2)`. Counters run 2–99; a
+// larger number (`… results 2026`) is never read as one.
+const COUNTER = '(?:[2-9]|[1-9]\\d)'
+const DUPLICATE = new RegExp(`^(.*\\S)(?: ${COUNTER}| \\(${COUNTER}\\))$`)
 
 // CleanShot template tokens. Any other `%x` makes the template unusable (it is not guessed at).
 const TOKEN: Record<string, { field: Field; re: string } | undefined> = {
@@ -123,9 +125,10 @@ function matchTemplate(base: string, t: NameTemplate): ParsedScreenshotName | nu
 }
 
 /**
- * A trailing ` 2` / ` (2)` is a duplicate counter only when it cannot be part of the window title (the
- * template does not end in text), or when the same name without it is in the folder listing.
- * Otherwise the digits stay: `… with Quarterly results 2026` keeps its year.
+ * A trailing ` 2` / ` (2)` (2–99) is a duplicate counter only when it cannot be part of the window
+ * title (the template does not end in text), or when the same name without it is in the folder
+ * listing. Otherwise the digits stay: `… with Quarterly results 2026` keeps its year, even when
+ * `… with Quarterly results` is in the same folder.
  */
 function parseWithTemplate(base: string, ext: string, t: NameTemplate, ctx: ParseContext): ParsedScreenshotName | null {
   const dup = DUPLICATE.exec(base)

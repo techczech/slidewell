@@ -10,13 +10,14 @@
  * record (triage_fts) is keyed by source-relative path and skipped on re-scan when size+mtime match.
  */
 import { createHash } from 'node:crypto'
-import { createReadStream, existsSync, lstatSync, mkdirSync, statSync } from 'node:fs'
+import { constants as fsc, existsSync, lstatSync, mkdirSync, promises as fsp, statSync } from 'node:fs'
+import type { FileHandle } from 'node:fs/promises'
 import { join, relative, extname, basename, dirname } from 'node:path'
 import { query, run, safeFtsQuery } from './sqlite'
 import { ocrImage, ingestScreenshot, ingestVideo, makePoster, recordWellSource } from './well'
 import { tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
 import { parseScreenshotName, type NameTemplate } from './screenshot-name'
-import { downloadOnlineOnly as downloadInChild, downloadWithDeadline, type DownloadOptions } from './online-only'
+import { downloadOnlineOnly as downloadInChild, downloadWithDeadline, openDownloaded, type DownloadOptions, type FileIdentity } from './online-only'
 import { walk } from './scan-walk'
 import { DatabaseSync } from 'node:sqlite'
 import { pileOf, type ProposalLabel } from './review/piles'
@@ -57,15 +58,37 @@ async function ensureTriage(wellRoot: string): Promise<void> {
      )`
   )
   await run(db, `CREATE TABLE IF NOT EXISTS triage_decisions (hash TEXT PRIMARY KEY, state TEXT NOT NULL, decided_at TEXT, well_id TEXT)`)
+  // per-file download backoff (ticket 15): a file that keeps failing waits longer each time
+  await run(db, `CREATE TABLE IF NOT EXISTS download_backoff (source TEXT NOT NULL, rel_path TEXT NOT NULL, sig TEXT NOT NULL, failures INTEGER NOT NULL, last_attempt INTEGER NOT NULL, PRIMARY KEY (source, rel_path))`)
+}
+
+/** Wait after the n-th failed download of one file: 10 min, doubling, at most a day. */
+export function downloadBackoffMs(failures: number): number {
+  return failures <= 0 ? 0 : Math.min(10 * 60_000 * 2 ** (failures - 1), 24 * 3_600_000)
 }
 
 // Content hash of a file, or null if the read stalls (e.g. a OneDrive placeholder that slipped past
 // the blocks===0 check and is silently downloading). The timeout keeps one bad file from freezing
-// the whole scan — the caller degrades a null to a "not downloaded" row.
-function hashFile(path: string, timeoutMs = 15000): Promise<string | null> {
+// the whole scan — the caller degrades a null to a "not downloaded" row. A path is opened with
+// O_NOFOLLOW|O_NONBLOCK and read only if fstat shows a regular file; a downloaded file is passed as
+// the descriptor openDownloaded checked, so it is never reopened by path. The handle is closed here.
+async function hashFile(file: string | FileHandle, timeoutMs = 15000): Promise<string | null> {
+  let fh: FileHandle
+  if (typeof file === 'string') {
+    try {
+      fh = await fsp.open(file, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK)
+    } catch {
+      return null
+    }
+    const st = await fh.stat().catch(() => null)
+    if (!st?.isFile()) {
+      await fh.close().catch(() => undefined)
+      return null
+    }
+  } else fh = file
   return new Promise((resolve) => {
     const h = createHash('sha256')
-    const s = createReadStream(path)
+    const s = fh.createReadStream({ start: 0, autoClose: true })
     const done = (v: string | null): void => {
       clearTimeout(t)
       s.destroy()
@@ -107,9 +130,18 @@ export interface ScanOptions {
    * Triage folder). Null/absent = never download. One file at a time, out of process, with a per-file
    * timeout. A failed file does not stop later ones; downloading ends for this scan after
    * `downloadFailLimit` failures in a row, after `downloadBudgetMs` spent downloading, or on `signal`.
-   * Newest files are tried first.
+   * Newest files are tried first, except files in backoff: each failure is recorded per file and the
+   * file is skipped until downloadBackoffMs(failures) has passed, so files that never download cannot
+   * starve healthy ones from scan to scan.
    */
   downloadRoot?: string | null
+  /**
+   * Canonical primary Triage folder when this source is another one (ticket 15): its subtree is never
+   * walked nor downloaded in, even when nested inside this source or its download root.
+   */
+  excludeDir?: string | null
+  /** Test seam: the clock for the per-file backoff. */
+  now?: () => number
   downloadTimeoutMs?: number // default 60 s
   downloadFailLimit?: number // default 3
   downloadBudgetMs?: number // default 10 min
@@ -168,9 +200,30 @@ async function scanTriageSourceNow(
   const failLimit = opts.downloadFailLimit ?? 3
   let downloadMs = 0
   const download = opts.download ?? downloadInChild
+  const excludeDir = opts.excludeDir ?? null
+  const now = opts.now ?? Date.now
+  const backoff = new Map(
+    (await query<{ rel_path: string; sig: string; failures: string; last_attempt: string }>(db, 'SELECT rel_path, sig, failures, last_attempt FROM download_backoff WHERE source = ?', [sourceRoot])).map((r) => [
+      r.rel_path,
+      { sig: r.sig, failures: Number(r.failures), last: Number(r.last_attempt) }
+    ])
+  )
+  const inBackoff = (rel: string, sig: string): boolean => {
+    const b = backoff.get(rel)
+    return Boolean(b && b.sig === sig && now() - b.last < downloadBackoffMs(b.failures))
+  }
+  const recordFailure = async (rel: string, sig: string): Promise<void> => {
+    const b = backoff.get(rel)
+    const failures = b && b.sig === sig ? b.failures + 1 : 1
+    backoff.set(rel, { sig, failures, last: now() })
+    await run(db, 'INSERT OR REPLACE INTO download_backoff (source, rel_path, sig, failures, last_attempt) VALUES (?, ?, ?, ?, ?)', [sourceRoot, rel, sig, failures, now()])
+  }
+  const clearFailures = async (rel: string): Promise<void> => {
+    if (backoff.delete(rel)) await run(db, 'DELETE FROM download_backoff WHERE source = ? AND rel_path = ?', [sourceRoot, rel])
+  }
 
-  // Phase 0 — enumerate (stat only).
-  const walked = [...walk(sourceRoot, !opts.namedOnly)].map((w) => w.abs)
+  // Phase 0 — enumerate (stat only). The primary Triage subtree is never entered from another source.
+  const walked = [...walk(sourceRoot, !opts.namedOnly, excludeDir)].map((w) => w.abs)
   // lower-case names per folder: a trailing " 2" is a duplicate counter only when the plain name is there too
   const siblings = new Map<string, Set<string>>()
   for (const abs of walked) {
@@ -204,25 +257,36 @@ async function scanTriageSourceNow(
     i++
     const sig = `${f.size}:${f.mtime}`
     const key = `${sourceRoot}\0${f.rel}`
-    if (seen.get(key) === sig && !(downloads && wasOffline.has(key))) {
+    const backingOff = f.offline && inBackoff(f.rel, sig)
+    if (seen.get(key) === sig && !(downloads && wasOffline.has(key) && !backingOff)) {
       if (f.offline) offlineN++
       continue
     }
-    if (f.offline && downloads && downloadRoot) {
+    let downloaded: FileHandle | null = null // the checked descriptor of a file downloaded just now
+    if (f.offline && downloads && downloadRoot && !backingOff) {
       if (opts.signal?.aborted || downloadMs >= (opts.downloadBudgetMs ?? 600_000)) downloads = false
       else {
         const t0 = Date.now()
+        let failed = false
         try {
           onProgress?.(`downloading ${basename(f.abs)}…`)
-          await downloadWithDeadline(f.abs, download, { timeoutMs: opts.downloadTimeoutMs ?? 60_000, signal: opts.signal, root: downloadRoot })
-          const st = lstatSync(f.abs) // the very path, never through a link
-          if (st.isFile() && st.blocks > 0) {
-            f.offline = false
-            failuresInARow = 0
-          } else failuresInARow++
+          const before = lstatSync(f.abs, { bigint: true }) // the very path, never through a link
+          if (!before.isFile()) throw Object.assign(new Error('not a regular file'), { code: 'ENOTREG' })
+          const identity: FileIdentity = { dev: before.dev, ino: before.ino }
+          const where = { root: downloadRoot, exclude: excludeDir }
+          await downloadWithDeadline(f.abs, download, { timeoutMs: opts.downloadTimeoutMs ?? 60_000, signal: opts.signal, identity, ...where })
+          // read afterwards only through a descriptor checked to be that same file, still inside the root
+          downloaded = await openDownloaded(f.abs, { identity, ...where })
+          f.offline = false
+          failuresInARow = 0
+          await clearFailures(f.rel)
         } catch (e) {
           if ((e as NodeJS.ErrnoException)?.code === 'ABORT_ERR') downloads = false
-          else failuresInARow++ // this file stays "not downloaded"; later files are still tried
+          else failed = true // this file stays "not downloaded"; later files are still tried
+        }
+        if (failed) {
+          failuresInARow++
+          await recordFailure(f.rel, sig)
         }
         downloadMs += Date.now() - t0
         if (failuresInARow >= failLimit) downloads = false // offline: do not wait on every file in turn
@@ -237,7 +301,7 @@ async function scanTriageSourceNow(
       hash = pathId() // online-only placeholder; never read
       offlineN++
     } else {
-      const h = await hashFile(f.abs)
+      const h = await hashFile(downloaded ?? f.abs)
       if (h === null) {
         // unreadable / stalled read — treat like a not-downloaded file rather than hang
         hash = pathId()

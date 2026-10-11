@@ -5,6 +5,8 @@
  *   captureDownloadRoot(source, known) → the canonical folder a capture source may download in, or null
  *   downloadOnlineOnly(path, opts)     → asks macOS to download one file, with a timeout and Stop
  *   downloadWithDeadline(path, dl, o)  → runs any downloader under the timeout and Stop
+ *   openDownloaded(path, expect)       → the descriptor to read a downloaded file through (no path reopen)
+ *   insideDir(path, dir)               → canonical containment test (the primary Triage subtree exclusion)
  *
  * The download runs OUT OF PROCESS: a child (this app's own binary in Node mode) opens the file with
  * O_NOFOLLOW, checks with fstat that the descriptor it holds is a regular file with the same device and
@@ -16,7 +18,8 @@
  * is written, moved or deleted. Callers re-check `isOnlineOnly` afterwards before opening the file.
  */
 import { execFile, spawn } from 'node:child_process'
-import { promises as fsp, realpath as realpathCb } from 'node:fs'
+import { constants as fsc, promises as fsp, realpath as realpathCb } from 'node:fs'
+import type { FileHandle } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -34,10 +37,15 @@ export async function isOnlineOnly(path: string): Promise<boolean> {
 const realpathNative = promisify(realpathCb.native)
 const canonical = async (p: string | null | undefined, real: (p: string) => Promise<string>): Promise<string | null> => (p ? real(p).catch(() => null) : null)
 
+/** `path` is `dir` or below it (both canonical). A null `dir` contains nothing. */
+export const insideDir = (path: string, dir: string | null | undefined): boolean => Boolean(dir) && (path === dir || path.startsWith(dir!.endsWith('/') ? dir! : `${dir}/`))
+
 /**
  * Download authority for a capture source (ticket 15), decided on canonical paths (realpath) so no
  * alias, `..` or symlink can widen it: the source must BE the Desktop or CleanShot's export folder,
- * and never the primary Triage folder, by whatever name. Returns the canonical root, else null.
+ * and never the primary Triage folder or anything inside it, by whatever name. Returns the canonical
+ * root, else null. Files of the primary subtree nested under an authorised root are excluded by the
+ * caller (DownloadOptions.exclude, ScanOptions.excludeDir).
  */
 export async function captureDownloadRoot(
   source: string,
@@ -45,7 +53,7 @@ export async function captureDownloadRoot(
   real: (p: string) => Promise<string> = realpathNative
 ): Promise<string | null> {
   const [s, desktop, cleanshot, primary] = await Promise.all([source, known.desktop, known.cleanshotExport, known.primary].map((p) => canonical(p, real)))
-  if (!s || (primary && s === primary)) return null
+  if (!s || insideDir(s, primary)) return null
   return s === desktop || s === cleanshot ? s : null
 }
 
@@ -54,9 +62,15 @@ export type DownloadOptions = {
   signal?: AbortSignal
   /** Canonical folder the file must be in (captureDownloadRoot or the backlog's resolved source). */
   root: string
+  /** Canonical folder no file may be downloaded in even inside `root`: the primary Triage subtree. */
+  exclude?: string | null
+  /** The identity (lstat dev + inode) the caller recorded; a file that is no longer it is refused. */
+  identity?: FileIdentity
   /** Test seam: called with the child's pid once it is running. */
   onSpawn?: (pid: number) => void
 }
+
+export type FileIdentity = { dev: bigint; ino: bigint }
 
 const abortError = (): Error => Object.assign(new Error('stopped'), { code: 'ABORT_ERR' })
 const coded = (message: string, code: string): Error => Object.assign(new Error(message), { code })
@@ -87,8 +101,9 @@ export async function downloadOnlineOnly(path: string, opts: DownloadOptions): P
   if (opts.signal?.aborted) throw abortError()
   const st = await fsp.lstat(path, { bigint: true })
   if (!st.isFile()) throw coded('not a regular file', 'ENOTREG')
+  if (opts.identity && (st.dev !== opts.identity.dev || st.ino !== opts.identity.ino)) throw coded('the file changed before it was read', 'ECHANGED')
   const dir = await realpathNative(dirname(path))
-  if (dir !== opts.root && !dir.startsWith(`${opts.root}/`)) throw coded('outside the folder it may download in', 'EOUTSIDE')
+  if (!insideDir(dir, opts.root) || insideDir(dir, opts.exclude)) throw coded('outside the folder it may download in', 'EOUTSIDE')
   if (opts.signal?.aborted) throw abortError()
   await new Promise<void>((resolve, reject) => {
     // stdin/stdout/stderr all /dev/null: nothing of the file reaches this process
@@ -153,4 +168,36 @@ export function downloadWithDeadline(path: string, download: (path: string, opts
         (e) => finish(e instanceof Error ? e : new Error(String(e)))
       )
   })
+}
+
+const READ_FLAGS = fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK
+
+/**
+ * The descriptor a downloaded file is read through (ticket 15), so nothing after the download reopens
+ * it by path. Opened with O_NOFOLLOW (a link in its place is refused) and O_NONBLOCK (a FIFO in its
+ * place cannot block the open); then fstat must show a regular file with the identity the download
+ * child verified and its bytes on disk, and the folder holding the path must still be inside `root`
+ * and outside `exclude`. Rejects ENOTREG, ECHANGED, EDOWNLOAD (still online-only) or EOUTSIDE, and
+ * closes the descriptor; on success the caller owns (and closes) it.
+ */
+export async function openDownloaded(path: string, expect: { identity: FileIdentity; root: string; exclude?: string | null }): Promise<FileHandle> {
+  let fh: FileHandle
+  try {
+    fh = await fsp.open(path, READ_FLAGS)
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code
+    throw code === 'ELOOP' ? coded('not a regular file', 'ENOTREG') : coded(`could not open: ${code ?? 'error'}`, 'EDOWNLOAD')
+  }
+  try {
+    const st = await fh.stat({ bigint: true })
+    if (!st.isFile()) throw coded('not a regular file', 'ENOTREG')
+    if (st.dev !== expect.identity.dev || st.ino !== expect.identity.ino) throw coded('the file changed after it was downloaded', 'ECHANGED')
+    if (st.size > 0n && st.blocks === 0n) throw coded('still not downloaded', 'EDOWNLOAD')
+    const dir = await realpathNative(dirname(path)).catch(() => null)
+    if (!dir || !insideDir(dir, expect.root) || insideDir(dir, expect.exclude)) throw coded('outside the folder it may download in', 'EOUTSIDE')
+    return fh
+  } catch (e) {
+    await fh.close().catch(() => undefined)
+    throw e
+  }
 }

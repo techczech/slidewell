@@ -20,6 +20,8 @@ import { ensureWell, drainInbox, scanVault, searchWell, wellByIds, wellAbsPath, 
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow, type ScanOptions } from './triage'
 import { cleanShotFolder, cleanShotNameTemplate } from './cleanshot-folder'
 import { captureDownloadRoot } from './online-only'
+import { createCaptureDownloads } from './capture-downloads'
+import { realpath } from 'node:fs/promises'
 import { createSourceWatcher } from './source-watcher'
 import { registerBacklogIpc } from './backlog-ipc'
 import { talkAbsPath, isVaultChangeRelevant } from './talk-usage'
@@ -191,25 +193,26 @@ function triageSources(): CaptureSource[] {
 }
 
 // Capture-watcher downloads are owned here: quitting SlideWell or pressing Stop on the backlog import
-// aborts this signal (the active download child is killed) and later scans get a fresh one.
-let captureDownloads = new AbortController()
-function stopCaptureDownloads(): void {
-  const c = captureDownloads
-  captureDownloads = new AbortController()
-  c.abort()
-}
+// aborts them (the active download child is killed) and they stay off until the next explicit user
+// action (Scan, a new backlog run) or app start (capture-downloads.ts).
+const captureDownloads = createCaptureDownloads()
 
 // How one capture source is scanned (ticket 15). Names are read with CleanShot's own template.
 // Download authority is decided on canonical paths (captureDownloadRoot), never from namedOnly: only a
 // source that IS the Desktop (scanned screenshot names only) or CleanShot's export folder may download
 // online-only files; the primary Triage folder never does, under any alias (it can hold thousands).
-async function scanOptionsFor(s: CaptureSource): Promise<ScanOptions> {
+// Every other source skips the primary folder's subtree (walk and download) when it is nested inside.
+async function scanOptionsFor(s: CaptureSource, o: { downloads?: boolean } = {}): Promise<ScanOptions> {
   const [nameTemplate, cleanshotExport] = await Promise.all([cleanShotNameTemplate(), cleanShotFolder()])
   const desktop = join(homedir(), 'Desktop')
-  let downloadRoot = await captureDownloadRoot(s.path, { desktop, cleanshotExport, primary: screenshotRootResolved() })
+  const primary = screenshotRootResolved()
+  let downloadRoot = await captureDownloadRoot(s.path, { desktop, cleanshotExport, primary })
   // the whole Desktop is never downloaded: only when the source is scanned for screenshot names alone
   if (downloadRoot && !s.namedOnly && downloadRoot === (await captureDownloadRoot(desktop, { desktop, cleanshotExport: null, primary: null }))) downloadRoot = null
-  return { namedOnly: s.namedOnly, nameTemplate, downloadRoot, signal: captureDownloads.signal }
+  const [src, primaryReal] = await Promise.all([s.path, primary].map((p) => (p ? realpath(p).catch(() => null) : Promise.resolve(null))))
+  const excludeDir = primaryReal && src !== primaryReal ? primaryReal : null
+  const dl = captureDownloads.options(o.downloads === false ? null : downloadRoot)
+  return { namedOnly: s.namedOnly, nameTemplate, excludeDir, ...dl }
 }
 
 // The default destination for throwaway conversions (Settings-chosen). Pre-fills the save dialog;
@@ -966,16 +969,18 @@ app.whenReady().then(() => {
   const fromMainWindow = (sender: Electron.WebContents): boolean => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents)
   const onTriageProgress = (m: string): void => void mainWindow?.webContents.send('triage:progress', m)
   guardedHandle(ipcMain, fromMainWindow, 'triage:scan', async () => {
+    captureDownloads.resume() // an explicit Scan turns downloading back on after a Stop
     return scanAllSources()
   })
-  // One scan of every capture source, through the one-at-a-time scan queue.
-  async function scanAllSources(): Promise<{ ok: boolean; indexed: number; total: number; offline?: number }> {
+  // One scan of every capture source, through the one-at-a-time scan queue. `downloads: false` = this
+  // scan never downloads (the follow-up of a stopped backlog run), whatever the gate says.
+  async function scanAllSources(o: { downloads?: boolean } = {}): Promise<{ ok: boolean; indexed: number; total: number; offline?: number }> {
     const sources = triageSources()
     if (sources.length === 0) return { ok: false, indexed: 0, total: 0 }
     const sum = { indexed: 0, total: 0, offline: 0 }
     try {
       for (const s of sources) {
-        const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, await scanOptionsFor(s))
+        const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, await scanOptionsFor(s, o))
         sum.indexed += res.indexed
         sum.total += res.total
         sum.offline += res.offline
@@ -1004,7 +1009,7 @@ app.whenReady().then(() => {
   refreshWatchers()
   app.on('will-quit', () => {
     watcher.close()
-    stopCaptureDownloads() // kill any active download child
+    captureDownloads.stop() // kill any active download child
   })
   // One-off backlog import (Desktop + CleanShot history → the Triage source folder). After a run,
   // one explicit scan; the import itself never waits on watcher events from the (OneDrive) folder.
@@ -1012,8 +1017,8 @@ app.whenReady().then(() => {
     watchedFolder: screenshotRootResolved,
     stateDir: () => join(app.getPath('userData'), 'backlog-import'),
     isMainWindow: (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents),
-    afterRun: () => void scanAllSources().then(() => mainWindow?.webContents.send('triage:changed')),
-    onStop: stopCaptureDownloads
+    afterRun: ({ stopped }) => void scanAllSources({ downloads: !stopped }).then(() => mainWindow?.webContents.send('triage:changed')),
+    captureDownloads
   })
   guardedHandle(ipcMain, fromMainWindow, 'triage:list', async (_e, q: string, state: string, sort?: string, limit?: number, offset?: number) => {
     const src = triageSources()[0]?.path ?? null

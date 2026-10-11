@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { dryRun, real, runImport, type BacklogEnv, type RunProgress } from './backlog-import'
 import type { BacklogPlan } from './backlog-plan'
 import { cleanShotNameTemplate, cleanShotSetting, setCleanShotExportPath, type DefaultsReader, type DefaultsWriter } from './cleanshot-folder'
+import type { CaptureDownloads } from './capture-downloads'
 
 /** CleanShot X keeps its capture history here (one folder per capture). Read only. */
 export function cleanShotHistoryDir(home = homedir()): string {
@@ -22,10 +23,13 @@ export function registerBacklogIpc(deps: {
   watchedFolder: () => string | null // the Triage source folder (config.screenshotRoot)
   stateDir: () => string
   isMainWindow: (sender: WebContents) => boolean
-  afterRun: () => void // e.g. one explicit scan of the capture sources
+  // e.g. one scan of the capture sources; `stopped` = the run was cancelled (that scan must not download)
+  afterRun: (o: { stopped: boolean }) => void
   writer?: DefaultsWriter
   nameTemplateReader?: DefaultsReader // CleanShot's mediaNameTemplate (default: `defaults read`)
-  onStop?: () => void // Stop also stops the capture watcher's downloads (they share the Desktop)
+  // The capture watcher's downloads (they share the Desktop): Stop stops them and they stay stopped,
+  // also for the cancelled run's follow-up scan; starting a run is an explicit action and resumes them.
+  captureDownloads?: CaptureDownloads
 }): void {
   let shown: { id: string; plan: BacklogPlan; at: number } | null = null
   let running: AbortController | null = null
@@ -53,13 +57,14 @@ export function registerBacklogIpc(deps: {
     if (!shown || shown.id !== planId || Date.now() - shown.at > PLAN_TTL_MS) return { refused: 'show the plan again first' }
     const plan = shown.plan
     shown = null // one plan, one run
-    running = new AbortController()
+    const run = (running = new AbortController())
+    deps.captureDownloads?.resume()
     try {
       const result = await runImport(plan, env(), {
-        signal: running.signal,
+        signal: run.signal,
         onProgress: (p: RunProgress) => e.sender.isDestroyed() || e.sender.send('backlog:progress', p)
       })
-      deps.afterRun()
+      deps.afterRun({ stopped: run.signal.aborted || Boolean(deps.captureDownloads?.stopped) })
       return { result }
     } finally {
       running = null
@@ -68,7 +73,7 @@ export function registerBacklogIpc(deps: {
 
   ipcMain.handle('backlog:cancel', () => {
     running?.abort()
-    deps.onStop?.()
+    deps.captureDownloads?.stop()
     return Boolean(running)
   })
   // quitting stops a run: its download child is killed, never left behind
