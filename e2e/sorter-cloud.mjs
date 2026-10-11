@@ -4,9 +4,11 @@
 //
 //   1. Settings › Ask Luna: save a made-up key; config.json holds only ciphertext; saving the key
 //      does not turn asking Luna on; a send from the renderer without a prepared batch is refused;
-//      then he turns it on (main records the time).
+//      turning it on raises main's own native dialog (count, cost, what is sent); declined, nothing is
+//      recorded; confirmed, main records the time.
 //   2. Sort now while "offline" (every https request fails): the confirm dialog shows count + cost;
-//      after Send the run completes with the cloud step skipped and the items stay doubtful.
+//      after Send, main's native dialog asks again (declined: nothing sent); confirmed, the run
+//      completes with the cloud step skipped and the items stay doubtful.
 //   3. Sort now online: only the three doubtful screenshots reach the stub, shrunk to ≤ 1456 px; the
 //      answers are recorded under the keep-bias with decided_by 'luna'; Review shows "asked Luna".
 //   4. The made-up key appears nowhere in config.json, the app's stdout/stderr or the profile folder.
@@ -17,8 +19,9 @@
 //
 // Isolation: own --user-data-dir, own HOME, --use-mock-keychain (safeStorage works without touching
 // the login keychain), SLIDEWELL_E2E_HIDDEN=1. The stub is reached through a test-only https
-// interception installed from this script in the main process (protocol.handle); the app's own code
-// has no stub switch. Nothing goes to the real network.
+// interception installed from this script in the main process (protocol.handle); main's native
+// consent dialog (dialog.showMessageBox) is replaced the same way, answering from a queue and
+// recording what it showed. The app's own code has no stub switch. Nothing goes to the real network.
 import { _electron as electron } from 'playwright'
 import { DatabaseSync } from 'node:sqlite'
 import { createServer } from 'node:http'
@@ -151,6 +154,22 @@ const route = (mode) =>
     })
   }, { mode, stubUrl })
 
+// test-only: main's native consent dialog answers from a queue (true = the confirm button) and records what it showed
+const answerDialogs = (answers) =>
+  app.evaluate(({ dialog }, answers) => {
+    globalThis.__cloudDialogs = globalThis.__cloudDialogs ?? { shown: [], answers: [] }
+    globalThis.__cloudDialogs.answers.push(...answers)
+    if (!globalThis.__cloudDialogs.patched) {
+      globalThis.__cloudDialogs.patched = true
+      dialog.showMessageBox = async (win, opts) => {
+        const o = opts ?? win
+        globalThis.__cloudDialogs.shown.push({ parent: Boolean(opts), message: o.message, detail: o.detail, buttons: o.buttons })
+        return { response: globalThis.__cloudDialogs.answers.shift() ? 1 : 0, checkboxChecked: false }
+      }
+    }
+  }, answers)
+const dialogsShown = () => app.evaluate(() => globalThis.__cloudDialogs?.shown ?? [])
+
 try {
   await route('offline')
   let win = null
@@ -183,6 +202,13 @@ try {
   check('a send without a prepared batch is refused by main', forged.skipped === 'not-prepared' && forged.asked === 0, JSON.stringify(forged))
   const offPrep = await win.evaluate(() => window.sw.cloud.prepare())
   check('while off, Sort now offers nothing to send', offPrep.blocked === 'off' && offPrep.token === null, JSON.stringify(offPrep))
+  await answerDialogs([false, true])
+  await section.locator('input.sorter-cloud-enabled').click() // declined in main's dialog
+  for (let i = 0; i < 50 && (await dialogsShown()).length < 1; i++) await sleep(100)
+  await sleep(300)
+  check('declining main’s dialog leaves asking Luna off', (await win.evaluate(() => window.sw.cloud.status())).settings.enabled === false && !JSON.parse(readFileSync(join(userData, 'config.json'), 'utf8')).sorterCloud?.optedInAt)
+  const turnOn = (await dialogsShown())[0]
+  check('turning on raises main’s own dialog on the main window: count, cost and what is sent', Boolean(turnOn?.parent) && /3 doubtful screenshots are waiting now/.test(turnOn?.detail ?? '') && /Estimated cost: (about \$|under \$)/.test(turnOn?.detail ?? '') && /app name and window title/.test(turnOn?.detail ?? ''), JSON.stringify(turnOn))
   await section.locator('input.sorter-cloud-enabled').click() // controlled input: it ticks once main answers
   await win.waitForFunction(async () => (await window.sw.cloud.status()).settings.enabled === true)
   const optedIn = JSON.parse(readFileSync(join(userData, 'config.json'), 'utf8')).sorterCloud?.optedInAt
@@ -198,7 +224,18 @@ try {
   check('the dialog says the app name and window title go with each picture', /app name and window title/.test(dialogText) && !/Nothing else leaves this Mac/.test(dialogText), dialogText)
   await win.screenshot({ path: join(screens, 'sorter-cloud-confirm.png') })
   check('nothing was sent before the click', seen.length === 0 && (await app.evaluate(() => globalThis.__cloudE2E.calls)) === 0)
+  await answerDialogs([false])
   await dialog.locator('button.sorter-cloud-send').click()
+  const result0 = section.locator('.sorter-cloud-result')
+  await result0.waitFor({ timeout: 60000 })
+  const declinedText = await result0.innerText()
+  const sendDialog = (await dialogsShown()).at(-1)
+  check('Send in the app raises main’s own dialog with count and cost; declined, nothing is sent', /Send 3 screenshots to Luna\?/.test(sendDialog?.message ?? '') && /Estimated cost/.test(sendDialog?.detail ?? '') && /did not confirm/.test(declinedText) && (await app.evaluate(() => globalThis.__cloudE2E.calls)) === 0, `${JSON.stringify(sendDialog)} ${declinedText}`)
+  await answerDialogs([true, true])
+  await section.locator('button.sorter-cloud-sort').click()
+  await dialog.waitFor({ timeout: 20000 })
+  await dialog.locator('button.sorter-cloud-send').click()
+  await win.waitForFunction(() => /offline/.test(document.querySelector('.sorter-cloud-result')?.textContent ?? ''), null, { timeout: 60000 })
   const result = section.locator('.sorter-cloud-result')
   await result.waitFor({ timeout: 60000 })
   const offlineText = await result.innerText()

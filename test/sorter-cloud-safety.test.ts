@@ -281,7 +281,7 @@ describe('finding 7: one claim per screenshot across processes', () => {
     expect(new Set(windows).size).toBe(20)
   })
 
-  it('claimForCloud: a live claim blocks another run; a stale one does not; the limit holds in the claim', () => {
+  it('claimForCloud: a live claim blocks another run; a stale one does not; the limit holds when a request is built', () => {
     const w = four()
     const now = new Date('2026-10-11T01:00:00Z')
     const hs = ['d1', 'd2', 'd3', 'd4'].map(hashOf)
@@ -289,11 +289,17 @@ describe('finding 7: one claim per screenshot across processes', () => {
     try {
       expect(st.claimForCloud(hs.slice(0, 2), { ...SCOPE, night: 'n', limit: 300, runId: 'A', now }).claimed).toEqual(hs.slice(0, 2))
       expect(st.claimForCloud(hs, { ...SCOPE, night: 'n', limit: 300, runId: 'B', now }).claimed).toEqual(hs.slice(2))
+      expect(st.admitForRequest(hs, { ...SCOPE, runId: 'B', night: 'n', limit: 300 })).toEqual({ admitted: hs.slice(2), overLimit: 0 }) // only B's own
+      expect(st.allowanceUsed('n')).toBe(2)
+      expect(st.admitForRequest(hs.slice(2), { ...SCOPE, runId: 'B', night: 'n', limit: 300 }).admitted).toEqual(hs.slice(2)) // a retry: not counted again
+      expect(st.allowanceUsed('n')).toBe(2)
       const later = new Date(now.getTime() + CLAIM_STALE_MS + 1000)
-      expect(st.claimForCloud(hs, { ...SCOPE, night: 'n', limit: 5, runId: 'C', now: later }).claimed).toEqual(hs.slice(0, 1)) // 4 of 5 used
-      expect(st.allowanceUsed('n')).toBe(5)
-      st.releaseClaims('C', 'n', 1)
-      expect(st.allowanceUsed('n')).toBe(4)
+      expect(st.claimForCloud(hs, { ...SCOPE, night: 'n', limit: 3, runId: 'C', now: later }).claimed).toEqual(hs.slice(0, 1)) // 2 of 3 used
+      st.releaseClaims('B')
+      expect(st.claimForCloud(hs, { ...SCOPE, night: 'n', limit: 3, runId: 'D', now: later }).claimed).toEqual(hs.slice(1, 2))
+      expect(st.admitForRequest(hs.slice(1, 2), { ...SCOPE, runId: 'D', night: 'n', limit: 3 })).toEqual({ admitted: hs.slice(1, 2), overLimit: 0 })
+      expect(st.admitForRequest(hs.slice(0, 1), { ...SCOPE, runId: 'C', night: 'n', limit: 3 })).toEqual({ admitted: [], overLimit: 1 }) // D got the last one
+      expect(st.allowanceUsed('n')).toBe(3)
     } finally {
       st.close()
     }

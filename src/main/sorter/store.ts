@@ -20,15 +20,17 @@
  *                                                      Luna's answer per screenshot, so a screenshot is asked
  *                                                      once per model + prompt and its answer re-applied on
  *                                                      later local sorts (cloud/service.ts)
- *   sorter_cloud_claims(hash TEXT PRIMARY KEY, run_id TEXT, claimed_at TEXT)
+ *   sorter_cloud_claims(hash TEXT PRIMARY KEY, run_id TEXT, claimed_at TEXT, counted INTEGER)
  *                                                      screenshots a cloud run has claimed and is sending now;
  *                                                      claimed in one write transaction, so two processes can
  *                                                      never send the same screenshot; released when the run
- *                                                      ends (a crashed run's claims go stale after CLAIM_STALE_MS)
+ *                                                      ends (a crashed run's claims go stale after CLAIM_STALE_MS);
+ *                                                      counted = 1 once it went into a request (admitForRequest)
  *   sorter_cloud_allowance(night TEXT PRIMARY KEY, sent INTEGER)
- *                                                      how many screenshots were sent to Luna in each night
- *                                                      window (schedule.ts nightOf), nightly and Sort now alike;
- *                                                      the per-night limit is checked against it in the claim
+ *                                                      how many screenshots were put into a request to Luna in
+ *                                                      each night window (schedule.ts nightOf), nightly and Sort
+ *                                                      now alike; counted when the request is built, never at the
+ *                                                      claim, so a run that dies before sending uses none of it
  *   sorter_models(id TEXT PRIMARY KEY, trained_at TEXT, sorter_version TEXT,
  *                 model TEXT (classifier JSON), report TEXT (accuracy report JSON))
  *
@@ -260,7 +262,8 @@ export class SorterStore {
       CREATE TABLE IF NOT EXISTS sorter_cloud_claims (
         hash TEXT PRIMARY KEY,
         run_id TEXT NOT NULL,
-        claimed_at TEXT NOT NULL
+        claimed_at TEXT NOT NULL,
+        counted INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS sorter_cloud_allowance (
         night TEXT PRIMARY KEY,
@@ -275,6 +278,8 @@ export class SorterStore {
       );
     `)
     migrateProposalColumns(this.db)
+    const claimCols = new Set((this.db.prepare("SELECT name FROM pragma_table_info('sorter_cloud_claims')").all() as Array<{ name: string }>).map((c) => c.name))
+    if (!claimCols.has('counted')) this.db.exec('ALTER TABLE sorter_cloud_claims ADD COLUMN counted INTEGER NOT NULL DEFAULT 0')
   }
 
   saveModel<R>(rec: ModelRecord<R>): void {
@@ -341,8 +346,8 @@ export class SorterStore {
   /**
    * Claim screenshots for one cloud run, in one write transaction (BEGIN IMMEDIATE, so a second
    * process waits and then sees these claims): of `hashes`, in order, those still eligible and not
-   * held by another live run, at most what is left of `limit` for `night`. The claimed count is added
-   * to the night's allowance in the same transaction. Returns the claimed hashes.
+   * held by another live run, at most what is left of `limit` for `night`. A claim uses no allowance;
+   * admitForRequest counts each screenshot when it goes into a request. Returns the claimed hashes.
    */
   claimForCloud(hashes: string[], o: CloudScope & { night: string; limit: number; runId: string; now: Date }): { claimed: string[]; leftBefore: number } {
     const nowIso = o.now.toISOString()
@@ -363,11 +368,6 @@ export class SorterStore {
         claim.run(h, o.runId, nowIso)
         claimed.push(h)
       }
-      if (claimed.length) {
-        this.db
-          .prepare('INSERT INTO sorter_cloud_allowance (night, sent) VALUES (?, ?) ON CONFLICT(night) DO UPDATE SET sent = sorter_cloud_allowance.sent + excluded.sent')
-          .run(o.night, claimed.length)
-      }
       this.db.exec('COMMIT')
       return { claimed, leftBefore }
     } catch (e) {
@@ -376,23 +376,56 @@ export class SorterStore {
     }
   }
 
-  /** Of `hashes`, those this run still holds and that are still eligible (checked just before a request). */
-  stillEligible(hashes: string[], runId: string, scope: CloudScope): Set<string> {
+  /**
+   * Called just before every HTTP attempt (first try and each retry), in one write transaction: of
+   * `hashes`, those this run still holds and that are still eligible. Each one not yet counted is
+   * counted against `night`'s allowance now, while room is left under `limit`; one that does not fit
+   * is dropped (overLimit). A retry passes already-counted ones through without counting them again.
+   * Returns the hashes that may go into this request, in order.
+   */
+  admitForRequest(hashes: string[], o: CloudScope & { runId: string; night: string; limit: number }): { admitted: string[]; overLimit: number } {
     const q = this.db.prepare(
-      `SELECT 1 FROM sorter_proposals p JOIN sorter_cloud_claims k ON k.hash = p.hash AND k.run_id = ? WHERE p.hash = ? AND ${this.eligibleSql()}`
+      `SELECT k.counted AS counted FROM sorter_proposals p JOIN sorter_cloud_claims k ON k.hash = p.hash AND k.run_id = ? WHERE p.hash = ? AND ${this.eligibleSql()}`
     )
-    return new Set(hashes.filter((h) => q.get(runId, h, scope.sorterVersion, scope.model, scope.promptVersion)))
+    const mark = this.db.prepare('UPDATE sorter_cloud_claims SET counted = 1 WHERE hash = ? AND run_id = ?')
+    const admitted: string[] = []
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      let left = Math.max(0, Math.floor(o.limit) - this.allowanceUsed(o.night))
+      let added = 0
+      let overLimit = 0
+      for (const h of hashes) {
+        const r = q.get(o.runId, h, o.sorterVersion, o.model, o.promptVersion) as { counted: number } | undefined
+        if (!r) continue
+        if (!Number(r.counted)) {
+          if (left <= 0) {
+            overLimit++
+            continue
+          }
+          mark.run(h, o.runId)
+          left--
+          added++
+        }
+        admitted.push(h)
+      }
+      if (added) {
+        this.db
+          .prepare('INSERT INTO sorter_cloud_allowance (night, sent) VALUES (?, ?) ON CONFLICT(night) DO UPDATE SET sent = sorter_cloud_allowance.sent + excluded.sent')
+          .run(o.night, added)
+      }
+      this.db.exec('COMMIT')
+      return { admitted, overLimit }
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
   }
 
-  /**
-   * End of a run: its claims go, and the night's allowance gets back `unsent` (claimed screenshots
-   * that never went into a request, so never left the Mac).
-   */
-  releaseClaims(runId: string, night: string, unsent: number): void {
+  /** End of a run: its claims go. The allowance holds only what went into a request, so nothing is given back. */
+  releaseClaims(runId: string): void {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       this.db.prepare('DELETE FROM sorter_cloud_claims WHERE run_id = ?').run(runId)
-      if (unsent > 0) this.db.prepare('UPDATE sorter_cloud_allowance SET sent = MAX(0, sent - ?) WHERE night = ?').run(Math.floor(unsent), night)
       this.db.exec('COMMIT')
     } catch (e) {
       this.db.exec('ROLLBACK')

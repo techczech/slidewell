@@ -2,20 +2,30 @@
  * The sorter's cloud step as one main-process service: the nightly batch and the manual "Sort now".
  *
  * Consent lives here, not in the renderer:
- *   - The cloud step is off until he turns it on in Settings; main records the moment (optedInAt in
- *     config.json). Saving a key does not turn it on. Off means no nightly upload and no Sort now upload.
+ *   - The cloud step is off until he turns it on in Settings and confirms main's own native dialog
+ *     (deps.confirm: count waiting, estimated cost, what goes to OpenAI); only then does main record
+ *     the moment (optedInAt in config.json; changeSettings). Saving a key does not turn it on. Off
+ *     means no nightly upload and no Sort now upload.
  *   - Sort now: prepare() runs the local sorter, picks the batch and returns its count, cost and a
  *     one-time token; send(token) sends exactly that batch (less anything no longer eligible), and
- *     refuses without the token of the batch prepared last, or once it is PREPARED_TTL_MS old.
+ *     refuses without the token of the batch prepared last, or once it is PREPARED_TTL_MS old. Before
+ *     anything is claimed, main asks again with its native dialog; nothing goes unless he confirms.
+ *     The nightly batch needs only the recorded opt-in.
+ *   - Revocation: before every request and every retry the opt-in and the key are read again from
+ *     main's state; if asking Luna was turned off or the key removed, the run stops there, its claims
+ *     go and nothing further is sent.
  *   - At most NIGHTLY_LIMIT screenshots go to Luna per night window (schedule.ts nightOf), nightly
- *     and Sort now together. The count is kept in triage.db and checked when a run claims its batch
- *     (store.ts claimForCloud), so moving the batch time or pressing Sort now cannot exceed it.
+ *     and Sort now together. The count is kept in triage.db and taken when a screenshot is put into
+ *     a request (store.ts admitForRequest), never at the claim: a run that dies before sending uses
+ *     none of it, and moving the batch time or pressing Sort now cannot exceed it.
  *
  * What is sent: doubtful screenshots (screenshot file names only, luna.ts isScreenshotFile) Luna has
  * not answered for this model and prompt, newest first. A run claims them in one transaction, so two
  * processes never send the same one. Just before each request, each one is re-read and must still hash
  * to the hash it was classified under (a regular file, not a link; images.ts readVerified), and must
- * still be eligible (no decision of his, not answered in review); otherwise it is not sent.
+ * still be eligible (no decision of his, not answered in review); otherwise it is not sent. A retry
+ * re-checks eligibility the same way and drops what is no longer eligible; if nothing is left, it is
+ * not made.
  * Luna's answers are redacted (no key) before they are stored or shown, then go through the keep-bias
  * in cascade.ts and are recorded with decided_by 'luna'. No key, or offline: skipped, items stay doubtful.
  *
@@ -29,6 +39,7 @@ import { DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from '../decide'
 import { applyLuna, type CascadeRow } from './cascade'
 import { buildLunaRequest, estimateCost, LUNA, LunaResponseError, parseLunaResponse, planChunks, selectForCloud, type CloudCandidate, type CostEstimate, type LunaItem } from './luna'
 import { LunaHttpError, pool, postLuna, redact, type HttpPost } from './client'
+import type { LunaRequest } from './luna'
 import { readVerified, type VerifyRefusal } from './images'
 import { DEFAULT_BATCH_TIME, isBatchDue, nextSlot, nightOf, normaliseBatchTime } from './schedule'
 
@@ -61,7 +72,10 @@ export function applySettingsPatch(cur: StoredCloudSettings, patch: unknown, now
   return out
 }
 
-export type CloudSkip = 'off' | 'no-key' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared'
+export type CloudSkip = 'off' | 'no-key' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed'
+
+/** What main's native confirm dialog shows (index.ts raises it with dialog.showMessageBox on the main window). */
+export type ConsentPrompt = { kind: 'turn-on' | 'send'; count: number; estimate: CostEstimate; message: string; detail: string; confirmLabel: string }
 
 export type CloudRunSummary = {
   at: string
@@ -127,6 +141,8 @@ export type CloudDeps = {
   state: () => CloudState
   saveState: (patch: Partial<CloudState>) => void
   broadcast: (s: CloudStatus) => void
+  /** Main's native confirm (parent: the main window); true only when he pressed the confirm button. */
+  confirm: (p: ConsentPrompt) => Promise<boolean>
   log?: (line: string) => void
   thresholds?: Thresholds
   now?: () => Date
@@ -135,6 +151,36 @@ export type CloudDeps = {
 }
 
 const plural = (n: number, one: string, many = `${one}s`): string => `${n.toLocaleString('en-GB')} ${n === 1 ? one : many}`
+const usd = (x: number): string => (x < 0.01 ? 'under $0.01' : `about $${x.toFixed(2)}`)
+/** The plain disclosure in every consent dialog: what leaves the Mac. */
+const DISCLOSURE = `For each screenshot, OpenAI (${LUNA.model}) receives the picture, resized to ${LUNA.longEdge} pixels on its long edge, with the app name and window title from its file name. Window titles can name documents, people or folders. The file’s folder and the text read from the picture are not sent.`
+
+/** The dialog for turning the cloud step on: what is waiting now and what a night can cost. */
+export function turnOnPrompt(waiting: number, leftTonight: number): ConsentPrompt {
+  const now = Math.min(waiting, leftTonight)
+  const estimate = estimateCost(now)
+  return {
+    kind: 'turn-on',
+    count: now,
+    estimate,
+    message: 'Turn on asking Luna?',
+    detail: `${plural(waiting, 'doubtful screenshot')} ${waiting === 1 ? 'is' : 'are'} waiting now; ${plural(now, 'screenshot')} would go at the next sort. Estimated cost: ${usd(estimate.usd)}. At most ${NIGHTLY_LIMIT.toLocaleString('en-GB')} screenshots a night (${usd(estimateCost(NIGHTLY_LIMIT).usd)}).\n\n${DISCLOSURE}`,
+    confirmLabel: 'Turn on'
+  }
+}
+
+/** The dialog before a Sort now send: this batch's count and estimated cost. */
+export function sendPrompt(count: number): ConsentPrompt {
+  const estimate = estimateCost(count)
+  return {
+    kind: 'send',
+    count,
+    estimate,
+    message: `Send ${plural(count, 'screenshot')} to Luna?`,
+    detail: `${plural(count, 'screenshot')} the sorter could not call will go to OpenAI in ${plural(estimate.requests, 'request')}. Estimated cost: ${usd(estimate.usd)}.\n\n${DISCLOSURE}`,
+    confirmLabel: `Send ${count.toLocaleString('en-GB')}`
+  }
+}
 const SCOPE: CloudScope = { sorterVersion: SORTER_VERSION, model: LUNA.model, promptVersion: LUNA.promptVersion }
 
 export class CloudSorter {
@@ -198,6 +244,31 @@ export class CloudSorter {
 
   cancel(): void {
     this.abort?.abort()
+  }
+
+  /** Turning the cloud step on: main's own dialog with what is waiting and the cost; true when he confirms. */
+  async consentToTurnOn(): Promise<boolean> {
+    const waiting = this.candidates().list.length
+    const leftTonight = Math.max(0, NIGHTLY_LIMIT - this.withStore((s) => s.allowanceUsed(nightOf(this.now()))))
+    const ok = await this.deps.confirm(turnOnPrompt(waiting, leftTonight)).catch(() => false)
+    this.log(`turning on: ${ok ? 'confirmed' : 'not confirmed'}`)
+    return ok === true
+  }
+
+  /**
+   * The opt-in and the key, read again from main's state; null (and why) when asking Luna was turned
+   * off or the key is gone. Read before every request and every retry.
+   */
+  private liveConsent(): { key: string } | { revoked: 'off' | 'no-key' } {
+    let enabled = false
+    try {
+      enabled = this.deps.settings().enabled === true
+    } catch {
+      enabled = false
+    }
+    if (!enabled) return { revoked: 'off' }
+    const key = this.safeKey()
+    return key ? { key } : { revoked: 'no-key' }
   }
 
   /** Doubtful screenshots Luna has not answered, with a readable picture on this Mac. */
@@ -288,7 +359,7 @@ export class CloudSorter {
       summary =
         this.now().getTime() > p.expiresAt
           ? this.refused('manual', 'The prepared batch is too old. Press Sort now again to see the current count.')
-          : await this.runCloud({ trigger: 'manual', local: null, only: p.hashes })
+          : await this.runCloud({ trigger: 'manual', local: null, only: p.hashes, confirm: true })
     }
     this.deps.saveState({ lastRun: summary })
     this.push()
@@ -330,7 +401,7 @@ export class CloudSorter {
     return this.runNightly()
   }
 
-  private async runCloud(o: { trigger: CloudRunSummary['trigger']; local: CloudRunSummary['local']; only?: string[] }): Promise<CloudRunSummary> {
+  private async runCloud(o: { trigger: CloudRunSummary['trigger']; local: CloudRunSummary['local']; only?: string[]; confirm?: boolean }): Promise<CloudRunSummary> {
     const { trigger, local } = o
     const at = this.now().toISOString()
     const base: CloudRunSummary = { at, trigger, local, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, skipped: null, error: null, message: '' }
@@ -352,8 +423,18 @@ export class CloudSorter {
     const key = this.deps.key.get()
     if (!key) return finish({ skipped: 'no-key', stayedDoubtful: list.length })
     if (!this.deps.online()) return finish({ skipped: 'offline', stayedDoubtful: list.length })
-    const wanted = selectForCloud(pool0, NIGHTLY_LIMIT)
+    let wanted = selectForCloud(pool0, NIGHTLY_LIMIT)
     if (!wanted.length) return finish({ skipped: 'nothing-doubtful', stayedDoubtful: list.length })
+    if (o.confirm) {
+      // a manual send goes only after main's own dialog returns OK
+      const ok = await this.deps.confirm(sendPrompt(wanted.length)).catch(() => false)
+      if (ok !== true) return finish({ skipped: 'not-confirmed', stayedDoubtful: list.length })
+      if (this.busy()) return finish({ error: 'The sorter is already running.' })
+      const after = this.candidates()
+      const still = new Set(after.list.map((c) => c.hash))
+      wanted = wanted.filter((c) => still.has(c.hash))
+      if (!wanted.length) return finish({ skipped: 'nothing-doubtful', stayedDoubtful: after.list.length })
+    }
 
     // claim the batch in one transaction: tonight's limit and other runs (other processes too) are checked there
     const night = nightOf(this.now())
@@ -371,16 +452,30 @@ export class CloudSorter {
     this.total = selected.length
     this.push()
     let fatal: LunaHttpError | null = null
+    let revoked: 'off' | 'no-key' | null = null
     let chunkError: string | null = null
-    let sent = 0
-    const refused = new Map<VerifyRefusal | 'no-longer-eligible', number>()
-    const refuse = (why: VerifyRefusal | 'no-longer-eligible', n = 1): void => void refused.set(why, (refused.get(why) ?? 0) + n)
+    const refused = new Map<NotSent, number>()
+    const refuse = (why: NotSent, n = 1): void => void refused.set(why, (refused.get(why) ?? 0) + n)
+    // revocation: the opt-in and the key from main's state; when either has gone, stop the whole run
+    const consent = (): string => {
+      const c = this.liveConsent()
+      if ('key' in c) return c.key
+      revoked ??= c.revoked
+      ctl.abort()
+      throw new LunaHttpError(c.revoked === 'off' ? 'Asking Luna was turned off' : 'The OpenAI key was removed', 'revoked')
+    }
     const counts = { asked: 0, answered: 0, keep: 0, throwaway: 0 }
     try {
       await pool(
         planChunks(selected, LUNA.chunkSize),
         LUNA.concurrency,
         async (chunk) => {
+          if (ctl.signal.aborted) return
+          try {
+            consent()
+          } catch {
+            return
+          }
           const items: LunaItem[] = []
           for (const c of chunk) {
             if (ctl.signal.aborted) return
@@ -397,23 +492,39 @@ export class CloudSorter {
             }
           }
           if (!items.length || ctl.signal.aborted) return
-          // eligibility again, just before the request: he may have decided or answered one meanwhile
-          const live = this.withStore((s) => s.stillEligible(items.map((i) => i.hash), runId, SCOPE))
-          const sendable = items.filter((i) => live.has(i.hash))
-          if (sendable.length < items.length) refuse('no-longer-eligible', items.length - sendable.length)
-          if (!sendable.length) return
-          const req = buildLunaRequest(sendable)
-          counts.asked += req.ids.size
-          sent += req.ids.size
+          let current = items
+          const last: { req: LunaRequest | null } = { req: null }
           try {
-            const json = await postLuna(req.body, {
+            const json = await postLuna(null, {
               key,
               http: this.deps.http,
               endpoint: this.deps.endpoint,
               signal: ctl.signal,
               sleep: this.deps.sleep,
-              onRetry: (attempt, why, wait) => this.log(`retry ${attempt} after ${why}, waiting ${wait} ms`)
+              onRetry: (attempt, why, wait) => this.log(`retry ${attempt} after ${why}, waiting ${wait} ms`),
+              // before the first attempt and before every retry: consent and key again (else stop the run),
+              // then eligibility per item (he may have decided or answered one meanwhile), and tonight's
+              // allowance, counted here for what goes into the request (store.ts admitForRequest)
+              before: (attempt) => {
+                const liveKey = consent()
+                const { admitted, overLimit } = this.withStore((s) => s.admitForRequest(current.map((i) => i.hash), { ...SCOPE, runId, night, limit: NIGHTLY_LIMIT }))
+                const keep = new Set(admitted)
+                const next = current.filter((i) => keep.has(i.hash))
+                if (overLimit) refuse('limit-reached', overLimit)
+                if (current.length - next.length - overLimit > 0) refuse('no-longer-eligible', current.length - next.length - overLimit)
+                current = next
+                if (!current.length) {
+                  last.req = null
+                  if (attempt > 1) this.log(`retry ${attempt - 1} not made: nothing in it is still waiting for Luna`)
+                  return 'skip'
+                }
+                last.req = buildLunaRequest(current)
+                if (attempt === 1) counts.asked += last.req.ids.size
+                return { body: last.req.body, key: liveKey }
+              }
             })
+            const req = last.req as LunaRequest | null
+            if (json === null || !req) return
             const parsed = parseLunaResponse(json, req.ids)
             const askedAt = new Date().toISOString()
             const answers: CloudAnswerRow[] = []
@@ -437,7 +548,7 @@ export class CloudSorter {
             }
             if (parsed.missing.length) this.log(`${parsed.missing.length} screenshot(s) in a request got no usable answer; they stay doubtful`)
           } catch (e) {
-            if (e instanceof LunaHttpError && (e.kind === 'offline' || e.kind === 'auth' || e.kind === 'rate' || e.kind === 'cancelled')) {
+            if (e instanceof LunaHttpError && (e.kind === 'offline' || e.kind === 'auth' || e.kind === 'rate' || e.kind === 'cancelled' || e.kind === 'revoked')) {
               fatal ??= e
               ctl.abort()
             } else {
@@ -456,11 +567,13 @@ export class CloudSorter {
       this.phase = 'idle'
       this.done = 0
       this.total = 0
-      // claims go; screenshots that never went into a request are given back to tonight's limit
-      this.withStore((s) => s.releaseClaims(runId, night, selected.length - sent))
+      // claims go (unsent ones too); the allowance already holds only what went into a request
+      this.withStore((s) => s.releaseClaims(runId))
     }
     for (const [why, n] of refused) this.log(`${n} screenshot(s) not sent: ${REFUSAL_WORDS[why]}`)
     const stayedDoubtful = list.length - counts.keep - counts.throwaway
+    const r = revoked as 'off' | 'no-key' | null
+    if (r) return finish({ ...counts, stayedDoubtful, skipped: r })
     const f = fatal as LunaHttpError | null
     if (f) {
       const skipped: CloudSkip | null = f.kind === 'offline' ? 'offline' : f.kind === 'auth' ? 'key-rejected' : f.kind === 'cancelled' ? 'cancelled' : null
@@ -470,8 +583,10 @@ export class CloudSorter {
   }
 }
 
+type NotSent = VerifyRefusal | 'no-longer-eligible' | 'limit-reached'
 /** Log words for a screenshot that was not sent (never its path or name). */
-const REFUSAL_WORDS: Record<VerifyRefusal | 'no-longer-eligible', string> = {
+const REFUSAL_WORDS: Record<NotSent, string> = {
+  'limit-reached': 'tonight’s limit was reached',
   changed: 'the file changed since it was scanned',
   symlink: 'the path is a link, not the file',
   'not-a-file': 'the path is not a regular file',
@@ -486,14 +601,20 @@ export function describe(s: CloudRunSummary): string {
   switch (s.skipped) {
     case 'not-prepared':
       return `Nothing was sent. ${s.error ?? ''}`.trim()
+    case 'not-confirmed':
+      return `Nothing was sent: you did not confirm.${waiting}`
     case 'off':
-      return `Luna was not asked: asking Luna is turned off.${waiting}`
+      return s.asked
+        ? `Stopped after asking Luna about ${plural(s.asked, 'screenshot')}: asking Luna was turned off.${waiting}`
+        : `Luna was not asked: asking Luna is turned off.${waiting}`
     case 'limit-reached':
       return `Luna was not asked: it has had ${NIGHTLY_LIMIT.toLocaleString('en-GB')} screenshots tonight, the most per night.${waiting}`
     case 'nothing-doubtful':
       return 'Nothing doubtful was waiting for Luna.'
     case 'no-key':
-      return `Luna was not asked: no OpenAI key is saved.${waiting}`
+      return s.asked
+        ? `Stopped after asking Luna about ${plural(s.asked, 'screenshot')}: the OpenAI key was removed.${waiting}`
+        : `Luna was not asked: no OpenAI key is saved.${waiting}`
     case 'offline':
       return `Luna was not asked${s.answered ? ' about all of them' : ''}: this Mac was offline.${waiting}`
     case 'key-rejected':
@@ -503,6 +624,19 @@ export function describe(s: CloudRunSummary): string {
   }
   if (s.error && !s.answered) return `Luna could not answer: ${s.error}.${waiting}`
   return `Asked Luna about ${plural(s.asked, 'screenshot')}: ${s.keep.toLocaleString('en-GB')} keep, ${s.throwaway.toLocaleString('en-GB')} throwaway.${waiting}`
+}
+
+/**
+ * A settings change from the renderer. Turning the cloud step on is recorded only after main's own
+ * dialog (consentToTurnOn) returns OK; declined, everything else in the patch still applies.
+ */
+export async function changeSettings(svc: Pick<CloudSorter, 'consentToTurnOn'>, patch: unknown, current: () => StoredCloudSettings, save: (s: StoredCloudSettings) => void, now: () => Date): Promise<void> {
+  let p: Record<string, unknown> = patch && typeof patch === 'object' ? { ...(patch as Record<string, unknown>) } : {}
+  if (p.enabled === true && !normaliseCloudSettings(current()).enabled && !(await svc.consentToTurnOn())) {
+    const { enabled: _drop, ...rest } = p // eslint-disable-line @typescript-eslint/no-unused-vars
+    p = rest
+  }
+  save(applySettingsPatch(current(), p, now())) // read again: the dialog may have stood open a while
 }
 
 /** IPC for Settings › Screenshot sorter › Luna. Types: src/preload/index.ts. Never returns the key. */
@@ -528,9 +662,9 @@ export function registerCloudIpc(
     key.clear()
     return svc.status()
   })
-  // only on/off (his opt-in, recorded here with its time) and the batch time can be set; the limit is fixed
-  handle('cloud:set-settings', (patch: unknown) => {
-    saveSettings(applySettingsPatch(current(), patch, new Date()))
+  // only on/off (his opt-in, recorded here with its time after main's own dialog) and the batch time can be set; the limit is fixed
+  handle('cloud:set-settings', async (patch: unknown) => {
+    await changeSettings(svc, patch, current, saveSettings, () => new Date())
     return svc.status()
   })
   handle('cloud:prepare', () => svc.prepare())

@@ -2,7 +2,7 @@
  * A screenshot read and shrunk for Luna.
  *
  *   readVerified(path, hash): the file's bytes, only when the path is a regular file (not a symlink,
- *     not a folder or device) and the bytes hash to the content hash the screenshot was classified
+ *     not a folder, FIFO or device; opened non-blocking and fstat'ed before any read) and the bytes hash to the content hash the screenshot was classified
  *     under (sha256, first 12 hex characters, as triage.ts hashes). The bytes that were hashed are
  *     the bytes that get shrunk and sent: one open file descriptor, no second read of the path.
  *   shrinkForLuna(bytes): long edge at most LUNA.longEdge pixels, JPEG, transparency on white.
@@ -29,8 +29,10 @@ export async function readVerified(path: string, hash: string): Promise<Verified
   let fh: fsp.FileHandle | null = null
   try {
     try {
-      // O_NOFOLLOW: a symlink at the last path component fails to open (ELOOP) instead of being followed
-      fh = await fsp.open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+      // O_NOFOLLOW: a symlink at the last path component fails to open (ELOOP) instead of being followed.
+      // O_NONBLOCK: opening a FIFO (or a device) returns at once instead of waiting for a writer;
+      // the descriptor is then checked before anything is read from it.
+      fh = await fsp.open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     } catch (e) {
       const code = (e as NodeJS.ErrnoException)?.code
       return { ok: false, why: code === 'ELOOP' || code === 'EMLINK' ? 'symlink' : 'unreadable' }

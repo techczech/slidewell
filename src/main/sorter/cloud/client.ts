@@ -11,7 +11,7 @@ import { LUNA } from './luna'
 export type HttpResponse = { status: number; headers: { get(name: string): string | null }; text(): Promise<string> }
 export type HttpPost = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<HttpResponse>
 
-export type LunaErrorKind = 'offline' | 'auth' | 'rate' | 'server' | 'bad-request' | 'timeout' | 'cancelled'
+export type LunaErrorKind = 'offline' | 'auth' | 'rate' | 'server' | 'bad-request' | 'timeout' | 'cancelled' | 'revoked'
 
 export class LunaHttpError extends Error {
   constructor(
@@ -42,6 +42,12 @@ export type PostOptions = {
   random?: () => number
   /** Told about each retry (attempt number, why, wait); never given the key or a body. */
   onRetry?: (attempt: number, why: string, waitMs: number) => void
+  /**
+   * Called before every attempt, the first and each retry. Returns the body and key for this attempt
+   * (they replace `body` and `key`), or 'skip' when nothing is left to send (postLuna then returns
+   * null without a request). May throw (e.g. LunaHttpError 'revoked') to stop with no request.
+   */
+  before?: (attempt: number) => { body: unknown; key: string } | 'skip'
 }
 
 const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
@@ -78,17 +84,24 @@ function apiMessage(text: string, key: string): string {
 }
 
 /**
- * POST one body; returns the parsed JSON on 2xx. Retries 429 / 5xx / timeout / network failure with
+ * POST one body; returns the parsed JSON on 2xx (null when `before` said 'skip'). Retries 429 / 5xx / timeout / network failure with
  * exponential backoff (1 s, 2 s, 4 s … with jitter, or Retry-After). Throws LunaHttpError otherwise.
  */
 export async function postLuna(body: unknown, o: PostOptions): Promise<unknown> {
   const attempts = Math.max(1, o.maxAttempts ?? LUNA.maxAttempts)
   const sleep = o.sleep ?? defaultSleep
   const random = o.random ?? Math.random
-  const payload = JSON.stringify(body)
   let last: LunaHttpError = new LunaHttpError('Luna could not be reached', 'offline')
   for (let attempt = 1; attempt <= attempts; attempt++) {
     if (o.signal?.aborted) throw new LunaHttpError('cancelled', 'cancelled')
+    let key = o.key
+    let payload: string
+    if (o.before) {
+      const b = o.before(attempt)
+      if (b === 'skip') return null
+      key = b.key
+      payload = JSON.stringify(b.body)
+    } else payload = JSON.stringify(body)
     const ctl = new AbortController()
     let timedOut = false
     const timer = setTimeout(() => {
@@ -101,7 +114,7 @@ export async function postLuna(body: unknown, o: PostOptions): Promise<unknown> 
     try {
       const res = await o.http(o.endpoint ?? LUNA.endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${o.key}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         body: payload,
         signal: ctl.signal
       })
@@ -118,7 +131,7 @@ export async function postLuna(body: unknown, o: PostOptions): Promise<unknown> 
         last = new LunaHttpError(res.status === 429 ? 'OpenAI is rate-limiting requests' : `OpenAI had a server error (${res.status})`, res.status === 429 ? 'rate' : 'server', res.status)
         wait = retryAfterMs(res.headers.get('retry-after'))
       } else {
-        const m = apiMessage(text, o.key)
+        const m = apiMessage(text, key)
         throw new LunaHttpError(`OpenAI refused the request (${res.status})${m ? `: ${m}` : ''}`, 'bad-request', res.status)
       }
     } catch (e) {

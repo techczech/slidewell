@@ -410,6 +410,12 @@ app.whenReady().then(() => {
     broadcast: (st) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('cloud:status', st)
     },
+    // consent is main's own native dialog, raised on the main window; no window, no consent
+    confirm: async (p) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return false
+      const r = await dialog.showMessageBox(mainWindow, { type: 'question', buttons: ['Cancel', p.confirmLabel], defaultId: 1, cancelId: 0, noLink: true, message: p.message, detail: p.detail })
+      return r.response === 1
+    },
     log: (line) => console.warn(line)
   })
   registerCloudIpc(cloud, lunaKey, (s) => saveCloudCfg(s), () => cloudCfg(), (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))

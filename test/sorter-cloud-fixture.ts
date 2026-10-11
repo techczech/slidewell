@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { SorterStore, type ProposalRow } from '../src/main/sorter/store'
 import { SORTER_VERSION } from '../src/main/sorter/decide'
 import type { HttpPost } from '../src/main/sorter/cloud/client'
-import type { CloudDeps, CloudSettings, CloudState } from '../src/main/sorter/cloud/service'
+import type { CloudDeps, CloudSettings, CloudState, ConsentPrompt } from '../src/main/sorter/cloud/service'
 import { contentHash } from '../src/main/sorter/cloud/images'
 
 // a 1×1 PNG; the tests' shrink stub never decodes it
@@ -104,8 +104,16 @@ export function lunaStub(opts: { delayMs?: number } = {}): { http: HttpPost; see
   return { http, seen, peak: () => peak }
 }
 
-export function cloudDeps(well: string, extra: Partial<CloudDeps> & { keyValue?: string | null; settings?: Partial<CloudSettings> } = {}): CloudDeps & { stateBox: CloudState; logs: string[]; localRuns: number } {
-  const { keyValue, settings: settingsPatch, ...rest } = extra
+/**
+ * Fake deps. `confirmAnswer` is what main's native dialog returns (default: he confirms); every
+ * dialog shown is recorded in `prompts`.
+ */
+export function cloudDeps(
+  well: string,
+  extra: Partial<CloudDeps> & { keyValue?: string | null; settings?: Partial<CloudSettings>; confirmAnswer?: boolean } = {}
+): CloudDeps & { stateBox: CloudState; logs: string[]; localRuns: number; prompts: ConsentPrompt[] } {
+  const { keyValue, settings: settingsPatch, confirmAnswer, ...rest } = extra
+  const prompts: ConsentPrompt[] = []
   const stateBox: CloudState = { lastRunAt: null, since: null, lastRun: null }
   const logs: string[] = []
   const key = keyValue === undefined ? 'sk-test-FAKEKEY0123456789abcdefWXYZ' : keyValue
@@ -127,9 +135,14 @@ export function cloudDeps(well: string, extra: Partial<CloudDeps> & { keyValue?:
     broadcast: () => undefined,
     log: (l: string) => void logs.push(l),
     sleep: async () => undefined,
+    confirm: async (p: ConsentPrompt) => {
+      prompts.push(p)
+      return confirmAnswer ?? true
+    },
     ...rest,
     stateBox,
     logs,
+    prompts,
     localRuns: 0
   }
   return out
