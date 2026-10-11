@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { compileNameTemplate, type NameTemplate } from './screenshot-name'
 
 export type DefaultsReader = () => Promise<string | null>
 
@@ -76,4 +77,71 @@ export async function setCleanShotExportPath(
   const wrote = await write(t).catch(() => false)
   const after = await cleanShotSetting(t, read)
   return { ...after, ok: wrote && after.matches }
+}
+
+// ---- CleanShot's file name template (ticket 15): read-only, injectable like the export folder. ----
+
+/** `defaults read pl.maketheweb.cleanshotx mediaNameTemplate` via execFile (no shell). */
+export const readCleanShotNameTemplate: DefaultsReader = () =>
+  new Promise((resolve) => {
+    execFile('defaults', ['read', 'pl.maketheweb.cleanshotx', 'mediaNameTemplate'], { timeout: 3000 }, (err, stdout) => resolve(err ? null : String(stdout).trim() || null))
+  })
+
+/**
+ * Parse the old-style property-list array `defaults read` prints, e.g. `( "CleanShot ", "%y", "-" )`.
+ * Strings are quoted (escapes \\ \" \n \t \Uxxxx and octal) or bare words. Null for anything else.
+ */
+export function parseDefaultsArray(raw: string | null): string[] | null {
+  if (!raw) return null
+  const s = raw.trim()
+  if (!s.startsWith('(') || !s.endsWith(')')) return null
+  const out: string[] = []
+  let i = 1
+  const end = s.length - 1
+  const skipWs = (): void => {
+    while (i < end && /\s/.test(s[i])) i++
+  }
+  while (true) {
+    skipWs()
+    if (i >= end) break
+    if (s[i] === '"') {
+      i++
+      let v = ''
+      while (i < end && s[i] !== '"') {
+        if (s[i] !== '\\') {
+          v += s[i++]
+          continue
+        }
+        const c = s[i + 1]
+        if (c === 'U' && /^[0-9A-Fa-f]{4}$/.test(s.slice(i + 2, i + 6))) {
+          v += String.fromCharCode(parseInt(s.slice(i + 2, i + 6), 16))
+          i += 6
+        } else if (/[0-7]/.test(c ?? '') && /^[0-7]{3}$/.test(s.slice(i + 1, i + 4))) {
+          v += String.fromCharCode(parseInt(s.slice(i + 1, i + 4), 8))
+          i += 4
+        } else {
+          v += c === 'n' ? '\n' : c === 't' ? '\t' : c === 'r' ? '\r' : (c ?? '')
+          i += 2
+        }
+      }
+      if (s[i] !== '"') return null // unterminated
+      i++
+      out.push(v)
+    } else {
+      const m = /^[A-Za-z0-9_$+\/:.%-]+/.exec(s.slice(i, end))
+      if (!m) return null
+      out.push(m[0])
+      i += m[0].length
+    }
+    skipWs()
+    if (i >= end) break
+    if (s[i] !== ',') return null
+    i++
+  }
+  return out
+}
+
+/** CleanShot's name template, compiled; null when unset, unreadable or without a full date. */
+export async function cleanShotNameTemplate(read: DefaultsReader = readCleanShotNameTemplate): Promise<NameTemplate | null> {
+  return compileNameTemplate(parseDefaultsArray(await read().catch(() => null)))
 }

@@ -9,6 +9,7 @@ import { homedir } from 'node:os'
 import { join, relative } from 'node:path'
 import { dryRun, runImport, ledgerPath, readHashed, defaultIsOnlineOnly, type BacklogEnv } from '../src/main/backlog-import'
 import { parseLedger, STAGING_DIR } from '../src/main/backlog-plan'
+import { downloadOnlineOnly, downloadWithDeadline } from '../src/main/online-only'
 
 const SCRATCH_ROOT = join(homedir(), 'Library', 'Caches', 'slidewell-dev-13', 'vitest')
 let n = 0
@@ -254,7 +255,7 @@ describe('backlog import (copy only) on scratch folders', () => {
     })
   })
 
-  describe('online-only (never hydrated)', () => {
+  describe('online-only copies in the watched folder (never downloaded)', () => {
     it('item 7: an online-only recorded copy is unverified, not done, not copied again, not read', async () => {
       await runImport(await dryRun(env), env)
       chmodSync(W(C1), 0o000) // any read attempt would fail
@@ -268,13 +269,12 @@ describe('backlog import (copy only) on scratch folders', () => {
       expect(readdirSync(env.watchedFolder!).filter((x) => !x.startsWith('.'))).toHaveLength(4)
     })
 
-    it('online-only sources are counted in the dry run and never read', async () => {
-      const src = join(env.cleanshotDir!, 'media_a', C1)
-      const fake: BacklogEnv = { ...env, ops: { isOnlineOnly: async (p) => p === src } }
-      const plan = await dryRun(fake)
-      expect(plan.ok && plan.summary).toMatchObject({ onlineOnly: 1, cleanshot: { count: 1 } })
-      chmodSync(src, 0o000)
-      expect(await runImport(plan, fake)).toMatchObject({ ok: true, failed: 0, copied: 3 })
+    it('an online-only recorded copy is never downloaded to check it (the download is for sources only)', async () => {
+      await runImport(await dryRun(env), env)
+      const asked: string[] = []
+      const fake: BacklogEnv = { ...env, ops: { isOnlineOnly: async (p) => p === W(C1), download: async (p) => void asked.push(p) } }
+      await runImport(await dryRun(fake), fake)
+      expect(asked).toEqual([])
     })
 
     it('a name taken by an online-only file is not read; the item is left out and reported', async () => {
@@ -287,6 +287,96 @@ describe('backlog import (copy only) on scratch folders', () => {
 
     it('an ordinary file is not online-only', async () => {
       expect(await defaultIsOnlineOnly(join(env.desktopDir, D1))).toBe(false)
+    })
+  })
+
+  // Ticket 15: online-only sources (iCloud Desktop, OneDrive placeholders) are downloaded one at a time.
+  // The fake: a source is "dataless" (mode 000, so any read in this process would fail) until the
+  // injected downloader "downloads" it (restores the mode). No real iCloud or OneDrive is involved.
+  describe('online-only sources are downloaded, then copied', () => {
+    const SRC = (): string => join(env.cleanshotDir!, 'media_a', C1)
+    const dataless = (paths: string[], download: (p: string, o: { timeoutMs: number; signal?: AbortSignal }) => Promise<void>): BacklogEnv => {
+      const offline = new Set(paths)
+      for (const p of paths) chmodSync(p, 0o000)
+      return {
+        ...env,
+        ops: {
+          isOnlineOnly: async (p) => offline.has(p),
+          download: async (p, o) => {
+            await download(p, o)
+            if (offline.delete(p)) chmodSync(p, 0o644)
+          }
+        }
+      }
+    }
+
+    it('the dry run says how many need downloading and their size, without reading them', async () => {
+      const before = tree(root)
+      const fake = dataless([SRC(), join(env.desktopDir, D1)], async () => undefined)
+      const plan = await dryRun(fake)
+      expect(plan.ok && plan.summary).toMatchObject({ needDownloading: { count: 2, bytes: 4 + 6 }, desktop: { count: 2 }, cleanshot: { count: 2 } })
+      chmodSync(SRC(), 0o644)
+      chmodSync(join(env.desktopDir, D1), 0o644)
+      expect(tree(root)).toEqual(before) // nothing written, nothing changed
+    })
+
+    it('downloads each online-only source, then copies and verifies it; the original stays', async () => {
+      const asked: string[] = []
+      const fake = dataless([SRC(), join(env.desktopDir, D1)], async (p) => void asked.push(p))
+      const res = await runImport(await dryRun(fake), fake)
+      expect(res).toMatchObject({ ok: true, copied: 4, downloaded: 2, onlineOnly: 0, failed: 0 })
+      expect(asked).toEqual([join(env.desktopDir, D1), SRC()])
+      expect(readFileSync(W(C1), 'utf8')).toBe('cs-1')
+      expect(readFileSync(SRC(), 'utf8')).toBe('cs-1') // copy only: the original is still there
+      expect(readFileSync(W(D1), 'utf8')).toBe('desk-1')
+    })
+
+    it('a download that does not arrive within the per-file timeout is left out, never read, and the run carries on', async () => {
+      let aborted = false
+      const fake = dataless([SRC()], (_p, o) => new Promise<void>(() => o.signal?.addEventListener('abort', () => (aborted = true)))) // never finishes
+      const res = await runImport(await dryRun(fake), { ...fake, downloadTimeoutMs: 50 })
+      expect(res).toMatchObject({ ok: true, copied: 3, downloaded: 0, onlineOnly: 1, failed: 0 })
+      expect(aborted).toBe(true) // the downloader was told to stop (the real one kills its child)
+      expect(existsSync(W(C1))).toBe(false)
+      expect(statSync(SRC()).mode & 0o777).toBe(0) // untouched
+      // the next run tries again (the file has arrived meanwhile)
+      chmodSync(SRC(), 0o644)
+      const again = dataless([], async () => undefined)
+      expect(await runImport(await dryRun(again), again)).toMatchObject({ copied: 1, alreadyDone: 0 })
+    })
+
+    it('Stop during a download ends the run at once; nothing after it is copied', async () => {
+      chmodSync(SRC(), 0o000)
+      const stop = new AbortController()
+      const fake = dataless([SRC()], (_p, o) => new Promise<void>((_r, reject) => {
+        setTimeout(() => stop.abort(), 10)
+        o.signal?.addEventListener('abort', () => reject(Object.assign(new Error('killed'), { code: 'EDOWNLOAD' })))
+      }))
+      const res = await runImport(await dryRun(fake), fake, { signal: stop.signal })
+      expect(res).toMatchObject({ cancelled: true, ok: false, copied: 2, downloaded: 0 })
+      expect(existsSync(W(C1)) || existsSync(W(C2))).toBe(false)
+    })
+
+    it('a file still online-only after the download is left out', async () => {
+      const fake = dataless([SRC()], async () => undefined)
+      fake.ops!.download = async () => undefined // "finished" but the bytes never came
+      expect(await runImport(await dryRun(fake), fake)).toMatchObject({ ok: true, copied: 3, onlineOnly: 1, failed: 0 })
+    })
+
+    it('the real downloader reads a local file out of process and refuses non-regular files and a stopped run', async () => {
+      await downloadOnlineOnly(join(env.desktopDir, D1), { timeoutMs: 5000 })
+      execFileSync('mkfifo', [join(root, 'pipe.png')])
+      await expect(downloadOnlineOnly(join(root, 'pipe.png'), { timeoutMs: 5000 })).rejects.toMatchObject({ code: 'ENOTREG' })
+      const stopped = new AbortController()
+      stopped.abort()
+      await expect(downloadOnlineOnly(join(env.desktopDir, D1), { timeoutMs: 5000, signal: stopped.signal })).rejects.toMatchObject({ code: 'ABORT_ERR' })
+      expect(readFileSync(join(env.desktopDir, D1), 'utf8')).toBe('desk-1')
+    })
+
+    it('the deadline holds even when the downloader ignores it', async () => {
+      const t0 = Date.now()
+      await expect(downloadWithDeadline('/x', () => new Promise<void>(() => undefined), { timeoutMs: 30 })).rejects.toMatchObject({ code: 'ETIMEDOUT' })
+      expect(Date.now() - t0).toBeLessThan(1000)
     })
   })
 

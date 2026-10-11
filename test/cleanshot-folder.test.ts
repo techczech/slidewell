@@ -38,3 +38,41 @@ describe('changing CleanShot export folder (fake writer only)', () => {
     expect(failed.ok).toBe(false)
   })
 })
+
+describe('CleanShot name template (fake reader only)', () => {
+  // `defaults read pl.maketheweb.cleanshotx mediaNameTemplate` on Dominik's Mac, 2026-10-10
+  const HIS_RAW = `(
+    "CleanShot ",
+    "%y",
+    "-",
+    "%m",
+    "-",
+    "%d",
+    " at ",
+    "%H",
+    "%M",
+    "from ",
+    "%a",
+    " with ",
+    "%t"
+)`
+
+  it('parses the array defaults prints', async () => {
+    const { parseDefaultsArray } = await import('../src/main/cleanshot-folder')
+    expect(parseDefaultsArray(HIS_RAW)).toEqual(['CleanShot ', '%y', '-', '%m', '-', '%d', ' at ', '%H', '%M', 'from ', '%a', ' with ', '%t'])
+    expect(parseDefaultsArray('(\n    Shot,\n    "%y",\n    "a \\"b\\" \\U2014 c\\\\"\n)')).toEqual(['Shot', '%y', 'a "b" — c\\'])
+    expect(parseDefaultsArray('()')).toEqual([])
+    expect(parseDefaultsArray('CleanShot %y')).toBeNull()
+    expect(parseDefaultsArray('( "unterminated )')).toBeNull()
+    expect(parseDefaultsArray(null)).toBeNull()
+  })
+
+  it('compiles his template through the injected reader; null when unset or failing', async () => {
+    const { cleanShotNameTemplate } = await import('../src/main/cleanshot-folder')
+    const { parseScreenshotName } = await import('../src/main/screenshot-name')
+    const tpl = await cleanShotNameTemplate(async () => HIS_RAW)
+    expect(parseScreenshotName('CleanShot 2026-10-10 at 1147from TalkWeaver with TalkWeaver.png', tpl)).toMatchObject({ app: 'TalkWeaver', window: 'TalkWeaver' })
+    expect(await cleanShotNameTemplate(async () => null)).toBeNull()
+    expect(await cleanShotNameTemplate(async () => { throw new Error('no defaults') })).toBeNull()
+  })
+})

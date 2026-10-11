@@ -17,8 +17,8 @@ import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, 
 import { loadDeckMeta, categoryList, invalidateDeckMeta, setOwnerNames, type DeckMetaIndex } from './deckmeta'
 import { resolveOwnerNames, cleanOwnerNames } from './owners'
 import { ensureWell, drainInbox, scanVault, searchWell, wellByIds, wellAbsPath, ingestScreenshot, findFfmpeg, type WellRow } from './well'
-import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow } from './triage'
-import { cleanShotFolder } from './cleanshot-folder'
+import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow, type ScanOptions } from './triage'
+import { cleanShotFolder, cleanShotNameTemplate } from './cleanshot-folder'
 import { createSourceWatcher } from './source-watcher'
 import { registerBacklogIpc } from './backlog-ipc'
 import { talkAbsPath, isVaultChangeRelevant } from './talk-usage'
@@ -187,6 +187,17 @@ function triageSources(): CaptureSource[] {
     if (s && typeof s.path === 'string' && existsSync(s.path) && !out.some((o) => o.path === s.path)) out.push({ path: s.path, namedOnly: Boolean(s.namedOnly) })
   }
   return out
+}
+
+// How one capture source is scanned (ticket 15). Names are read with CleanShot's own template. The
+// Desktop and CleanShot's export folder (as an extra source) get their online-only files downloaded,
+// one at a time with a timeout; the primary Triage folder never does (it can hold thousands).
+async function scanOptionsFor(s: CaptureSource): Promise<ScanOptions> {
+  const [nameTemplate, cs] = await Promise.all([cleanShotNameTemplate(), cleanShotFolder()])
+  const strip = (p: string): string => (p.length > 1 ? p.replace(/\/+$/, '') : p)
+  const primary = screenshotRootResolved()
+  const isCleanShot = Boolean(cs && strip(cs) === strip(s.path) && (!primary || strip(primary) !== strip(s.path)))
+  return { namedOnly: s.namedOnly, nameTemplate, downloadOnlineOnly: s.namedOnly || isCleanShot }
 }
 
 // The default destination for throwaway conversions (Settings-chosen). Pre-fills the save dialog;
@@ -952,7 +963,7 @@ app.whenReady().then(() => {
     const sum = { indexed: 0, total: 0, offline: 0 }
     try {
       for (const s of sources) {
-        const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, { namedOnly: s.namedOnly })
+        const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, await scanOptionsFor(s))
         sum.indexed += res.indexed
         sum.total += res.total
         sum.offline += res.offline
@@ -972,7 +983,8 @@ app.whenReady().then(() => {
   const watcher = createSourceWatcher((path) => {
     const s = triageSources().find((x) => x.path === path)
     if (!s) return
-    void scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, { namedOnly: s.namedOnly })
+    void scanOptionsFor(s)
+      .then((o) => scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, o))
       .then(() => mainWindow?.webContents.send('triage:changed'))
       .catch(() => undefined)
   })

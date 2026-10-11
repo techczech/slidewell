@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { dryRun, real, runImport, type BacklogEnv, type RunProgress } from './backlog-import'
 import type { BacklogPlan } from './backlog-plan'
-import { cleanShotSetting, setCleanShotExportPath, type DefaultsWriter } from './cleanshot-folder'
+import { cleanShotNameTemplate, cleanShotSetting, setCleanShotExportPath, type DefaultsReader, type DefaultsWriter } from './cleanshot-folder'
 
 /** CleanShot X keeps its capture history here (one folder per capture). Read only. */
 export function cleanShotHistoryDir(home = homedir()): string {
@@ -24,6 +24,7 @@ export function registerBacklogIpc(deps: {
   isMainWindow: (sender: WebContents) => boolean
   afterRun: () => void // e.g. one explicit scan of the capture sources
   writer?: DefaultsWriter
+  nameTemplateReader?: DefaultsReader // CleanShot's mediaNameTemplate (default: `defaults read`)
 }): void {
   let shown: { id: string; plan: BacklogPlan; at: number } | null = null
   let running: AbortController | null = null
@@ -37,7 +38,8 @@ export function registerBacklogIpc(deps: {
 
   ipcMain.handle('backlog:dry-run', async (e) => {
     if (!deps.isMainWindow(e.sender)) return null
-    const plan = await dryRun(env())
+    // Desktop names are recognised with CleanShot's own name template, read fresh for every dry run
+    const plan = await dryRun({ ...env(), nameTemplate: await cleanShotNameTemplate(deps.nameTemplateReader) })
     const id = randomUUID()
     shown = { id, plan, at: Date.now() }
     // items are not sent: the renderer shows counts, sizes and examples only

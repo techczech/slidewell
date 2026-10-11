@@ -101,9 +101,12 @@ export function BacklogImportSettings(): JSX.Element {
                   {plural(p.summary.unverifiedOnlineOnly, 'earlier copy', 'earlier copies')} unverified, online-only: not checked (that would download them) and not copied again.
                 </div>
               )}
-              {p.summary.onlineOnly > 0 && (
-                <div className="settings-row-detail" style={WRAP}>
-                  {plural(p.summary.onlineOnly, 'file')} online-only, left out: open OneDrive (or iCloud) to download them, then run this again.
+              {p.summary.needDownloading.count > 0 && (
+                <div className="settings-row-detail" style={WRAP} data-testid="backlog-need-downloading">
+                  <b>
+                    {p.summary.needDownloading.count.toLocaleString('en-GB')} need downloading (about {mb(p.summary.needDownloading.bytes)})
+                  </b>
+                  : they are only in iCloud or OneDrive. SlideWell downloads them one at a time while copying; a file that does not arrive within two minutes is left out, and running this again tries it again.
                 </div>
               )}
               {p.summary.done > 0 && <div className="settings-row-detail" style={WRAP}>{plural(p.summary.done, 'file')} already copied earlier and checked; not copied twice.</div>}
@@ -154,8 +157,9 @@ export function BacklogImportSettings(): JSX.Element {
               <div className="settings-row-label">{result.cancelled ? 'Stopped. Run it again to carry on; nothing is copied twice.' : result.ok ? 'Done.' : 'Finished with problems.'}</div>
               <div className="settings-row-detail" style={WRAP}>
                 {plural(result.copied, 'copy', 'copies')} made
+                {result.downloaded > 0 ? ` · ${plural(result.downloaded, 'file')} downloaded first` : ''}
                 {result.reused + result.alreadyDone > 0 ? ` · ${plural(result.reused + result.alreadyDone, 'file')} already there` : ''}
-                {result.onlineOnly > 0 ? ` · ${plural(result.onlineOnly, 'online-only file')} left out` : ''}
+                {result.onlineOnly > 0 ? ` · ${plural(result.onlineOnly, 'online-only file')} not downloaded, left out (run again to retry)` : ''}
                 {result.unverifiedOnlineOnly > 0 ? ` · ${plural(result.unverifiedOnlineOnly, 'earlier copy', 'earlier copies')} unverified, online-only` : ''}
                 {result.notRegular > 0 ? ` · ${plural(result.notRegular, 'item')} skipped: not a regular file` : ''}
                 {result.gone > 0 ? ` · ${plural(result.gone, 'file')} no longer there` : ''}

@@ -18,8 +18,12 @@
  *   still exists and matches by hash. A missing or changed copy puts the item back in the plan. A
  *   recorded copy that is online-only cannot be checked without downloading it: it is counted as
  *   "unverified, online-only", neither done nor copied again.
+ * - Online-only SOURCES (iCloud Desktop, OneDrive placeholders) are planned like any other file and
+ *   flagged: the run downloads them one at a time (ticket 15). The dry run counts them and their size
+ *   ("N need downloading, about X MB") from the listing alone; nothing is read to plan.
+ * - Desktop names are recognised with CleanShot's own name template when one is given (ticket 15).
  */
-import { parseScreenshotName } from './screenshot-name'
+import { parseScreenshotName, type NameTemplate } from './screenshot-name'
 
 export type BacklogSource = 'desktop' | 'cleanshot'
 
@@ -56,6 +60,7 @@ export type PlanItem = {
   copyTo: string
   nameTaken: boolean
   recopy: boolean // the ledger had it, but its recorded copy is missing or changed
+  onlineOnly: boolean // the source is online-only: the run downloads it first (read in a child process)
 }
 
 export type SourceSummary = { count: number; bytes: number; examples: string[] }
@@ -74,7 +79,7 @@ export type BacklogPlan =
         recopy: number // included in the counts above
         done: number // verified copies already in the watched folder
         unverifiedOnlineOnly: number // recorded copy is online-only: not checked, not copied again
-        onlineOnly: number // online-only sources left out; downloading them first is the user's step
+        needDownloading: { count: number; bytes: number } // online-only sources in the plan (included in the counts above)
         nameTaken: number
         totalBytes: number
         skipped: { cleanshotProjects: number; cleanshotOther: number; empty: number; notRegular: number }
@@ -94,6 +99,7 @@ export type PlanInput = {
   ledger: LedgerEntry[]
   copyStates?: Record<string, CopyState> // keyed by copyStateKey(dest, hash); absent = missing-or-changed
   date: string // YYYY-MM-DD, local
+  nameTemplate?: NameTemplate | null // CleanShot's own name template (cleanshot-folder.ts), for Desktop names
 }
 
 // Same media types the capture inbox scans (triage.ts).
@@ -153,7 +159,6 @@ export function planBacklogImport(input: PlanInput): BacklogPlan {
   const stateOf = (e: LedgerEntry): CopyState => input.copyStates?.[copyStateKey(e.dest, e.hash)] ?? 'missing-or-changed'
   const taken = new Set(input.watchedNames.map((n) => n.toLowerCase()))
   const skipped = { cleanshotProjects: 0, cleanshotOther: 0, empty: 0, notRegular: 0 }
-  let onlineOnly = 0
   let done = 0
   let unverifiedOnlineOnly = 0
   const items: PlanItem[] = []
@@ -165,10 +170,6 @@ export function planBacklogImport(input: PlanInput): BacklogPlan {
     }
     if (f.size <= 0) {
       skipped.empty++
-      return
-    }
-    if (f.onlineOnly) {
-      onlineOnly++
       return
     }
     const from = joinPath(root, f.rel)
@@ -185,13 +186,13 @@ export function planBacklogImport(input: PlanInput): BacklogPlan {
     const key = name.toLowerCase()
     const nameTaken = taken.has(key)
     taken.add(key)
-    items.push({ id: from, source, from, name, size: f.size, mtimeMs: f.mtimeMs, copyTo: joinPath(watched, name), nameTaken, recopy: prior.some((e) => e.step === 'copied') })
+    items.push({ id: from, source, from, name, size: f.size, mtimeMs: f.mtimeMs, copyTo: joinPath(watched, name), nameTaken, recopy: prior.some((e) => e.step === 'copied'), onlineOnly: Boolean(f.onlineOnly) })
   }
 
   const byRel = (a: ListedFile, b: ListedFile): number => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0)
   for (const f of [...input.desktop].sort(byRel)) {
     if (f.rel.includes('/') || f.rel.startsWith('.')) continue
-    if (!MEDIA_EXT.has(ext(f.rel)) || !parseScreenshotName(f.rel)) continue
+    if (!MEDIA_EXT.has(ext(f.rel)) || !parseScreenshotName(f.rel, input.nameTemplate)) continue
     add('desktop', input.desktopDir, f, f.rel)
   }
   if (input.cleanshotDir) {
@@ -229,7 +230,7 @@ export function planBacklogImport(input: PlanInput): BacklogPlan {
       recopy: items.filter((i) => i.recopy).length,
       done,
       unverifiedOnlineOnly,
-      onlineOnly,
+      needDownloading: { count: items.filter((i) => i.onlineOnly).length, bytes: items.filter((i) => i.onlineOnly).reduce((s, i) => s + i.size, 0) },
       nameTaken: items.filter((i) => i.nameTaken).length,
       totalBytes: desktop.bytes + cleanshot.bytes,
       skipped,

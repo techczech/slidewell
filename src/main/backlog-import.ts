@@ -31,16 +31,24 @@
  *
  * Reads: every source and destination is opened O_RDONLY|O_NOFOLLOW|O_NONBLOCK and fstat-checked to be
  * a regular file before a byte is read (FIFOs, sockets and devices are skipped and counted); online-only
- * placeholders (SF_DATALESS) are never opened; every read has an idle timeout and stops on cancel.
+ * placeholders (SF_DATALESS) are never opened in this process; every read has an idle timeout and stops
+ * on cancel.
+ *
+ * Online-only SOURCES (ticket 15; reverses the earlier "never hydrate" rule for the Desktop and CleanShot
+ * history only): one at a time, the file is downloaded by a child process (online-only.ts) with a
+ * per-file timeout (default 120 s) and Stop, then re-checked; only once its bytes are on disk is it read
+ * and copied as above. A file that does not arrive in time is left out and reported; the next run tries
+ * again. Recorded copies in the watched folder are still never downloaded.
  * Remaining limit: a read already blocked inside a libuv worker (a hung network or File Provider read)
  * cannot be interrupted. We stop waiting for it (timeout or Stop rejects), but that worker stays busy
  * until the OS returns.
  */
 import { createHash, randomBytes } from 'node:crypto'
-import { execFile } from 'node:child_process'
 import { constants as FS, promises as fsp, realpath as realpathCb } from 'node:fs'
 import { promisify } from 'node:util'
 import { join, basename } from 'node:path'
+import { downloadOnlineOnly, downloadWithDeadline, isOnlineOnly, type DownloadOptions } from './online-only'
+import type { NameTemplate } from './screenshot-name'
 import { alternativeName, copyStateKey, foldersOverlap, planBacklogImport, parseLedger, STAGING_DIR, type BacklogPlan, type CopyState, type LedgerEntry, type ListedFile, type PlanItem } from './backlog-plan'
 
 export type BacklogEnv = {
@@ -53,12 +61,16 @@ export type BacklogEnv = {
   ops?: Partial<FsOps>
   retry?: { tries?: number; baseMs?: number }
   readIdleMs?: number // a read that delivers no data for this long fails (default 30 s)
+  downloadTimeoutMs?: number // an online-only source not downloaded within this is left out (default 120 s)
+  nameTemplate?: NameTemplate | null // CleanShot's own name template, for recognising Desktop names
 }
 
 export type FsOps = {
   link: (from: string, to: string) => Promise<void>
   copyFileExcl: (from: string, to: string) => Promise<void>
   isOnlineOnly: (path: string) => Promise<boolean>
+  /** Download one online-only source (out of process); honours opts.timeoutMs and opts.signal. */
+  download: (path: string, opts: DownloadOptions) => Promise<void>
   stagedName: (stagingDir: string, name: string) => string
   /** Test seam: called with each chunk read from a source while staging it. */
   onSourceChunk?: (from: string, chunk: Buffer) => Promise<void> | void
@@ -71,8 +83,9 @@ export type RunResult = {
   copied: number // new verified copies written
   reused: number // identical file already in the watched folder under that name
   alreadyDone: number // the ledger's recorded copy still exists and matches
+  downloaded: number // online-only sources downloaded during this run (then copied as usual)
   unverifiedOnlineOnly: number // recorded copy is online-only: not checked, not copied again
-  onlineOnly: number // left out: online-only source, or the name is taken by an online-only file
+  onlineOnly: number // left out: online-only source not downloaded in time, or the name is taken by an online-only file
   notRegular: number // skipped: not a regular file
   gone: number // file vanished since the plan
   failed: number
@@ -83,7 +96,7 @@ export type RunResult = {
 
 const RETRY_CODES = new Set(['EDEADLK', 'EAGAIN', 'EBUSY'])
 const LINK_UNAVAILABLE = new Set(['ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV'])
-const SF_DATALESS = 0x40000000
+const DOWNLOAD_TIMEOUT_MS = 120_000
 const ONLINE_ONLY_NOTE = 'online-only; open OneDrive (or iCloud) to download it, then run again'
 
 class Skip extends Error {
@@ -107,19 +120,14 @@ export function localDate(d: Date): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
 
-/** A cloud placeholder whose bytes are not on disk (SF_DATALESS). Cheap: only zero-block files are asked about. */
-export async function defaultIsOnlineOnly(path: string): Promise<boolean> {
-  const st = await fsp.lstat(path).catch(() => null)
-  if (!st || !st.isFile() || st.size === 0 || st.blocks > 0) return false
-  return new Promise((resolve) =>
-    execFile('/usr/bin/stat', ['-f', '%Xf', '--', path], { timeout: 3000 }, (err, out) => resolve(err ? true : (parseInt(String(out).trim(), 16) & SF_DATALESS) !== 0))
-  )
-}
+/** A cloud placeholder whose bytes are not on disk (SF_DATALESS); see online-only.ts. */
+export const defaultIsOnlineOnly = isOnlineOnly
 
 const defaultOps: FsOps = {
   link: (a, b) => fsp.link(a, b),
   copyFileExcl: (a, b) => fsp.copyFile(a, b, FS.COPYFILE_EXCL),
   isOnlineOnly: defaultIsOnlineOnly,
+  download: downloadOnlineOnly,
   stagedName: (dir, name) => join(dir, `${name}.${randomBytes(8).toString('hex')}`)
 }
 
@@ -308,6 +316,7 @@ export async function dryRun(env: BacklogEnv): Promise<BacklogPlan> {
     stagingNames: l.stagingNames,
     ledger,
     copyStates,
+    nameTemplate: env.nameTemplate,
     date: localDate((env.now ?? (() => new Date()))())
   })
 }
@@ -350,6 +359,7 @@ export async function runImport(
     copied: 0,
     reused: 0,
     alreadyDone: 0,
+    downloaded: 0,
     unverifiedOnlineOnly: 0,
     onlineOnly: 0,
     notRegular: 0,
@@ -523,14 +533,18 @@ export async function runImport(
   return res
 
   async function importOne(item: PlanItem): Promise<void> {
-    const st = await withRetry(() => fsp.lstat(item.from), env).catch(() => null)
+    let st = await withRetry(() => fsp.lstat(item.from), env).catch(() => null)
     if (!st) {
       res.gone++
       await log('gone', { source: item.source, from: item.from })
       return
     }
     if (!st.isFile()) throw new Skip('not a regular file', 'not-regular')
-    if (await ops.isOnlineOnly(item.from)) throw new Skip(`this file is ${ONLINE_ONLY_NOTE}`, 'online-only')
+    if (await ops.isOnlineOnly(item.from)) {
+      await downloadSource(item)
+      st = await withRetry(() => fsp.lstat(item.from), env)
+      if (!st.isFile()) throw new Skip('not a regular file', 'not-regular')
+    }
     const hash = await hashOf(item.from)
 
     const prior = await priorState(hash)
@@ -554,6 +568,23 @@ export async function runImport(
     const entry: LedgerEntry = { step: 'copied', hash, watched, source: item.source, from: item.from, size: st.size, mtimeMs: Math.round(st.mtimeMs), dest: placed.dest, at: now().toISOString() }
     await appendLine(ledgerFile, entry, env)
     await log(placed.reused ? 'reused' : 'copied', { source: item.source, from: item.from, to: placed.dest, hash, verified: true })
+  }
+
+  /** Online-only source: download it out of process (timeout + Stop), then insist its bytes are on disk. */
+  async function downloadSource(item: PlanItem): Promise<void> {
+    const timeoutMs = env.downloadTimeoutMs ?? DOWNLOAD_TIMEOUT_MS
+    await log('downloading', { source: item.source, from: item.from, size: item.size })
+    try {
+      await downloadWithDeadline(item.from, ops.download, { timeoutMs, signal })
+    } catch (e) {
+      const code = errCode(e)
+      if (code === 'ABORT_ERR') throw e
+      if (code === 'ENOTREG') throw new Skip('not a regular file', 'not-regular')
+      throw new Skip(`online-only, ${(e as Error).message}; left out, run again to retry`, 'online-only')
+    }
+    if (await ops.isOnlineOnly(item.from)) throw new Skip('online-only, still not downloaded after reading it; left out, run again to retry', 'online-only')
+    res.downloaded++
+    await log('downloaded', { source: item.source, from: item.from })
   }
 }
 

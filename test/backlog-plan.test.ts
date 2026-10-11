@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { planBacklogImport, parseLedger, copyStateKey, alternativeName, foldersOverlap, isMovedFolderName, type PlanInput, type LedgerEntry } from '../src/main/backlog-plan'
+import { compileNameTemplate } from '../src/main/screenshot-name'
 
 const base = (over: Partial<PlanInput> = {}): PlanInput => ({
   watchedFolder: '/W/Shots',
@@ -92,12 +93,22 @@ describe('planBacklogImport (copy only)', () => {
     expect(plan.summary).toMatchObject({ done: 0, unverifiedOnlineOnly: 1 })
   })
 
-  it('leaves out online-only sources, empty files and non-regular files, and counts them', () => {
-    const plan = planBacklogImport(base({ cleanshot: [{ ...f('m1/a.png'), onlineOnly: true }, f('m2/b.png'), f('m3/c.png', 0), { ...f('m4/d.png'), notRegular: true }] }))
+  it('plans online-only sources flagged for download; leaves out empty and non-regular files', () => {
+    const plan = planBacklogImport(base({ cleanshot: [{ ...f('m1/a.png'), size: 3_000_000, onlineOnly: true }, f('m2/b.png'), f('m3/c.png', 0), { ...f('m4/d.png'), notRegular: true }] }))
     if (!plan.ok) throw new Error('expected a plan')
-    expect(plan.items.map((i) => i.name)).toEqual(['b.png'])
-    expect(plan.summary.onlineOnly).toBe(1)
+    expect(plan.items.map((i) => [i.name, i.onlineOnly])).toEqual([
+      ['a.png', true],
+      ['b.png', false]
+    ])
+    expect(plan.summary.needDownloading).toEqual({ count: 1, bytes: 3_000_000 })
     expect(plan.summary.skipped).toMatchObject({ empty: 1, notRegular: 1 })
+  })
+
+  it('recognises Desktop names with CleanShot\'s own template', () => {
+    const tpl = compileNameTemplate(['CleanShot ', '%y', '-', '%m', '-', '%d', ' at ', '%H', '%M', 'from ', '%a', ' with ', '%t'])
+    const mine = 'CleanShot 2026-10-10 at 1147from TalkWeaver with TalkWeaver.png'
+    const plan = planBacklogImport(base({ desktop: [f(mine), f('notes.png')], nameTemplate: tpl }))
+    expect(plan.ok && plan.items.map((i) => i.name)).toEqual([mine])
   })
 
   it('counts staged files left by an interrupted run', () => {
