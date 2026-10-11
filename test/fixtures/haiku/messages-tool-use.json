@@ -1,0 +1,24 @@
+{
+  "id": "msg_synthetic0001",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-haiku-5-5",
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "toolu_synthetic0001",
+      "name": "screenshot_verdicts",
+      "input": {
+        "items": [
+          { "id": "s1", "verdict": "keep", "confidence": 0.91, "reason": "A chart from a talk, worth keeping for slides." },
+          { "id": "s2", "verdict": "throwaway", "confidence": 0.96, "reason": "A Wi-Fi settings pane." },
+          { "id": "s3", "verdict": "unsure", "confidence": 0.5, "reason": "A half-loaded page." },
+          { "id": "s9", "verdict": "keep", "confidence": 0.99, "reason": "An id that was never asked." }
+        ]
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": { "input_tokens": 5312, "output_tokens": 148 }
+}

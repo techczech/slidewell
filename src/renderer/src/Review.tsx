@@ -73,12 +73,14 @@ function Shot({ card, caption, className = '' }: { card: ReviewCard; caption?: s
   )
 }
 
-// Which sorter step made the call (ticket 07), in the words the card shows.
-const STEP_WORDS: Record<NonNullable<ReviewCard['decidedBy']>, string> = { rules: 'by rules', history: 'by your history', luna: 'asked Luna' }
+// Which sorter step made the call (tickets 07, 16), in the words the card shows.
+const STEP_WORDS: Record<NonNullable<ReviewCard['decidedBy']>, string> = { rules: 'by rules', history: 'by your history', luna: 'asked Luna', haiku: 'asked Haiku' }
+const ASKED: Partial<Record<NonNullable<ReviewCard['decidedBy']>, string>> = { luna: 'asked Luna', haiku: 'asked Haiku' }
+const asked = (by: ReviewCard['decidedBy']): string | null => (by ? (ASKED[by] ?? null) : null)
 const step = (c: ReviewCard): string | null => (c.by === 'sorter' && c.decidedBy ? STEP_WORDS[c.decidedBy] : null)
 function Step({ card }: { card: ReviewCard }): JSX.Element | null {
   const w = step(card)
-  return w ? <span className={`rv-step${card.decidedBy === 'luna' ? ' luna' : ''}`}>{w}</span> : null
+  return w ? <span className={`rv-step${asked(card.decidedBy) ? ' luna' : ''}`}>{w}</span> : null
 }
 const title = (c: ReviewCard): string => [c.app, c.windowTitle].filter(Boolean).join(' · ') || c.filename
 
@@ -424,7 +426,7 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
               <div className="rv-why-l">Why it is asking</div>
               <p className="rv-why">
                 {current.reason}
-                {current.decidedBy === 'luna' && <span className="rv-why-step"> · asked Luna</span>}
+                {asked(current.decidedBy) && <span className="rv-why-step"> · {asked(current.decidedBy)}</span>}
               </p>
               <p className="rv-lean">
                 If you skip it, it stays <b>kept</b>. Only sure throwaways go to the Throwaway pile.
@@ -460,7 +462,7 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
                 <div className="rv-un">{title(c)}</div>
                 <div className="rv-ur">
                   {c.reason}
-                  {c.decidedBy === 'luna' ? ' · asked Luna' : ''}
+                  {asked(c.decidedBy) ? ` · ${asked(c.decidedBy)}` : ''}
                 </div>
               </div>
               <span className="rv-num">{i + 2}</span>

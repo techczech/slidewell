@@ -1,5 +1,6 @@
 /**
- * A screenshot read and shrunk for Luna.
+ * A screenshot read and shrunk for the cloud step. Both providers (Luna and Haiku, provider.ts) get
+ * the same verified bytes shrunk the same way: HAIKU.longEdge is LUNA.longEdge.
  *
  *   readVerified(path, hash): the file's bytes, only when the path is a regular file (not a symlink,
  *     not a folder, FIFO or device; opened non-blocking and fstat'ed before any read) and the bytes hash to the content hash the screenshot was classified

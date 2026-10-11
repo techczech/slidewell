@@ -134,7 +134,7 @@ export type ReviewCard = {
   proposal: 'keep' | 'throwaway' | 'doubtful'
   pile: ReviewPile
   by: 'you' | 'sorter' // his decision, or a proposal he has not overridden
-  decidedBy: 'rules' | 'history' | 'luna' | null // which sorter step made the call (shown as rules / your history / asked Luna)
+  decidedBy: 'rules' | 'history' | 'luna' | 'haiku' | null // which sorter step made the call (shown as rules / your history / asked Luna / asked Haiku)
   binInDays: number | null // Throwaway only: whole days before it moves to the Bin
   thumbUrl: string | null
   offline: boolean
@@ -308,30 +308,37 @@ export type SorterStatus = {
   pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
 }
 
-// Screenshot sorter, cloud step (ticket 07). Same shapes as src/main/sorter/cloud/service.ts.
-// enabled = his recorded opt-in (main stores when); the per-night limit is fixed in main (nightlyLimit)
-export type CloudSettings = { enabled: boolean; batchTime: string }
+// Screenshot sorter, cloud step (tickets 07, 16). Same shapes as src/main/sorter/cloud/service.ts.
+// provider = which company is asked: OpenAI (Luna) or Anthropic (Haiku).
+// enabled = his recorded opt-in to that provider (main stores when; opting in to one is not opting in to
+// the other); the per-night limit is fixed in main (nightlyLimit) and shared by both providers
+export type CloudProviderId = 'openai' | 'anthropic'
+export type CloudSettings = { enabled: boolean; batchTime: string; provider: CloudProviderId }
 export type CloudRunSummary = {
   at: string
   trigger: 'nightly' | 'manual'
+  provider?: CloudProviderId
   local: { ok: boolean; message: string } | null
   asked: number
   answered: number
   keep: number
   throwaway: number
   stayedDoubtful: number
-  skipped: 'off' | 'no-key' | 'revoked' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | null
+  skipped: 'off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | null
   error: string | null
   message: string
 }
 export type CloudCostEstimate = { screenshots: number; requests: number; inputTokens: number; outputTokens: number; usd: number }
 export type CloudPreview = {
   local: { ok: boolean; message: string }
+  provider: CloudProviderId // the batch is bound to it: main refuses the send when another is selected by then
   doubtful: number
   toSend: number
   cap: number
   leftTonight: number
   estimate: CloudCostEstimate
+  costLabel: string // the words before the cost figure
+  costNote: string // a sentence after it ('' when none)
   blocked: 'off' | 'no-key' | 'offline' | 'busy' | 'nothing-doubtful' | 'limit-reached' | null
   /** One-time token for send(): main sends only the batch it prepared and showed. */
   token: string | null
@@ -341,14 +348,17 @@ export type CloudStatus = {
   phase: 'idle' | 'sorting' | 'asking'
   done: number
   total: number
-  hasKey: boolean // the key itself never crosses to the renderer
+  hasKey: boolean // the selected provider's; no key ever crosses to the renderer
   encryptionAvailable: boolean
   settings: CloudSettings
   nightlyLimit: number
   lastRun: CloudRunSummary | null
   nextRunAt: string | null
-  model: string
+  model: string // the selected provider's model, short name and company
+  name: string
+  company: string
   longEdge: number
+  providers: Array<{ id: CloudProviderId; name: string; company: string; model: string; hasKey: boolean }>
 }
 
 const api = {
@@ -384,11 +394,11 @@ const api = {
       return () => ipcRenderer.removeListener('sorter:status', handler)
     }
   },
-  // Sorter cloud step: Luna for the doubtful ones. The key is write-only from here (set / clear); status says only whether one is saved.
+  // Sorter cloud step: Luna or Haiku for the doubtful ones. Each provider's key is write-only from here (set / clear, always naming the provider); status says only whether one is saved.
   cloud: {
     status: (): Promise<CloudStatus> => ipcRenderer.invoke('cloud:status'),
-    setKey: (key: string): Promise<{ ok: boolean; saved: boolean; error?: string; status: CloudStatus }> => ipcRenderer.invoke('cloud:set-key', key),
-    clearKey: (): Promise<CloudStatus> => ipcRenderer.invoke('cloud:clear-key'),
+    setKey: (provider: CloudProviderId, key: string): Promise<{ ok: boolean; saved: boolean; error?: string; status: CloudStatus }> => ipcRenderer.invoke('cloud:set-key', provider, key),
+    clearKey: (provider: CloudProviderId): Promise<CloudStatus> => ipcRenderer.invoke('cloud:clear-key', provider),
     setSettings: (patch: Partial<CloudSettings>): Promise<CloudStatus> => ipcRenderer.invoke('cloud:set-settings', patch),
     prepare: (): Promise<CloudPreview> => ipcRenderer.invoke('cloud:prepare'),
     send: (token: string): Promise<CloudRunSummary> => ipcRenderer.invoke('cloud:send', token),

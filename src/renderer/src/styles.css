@@ -1704,6 +1704,21 @@ body {
 .sorter-cloud-key .pic-ready {
   flex: 1;
 }
+/* which company is asked (ticket 16): two radio choices on one row */
+.sorter-cloud-provider {
+  gap: 1.1rem;
+}
+.sorter-cloud-provider label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+.sorter-cloud-provider input[type='radio'] {
+  width: auto;
+  height: auto;
+  margin: 0;
+}
 .pic-check input.sorter-cloud-time,
 .pic-check input.sorter-cloud-cap {
   width: auto;

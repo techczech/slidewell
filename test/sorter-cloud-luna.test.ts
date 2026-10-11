@@ -120,6 +120,16 @@ describe('response parser (recorded-shape fixtures)', () => {
     expect([...r.answers.keys()]).toEqual(['h3'])
     expect(r.answers.get('h3')).toEqual({ verdict: 'throwaway', confidence: 1, reason: 'line one line two' })
   })
+
+  it('a property that is not in the schema, on the answer or on any entry, gives no decision at all', () => {
+    const entry = { id: 's1', verdict: 'keep', confidence: 0.9, reason: 'A chart.' }
+    for (const data of [{ items: [entry], note: 'extra' }, { items: [{ ...entry, override: true }] }, { items: [entry, { ...entry, id: 's9', extra: 1 }] }]) {
+      const body = { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(data) }] }] }
+      expect(() => parseLunaResponse(body, ids), JSON.stringify(data)).toThrow(/not asked for/)
+    }
+    const body = { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ items: [entry] }) }] }] }
+    expect(parseLunaResponse(body, ids).answers.size).toBe(1)
+  })
 })
 
 describe('cost estimate', () => {

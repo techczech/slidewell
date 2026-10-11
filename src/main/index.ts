@@ -46,6 +46,7 @@ import { CloudSorter, normaliseCloudSettings, registerCloudIpc, type CloudRunSum
 import { ApiKeyStore } from './sorter/cloud/key-store'
 import { shrinkForLuna } from './sorter/cloud/images'
 import type { HttpPost } from './sorter/cloud/client'
+import { PROVIDERS } from './sorter/cloud/provider'
 import { guardedHandle } from './ipc-guard'
 import { pileOf, type ProposalLabel } from './review/piles'
 
@@ -85,9 +86,11 @@ type Config = {
   storage?: Partial<Record<'archive' | 'others' | 'well', { backend?: 'local' | 'r2' }>> // per-store backend (spec 2026-06-24)
   ownerNames?: string[] // "My decks": authors that count as the user (unset → the OS account's names; owners.ts)
   pictureSearch?: PictureSearchSettings // picture search: well images on/off, indexing paused (survives restart)
-  // sorter cloud step (ticket 07): the OpenAI key only as safeStorage ciphertext (keyEnc), never in plain text;
-  // optedInAt = when he turned the cloud step on (absent = off); the per-night limit is fixed in code
-  sorterCloud?: StoredCloudSettings & { keyEnc?: string; lastRunAt?: string | null; since?: string | null; lastRun?: CloudRunSummary | null }
+  // sorter cloud step (tickets 07, 16): each provider's key only as safeStorage ciphertext (keyEnc = OpenAI,
+  // anthropicKeyEnc = Anthropic), never in plain text; provider = which one is asked (absent = OpenAI);
+  // optedInAt / anthropicOptedInAt = when he agreed to that provider (absent = not agreed, so off);
+  // the per-night limit is fixed in code
+  sorterCloud?: StoredCloudSettings & { keyEnc?: string; anthropicKeyEnc?: string; lastRunAt?: string | null; since?: string | null; lastRun?: CloudRunSummary | null }
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -428,16 +431,18 @@ app.whenReady().then(() => {
   registerSorterIpc(sorter, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
   app.on('will-quit', () => sorter.cancel())
 
-  // --- screenshot sorter, cloud step (sorter/cloud/service.ts): Luna for the doubtful ones, nightly + Sort now ---
-  // The OpenAI key is stored like the R2 credentials: safeStorage ciphertext in config.json, never returned or logged.
+  // --- screenshot sorter, cloud step (sorter/cloud/service.ts): Luna or Haiku for the doubtful ones, nightly + Sort now ---
+  // Each provider's key is stored like the R2 credentials: safeStorage ciphertext in config.json, never returned or
+  // logged. One store per provider, each with its own field, and no other source: no environment variable is read.
   const cloudCfg = (): NonNullable<Config['sorterCloud']> => readConfig().sorterCloud ?? {}
   const saveCloudCfg = (patch: Partial<NonNullable<Config['sorterCloud']>>): void => writeConfig({ sorterCloud: { ...cloudCfg(), ...patch } })
-  const lunaKey = new ApiKeyStore(
-    () => cloudCfg().keyEnc,
-    (enc) => saveCloudCfg({ keyEnc: enc }),
-    { available: () => safeStorage.isEncryptionAvailable(), encrypt: (k) => safeStorage.encryptString(k), decrypt: (b) => safeStorage.decryptString(b) }
-  )
-  const lunaHttp: HttpPost = (url, init) => net.fetch(url, { method: init.method, headers: init.headers, body: init.body, signal: init.signal })
+  const keychain = { available: () => safeStorage.isEncryptionAvailable(), encrypt: (k: string) => safeStorage.encryptString(k), decrypt: (b: Buffer) => safeStorage.decryptString(b) }
+  const cloudKeys = {
+    openai: new ApiKeyStore(() => cloudCfg().keyEnc, (enc) => saveCloudCfg({ keyEnc: enc }), keychain, PROVIDERS.openai.keyRule),
+    anthropic: new ApiKeyStore(() => cloudCfg().anthropicKeyEnc, (enc) => saveCloudCfg({ anthropicKeyEnc: enc }), keychain, PROVIDERS.anthropic.keyRule)
+  }
+  // redirect 'error': a request carries a key and pictures, and is never followed to another address
+  const cloudHttp: HttpPost = (url, init) => net.fetch(url, { method: init.method, headers: init.headers, body: init.body, signal: init.signal, redirect: init.redirect })
   const cloudSettings = (): CloudSettings => normaliseCloudSettings(cloudCfg())
   const cloud = new CloudSorter({
     wellRoot: wellRootResolved,
@@ -446,9 +451,9 @@ app.whenReady().then(() => {
       const st = sorter.status()
       return st.canRunUnattended && st.modelReady
     },
-    key: lunaKey,
+    keys: cloudKeys,
     online: () => net.isOnline(),
-    http: lunaHttp,
+    http: cloudHttp,
     shrink: (bytes) => shrinkForLuna(bytes),
     settings: cloudSettings,
     state: () => {
@@ -467,7 +472,7 @@ app.whenReady().then(() => {
     },
     log: (line) => console.warn(line)
   })
-  registerCloudIpc(cloud, lunaKey, (s) => saveCloudCfg(s), () => cloudCfg(), (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+  registerCloudIpc(cloud, cloudKeys, (s) => saveCloudCfg(s), () => cloudCfg(), (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
   // the nightly batch runs only while the app is open: checked shortly after launch (a missed night runs then) and every minute
   const cloudTick = (): void => void cloud.tick().catch((e) => console.warn(`[sorter-cloud] nightly check failed: ${(e as Error)?.name ?? 'error'}`))
   const cloudFirst = setTimeout(cloudTick, 30_000)

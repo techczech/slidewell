@@ -6,7 +6,9 @@
  *   parseLunaResponse(json)  → one answer per screenshot that was asked about; unknown ids are dropped
  *   estimateCost(n)          → the estimate shown before a manual run
  *
- * Nothing here does I/O. The HTTP client is client.ts; the run is service.ts.
+ * Nothing here does I/O. The HTTP client is client.ts; the run is service.ts. The instructions, the
+ * answer schema, the selection of what may be sent and the answer types are shared with the second
+ * provider (haiku.ts); provider.ts puts the two behind one seam.
  *
  * Privacy: a screenshot is sent only when the local steps left it doubtful (the builder drops
  * anything else) and only when it is a screenshot: its file name is a CleanShot or macOS screenshot
@@ -148,8 +150,8 @@ export function planChunks<T extends { proposal: string }>(candidates: T[], size
   return out
 }
 
-/** Text that goes beside a picture: at most one line, no control characters. */
-function clean(s: string, max = Infinity): string {
+/** Text that goes beside a picture: at most one line, no control characters. Shared with haiku.ts. */
+export function clean(s: string, max = Infinity): string {
   return (s ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max)
 }
 
@@ -207,10 +209,13 @@ function outputText(json: Record<string, unknown>): string {
 }
 
 const VERDICTS = new Set<Verdict>(['keep', 'throwaway', 'unsure'])
+/** The only properties an entry may have (LUNA_SCHEMA's item properties). */
+const ITEM_KEYS = new Set(['id', 'verdict', 'confidence', 'reason'])
 
 /**
  * Luna's answers, keyed by content hash. Ids that were not in the request are ignored; a malformed
- * entry leaves that screenshot unanswered. Throws LunaResponseError when the body as a whole is unusable.
+ * entry leaves that screenshot unanswered. Throws LunaResponseError when the body as a whole is
+ * unusable, which includes an answer with any property the schema does not have.
  */
 export function parseLunaResponse(body: unknown, ids: Map<string, string>): LunaParsed {
   if (!body || typeof body !== 'object') throw new LunaResponseError('Luna sent no answer', 'malformed')
@@ -224,6 +229,9 @@ export function parseLunaResponse(body: unknown, ids: Map<string, string>): Luna
   }
   const items = data && typeof data === 'object' && Array.isArray((data as { items?: unknown }).items) ? ((data as { items: unknown[] }).items) : null
   if (!items) throw new LunaResponseError('Luna’s answer had no items', 'malformed')
+  // the schema allows `items` and four properties per entry (additionalProperties: false); anything else is no answer at all
+  const isObj = (x: unknown): x is Record<string, unknown> => Boolean(x) && typeof x === 'object' && !Array.isArray(x)
+  if (Object.keys(data as object).some((k) => k !== 'items') || items.some((it) => isObj(it) && Object.keys(it).some((k) => !ITEM_KEYS.has(k)))) throw new LunaResponseError('Luna’s answer held something that was not asked for', 'malformed')
   const answers = new Map<string, LunaAnswer>()
   for (const raw of items) {
     if (!raw || typeof raw !== 'object') continue
