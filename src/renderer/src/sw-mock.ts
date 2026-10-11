@@ -2,25 +2,37 @@ import type { SwApi } from '../../preload'
 import { reviewMock } from './review-mock'
 import type { CloudStatus } from '../../preload'
 
-// Settings › Luna in the browser preview: a pretend key flag and settings; nothing is ever sent.
+// Settings › cloud step in the browser preview: pretend key flags and settings; nothing is ever sent.
 function cloudMock(): SwApi['cloud'] {
-  const st: CloudStatus = { phase: 'idle', done: 0, total: 0, hasKey: false, encryptionAvailable: true, settings: { enabled: false, batchTime: '02:00' }, nightlyLimit: 300, lastRun: null, nextRunAt: null, model: 'gpt-6-luna', longEdge: 1456 }
+  const providers: CloudStatus['providers'] = [
+    { id: 'openai', name: 'Luna', company: 'OpenAI', model: 'gpt-6-luna', hasKey: false },
+    { id: 'anthropic', name: 'Haiku', company: 'Anthropic', model: 'claude-haiku-5-5', hasKey: false }
+  ]
+  const st: CloudStatus = { phase: 'idle', done: 0, total: 0, hasKey: false, encryptionAvailable: true, settings: { enabled: false, batchTime: '02:00', provider: 'openai' }, nightlyLimit: 300, lastRun: null, nextRunAt: null, model: 'gpt-6-luna', name: 'Luna', company: 'OpenAI', longEdge: 1456, providers }
+  const sync = (): CloudStatus => {
+    const p = providers.find((x) => x.id === st.settings.provider) ?? providers[0]
+    Object.assign(st, { hasKey: p.hasKey, model: p.model, name: p.name, company: p.company })
+    return { ...st, providers: providers.map((x) => ({ ...x })) }
+  }
   return {
-    status: async () => ({ ...st }),
-    setKey: async (k: string) => {
-      st.hasKey = k.trim().length >= 20
-      return { ok: st.hasKey, saved: st.hasKey, error: st.hasKey ? undefined : 'That does not look like an API key.', status: { ...st } }
+    status: async () => sync(),
+    setKey: async (provider, k: string) => {
+      const p = providers.find((x) => x.id === provider)
+      const ok = Boolean(p) && k.trim().length >= 20
+      if (p && ok) p.hasKey = true
+      return { ok, saved: ok, error: ok ? undefined : 'That does not look like an API key.', status: sync() }
     },
-    clearKey: async () => {
-      st.hasKey = false
-      return { ...st }
+    clearKey: async (provider) => {
+      const p = providers.find((x) => x.id === provider)
+      if (p) p.hasKey = false
+      return sync()
     },
     setSettings: async (patch) => {
       st.settings = { ...st.settings, ...patch }
-      return { ...st }
+      return sync()
     },
-    prepare: async () => ({ local: { ok: false, message: 'not available in the browser preview' }, doubtful: 0, toSend: 0, cap: st.nightlyLimit, leftTonight: st.nightlyLimit, estimate: { screenshots: 0, requests: 0, inputTokens: 0, outputTokens: 0, usd: 0 }, blocked: 'nothing-doubtful' as const, token: null, message: 'Nothing doubtful is waiting for Luna.' }),
-    send: async () => ({ at: new Date().toISOString(), trigger: 'manual' as const, local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, skipped: 'nothing-doubtful' as const, error: null, message: 'Nothing doubtful was waiting for Luna.' }),
+    prepare: async () => ({ local: { ok: false, message: 'not available in the browser preview' }, provider: st.settings.provider, doubtful: 0, toSend: 0, cap: st.nightlyLimit, leftTonight: st.nightlyLimit, estimate: { screenshots: 0, requests: 0, inputTokens: 0, outputTokens: 0, usd: 0 }, costLabel: 'Estimated cost', costNote: '', blocked: 'nothing-doubtful' as const, token: null, message: `Nothing doubtful is waiting for ${st.name}.` }),
+    send: async () => ({ at: new Date().toISOString(), trigger: 'manual' as const, provider: st.settings.provider, local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, skipped: 'nothing-doubtful' as const, error: null, message: `Nothing doubtful was waiting for ${st.name}.` }),
     cancel: async () => undefined,
     onStatus: () => () => undefined
   }

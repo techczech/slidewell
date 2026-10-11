@@ -114,3 +114,141 @@ describe('API key in logs', () => {
     }
   })
 })
+
+// --- ticket 16: a second provider, each with its own key ---
+const { PROVIDERS } = await import('../src/main/sorter/cloud/provider')
+const { bothStubs } = await import('./sorter-cloud-fixture')
+
+// a made-up key in Anthropic's shape; it must never appear in config.json, a log line or a run summary
+const FAKE_ANT_KEY = 'sk-ant-api03-ANTLEAKCHECK-0123456789abcdefghijklmnop'
+
+/** The two stores as index.ts builds them: one config field each, each with its provider's key rule. */
+function bothStores(cfg: ReturnType<typeof configFile>): Record<'openai' | 'anthropic', InstanceType<typeof ApiKeyStore>> {
+  const field = (name: 'keyEnc' | 'anthropicKeyEnc', rule: (k: string) => string | null): InstanceType<typeof ApiKeyStore> =>
+    new ApiKeyStore(
+      () => cfg.read().sorterCloud?.[name],
+      (enc) => cfg.write({ sorterCloud: { ...(cfg.read().sorterCloud ?? {}), [name]: enc } }),
+      box,
+      rule
+    )
+  return { openai: field('keyEnc', PROVIDERS.openai.keyRule), anthropic: field('anthropicKeyEnc', PROVIDERS.anthropic.keyRule) }
+}
+
+describe('a key per provider', () => {
+  it('each provider’s key has its own encrypted field; saving or removing one leaves the other', () => {
+    const cfg = configFile()
+    const keys = bothStores(cfg)
+    expect(keys.openai.set(FAKE_KEY)).toEqual({ ok: true, saved: true })
+    expect(keys.anthropic.has()).toBe(false) // an OpenAI key is not an Anthropic key
+    expect(keys.anthropic.set(FAKE_ANT_KEY)).toEqual({ ok: true, saved: true })
+    expect(keys.openai.get()).toBe(FAKE_KEY)
+    expect(keys.anthropic.get()).toBe(FAKE_ANT_KEY)
+    const text = readFileSync(cfg.path, 'utf8')
+    expect(text).not.toContain('LEAKCHECK')
+    expect(text).not.toContain('sk-ant')
+    expect(Object.keys(cfg.read().sorterCloud).sort()).toEqual(['anthropicKeyEnc', 'keyEnc'])
+    keys.openai.clear()
+    expect(keys.openai.has()).toBe(false)
+    expect(keys.anthropic.get()).toBe(FAKE_ANT_KEY)
+    keys.anthropic.clear()
+    expect(readFileSync(cfg.path, 'utf8')).not.toMatch(/keyEnc/i)
+  })
+
+  it('a key of the other provider is refused, and the refusal does not repeat it', () => {
+    const cfg = configFile()
+    const keys = bothStores(cfg)
+    const a = keys.anthropic.set(FAKE_KEY)
+    const o = keys.openai.set(FAKE_ANT_KEY)
+    expect(a).toMatchObject({ ok: false, saved: false, error: expect.stringMatching(/Anthropic API key/) })
+    expect(o).toMatchObject({ ok: false, saved: false, error: expect.stringMatching(/Anthropic key/) })
+    expect(JSON.stringify([a, o])).not.toContain('LEAKCHECK')
+    expect(existsSync(cfg.path)).toBe(false) // nothing was written
+  })
+
+  it('ciphertext moved by hand into the other provider’s field reads as no key there', () => {
+    const cfg = configFile()
+    const keys = bothStores(cfg)
+    keys.openai.set(FAKE_KEY)
+    keys.anthropic.set(FAKE_ANT_KEY)
+    const c = cfg.read().sorterCloud
+    cfg.write({ sorterCloud: { keyEnc: c.anthropicKeyEnc, anthropicKeyEnc: c.keyEnc } })
+    expect(keys.openai.get()).toBeNull()
+    expect(keys.anthropic.get()).toBeNull()
+    expect(keys.openai.has() || keys.anthropic.has()).toBe(false)
+  })
+
+  it('a key in the environment is never used: with nothing stored, nothing is sent to either provider', async () => {
+    const well = makeCloudWell([{ hash: 'a', proposal: 'doubtful', window: 'one' }])
+    dirs.push(well)
+    const names = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY'] as const
+    const before = names.map((n) => process.env[n])
+    process.env.ANTHROPIC_API_KEY = FAKE_ANT_KEY
+    process.env.ANTHROPIC_AUTH_TOKEN = FAKE_ANT_KEY
+    process.env.OPENAI_API_KEY = FAKE_KEY
+    try {
+      for (const provider of ['anthropic', 'openai'] as const) {
+        const net = bothStubs()
+        const d = cloudDeps(well, { keyValue: null, anthropicKeyValue: null, http: net.http, settings: { provider } })
+        const svc = new CloudSorter(d)
+        expect(svc.status().hasKey).toBe(false)
+        expect(await svc.prepare()).toMatchObject({ blocked: 'no-key', token: null })
+        expect(await svc.runNightly()).toMatchObject({ skipped: 'no-key', asked: 0 })
+        expect(net.urls).toEqual([])
+      }
+    } finally {
+      names.forEach((n, i) => (before[i] === undefined ? delete process.env[n] : (process.env[n] = before[i])))
+    }
+  })
+
+  it('the cloud step’s source reads no environment variable at all', () => {
+    const dir = join(__dirname, '..', 'src', 'main', 'sorter', 'cloud')
+    for (const f of ['client.ts', 'haiku.ts', 'key-store.ts', 'luna.ts', 'provider.ts', 'service.ts']) {
+      expect(readFileSync(join(dir, f), 'utf8'), f).not.toMatch(/process\.env|ANTHROPIC_API_KEY|OPENAI_API_KEY/)
+    }
+  })
+
+  it('a Haiku run with a key that is not Anthropic’s kind is not made', async () => {
+    const well = makeCloudWell([{ hash: 'a', proposal: 'doubtful', window: 'one' }])
+    dirs.push(well)
+    const net = bothStubs()
+    // a store without the rule (as a hand-built one might be) that hands back an OpenAI-shaped key
+    const d = cloudDeps(well, { anthropicKeyValue: FAKE_KEY, http: net.http, settings: { provider: 'anthropic' } })
+    expect(await new CloudSorter(d).runNightly()).toMatchObject({ skipped: 'no-key', asked: 0 })
+    const d2 = cloudDeps(well, { keyValue: FAKE_ANT_KEY, http: net.http, settings: { provider: 'openai' } })
+    expect(await new CloudSorter(d2).runNightly()).toMatchObject({ skipped: 'no-key', asked: 0 })
+    expect(net.urls).toEqual([])
+  })
+})
+
+describe('both keys in logs', () => {
+  it('no log line, console line or run summary of a Haiku run carries either key, even when Anthropic echoes them', async () => {
+    const well = makeCloudWell([
+      { hash: 'a', proposal: 'doubtful', window: 'one' },
+      { hash: 'b', proposal: 'doubtful', window: 'two' }
+    ])
+    dirs.push(well)
+    const consoleLines: string[] = []
+    const spies = (['log', 'warn', 'error', 'info', 'debug'] as const).map((m) => vi.spyOn(console, m).mockImplementation((...a: unknown[]) => void consoleLines.push(a.map(String).join(' '))))
+    try {
+      const echo = (status: number) => async () => ({
+        status,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: `Something about ${FAKE_ANT_KEY} and sk-ant-api03-ANT...mnop and x-api-key: ${FAKE_ANT_KEY} and the other one ${FAKE_KEY}` } })
+      })
+      const runs = []
+      for (const http of [echo(400), echo(529), echo(401)]) {
+        const d = cloudDeps(well, { keyValue: FAKE_KEY, anthropicKeyValue: FAKE_ANT_KEY, http, settings: { provider: 'anthropic' } })
+        const svc = new CloudSorter(d)
+        runs.push({ summary: await svc.runNightly(), logs: d.logs, status: svc.status() })
+      }
+      const everything = JSON.stringify(runs) + consoleLines.join('\n')
+      expect(runs.map((r) => r.summary.skipped ?? r.summary.error)).toEqual([expect.stringContaining('Anthropic refused the request (400)'), expect.stringContaining('Anthropic had a server error'), 'key-rejected'])
+      expect(runs[0].logs.some((l) => l.includes('[key]'))).toBe(true) // the echoed keys were there, and were removed
+      expect(everything).not.toContain('LEAKCHECK')
+      expect(everything).not.toMatch(/sk-ant|sk-test/)
+      expect(runs[2].summary.message).toBe('Anthropic did not accept the API key. 2 screenshots still need a look.')
+    } finally {
+      for (const s of spies) s.mockRestore()
+    }
+  })
+})

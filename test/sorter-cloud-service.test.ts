@@ -193,9 +193,9 @@ describe('nightly schedule', () => {
   })
 
   it('settings are normalised; the cloud step is off unless an opt-in time is recorded', () => {
-    expect(normaliseCloudSettings(undefined)).toEqual({ enabled: false, batchTime: '02:00' })
-    expect(normaliseCloudSettings({ enabled: true, batchTime: '7:30', nightlyCap: 99999 } as never)).toEqual({ enabled: false, batchTime: '07:30' }) // an old enabled flag is not an opt-in
-    expect(normaliseCloudSettings({ optedInAt: '2026-10-11T09:00:00.000Z', batchTime: 'x' })).toEqual({ enabled: true, batchTime: '02:00' })
+    expect(normaliseCloudSettings(undefined)).toEqual({ enabled: false, batchTime: '02:00', provider: 'openai' })
+    expect(normaliseCloudSettings({ enabled: true, batchTime: '7:30', nightlyCap: 99999 } as never)).toEqual({ enabled: false, batchTime: '07:30', provider: 'openai' }) // an old enabled flag is not an opt-in
+    expect(normaliseCloudSettings({ optedInAt: '2026-10-11T09:00:00.000Z', batchTime: 'x' })).toEqual({ enabled: true, batchTime: '02:00', provider: 'openai' })
   })
 })
 

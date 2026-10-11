@@ -238,4 +238,32 @@ describe('sorter service: the cascade on re-sort (ticket 07)', () => {
       else expect(['rules', 'history', 'luna']).toContain(r.decided_by)
     }
   })
+
+  it('re-applies a Haiku answer the same way, under Haiku’s name and model (ticket 16)', async () => {
+    const w = well(70, 30)
+    const svc = new SorterService(deps(w, { thresholds: { throwaway: 0.999, keep: 0.999 } }))
+    expect((await svc.trainAndTest()).ok).toBe(true)
+    expect(await svc.sortUndecided()).toMatchObject({ ok: true, counts: { doubtful: 3 } })
+    const st = new SorterStore(w)
+    st.saveCloudResults(
+      [
+        { hash: 'new0', verdict: 'keep', confidence: 0.9, reason: 'A chart worth keeping.', model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1', askedAt: '2026-10-11T02:00:00Z' },
+        { hash: 'new1', verdict: 'unsure', confidence: 0.5, reason: 'Hard to tell.', model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1', askedAt: '2026-10-11T02:00:00Z' },
+        // Haiku's model under Luna's prompt version is not an answer either provider gave
+        { hash: 'new2', verdict: 'keep', confidence: 0.9, reason: 'A chart.', model: 'claude-haiku-5-5', promptVersion: 'luna-prompt-1', askedAt: '2026-10-11T02:00:00Z' }
+      ],
+      []
+    )
+    st.close()
+    await svc.sortUndecided()
+    const db = new DatabaseSync(join(w, 'triage.db'), { readOnly: true })
+    try {
+      const row = (h: string): unknown => db.prepare('SELECT proposal, decided_by, decided_model, reason FROM sorter_proposals WHERE hash = ?').get(h)
+      expect(row('new0')).toMatchObject({ proposal: 'keep', decided_by: 'haiku', decided_model: 'claude-haiku-5-5', reason: 'A chart worth keeping' })
+      expect(row('new1')).toMatchObject({ proposal: 'doubtful', decided_by: 'haiku', decided_model: 'claude-haiku-5-5', reason: 'Not sure, and Haiku was not sure either: hard to tell' })
+      expect(row('new2')).toMatchObject({ proposal: 'doubtful', decided_by: null, decided_model: null })
+    } finally {
+      db.close()
+    }
+  })
 })

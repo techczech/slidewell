@@ -257,7 +257,7 @@ describe('F: a run is bound to the key it started with', () => {
       ipc.clear()
       registerCloudIpc(
         svc,
-        { set: (k) => ((key = String(k)), { ok: true, saved: true }), clear: () => void (key = null) },
+        { openai: { set: (k) => ((key = String(k)), { ok: true, saved: true }), clear: () => void (key = null) }, anthropic: { set: () => ({ ok: false, saved: false }), clear: () => undefined } },
         () => undefined,
         () => ({}),
         () => true
@@ -265,7 +265,7 @@ describe('F: a run is bound to the key it started with', () => {
       let calls = 0
       d.http = async (u, init) => {
         calls++
-        if (calls === 1) await ipc.get(channel)!({ sender: null }, after) // he changes the key while the first request is out
+        if (calls === 1) await ipc.get(channel)!({ sender: null }, 'openai', after) // he changes the OpenAI key while the first request is out
         const r = await stub.http(u, init)
         if (init.signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' }) // as net.fetch does
         return r

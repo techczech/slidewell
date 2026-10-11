@@ -6,7 +6,9 @@
  *   parseLunaResponse(json)  → one answer per screenshot that was asked about; unknown ids are dropped
  *   estimateCost(n)          → the estimate shown before a manual run
  *
- * Nothing here does I/O. The HTTP client is client.ts; the run is service.ts.
+ * Nothing here does I/O. The HTTP client is client.ts; the run is service.ts. The instructions, the
+ * answer schema, the selection of what may be sent and the answer types are shared with the second
+ * provider (haiku.ts); provider.ts puts the two behind one seam.
  *
  * Privacy: a screenshot is sent only when the local steps left it doubtful (the builder drops
  * anything else) and only when it is a screenshot: its file name is a CleanShot or macOS screenshot
@@ -148,8 +150,8 @@ export function planChunks<T extends { proposal: string }>(candidates: T[], size
   return out
 }
 
-/** Text that goes beside a picture: at most one line, no control characters. */
-function clean(s: string, max = Infinity): string {
+/** Text that goes beside a picture: at most one line, no control characters. Shared with haiku.ts. */
+export function clean(s: string, max = Infinity): string {
   return (s ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max)
 }
 

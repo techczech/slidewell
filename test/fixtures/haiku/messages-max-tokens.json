@@ -1,0 +1,17 @@
+{
+  "id": "msg_synthetic0003",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-haiku-5-5",
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "toolu_synthetic0003",
+      "name": "screenshot_verdicts",
+      "input": { "items": [{ "id": "s1", "verdict": "keep", "confidence": 0.91, "reason": "A chart." }] }
+    }
+  ],
+  "stop_reason": "max_tokens",
+  "stop_sequence": null,
+  "usage": { "input_tokens": 5312, "output_tokens": 512 }
+}

@@ -6,7 +6,7 @@ const doubtful: CascadeRow = { proposal: 'doubtful', confidence: 0.6, pKeep: 0.4
 
 describe("Luna's answer obeys the keep-bias", () => {
   it('keep becomes keep, whatever its confidence', () => {
-    expect(applyLuna(doubtful, { verdict: 'keep', confidence: 0.55, reason: 'A slide-worthy chart.' })).toEqual({ proposal: 'keep', confidence: 0.55, pKeep: 0.55, reason: 'A slide-worthy chart', decidedBy: 'luna' })
+    expect(applyLuna(doubtful, { verdict: 'keep', confidence: 0.55, reason: 'A slide-worthy chart.' })).toEqual({ proposal: 'keep', confidence: 0.55, pKeep: 0.55, reason: 'A slide-worthy chart', decidedBy: 'luna', decidedModel: 'gpt-6-luna' })
   })
 
   it('throwaway counts only at or above the throwaway threshold', () => {

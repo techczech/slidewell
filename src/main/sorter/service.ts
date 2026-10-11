@@ -10,8 +10,8 @@
  * Sorting writes proposals only: it never moves, deletes or decides anything (binning is later
  * work), and it never writes his triage decisions. Nothing here makes a network call: the cloud step
  * (cloud/service.ts) runs after it. Each proposal records which step made the call (cloud/cascade.ts);
- * a doubtful screenshot Luna already answered gets that answer again here, in the same write, so a
- * re-sort neither asks Luna twice nor restarts a throwaway's 30-day clock.
+ * a doubtful screenshot a cloud model (Luna or Haiku) already answered gets that answer again here, in
+ * the same write, so a re-sort neither asks twice nor restarts a throwaway's 30-day clock.
  */
 import { ipcMain } from 'electron'
 import type { IndexItem } from '../picture-search/vector-store'
@@ -22,8 +22,8 @@ import { auc, brier, reliabilityTable, type CalibrationCheck, type ReliabilityRo
 import { decide, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from './decide'
 import { accuracyReport, enoughToMeasure, holdOutSplit, MIN_HELD_BACK, type AccuracyReport, type LabelledPrediction } from './accuracy'
 import { loadLabelled, loadUndecided, SorterStore, type ProposalRow, type Shot } from './store'
-import { applyLuna, decidedByLocal } from './cloud/cascade'
-import { LUNA } from './cloud/luna'
+import { applyCloud, decidedByLocal } from './cloud/cascade'
+import { answerScopes, voiceOfAnswer } from './cloud/provider'
 
 export const HOLD_OUT_FRACTION = 0.2
 
@@ -246,7 +246,8 @@ export class SorterService {
       // pictures of everything he kept: a look-alike of one of them leans throwaway
       const keptShots = loadLabelled(this.deps.wellRoot()).filter((s) => s.truth === 'keep' && s.image)
       const keptVectors = [...(await this.vectorsFor(keptShots, 'reading pictures of what you kept', ctl.signal)).values()]
-      const askedLuna = this.withStore((st) => st.cloudAnswers(LUNA.model, LUNA.promptVersion))
+      // answers already given by either cloud provider under its current model and prompt
+      const asked = this.withStore((st) => st.cloudAnswersIn(answerScopes()))
       this.set({ phase: 'sorting', done: 0, total: shots.length, message: 'sorting undecided screenshots', error: null }, true)
       const CHUNK = 25
       for (let i = 0; i < shots.length && !ctl.signal.aborted; i += CHUNK) {
@@ -266,8 +267,9 @@ export class SorterService {
           const rule = applyRules(s.facts)
           const verdict = decide(rule, v ? predictKeep(rec.model, v) : null, t, v ? (tierOf.get(s) ?? null) : null)
           const local = { proposal: verdict.proposal, confidence: verdict.confidence, pKeep: verdict.pKeep, reason: verdict.reason, decidedBy: decidedByLocal(verdict, rule, t) }
-          const answer = verdict.proposal === 'doubtful' ? askedLuna.get(s.hash) : undefined
-          const row = answer ? applyLuna(local, answer, t) : local
+          const answer = verdict.proposal === 'doubtful' ? asked.get(s.hash) : undefined
+          const who = answer ? voiceOfAnswer(answer.model, answer.promptVersion) : null
+          const row = answer && who ? applyCloud(local, answer, who, t) : local
           rows.push({ hash: s.hash, ...row, rule: rule?.rule ?? null })
           counts[row.proposal]++
         }

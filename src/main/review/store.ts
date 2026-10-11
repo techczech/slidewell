@@ -31,8 +31,8 @@ export type ReviewRow = PileFacts & {
   reason: string
   answeredAt: string | null
   answer: string | null
-  /** Which sorter step made the call (ticket 07): rules | history | luna; null for a local doubtful or an older row. */
-  decidedBy: 'rules' | 'history' | 'luna' | null
+  /** Which sorter step made the call (tickets 07, 16): rules | history | luna | haiku; null for a local doubtful or an older row. */
+  decidedBy: 'rules' | 'history' | 'luna' | 'haiku' | null
   decision: { state: string; decidedAt: string | null; wellId: string | null } | null
   file: ReviewFile | null
 }
@@ -99,7 +99,7 @@ export function readReviewRows(wellRoot: string): ReviewRow[] {
         throwawaySince: r.throwaway_since,
         answeredAt: r.answered_at,
         answer: r.answer,
-        decidedBy: r.decided_by === 'rules' || r.decided_by === 'history' || r.decided_by === 'luna' ? r.decided_by : null,
+        decidedBy: r.decided_by === 'rules' || r.decided_by === 'history' || r.decided_by === 'luna' || r.decided_by === 'haiku' ? r.decided_by : null,
         decision: r.state ? { state: r.state, decidedAt: r.decided_at, wellId: r.well_id } : null,
         file: f
           ? {

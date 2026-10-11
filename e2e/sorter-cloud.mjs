@@ -11,7 +11,13 @@
 //      completes with the cloud step skipped and the items stay doubtful.
 //   3. Sort now online: only the three doubtful screenshots reach the stub, shrunk to ≤ 1456 px; the
 //      answers are recorded under the keep-bias with decided_by 'luna'; Review shows "asked Luna".
-//   4. The made-up key appears nowhere in config.json, the app's stdout/stderr or the profile folder.
+//   4. Haiku as the second provider (ticket 16), against a stub of Anthropic's Messages API: choosing
+//      Haiku while asking is on raises main's dialog naming Anthropic (declined: still Luna; confirmed:
+//      Anthropic's own opt-in is recorded beside OpenAI's); the Anthropic key has its own field and its
+//      own ciphertext, and an OpenAI-shaped key is refused there; Sort now shows the list-price estimate
+//      and the free-credits line; only the two new doubtful screenshots go, to /v1/messages with
+//      x-api-key and no Bearer token; the answers are recorded with decided_by 'haiku' and the model.
+//   5. Neither made-up key appears in config.json, the app's stdout/stderr or the profile folder.
 //
 // Run after `npm run build` (or `npx electron-vite build`):  node e2e/sorter-cloud.mjs
 // Optional: SLIDEWELL_CLOUD_SCRATCH (default ~/Library/Caches/slidewell-e2e-sorter-cloud),
@@ -35,6 +41,7 @@ const repo = resolve(import.meta.dirname, '..')
 const scratch = resolve(process.env.SLIDEWELL_CLOUD_SCRATCH || join(homedir(), 'Library', 'Caches', 'slidewell-e2e-sorter-cloud'))
 const screens = resolve(process.env.SLIDEWELL_CLOUD_SCREENS || join(scratch, 'screens'))
 const FAKE_KEY = 'sk-test-E2ELEAKCHECK-0123456789abcdefghijklmnopqrstuv'
+const FAKE_ANT_KEY = 'sk-ant-api03-E2EANTLEAKCHECK-0123456789abcdefghijklmn'
 const SORTER_VERSION = /SORTER_VERSION = '([^']+)'/.exec(readFileSync(join(repo, 'src/main/sorter/decide.ts'), 'utf8'))[1]
 
 let failed = 0
@@ -93,18 +100,40 @@ writeFileSync(
 const proposal = (hash) => {
   const db = new DatabaseSync(join(well, 'triage.db'), { readOnly: true })
   try {
-    return db.prepare('SELECT proposal, decided_by, reason FROM sorter_proposals WHERE hash = ?').get(realHash.get(hash))
+    return db.prepare('SELECT proposal, decided_by, decided_model, reason FROM sorter_proposals WHERE hash = ?').get(realHash.get(hash))
   } finally {
     db.close()
   }
 }
 
-// --- the stub: answers like Luna by the window title sent beside each picture ---
+// --- the stub: answers like Luna (/v1/responses) or like Haiku (/v1/messages) by the window title sent beside each picture ---
 const seen = []
+const seenHaiku = []
+const verdictFor = (id, w) => {
+  if (w.startsWith('keep')) return { id, verdict: 'keep', confidence: 0.93, reason: 'A chart worth keeping for a slide.' }
+  if (w.startsWith('toss')) return { id, verdict: 'throwaway', confidence: 0.97, reason: 'A Wi-Fi settings pane.' }
+  return { id, verdict: 'unsure', confidence: 0.5, reason: 'A blurry chat window; hard to tell.' }
+}
+const answerHaiku = async (req, res, body) => {
+  const json = JSON.parse(body)
+  const parts = json.messages[0].content
+  const lines = parts.filter((p) => p.type === 'text' && p.text.startsWith('id: ')).map((p) => p.text)
+  const dims = []
+  for (const p of parts.filter((x) => x.type === 'image')) {
+    const m = await sharp(Buffer.from(p.source.data, 'base64')).metadata()
+    dims.push({ format: m.format, long: Math.max(m.width, m.height), declared: `${p.source.type}:${p.source.media_type}` })
+  }
+  const windows = lines.map((l) => /window: ([^·]+)/.exec(l)?.[1].trim() ?? '')
+  seenHaiku.push({ path: req.url, apiKey: req.headers['x-api-key'], version: req.headers['anthropic-version'], auth: req.headers.authorization, model: json.model, toolChoice: json.tool_choice, tool: json.tools?.[0]?.name, maxTokens: json.max_tokens, windows, dims })
+  const items = lines.map((l, i) => verdictFor(/^id: (s\d+)/.exec(l)[1], windows[i]))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ id: 'msg_e2e', type: 'message', role: 'assistant', model: json.model, content: [{ type: 'tool_use', id: 'toolu_e2e', name: json.tools[0].name, input: { items } }], stop_reason: 'tool_use', usage: { input_tokens: 1000, output_tokens: 50 } }))
+}
 const server = createServer((req, res) => {
   let body = ''
   req.on('data', (c) => (body += c))
   req.on('end', async () => {
+    if (req.url === '/v1/messages') return answerHaiku(req, res, body)
     const auth = req.headers.authorization
     const json = JSON.parse(body)
     const parts = json.input[0].content
@@ -139,7 +168,7 @@ const app = await electron.launch({
 })
 app.process().stdout?.on('data', (d) => output.push(String(d)))
 app.process().stderr?.on('data', (d) => output.push(String(d)))
-// test-only https interception: 'offline' fails every request; 'stub' forwards api.openai.com to the stub
+// test-only https interception: 'offline' fails every request; 'stub' forwards api.openai.com and api.anthropic.com to the stub
 const route = (mode) =>
   app.evaluate(async ({ protocol, net }, { mode, stubUrl }) => {
     globalThis.__cloudE2E = globalThis.__cloudE2E ?? { calls: 0 }
@@ -147,7 +176,8 @@ const route = (mode) =>
     protocol.handle('https', async (req) => {
       globalThis.__cloudE2E.calls++
       const u = new URL(req.url)
-      if (mode === 'offline' || u.host !== 'api.openai.com') throw new Error('offline (e2e)')
+      if (mode === 'offline' || (u.host !== 'api.openai.com' && u.host !== 'api.anthropic.com')) throw new Error('offline (e2e)')
+      globalThis.__cloudE2E.hosts = [...(globalThis.__cloudE2E.hosts ?? []), u.host]
       const headers = {}
       req.headers.forEach((v, k) => (headers[k] = v))
       return net.fetch(`${stubUrl}${u.pathname}`, { method: req.method, headers, body: await req.text() })
@@ -187,11 +217,14 @@ try {
   const section = win.locator('.sorter-cloud')
   await section.waitFor()
   await section.scrollIntoViewIfNeeded()
-  check('Settings shows the Luna section with no key yet', (await section.locator('.sorter-cloud-key-input').count()) === 1)
+  const openaiRow = section.locator('.sorter-cloud-key-openai')
+  const anthropicRow = section.locator('.sorter-cloud-key-anthropic')
+  check('Settings shows the Luna section with no key yet, and a key field for each provider', (await openaiRow.locator('.sorter-cloud-key-input').count()) === 1 && (await anthropicRow.locator('.sorter-cloud-key-input').count()) === 1)
+  check('Luna is the provider until he chooses otherwise', (await section.locator('input.sorter-cloud-provider-openai').isChecked()) && !(await section.locator('input.sorter-cloud-provider-anthropic').isChecked()))
   await section.screenshot({ path: join(screens, 'sorter-cloud-settings-no-key.png') })
-  await section.locator('.sorter-cloud-key-input').fill(FAKE_KEY)
-  await section.locator('button', { hasText: 'Save key' }).click()
-  await section.locator('.pic-ready', { hasText: 'Saved' }).waitFor({ timeout: 10000 })
+  await openaiRow.locator('.sorter-cloud-key-input').fill(FAKE_KEY)
+  await openaiRow.locator('button', { hasText: 'Save key' }).click()
+  await openaiRow.locator('.pic-ready', { hasText: 'Saved' }).waitFor({ timeout: 10000 })
   const st = await win.evaluate(() => window.sw.cloud.status())
   check('status says a key is saved (and carries no key)', st.hasKey === true && !JSON.stringify(st).includes(FAKE_KEY))
   const cfgText = readFileSync(join(userData, 'config.json'), 'utf8')
@@ -272,6 +305,96 @@ try {
   check('confident items show which step decided', strip.includes('asked Luna') && strip.includes('by your history'), strip)
   await sleep(300)
   await win.screenshot({ path: join(screens, 'sorter-cloud-review.png') })
+
+  // 4. Haiku as the second provider. Two new doubtful screenshots arrive (Luna has answered the first three).
+  const more = [
+    { hash: 'e2e-haiku-keep', proposal: 'doubtful', window: 'keep-diagram', colour: '#7b3fb3', takenAt: '2026-10-10T10:00:00' },
+    { hash: 'e2e-haiku-unsure', proposal: 'doubtful', window: 'blurry-page', colour: '#b36d3f', takenAt: '2026-10-10T09:00:00' }
+  ]
+  {
+    for (const s of more) {
+      const f = join(source, nameOf(s))
+      await sharp({ create: { width: 3024, height: 1964, channels: 3, background: s.colour } }).png().toFile(f)
+      realHash.set(s.hash, createHash('sha256').update(readFileSync(f)).digest('hex').slice(0, 12))
+    }
+    const t = new DatabaseSync(join(well, 'triage.db'))
+    t.exec('PRAGMA busy_timeout=5000;')
+    const fts = t.prepare("INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, offline, ocr_text, source, taken_at, app, window_title) VALUES (?, 'image', ?, ?, 'png', ?, ?, '0', '', ?, ?, 'Test App', ?)")
+    const prop = t.prepare("INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, rule, sorter_version, model_id, proposed_at) VALUES (?, 'doubtful', 0.6, 0.4, ?, NULL, ?, NULL, ?)")
+    for (const s of more) {
+      const st = statSync(join(source, nameOf(s)))
+      fts.run(realHash.get(s.hash), nameOf(s), nameOf(s), String(st.size), String(Math.round(st.mtimeMs)), source, s.takenAt, s.window)
+      prop.run(realHash.get(s.hash), `Not sure: local reason for ${s.window}`, SORTER_VERSION, new Date().toISOString())
+    }
+    t.close()
+  }
+  await win.locator('button.tb-btn[title^="Settings"]').click()
+  await section.waitFor()
+  await section.scrollIntoViewIfNeeded()
+  const readCfg = () => JSON.parse(readFileSync(join(userData, 'config.json'), 'utf8')).sorterCloud ?? {}
+  const lunaCalls = seen.length
+  const shownBefore = (await dialogsShown()).length
+  await answerDialogs([false, true])
+  await section.locator('input.sorter-cloud-provider-anthropic').click() // declined in main's dialog
+  for (let i = 0; i < 50 && (await dialogsShown()).length < shownBefore + 1; i++) await sleep(100)
+  await sleep(300)
+  const switchDialog = (await dialogsShown()).at(-1)
+  check('choosing Haiku while asking is on raises main’s own dialog, naming Anthropic and what it receives', Boolean(switchDialog?.parent) && /Ask Haiku instead of Luna\?/.test(switchDialog?.message ?? '') && /Anthropic \(claude-haiku-5-5\) receives the picture/.test(switchDialog?.detail ?? '') && /app name and window title/.test(switchDialog?.detail ?? '') && /Estimated cost at list price/.test(switchDialog?.detail ?? '') && /free monthly Anthropic API credits/.test(switchDialog?.detail ?? ''), JSON.stringify(switchDialog))
+  const afterDecline = await win.evaluate(() => window.sw.cloud.status())
+  check('declined: Luna is still the provider, still on, and Anthropic has no opt-in', afterDecline.settings.provider === 'openai' && afterDecline.settings.enabled === true && !readCfg().anthropicOptedInAt && (await section.locator('input.sorter-cloud-provider-openai').isChecked()), JSON.stringify(afterDecline.settings))
+  await section.locator('input.sorter-cloud-provider-anthropic').click() // confirmed
+  await win.waitForFunction(async () => (await window.sw.cloud.status()).settings.provider === 'anthropic')
+  const cfgSwitched = readCfg()
+  check('confirmed: Haiku is the provider and Anthropic’s own opt-in is recorded beside OpenAI’s', cfgSwitched.provider === 'anthropic' && Number.isFinite(Date.parse(cfgSwitched.anthropicOptedInAt)) && cfgSwitched.optedInAt === optedIn, JSON.stringify({ ...cfgSwitched, keyEnc: undefined, lastRun: undefined }))
+  const noKeyPrep = await win.evaluate(() => window.sw.cloud.prepare())
+  check('Haiku without an Anthropic key sends nothing, though an OpenAI key is saved', noKeyPrep.blocked === 'no-key' && noKeyPrep.token === null && noKeyPrep.provider === 'anthropic', JSON.stringify(noKeyPrep))
+  await anthropicRow.locator('.sorter-cloud-key-input').fill(FAKE_KEY) // the OpenAI-shaped key, in the wrong field
+  await anthropicRow.locator('button', { hasText: 'Save key' }).click()
+  await section.locator('.sorter-cloud-key-msg', { hasText: 'does not look like an Anthropic API key' }).waitFor({ timeout: 10000 })
+  check('an OpenAI-shaped key is refused as the Anthropic key', !readCfg().anthropicKeyEnc)
+  await anthropicRow.locator('.sorter-cloud-key-input').fill(FAKE_ANT_KEY)
+  await anthropicRow.locator('button', { hasText: 'Save key' }).click()
+  await anthropicRow.locator('.pic-ready', { hasText: 'Saved' }).waitFor({ timeout: 10000 })
+  const cfgBothText = readFileSync(join(userData, 'config.json'), 'utf8')
+  const cfgBoth = readCfg()
+  check('each provider’s key is held as its own ciphertext; the OpenAI key is still there', !cfgBothText.includes('E2EANTLEAKCHECK') && !cfgBothText.includes('E2ELEAKCHECK') && typeof cfgBoth.anthropicKeyEnc === 'string' && cfgBoth.anthropicKeyEnc.length > 20 && cfgBoth.keyEnc === cfg.sorterCloud.keyEnc && cfgBoth.anthropicKeyEnc !== cfgBoth.keyEnc)
+  const stBoth = await win.evaluate(() => window.sw.cloud.status())
+  check('status says both keys are saved and carries neither', stBoth.providers.every((p) => p.hasKey) && !/sk-|LEAKCHECK/.test(JSON.stringify(stBoth)), JSON.stringify(stBoth.providers))
+  await section.screenshot({ path: join(screens, 'sorter-cloud-settings-haiku.png') })
+  await section.locator('button.sorter-cloud-sort').click()
+  await dialog.waitFor({ timeout: 20000 })
+  const haikuText = await dialog.innerText()
+  check('Sort now with Haiku: count, list-price estimate, the free-credits line and the company', /Ask Haiku about 2 screenshots\?/.test(haikuText) && /Estimated cost at list price: (about \$|under \$)/.test(haikuText) && /free monthly Anthropic API credits/.test(haikuText) && /sent to Anthropic \(claude-haiku-5-5\)/.test(haikuText) && !/OpenAI|Luna/.test(haikuText), haikuText)
+  await win.screenshot({ path: join(screens, 'sorter-cloud-confirm-haiku.png') })
+  await answerDialogs([true])
+  await dialog.locator('button.sorter-cloud-send').click()
+  await win.waitForFunction(() => /Asked Haiku about/.test(document.querySelector('.sorter-cloud-result')?.textContent ?? ''), null, { timeout: 60000 })
+  const haikuResult = await result.innerText()
+  const haikuSend = (await dialogsShown()).at(-1)
+  check('main’s send dialog names Haiku and Anthropic', /Send 2 screenshots to Haiku\?/.test(haikuSend?.message ?? '') && /will go to Anthropic/.test(haikuSend?.detail ?? '') && !/OpenAI/.test(haikuSend?.detail ?? ''), JSON.stringify(haikuSend))
+  check('the run reports what Haiku said', /Asked Haiku about 2 screenshots: 1 keep, 0 throwaway\. 1 screenshot still needs a look\./.test(haikuResult), haikuResult)
+  check('only the two new doubtful screenshots went to Anthropic; nothing more went to OpenAI', JSON.stringify(seenHaiku.flatMap((s) => s.windows).sort()) === JSON.stringify(['blurry-page', 'keep-diagram']) && seen.length === lunaCalls, JSON.stringify(seenHaiku.map((s) => s.windows)))
+  check('the request: Messages API path, claude-haiku-5-5, forced answer tool, x-api-key and version headers, no Bearer token', seenHaiku.length === 1 && seenHaiku.every((s) => s.path === '/v1/messages' && s.model === 'claude-haiku-5-5' && s.toolChoice?.type === 'tool' && s.toolChoice?.name === s.tool && s.apiKey === FAKE_ANT_KEY && s.version === '2023-06-01' && s.auth === undefined && s.maxTokens >= 512), JSON.stringify(seenHaiku.map((s) => ({ ...s, apiKey: s.apiKey === FAKE_ANT_KEY }))))
+  check('each picture went as a base64 JPEG block, shrunk to 1456 px on its long edge', seenHaiku.flatMap((s) => s.dims).length === 2 && seenHaiku.flatMap((s) => s.dims).every((d) => d.format === 'jpeg' && d.long === 1456 && d.declared === 'base64:image/jpeg'), JSON.stringify(seenHaiku.map((s) => s.dims)))
+  const hk = proposal('e2e-haiku-keep')
+  const hu = proposal('e2e-haiku-unsure')
+  check("Haiku's keep became keep, recorded as haiku with its model", hk.proposal === 'keep' && hk.decided_by === 'haiku' && hk.decided_model === 'claude-haiku-5-5', JSON.stringify(hk))
+  check("Haiku's unsure stays doubtful, in Haiku's name", hu.proposal === 'doubtful' && hu.decided_by === 'haiku' && /Haiku was not sure either/.test(hu.reason), JSON.stringify(hu))
+  check("Luna's earlier decisions are untouched", proposal('e2e-doubt-keep').decided_by === 'luna' && proposal('e2e-doubt-keep').decided_model === 'gpt-6-luna' && proposal('e2e-doubt-toss').proposal === 'throwaway' && proposal('e2e-local-keep').decided_model === null, JSON.stringify(proposal('e2e-doubt-keep')))
+  const hosts = await app.evaluate(() => globalThis.__cloudE2E.hosts ?? [])
+  check('the Haiku run called api.anthropic.com only', hosts.at(-1) === 'api.anthropic.com' && hosts.filter((h) => h === 'api.anthropic.com').length === 1, JSON.stringify(hosts))
+  await win.locator('.settings-modal .modal-head button', { hasText: 'close' }).click()
+  // Review was open behind Settings and still shows what it loaded before the Haiku run: leave and come back
+  await win.locator('.view-switch .scope-tab', { hasText: 'Search' }).click()
+  await win.locator('.view-switch .scope-tab', { hasText: 'Review' }).click()
+  await win.waitForSelector('.rv-big', { timeout: 30000 })
+  await win.waitForFunction(() => /5 sorted confidently/.test(document.body.innerText), null, { timeout: 30000 })
+  if (!(await win.locator('.rv-strip-body').count())) await win.locator('.rv-strip-row').click()
+  await win.waitForSelector('.rv-strip-body')
+  const stripHaiku = await win.locator('.rv-strip-body').innerText()
+  check('Review names Haiku where Haiku was asked, beside Luna’s', stripHaiku.includes('asked Haiku') && stripHaiku.includes('asked Luna'), stripHaiku)
+  await sleep(300)
+  await win.screenshot({ path: join(screens, 'sorter-cloud-review-haiku.png') })
 } catch (e) {
   failed++
   console.log(`FAIL  ${e?.stack ?? e}`)
@@ -280,20 +403,21 @@ try {
   server.close()
 }
 
-// 4. leakage: config.json, the app's output, every file in the profile
+// 5. leakage: config.json, the app's output, every file in the profile
 const logs = output.join('')
-check('the app log has no key', !logs.includes(FAKE_KEY) && !logs.includes('E2ELEAKCHECK'))
+check('the app log has no key of either provider', !logs.includes(FAKE_KEY) && !logs.includes(FAKE_ANT_KEY) && !logs.includes('LEAKCHECK') && !/sk-ant|sk-test/.test(logs))
+check('the app log names the Haiku run', /\[sorter-cloud\] manual run \(Haiku\)/.test(logs), logs.slice(0, 400))
 check('the app log names the runs (so the leak check had something to read)', /\[sorter-cloud\] manual run/.test(logs), logs.slice(0, 400))
 const hits = []
 const walk = (d) => {
   for (const f of readdirSync(d, { withFileTypes: true })) {
     const p = join(d, f.name)
     if (f.isDirectory()) walk(p)
-    else if (f.isFile() && statSync(p).size < 50_000_000 && readFileSync(p).includes(Buffer.from('E2ELEAKCHECK'))) hits.push(p.slice(userData.length + 1))
+    else if (f.isFile() && statSync(p).size < 50_000_000 && (readFileSync(p).includes(Buffer.from('E2ELEAKCHECK')) || readFileSync(p).includes(Buffer.from('E2EANTLEAKCHECK')))) hits.push(p.slice(userData.length + 1))
   }
 }
 if (existsSync(userData)) walk(userData)
-check('no file in the profile holds the key in plain text', hits.length === 0, hits.join(', '))
+check('no file in the profile holds either key in plain text', hits.length === 0, hits.join(', '))
 console.log(`screens: ${screens}`)
 console.log(failed ? `${failed} FAILED` : 'ALL PASSED')
 process.exit(failed ? 1 : 0)
