@@ -88,6 +88,8 @@ export function buildHaikuRequest(items: LunaItem[]): LunaRequest {
 }
 
 const VERDICTS = new Set<Verdict>(['keep', 'throwaway', 'unsure'])
+/** The only properties an entry may have (LUNA_SCHEMA's item properties). */
+const ITEM_KEYS = new Set(['id', 'verdict', 'confidence', 'reason'])
 const isObject = (x: unknown): x is Record<string, unknown> => Boolean(x) && typeof x === 'object' && !Array.isArray(x)
 const malformed = (message: string): LunaResponseError => new LunaResponseError(message, 'malformed')
 
@@ -97,6 +99,10 @@ const malformed = (message: string): LunaResponseError => new LunaResponseError(
  *     answer tool whose input is { items: [...] }; a refusal, a reply cut off at max_tokens, an error
  *     body, plain text instead of the tool call, or two tool calls throw LunaResponseError, and every
  *     screenshot in the request stays doubtful;
+ *   - the input may hold `items` and nothing else, and every entry that is an object may hold `id`,
+ *     `verdict`, `confidence` and `reason` and nothing else (the schema's additionalProperties: false,
+ *     which the API does not enforce for a tool that is not strict); any other property anywhere
+ *     throws LunaResponseError, and every screenshot in the request stays doubtful;
  *   - an entry counts only when its id is one that was asked (exactly), its verdict is one of the
  *     three, its confidence is a finite number from 0 to 1 (a 93 is not read as 0.93 or as 1) and its
  *     reason is a string; any other entry is no answer for that screenshot;
@@ -112,6 +118,8 @@ export function parseHaikuResponse(body: unknown, ids: Map<string, string>): Lun
   if (calls.length !== 1 || calls[0].name !== HAIKU_TOOL_NAME) throw malformed('Haiku did not answer in the expected form')
   const input = calls[0].input
   if (!isObject(input) || !Array.isArray(input.items)) throw malformed('Haiku’s answer had no items')
+  const unexpected = Object.keys(input).some((k) => k !== 'items') || (input.items as unknown[]).some((it) => isObject(it) && Object.keys(it).some((k) => !ITEM_KEYS.has(k)))
+  if (unexpected) throw malformed('Haiku’s answer held something that was not asked for')
   const answers = new Map<string, LunaAnswer>()
   const seen = new Set<string>()
   for (const raw of input.items as unknown[]) {

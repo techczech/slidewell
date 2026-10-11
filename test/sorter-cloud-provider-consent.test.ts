@@ -266,6 +266,67 @@ describe('a prepared batch is bound to the provider it was prepared for', () => 
     expect(claimsLeft(w)).toBe(0)
   })
 
+  it('switching away and back while main’s send dialog is open: the confirmation no longer counts, nothing is sent and none of tonight’s allowance is used', async () => {
+    const w = four()
+    const net = bothStubs()
+    const a = app(w, { provider: 'openai', optedInAt: T1, anthropicOptedInAt: T1 }, { http: net.http })
+    const deps = a.d as CloudDeps
+    const p = await a.svc.prepare()
+    deps.confirm = async (prompt) => {
+      a.d.prompts.push(prompt)
+      await a.change({ provider: 'anthropic' }) // through Settings, while the dialog that names OpenAI is open
+      await a.change({ provider: 'openai' }) // and back: Luna is selected again when he confirms
+      return true
+    }
+    const s = await a.svc.send(p.token)
+    expect(normaliseCloudSettings(a.box.stored)).toMatchObject({ enabled: true, provider: 'openai' })
+    expect(a.d.prompts.map((x) => [x.kind, x.provider])).toEqual([['send', 'openai']])
+    expect(s).toMatchObject({ provider: 'openai', skipped: 'provider-changed', asked: 0, answered: 0 })
+    expect(net.urls).toEqual([])
+    expect(claimsLeft(w)).toBe(0)
+    expect(allowance(w, '2026-10-10')).toBe(0)
+    expect(a.svc.busy()).toBe(false)
+    // the old token is used up; a fresh prepare and an undisturbed dialog send as usual
+    expect(await a.svc.send(p.token)).toMatchObject({ skipped: 'not-prepared', asked: 0 })
+    deps.confirm = async () => true
+    const again = await a.svc.prepare()
+    expect(await a.svc.send(again.token)).toMatchObject({ provider: 'openai', asked: 4 })
+    expect(new Set(net.urls)).toEqual(new Set([OPENAI_URL]))
+  })
+
+  it('the key removed and the same key saved again while main’s send dialog is open: nothing is sent', async () => {
+    const w = four()
+    const net = bothStubs()
+    const a = app(w, { provider: 'openai', optedInAt: T1 }, { http: net.http })
+    const deps = a.d as CloudDeps
+    const p = await a.svc.prepare()
+    deps.confirm = async () => {
+      a.svc.keyChanged('anthropic', 'saved') // the other provider's key does not concern this send
+      a.svc.keyChanged('openai', 'cleared') // what the key IPC signals; the fake store still returns the same key afterwards
+      a.svc.keyChanged('openai', 'saved')
+      return true
+    }
+    const s = await a.svc.send(p.token)
+    expect(s).toMatchObject({ provider: 'openai', skipped: 'revoked', asked: 0 })
+    expect(net.urls).toEqual([])
+    expect(claimsLeft(w)).toBe(0)
+    expect(allowance(w, '2026-10-10')).toBe(0)
+  })
+
+  it('a change to the other provider’s key while main’s send dialog is open does not stop the send', async () => {
+    const w = four()
+    const net = bothStubs()
+    const a = app(w, { provider: 'openai', optedInAt: T1 }, { http: net.http })
+    const deps = a.d as CloudDeps
+    const p = await a.svc.prepare()
+    deps.confirm = async () => {
+      a.svc.keyChanged('anthropic', 'saved')
+      return true
+    }
+    expect(await a.svc.send(p.token)).toMatchObject({ provider: 'openai', asked: 4 })
+    expect(new Set(net.urls)).toEqual(new Set([OPENAI_URL]))
+  })
+
   it('a batch prepared for Haiku and sent with Haiku still selected goes to Anthropic, after main’s dialog names Anthropic', async () => {
     const w = four()
     const net = bothStubs()

@@ -164,6 +164,29 @@ describe('Haiku answer: read strictly', () => {
     }
   })
 
+  it('a property that is not in the schema, on the input or on any item, gives no decision at all', () => {
+    const bodies: unknown[] = [
+      { items: [ok('s1'), ok('s2')], note: 'extra' },
+      { items: [ok('s1'), ok('s2')], verdict: 'throwaway' },
+      { items: [ok('s1', { override: true }), ok('s2')] },
+      { items: [ok('s1'), ok('s2', { verdict: 'throwaway', confidence: 0.99, proposal: 'throwaway' })] },
+      { items: [ok('s1'), ok('s9', { extra: 1 })] }, // also on an entry whose id was never asked
+      { items: [ok('s1'), { id: 's2', verdict: 'keep', confidence: 0.9, reason: 'A chart.', Verdict: 'throwaway' }] }
+    ]
+    for (const input of bodies) {
+      let thrown: unknown = null
+      try {
+        parseHaikuResponse(reply(input), ids)
+      } catch (e) {
+        thrown = e
+      }
+      expect(thrown, JSON.stringify(input)).toBeInstanceOf(LunaResponseError)
+      expect((thrown as LunaResponseError).kind).toBe('malformed')
+    }
+    // exactly the four properties, and only `items` on the input, is still read
+    expect([...parseHaikuResponse(reply({ items: [ok('s1'), ok('s2')] }), ids).answers.keys()]).toEqual(['hash-one', 'hash-two'])
+  })
+
   it('a throwaway with an out-of-range confidence can never become a confident throwaway', () => {
     const p = parseHaikuResponse(reply({ items: [{ id: 's1', verdict: 'throwaway', confidence: 97, reason: 'A settings pane.' }] }), ids)
     expect(p.answers.size).toBe(0)

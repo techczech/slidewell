@@ -273,6 +273,14 @@ export class CloudSorter {
   private running: { provider: ProviderId; revoke: (why: Revoked) => void } | null = null
   /** The batch prepare() showed him, bound to the provider it was prepared for. */
   private prepared: { token: string; hashes: string[]; expiresAt: number; provider: ProviderId } | null = null
+  /**
+   * Counts every provider change and, per provider, every key change signalled from Settings. A send
+   * waiting on main's dialog has used up `prepared` and is not yet `running`, so neither can stop it;
+   * it compares these counts across the dialog instead and sends nothing when one has moved, even if
+   * the provider selected and the key stored are by then the same as before.
+   */
+  private providerChanges = 0
+  private keyChanges: Record<ProviderId, number> = { openai: 0, anthropic: 0 }
 
   constructor(private deps: CloudDeps) {}
 
@@ -351,6 +359,7 @@ export class CloudSorter {
    * retry, its claims released. A change to the other provider's key does not concern the run.
    */
   keyChanged(provider: ProviderId, change: 'cleared' | 'saved'): void {
+    this.keyChanges[provider]++
     if (!this.running || this.running.provider !== provider) return
     this.log(`the ${PROVIDERS[provider].company} key was ${change === 'cleared' ? 'removed' : 'changed'}: stopping the run`)
     this.running.revoke(change === 'cleared' ? 'no-key' : 'revoked')
@@ -361,6 +370,7 @@ export class CloudSorter {
    * sent, and a running batch (bound to the provider it started with) stops at once.
    */
   providerChanged(): void {
+    this.providerChanges++
     this.prepared = null
     const now = this.deps.settings().provider
     if (!this.running || this.running.provider === now) return
@@ -578,12 +588,18 @@ export class CloudSorter {
     if (!wanted.length) return finish({ skipped: 'nothing-doubtful', stayedDoubtful: list.length })
     if (o.confirm) {
       // a manual send goes only after main's own dialog, which names this provider, returns OK
+      const providerChanges = this.providerChanges
+      const keyChanges = this.keyChanges[provider.id]
       const ok = await this.deps.confirm(sendPrompt(wanted.length, provider)).catch(() => false)
       if (ok !== true) return finish({ skipped: 'not-confirmed', stayedDoubtful: list.length })
       if (this.busy()) return finish({ error: 'The sorter is already running.' })
       // the dialog may have stood open a while: the confirmation counts only for the provider it named
+      // and only if no other provider was selected meanwhile, even one switched away from and back to
+      if (this.providerChanges !== providerChanges) return finish({ skipped: 'provider-changed', stayedDoubtful: list.length })
       const live = this.liveConsent(provider, key)
       if (!('ok' in live)) return finish({ skipped: live.revoked, stayedDoubtful: list.length })
+      // nor if this provider's key was removed or saved meanwhile, even when the same key is stored again
+      if (this.keyChanges[provider.id] !== keyChanges) return finish({ skipped: 'revoked', stayedDoubtful: list.length })
       const after = this.candidates(provider)
       const still = new Set(after.list.map((c) => c.hash))
       wanted = wanted.filter((c) => still.has(c.hash))

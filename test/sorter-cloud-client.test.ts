@@ -167,6 +167,28 @@ describe('redact', () => {
     expect(redact('invalid x-api-key')).toBe('invalid x-api-key') // Anthropic's own 401 wording has no key in it
   })
 
+  it('a key masked with an ellipsis or dots leaves no fragment behind, Anthropic or OpenAI', () => {
+    // a long Anthropic key masked in the middle: the tail after the ellipsis goes too
+    expect(redact('bad sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV…wxyz end')).toBe('bad [key] end')
+    expect(redact('bad sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV...wxyz end')).toBe('bad [key] end')
+    expect(redact('bad sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV****wxyz end')).toBe('bad [key] end')
+    expect(redact('bad sk-ant-ABCDEFGH0123456789abcdef…wxyz end')).toBe('bad [key] end')
+    // OpenAI keys masked the same ways
+    expect(redact('bad sk-proj-ABCDEFGH0123456789abcd…wxyz end')).toBe('bad [key] end')
+    expect(redact('bad sk-proj-ABCDEFGH0123456789abcd...wxyz end')).toBe('bad [key] end')
+    expect(redact('bad sk-…wxyz end')).toBe('bad [key] end')
+    expect(redact('bad sk-...wxyz end')).toBe('bad [key] end')
+    expect(redact('bad sk-proj-…wxyz end')).toBe('bad [key] end')
+    expect(redact('bad sk-proj-...wxyz end')).toBe('bad [key] end')
+    expect(redact('bad sk-ab12…wxyz end')).toBe('bad [key] end')
+    expect(redact('bad sk-ab12...wxyz end')).toBe('bad [key] end')
+    expect(redact('bad echosk-proj-…wxyz end')).toBe('bad echo[key] end')
+    // ordinary words followed by dots or an ellipsis are not keys
+    for (const plain of ['A risk-free… offer and a task-based... plan.', 'The task-based…or-not question; risk-free...maybe.', 'A desk-top… and a disk-proof…box.']) {
+      expect(redact(plain), plain).toBe(plain)
+    }
+  })
+
   it('removes keys of both providers from one text, given either, both or neither', () => {
     const text = `OpenAI ${KEY} then Anthropic ${ANT_KEY} then Bearer ${KEY}`
     for (const keys of [[], [KEY], [ANT_KEY], [KEY, ANT_KEY], [null, undefined]]) {

@@ -53,11 +53,16 @@ export class LunaHttpError extends Error {
  *
  * Both (OpenAI sk-…, sk-proj-…; Anthropic sk-ant-api03-…): 20+ key characters after sk- with at
  * least one digit among them (also one glued to a preceding word such as echosk-proj-…, hence no
- * leading word boundary), or a masked one: 2+ key characters, a run of 2+ asterisks, 2+ alphanumerics
- * (sk-test-****WXYZ, sk-ant-****WXYZ). Ordinary words ending in "sk-" (task-based-classification,
- * risk-free**) have neither shape and are left alone.
+ * leading word boundary; dots, asterisks and an ellipsis inside it count, so a long key masked in the
+ * middle goes whole, tail included), or a masked one:
+ *   - 2+ key characters, a run of 2+ asterisks, 2+ alphanumerics (sk-test-****WXYZ, sk-ant-****WXYZ);
+ *   - 2+ dots or an ellipsis straight after a hyphen, then 2+ alphanumerics (sk-...WXYZ, sk-proj-…WXYZ);
+ *   - key characters with a digit somewhere, 2+ dots or an ellipsis, 2+ key characters (sk-ab12…WXYZ).
+ * Ordinary words ending in "sk-" (task-based-classification, risk-free**, task-based...or) have none
+ * of these shapes and are left alone.
  *
- * Anthropic only, because its keys carry a typed prefix no ordinary word has:
+ * Anthropic only, applied first so that the general patterns cannot take the front of a masked
+ * Anthropic key and leave its tail, because its keys carry a typed prefix no ordinary word has:
  *   - sk-ant-<kind><nn>- (sk-ant-api03-, sk-ant-admin01-, sk-ant-oat01-) and whatever key characters
  *     follow, however few: a key cut short, or masked with dots, an ellipsis or asterisks
  *     (sk-ant-api03-AbC...wxYZ, sk-ant-api03-…wxYZ);
@@ -71,10 +76,12 @@ export function redact(text: string, ...keys: Array<string | null | undefined>):
   let out = String(text ?? '')
   for (const key of keys) if (key && key.length >= 4) out = out.split(key).join('[key]')
   return out
-    .replace(/sk-(?=[A-Za-z0-9_*\-.]*\d)[A-Za-z0-9_*\-.]{20,}/g, '[key]')
-    .replace(/sk-[A-Za-z0-9_\-.]{2,}\*{2,}[A-Za-z0-9]{2,}/g, '[key]')
     .replace(/sk-ant-[a-z]{2,8}\d{2}-[A-Za-z0-9_\-*.…]*/g, '[key]')
     .replace(/sk-ant-[A-Za-z0-9_\-]*(?:\.{2,}|…|\*{2,})[A-Za-z0-9_\-]{2,}/g, '[key]')
+    .replace(/sk-(?=[A-Za-z0-9_*\-.…]*\d)[A-Za-z0-9_*\-.…]{20,}/g, '[key]')
+    .replace(/sk-[A-Za-z0-9_\-.]{2,}\*{2,}[A-Za-z0-9]{2,}/g, '[key]')
+    .replace(/sk-(?:[A-Za-z0-9_]+-)*(?:\.{2,}|…)[A-Za-z0-9]{2,}/g, '[key]')
+    .replace(/sk-(?=[A-Za-z0-9_\-.…]*\d)[A-Za-z0-9_\-]+(?:\.{2,}|…)[A-Za-z0-9_\-]{2,}/g, '[key]')
     .replace(/Bearer\s+\S+/gi, 'Bearer [key]')
     .replace(/(x-api-key["']?\s*[:=]\s*["']?)[^\s"',;}]+/gi, '$1[key]')
 }
