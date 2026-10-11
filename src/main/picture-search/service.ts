@@ -15,6 +15,7 @@ import { coveragePercent, estimateText, statusText, type IndexProgress } from '.
 import { archiveRenders, wellImages } from './sources'
 import { STORE_FILE, VectorStore, type IndexItem } from './vector-store'
 import { ImageEnumerator } from './enumeration'
+import type { PictureQueryEngine } from './query-socket'
 
 export type PictureSearchSettings = { includeWell?: boolean; paused?: boolean }
 
@@ -299,6 +300,42 @@ export class PictureSearchService {
   lookAlikeInputs(ids: string[]): { vectors: Map<string, Float32Array>; paths: () => Map<string, string> } {
     if (!this.store && !existsSync(join(this.deps.wellRoot(), STORE_FILE))) return { vectors: new Map(), paths: () => new Map() }
     return { vectors: this.openEngine().vectorsOf(ids), paths: () => this.openStore().pathsOf(ids) }
+  }
+
+  /**
+   * Under the app's own authority (launch, before the local query endpoint starts): open and
+   * initialise an existing picture index, so a later outside query only reads. Creates nothing when
+   * there is no index or no model. Never throws: a corrupt or unwritable index is reported (the reason
+   * names only the index file and an error code, no user paths) and the endpoint stays unavailable,
+   * so launch carries on.
+   */
+  prepareForQueries(): { ok: true } | { ok: false; reason: string } {
+    if (this.store || !this.modelReady()) return { ok: true }
+    try {
+      if (existsSync(join(this.deps.wellRoot(), STORE_FILE))) this.openStore()
+      return { ok: true }
+    } catch (e) {
+      this.store = null
+      const err = e as NodeJS.ErrnoException & { errcode?: number }
+      const code = typeof err?.code === 'string' ? err.code : (err?.name ?? 'error')
+      return { ok: false, reason: `${STORE_FILE} could not be opened (${code})` }
+    }
+  }
+
+  /**
+   * The local query endpoint's seam (query-socket.ts, ticket 10: TalkWeaver asks over a Unix socket).
+   * Ready only when the model is verified and the app itself has already opened the index (indexer,
+   * prepareForQueries): an outside query never opens, creates or initialises the store, so it writes
+   * nothing. Ranks slides, well images and triage screenshots (contract v1 names all three id kinds).
+   */
+  queryEndpoint(): PictureQueryEngine {
+    return {
+      ready: () => this.store !== null && this.modelReady(),
+      query: async (text, limit) => {
+        if (!this.store || !this.modelReady()) throw new Error('picture index not opened by SlideWell yet')
+        return this.pictureQuery({ text }, { limit, kinds: ['slide', 'well-image', 'triage'] })
+      }
+    }
   }
 
   /** How many picture queries this process has run (the Words-only fast path must leave it unchanged). */
