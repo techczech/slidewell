@@ -332,6 +332,7 @@ app.whenReady().then(() => {
   // Ids and scores only; no query text is logged. Closed and unlinked on quit.
   let pictureQueryServer: QueryServer | null = null
   let quitting = false
+  pictureSearch.prepareForQueries() // open the index here, so outside queries only read
   void startPictureQueryServer({
     socketPath: join(app.getPath('userData'), PICTURE_QUERY_SOCKET),
     engine: pictureSearch.queryEndpoint(),

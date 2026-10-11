@@ -16,8 +16,9 @@
  * set around bind) inside a directory this user owns and that is made 0700. Only this user can
  * reach it; no other machine can, since a Unix socket has no network address.
  *
- * Start-up is careful with whatever already sits at the path: a socket owned by this user that no
- * one answers is stale and replaced; a live one (another SlideWell) is left serving; anything else
+ * Start-up is careful with whatever already sits at the path: a socket owned by this user whose
+ * probe is refused (ECONNREFUSED/ENOENT) is stale and replaced; any other probe outcome (EMFILE,
+ * EACCES, a timeout) proves nothing, so the path is left alone and the endpoint does not start; a live one (another SlideWell) is left serving; anything else
  * (a file, a symlink, another user's socket) is refused and left alone, and no endpoint starts.
  */
 import { chmodSync, lstatSync, unlinkSync, type Stats } from 'node:fs'
@@ -26,7 +27,6 @@ import { dirname } from 'node:path'
 
 export const PICTURE_QUERY_SOCKET = 'picture-query.sock'
 export const MAX_REQUEST_BYTES = 4096
-export const MAX_QUERY_CHARS = 1000
 export const MAX_LIMIT = 200
 export const DEFAULT_LIMIT = 60
 const MAX_ID_CHARS = 512
@@ -51,13 +51,18 @@ export type QueryServerOptions = {
   readTimeoutMs?: number
   /** How long the engine has to answer before the client gets 'busy'. */
   answerTimeoutMs?: number
-  /** Queries running at once; one more is answered 'busy'. */
+  /** Engine calls not yet settled; one more is answered 'busy'. A timed-out call keeps its slot until it settles. */
   maxInFlight?: number
   /** Open connections at once; Node drops the rest. */
   maxConnections?: number
+  /** Test seam: how the stale-socket probe connects (default net.connect). */
+  probeConnect?: (path: string) => ProbeSocket
   /** Called with a short message (never query text) when something is refused or fails. */
   log?: (msg: string) => void
 }
+
+/** What the stale-socket probe needs from a connection attempt. */
+export type ProbeSocket = { on(event: string, fn: (...args: any[]) => void): unknown; destroy(): void } // eslint-disable-line @typescript-eslint/no-explicit-any
 
 export type QueryServer = {
   readonly socketPath: string
@@ -81,7 +86,7 @@ export function parseRequest(line: string): Parsed {
   const m = msg as { v?: unknown; op?: unknown; text?: unknown; limit?: unknown }
   if (m.v !== 1 || m.op !== 'picture-query' || typeof m.text !== 'string') return { ok: false }
   const text = m.text.replace(/[\u0000-\u001f]/g, ' ').trim()
-  if (!text || text.length > MAX_QUERY_CHARS) return { ok: false }
+  if (!text) return { ok: false } // length is bounded by the 4 KB request limit, as in the client
   let limit = DEFAULT_LIMIT
   if (m.limit !== undefined) {
     if (typeof m.limit !== 'number' || !Number.isFinite(m.limit)) return { ok: false }
@@ -119,18 +124,37 @@ function lstatOrNull(path: string): Stats | null {
   }
 }
 
-/** Does anyone answer on this socket? (connect succeeds = a live server.) */
-function probe(path: string, timeoutMs = 300): Promise<boolean> {
+type ProbeResult = 'live' | 'stale' | { unknown: string }
+
+/**
+ * Does anyone answer on this socket? Only ECONNREFUSED (nobody listening) or ENOENT (gone) prove it
+ * stale; a connection means live; anything else (EMFILE, EACCES, a timeout) proves nothing.
+ */
+function probe(path: string, connectFn: (path: string) => ProbeSocket, timeoutMs = 300): Promise<ProbeResult> {
   return new Promise((resolve) => {
-    const s = connect({ path })
-    const done = (live: boolean): void => {
+    let s: ProbeSocket
+    let settled = false
+    const done = (r: ProbeResult): void => {
+      if (settled) return
+      settled = true
       clearTimeout(t)
-      s.destroy()
-      resolve(live)
+      try {
+        s?.destroy()
+      } catch {
+        /* nothing to close */
+      }
+      resolve(r)
     }
-    const t = setTimeout(() => done(true), timeoutMs) // a hung peer is not provably stale: leave it
-    s.on('connect', () => done(true))
-    s.on('error', () => done(false))
+    const t = setTimeout(() => done({ unknown: 'probe timed out' }), timeoutMs)
+    try {
+      s = connectFn(path)
+    } catch (e) {
+      return done({ unknown: (e as NodeJS.ErrnoException).code ?? 'connect threw' })
+    }
+    s.on('connect', () => done('live'))
+    s.on('error', (e: NodeJS.ErrnoException) => {
+      done(e?.code === 'ECONNREFUSED' || e?.code === 'ENOENT' ? 'stale' : { unknown: e?.code ?? 'error' })
+    })
   })
 }
 
@@ -147,13 +171,15 @@ function securePrivateDir(dir: string): string | null {
 }
 
 /** Clear the way for the socket: nothing there, or a stale socket of ours (removed). */
-async function clearStale(path: string): Promise<string | null> {
+async function clearStale(path: string, connectFn: (path: string) => ProbeSocket): Promise<string | null> {
   const st = lstatOrNull(path)
   if (!st) return null
   if (!st.isSocket()) return 'something other than a socket is at the socket path; left alone'
   const uid = ownUid()
   if (uid !== null && st.uid !== uid) return 'the socket at the path belongs to another user; left alone'
-  if (await probe(path)) return 'another SlideWell is already answering on the socket'
+  const p = await probe(path, connectFn)
+  if (p === 'live') return 'another SlideWell is already answering on the socket'
+  if (p !== 'stale') return `could not tell whether the socket is stale (${p.unknown}); left alone`
   // re-check right before unlinking: still the same socket inode
   const again = lstatOrNull(path)
   if (!again) return null
@@ -198,8 +224,11 @@ export async function startPictureQueryServer(opts: QueryServerOptions): Promise
   try {
     const dirProblem = securePrivateDir(dirname(path))
     if (dirProblem) return { ok: false, reason: dirProblem }
-    const staleProblem = await clearStale(path)
-    if (staleProblem) return { ok: false, reason: staleProblem }
+    const staleProblem = await clearStale(path, opts.probeConnect ?? ((p) => connect({ path: p })))
+    if (staleProblem) {
+      log(`picture query endpoint not started: ${staleProblem}`)
+      return { ok: false, reason: staleProblem }
+    }
   } catch (e) {
     return { ok: false, reason: `socket preparation failed: ${(e as Error).message}` }
   }
@@ -257,34 +286,25 @@ export async function startPictureQueryServer(opts: QueryServerOptions): Promise
       }
       if (!ready) return finish(encodeRefusal('model-not-ready'))
       if (inFlight >= maxInFlight) return finish(encodeRefusal('busy'))
+      // the slot is held until the engine call itself settles, so a stalled engine cannot pile up work
       inFlight++
-      let settled = false
       const answerTimer = setTimeout(() => {
-        if (settled) return
-        settled = true
-        inFlight--
         log('picture query: engine did not answer in time')
-        finish(encodeRefusal('busy'))
+        finish(encodeRefusal('busy')) // the client is told now; the slot stays taken until settlement
       }, answerTimeoutMs)
       Promise.resolve()
         .then(() => opts.engine.query(req.text, req.limit))
         .then(
-          (hits) => {
-            if (settled) return
-            settled = true
-            inFlight--
-            clearTimeout(answerTimer)
-            finish(encodeHits(Array.isArray(hits) ? hits : [], req.limit))
-          },
+          (hits) => finish(encodeHits(Array.isArray(hits) ? hits : [], req.limit)),
           (e) => {
-            if (settled) return
-            settled = true
-            inFlight--
-            clearTimeout(answerTimer)
             log(`picture query: engine unavailable (${(e as Error)?.name ?? 'error'})`)
             finish(encodeRefusal('model-not-ready'))
           }
         )
+        .finally(() => {
+          inFlight--
+          clearTimeout(answerTimer)
+        })
     })
   })
   server.maxConnections = opts.maxConnections ?? 16

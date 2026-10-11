@@ -303,14 +303,28 @@ export class PictureSearchService {
   }
 
   /**
+   * Under the app's own authority (launch, before the local query endpoint starts): open and
+   * initialise an existing picture index, so a later outside query only reads. Creates nothing when
+   * there is no index or no model.
+   */
+  prepareForQueries(): void {
+    if (this.store || !this.modelReady()) return
+    if (existsSync(join(this.deps.wellRoot(), STORE_FILE))) this.openStore()
+  }
+
+  /**
    * The local query endpoint's seam (query-socket.ts, ticket 10: TalkWeaver asks over a Unix socket).
-   * Ready only when the model is verified and an index exists, so an outside query never creates the
-   * store. Ranks slides, well images and triage screenshots (contract v1 names all three id kinds).
+   * Ready only when the model is verified and the app itself has already opened the index (indexer,
+   * prepareForQueries): an outside query never opens, creates or initialises the store, so it writes
+   * nothing. Ranks slides, well images and triage screenshots (contract v1 names all three id kinds).
    */
   queryEndpoint(): PictureQueryEngine {
     return {
-      ready: () => this.modelReady() && (Boolean(this.store) || existsSync(join(this.deps.wellRoot(), STORE_FILE))),
-      query: (text, limit) => this.pictureQuery({ text }, { limit, kinds: ['slide', 'well-image', 'triage'] })
+      ready: () => this.store !== null && this.modelReady(),
+      query: async (text, limit) => {
+        if (!this.store || !this.modelReady()) throw new Error('picture index not opened by SlideWell yet')
+        return this.pictureQuery({ text }, { limit, kinds: ['slide', 'well-image', 'triage'] })
+      }
     }
   }
 

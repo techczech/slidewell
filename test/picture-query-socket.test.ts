@@ -2,9 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { spawnSync } from 'node:child_process'
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs'
 import { connect } from 'node:net'
+import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { startPictureQueryServer, parseRequest, type Hit, type PictureQueryEngine, type QueryServer } from '../src/main/picture-search/query-socket'
+import { startPictureQueryServer, parseRequest, type Hit, type PictureQueryEngine, type ProbeSocket, type QueryServer } from '../src/main/picture-search/query-socket'
 
 // A fake engine: fixed ranked hits; records what it was asked.
 function fakeEngine(hits: Hit[] = [], ready = true): PictureQueryEngine & { asked: Array<{ text: string; limit: number }> } {
@@ -157,6 +158,50 @@ describe('picture query endpoint (contract v1, Unix socket)', () => {
     expect(JSON.parse((await first).reply).ok).toBe(true)
   })
 
+  it('accepts any query whose request fits in 4 KB (a 2,000-character text)', async () => {
+    const engine = fakeEngine([{ id: 'well:abc1234', score: 0.5 }])
+    await start(engine)
+    const text = 'robot '.repeat(334).slice(0, 2000)
+    expect(text.length).toBe(2000)
+    expect(JSON.parse((await ask(sock, text)).reply)).toEqual({ v: 1, ok: true, hits: [{ id: 'well:abc1234', score: 0.5 }] })
+    expect(engine.asked[0].text).toBe(text.trim())
+  })
+
+  it('keeps a stalled query\'s slot until the engine settles: no pile-up past maxInFlight', async () => {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((r) => (release = r))
+    let calls = 0
+    await start(
+      { ready: () => true, query: async () => (calls++, await gate, [{ id: 'well:abc1234', score: 0.4 }]) },
+      { maxInFlight: 1, answerTimeoutMs: 50 }
+    )
+    const busy = { v: 1, ok: false, reason: 'busy' }
+    expect(JSON.parse((await ask(sock, 'one')).reply)).toEqual(busy) // timed out, still running
+    for (const t of ['two', 'three', 'four']) expect(JSON.parse((await ask(sock, t)).reply)).toEqual(busy)
+    expect(calls).toBe(1)
+    release()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(JSON.parse((await ask(sock, 'five')).reply).ok).toBe(true)
+    expect(calls).toBe(2)
+  })
+
+  it('refuses to start, and leaves the socket alone, when the probe fails for any reason but refused/absent', async () => {
+    makeStaleSocket(sock)
+    const before = lstatSync(sock).ino
+    const logged: string[] = []
+    const emfile = (): ProbeSocket => {
+      const e = new EventEmitter() as EventEmitter & { destroy: () => void }
+      e.destroy = () => undefined
+      setImmediate(() => e.emit('error', Object.assign(new Error('too many open files'), { code: 'EMFILE' })))
+      return e
+    }
+    const res = await startPictureQueryServer({ socketPath: sock, engine: fakeEngine(), probeConnect: emfile, log: (m) => logged.push(m) })
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.reason).toMatch(/EMFILE/)
+    expect(logged.join(' ')).toMatch(/EMFILE/)
+    expect(lstatSync(sock).ino).toBe(before)
+  })
+
   it('replaces a stale socket of ours', async () => {
     makeStaleSocket(sock)
     const before = lstatSync(sock).ino
@@ -204,7 +249,6 @@ describe('picture query endpoint (contract v1, Unix socket)', () => {
     expect(parseRequest('{"v":1,"op":"picture-query","text":"boats"}')).toEqual({ ok: true, text: 'boats', limit: 60 })
     expect(parseRequest('{"v":1,"op":"picture-query","text":"boats","limit":0}')).toEqual({ ok: true, text: 'boats', limit: 1 })
     expect(parseRequest('{"v":1,"op":"picture-query","text":"   "}').ok).toBe(false)
-    expect(parseRequest('{"v":1,"op":"picture-query","text":"' + 'a'.repeat(1001) + '"}').ok).toBe(false)
     expect(parseRequest('{"v":1,"op":"picture-query","text":"boats","limit":"9"}').ok).toBe(false)
     expect(parseRequest('{"v":1,"op":"other","text":"boats"}').ok).toBe(false)
     expect(parseRequest('[1]').ok).toBe(false)
