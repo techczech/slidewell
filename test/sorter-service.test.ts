@@ -193,3 +193,49 @@ describe('sorter service: too few independent examples', () => {
     expect(models(w)).toBe(0)
   })
 })
+
+describe('sorter service: the cascade on re-sort (ticket 07)', () => {
+  it('records which step decided, re-applies a Luna answer in the same write, and keeps a throwaway clock', async () => {
+    const w = well(70, 30)
+    // everything doubtful locally: keep needs 0.999, throwaway 0.999
+    const svc = new SorterService(deps(w, { thresholds: { throwaway: 0.999, keep: 0.999 } }))
+    expect((await svc.trainAndTest()).ok).toBe(true)
+    expect(await svc.sortUndecided()).toMatchObject({ ok: true, counts: { doubtful: 3 } })
+    const st = new SorterStore(w)
+    st.saveCloudResults(
+      [
+        { hash: 'new0', verdict: 'keep', confidence: 0.9, reason: 'A chart worth keeping.', model: 'gpt-6-luna', promptVersion: 'luna-prompt-1', askedAt: '2026-10-09T02:00:00Z' },
+        { hash: 'new1', verdict: 'throwaway', confidence: 0.9995, reason: 'A settings pane.', model: 'gpt-6-luna', promptVersion: 'luna-prompt-1', askedAt: '2026-10-09T02:00:00Z' },
+        { hash: 'new2', verdict: 'throwaway', confidence: 0.99, reason: 'A file picker.', model: 'an-older-model', promptVersion: 'luna-prompt-1', askedAt: '2026-10-09T02:00:00Z' }
+      ],
+      []
+    )
+    st.close()
+    const row = (h: string) => {
+      const db = new DatabaseSync(join(w, 'triage.db'), { readOnly: true })
+      try {
+        return db.prepare('SELECT proposal, decided_by, throwaway_since FROM sorter_proposals WHERE hash = ?').get(h) as { proposal: string; decided_by: string | null; throwaway_since: string | null }
+      } finally {
+        db.close()
+      }
+    }
+    await svc.sortUndecided()
+    expect(row('new0')).toMatchObject({ proposal: 'keep', decided_by: 'luna' })
+    expect(row('new1')).toMatchObject({ proposal: 'throwaway', decided_by: 'luna' })
+    expect(row('new2')).toMatchObject({ proposal: 'doubtful', decided_by: null }) // an answer from another model does not count
+    const since = row('new1').throwaway_since
+    expect(since).not.toBeNull()
+    await new Promise((r) => setTimeout(r, 5))
+    await svc.sortUndecided()
+    expect(row('new1').throwaway_since).toBe(since) // the 30-day clock is not restarted by a re-sort
+
+    // with ordinary thresholds the local steps make confident calls and say which step made them
+    const plain = new SorterService(deps(w))
+    await plain.sortUndecided()
+    for (const h of ['new0', 'new1', 'new2']) {
+      const r = row(h)
+      if (r.proposal === 'doubtful') expect(r.decided_by === null || r.decided_by === 'luna').toBe(true)
+      else expect(['rules', 'history', 'luna']).toContain(r.decided_by)
+    }
+  })
+})

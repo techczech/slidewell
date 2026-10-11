@@ -8,7 +8,10 @@
  *     confidence and reason, recorded in sorter_proposals. Needs a trained model with a report.
  *
  * Sorting writes proposals only: it never moves, deletes or decides anything (binning is later
- * work), and it never writes his triage decisions. Nothing here makes a network call.
+ * work), and it never writes his triage decisions. Nothing here makes a network call: the cloud step
+ * (cloud/service.ts) runs after it. Each proposal records which step made the call (cloud/cascade.ts);
+ * a doubtful screenshot Luna already answered gets that answer again here, in the same write, so a
+ * re-sort neither asks Luna twice nor restarts a throwaway's 30-day clock.
  */
 import { ipcMain } from 'electron'
 import type { IndexItem } from '../picture-search/vector-store'
@@ -19,6 +22,8 @@ import { auc, brier, reliabilityTable, type CalibrationCheck, type ReliabilityRo
 import { decide, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from './decide'
 import { accuracyReport, enoughToMeasure, holdOutSplit, MIN_HELD_BACK, type AccuracyReport, type LabelledPrediction } from './accuracy'
 import { loadLabelled, loadUndecided, SorterStore, type ProposalRow, type Shot } from './store'
+import { applyLuna, decidedByLocal } from './cloud/cascade'
+import { LUNA } from './cloud/luna'
 
 export const HOLD_OUT_FRACTION = 0.2
 
@@ -241,6 +246,7 @@ export class SorterService {
       // pictures of everything he kept: a look-alike of one of them leans throwaway
       const keptShots = loadLabelled(this.deps.wellRoot()).filter((s) => s.truth === 'keep' && s.image)
       const keptVectors = [...(await this.vectorsFor(keptShots, 'reading pictures of what you kept', ctl.signal)).values()]
+      const askedLuna = this.withStore((st) => st.cloudAnswers(LUNA.model, LUNA.promptVersion))
       this.set({ phase: 'sorting', done: 0, total: shots.length, message: 'sorting undecided screenshots', error: null }, true)
       const CHUNK = 25
       for (let i = 0; i < shots.length && !ctl.signal.aborted; i += CHUNK) {
@@ -259,8 +265,11 @@ export class SorterService {
           if (s.image && !v && ctl.signal.aborted) continue // not reached before cancel: no proposal
           const rule = applyRules(s.facts)
           const verdict = decide(rule, v ? predictKeep(rec.model, v) : null, t, v ? (tierOf.get(s) ?? null) : null)
-          rows.push({ hash: s.hash, proposal: verdict.proposal, confidence: verdict.confidence, pKeep: verdict.pKeep, reason: verdict.reason, rule: rule?.rule ?? null })
-          counts[verdict.proposal]++
+          const local = { proposal: verdict.proposal, confidence: verdict.confidence, pKeep: verdict.pKeep, reason: verdict.reason, decidedBy: decidedByLocal(verdict, rule, t) }
+          const answer = verdict.proposal === 'doubtful' ? askedLuna.get(s.hash) : undefined
+          const row = answer ? applyLuna(local, answer, t) : local
+          rows.push({ hash: s.hash, ...row, rule: rule?.rule ?? null })
+          counts[row.proposal]++
         }
         this.withStore((st) => st.writeProposals(rows, SORTER_VERSION, rec.id))
         sorted += rows.length

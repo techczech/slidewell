@@ -2,7 +2,7 @@
  * The sorter's data: what it reads (his labelled history and the undecided screenshots, from
  * triage.db and well.db) and what it writes (its own proposals and trained models, in triage.db).
  *
- * Writes go ONLY to two sorter tables in triage.db. His own decisions (triage_decisions) are read,
+ * Writes go ONLY to the sorter's own tables in triage.db. His own decisions (triage_decisions) are read,
  * never written: a proposal sits beside a decision, it never replaces or imitates one.
  *
  *   sorter_proposals(hash TEXT PRIMARY KEY,           triage content hash (same key as triage_decisions)
@@ -12,7 +12,25 @@
  *                    sorter_version TEXT, model_id TEXT, proposed_at TEXT,
  *                    throwaway_since TEXT,             when it first proposed throwaway (kept across re-sorts;
  *                                                      starts the review's 30-day clock), NULL otherwise
- *                    answered_at TEXT, answer TEXT)    set by the review screen when he answers (keep | throwaway)
+ *                    answered_at TEXT, answer TEXT,    set by the review screen when he answers (keep | throwaway)
+ *                    decided_by TEXT)                  which step made the call: rules | history | luna; NULL
+ *                                                      for a local doubtful (ticket 07)
+ *   sorter_cloud_answers(hash TEXT PRIMARY KEY, verdict TEXT, confidence REAL, reason TEXT,
+ *                    model TEXT, prompt_version TEXT, asked_at TEXT)
+ *                                                      Luna's answer per screenshot, so a screenshot is asked
+ *                                                      once per model + prompt and its answer re-applied on
+ *                                                      later local sorts (cloud/service.ts)
+ *   sorter_cloud_claims(hash TEXT PRIMARY KEY, run_id TEXT, claimed_at TEXT, counted INTEGER)
+ *                                                      screenshots a cloud run has claimed and is sending now;
+ *                                                      claimed in one write transaction, so two processes can
+ *                                                      never send the same screenshot; released when the run
+ *                                                      ends (a crashed run's claims go stale after CLAIM_STALE_MS);
+ *                                                      counted = 1 once it went into a request (admitForRequest)
+ *   sorter_cloud_allowance(night TEXT PRIMARY KEY, sent INTEGER)
+ *                                                      how many screenshots were put into a request to Luna in
+ *                                                      each night window (schedule.ts nightOf), nightly and Sort
+ *                                                      now alike; counted when the request is built, never at the
+ *                                                      claim, so a run that dies before sending uses none of it
  *   sorter_models(id TEXT PRIMARY KEY, trained_at TEXT, sorter_version TEXT,
  *                 model TEXT (classifier JSON), report TEXT (accuracy report JSON))
  *
@@ -26,6 +44,8 @@ import type { ShotFacts } from './rules'
 import type { Truth } from './accuracy'
 import type { Classifier } from './classifier'
 import type { Proposal } from './decide'
+import type { DecidedBy } from './cloud/cascade'
+import type { LunaAnswer } from './cloud/luna'
 
 const IMAGE_EXT = /\.(webp|png|jpe?g|gif|bmp|tiff?)$/i
 
@@ -43,7 +63,18 @@ export type Shot = {
   fromWellCopy: boolean
 }
 
-export type ProposalRow = { hash: string; proposal: Proposal; confidence: number; pKeep: number; reason: string; rule: string | null }
+export type ProposalRow = { hash: string; proposal: Proposal; confidence: number; pKeep: number; reason: string; rule: string | null; decidedBy?: DecidedBy | null }
+
+/** A doubtful proposal the cloud step may ask about (undecided, unanswered, current sorter version). */
+export type CloudPending = { hash: string; confidence: number; pKeep: number; reason: string }
+
+export type CloudAnswerRow = LunaAnswer & { hash: string; model: string; promptVersion: string; askedAt: string }
+
+/** Which proposals and answers count for the cloud step: the current sorter, Luna model and prompt. */
+export type CloudScope = { sorterVersion: string; model: string; promptVersion: string }
+
+/** A claim older than this belongs to a run that crashed; it no longer blocks the screenshot. */
+export const CLAIM_STALE_MS = 6 * 60 * 60 * 1000
 
 export type ModelRecord<R> = { id: string; trainedAt: string; sorterVersion: string; model: Classifier; report: R }
 
@@ -192,6 +223,7 @@ export function migrateProposalColumns(db: DatabaseSync): void {
   }
   if (!cols.has('answered_at')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN answered_at TEXT')
   if (!cols.has('answer')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN answer TEXT')
+  if (!cols.has('decided_by')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN decided_by TEXT')
 }
 
 /** The sorter's own tables in triage.db: proposals and trained models. */
@@ -215,7 +247,27 @@ export class SorterStore {
         proposed_at TEXT NOT NULL,
         throwaway_since TEXT,
         answered_at TEXT,
-        answer TEXT
+        answer TEXT,
+        decided_by TEXT
+      );
+      CREATE TABLE IF NOT EXISTS sorter_cloud_answers (
+        hash TEXT PRIMARY KEY,
+        verdict TEXT NOT NULL CHECK (verdict IN ('keep', 'throwaway', 'unsure')),
+        confidence REAL NOT NULL,
+        reason TEXT NOT NULL,
+        model TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        asked_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS sorter_cloud_claims (
+        hash TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        claimed_at TEXT NOT NULL,
+        counted INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS sorter_cloud_allowance (
+        night TEXT PRIMARY KEY,
+        sent INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS sorter_models (
         id TEXT PRIMARY KEY,
@@ -226,6 +278,8 @@ export class SorterStore {
       );
     `)
     migrateProposalColumns(this.db)
+    const claimCols = new Set((this.db.prepare("SELECT name FROM pragma_table_info('sorter_cloud_claims')").all() as Array<{ name: string }>).map((c) => c.name))
+    if (!claimCols.has('counted')) this.db.exec('ALTER TABLE sorter_cloud_claims ADD COLUMN counted INTEGER NOT NULL DEFAULT 0')
   }
 
   saveModel<R>(rec: ModelRecord<R>): void {
@@ -244,22 +298,178 @@ export class SorterStore {
     if (!rows.length) return
     const now = new Date().toISOString()
     const put = this.db.prepare(
-      `INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, rule, sorter_version, model_id, proposed_at, throwaway_since)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'throwaway' THEN ? END)
+      `INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, rule, sorter_version, model_id, proposed_at, decided_by, throwaway_since)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'throwaway' THEN ? END)
        ON CONFLICT(hash) DO UPDATE SET proposal = excluded.proposal, confidence = excluded.confidence, p_keep = excluded.p_keep,
          reason = excluded.reason, rule = excluded.rule, sorter_version = excluded.sorter_version, model_id = excluded.model_id, proposed_at = excluded.proposed_at,
+         decided_by = excluded.decided_by,
          throwaway_since = CASE WHEN excluded.proposal != 'throwaway' THEN NULL
                                 WHEN sorter_proposals.proposal = 'throwaway' AND sorter_proposals.throwaway_since IS NOT NULL THEN sorter_proposals.throwaway_since
                                 ELSE excluded.proposed_at END`
     )
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      for (const r of rows) put.run(r.hash, r.proposal, r.confidence, r.pKeep, r.reason, r.rule, sorterVersion, modelId, now, r.proposal, now)
+      for (const r of rows) put.run(r.hash, r.proposal, r.confidence, r.pKeep, r.reason, r.rule, sorterVersion, modelId, now, r.decidedBy ?? null, r.proposal, now)
       this.db.exec('COMMIT')
     } catch (e) {
       this.db.exec('ROLLBACK')
       throw e
     }
+  }
+
+  /**
+   * The cloud eligibility test for proposal `p`, as SQL: doubtful, made under the current sorter, not
+   * answered in review, no decision of his (kept or excluded in Triage), no Luna answer yet for this
+   * model + prompt. Parameters: sorterVersion, model, promptVersion.
+   */
+  private eligibleSql(): string {
+    const decisions = hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = p.hash)' : ''
+    return `p.proposal = 'doubtful' AND p.answered_at IS NULL AND p.sorter_version = ?
+      AND NOT EXISTS (SELECT 1 FROM sorter_cloud_answers c WHERE c.hash = p.hash AND c.model = ? AND c.prompt_version = ?) ${decisions}`
+  }
+
+  /** Doubtful proposals the cloud step may ask about (eligibleSql), whether or not a run holds them. */
+  cloudPending(sorterVersion: string, model: string, promptVersion: string): CloudPending[] {
+    return (
+      this.db
+        .prepare(`SELECT p.hash AS hash, p.confidence AS confidence, p.p_keep AS p_keep, p.reason AS reason FROM sorter_proposals p WHERE ${this.eligibleSql()}`)
+        .all(sorterVersion, model, promptVersion) as Array<{ hash: string; confidence: number; p_keep: number; reason: string }>
+    ).map((r) => ({ hash: r.hash, confidence: Number(r.confidence), pKeep: Number(r.p_keep), reason: r.reason }))
+  }
+
+  /** Screenshots sent to Luna in this night window so far. */
+  allowanceUsed(night: string): number {
+    const r = this.db.prepare('SELECT sent FROM sorter_cloud_allowance WHERE night = ?').get(night) as { sent: number } | undefined
+    return r ? Number(r.sent) : 0
+  }
+
+  /**
+   * Claim screenshots for one cloud run, in one write transaction (BEGIN IMMEDIATE, so a second
+   * process waits and then sees these claims): of `hashes`, in order, those still eligible and not
+   * held by another live run, at most what is left of `limit` for `night`. A claim uses no allowance;
+   * admitForRequest counts each screenshot when it goes into a request. Returns the claimed hashes.
+   */
+  claimForCloud(hashes: string[], o: CloudScope & { night: string; limit: number; runId: string; now: Date }): { claimed: string[]; leftBefore: number } {
+    const nowIso = o.now.toISOString()
+    const staleBefore = new Date(o.now.getTime() - CLAIM_STALE_MS).toISOString()
+    const eligible = this.db.prepare(
+      `SELECT 1 FROM sorter_proposals p WHERE p.hash = ? AND ${this.eligibleSql()} AND NOT EXISTS (SELECT 1 FROM sorter_cloud_claims k WHERE k.hash = p.hash)`
+    )
+    const claim = this.db.prepare('INSERT INTO sorter_cloud_claims (hash, run_id, claimed_at) VALUES (?, ?, ?)')
+    const claimed: string[] = []
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('DELETE FROM sorter_cloud_claims WHERE claimed_at < ?').run(staleBefore)
+      const used = this.allowanceUsed(o.night)
+      const leftBefore = Math.max(0, Math.floor(o.limit) - used)
+      for (const h of hashes) {
+        if (claimed.length >= leftBefore) break
+        if (claimed.includes(h) || !eligible.get(h, o.sorterVersion, o.model, o.promptVersion)) continue
+        claim.run(h, o.runId, nowIso)
+        claimed.push(h)
+      }
+      this.db.exec('COMMIT')
+      return { claimed, leftBefore }
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
+  /**
+   * Called just before every HTTP attempt (first try and each retry), in one write transaction: of
+   * `hashes`, those this run still holds and that are still eligible. Each one not yet counted is
+   * counted against `night`'s allowance now, while room is left under `limit`; one that does not fit
+   * is dropped (overLimit). A retry passes already-counted ones through without counting them again.
+   * Returns the hashes that may go into this request, in order.
+   */
+  admitForRequest(hashes: string[], o: CloudScope & { runId: string; night: string; limit: number }): { admitted: string[]; overLimit: number } {
+    const q = this.db.prepare(
+      `SELECT k.counted AS counted FROM sorter_proposals p JOIN sorter_cloud_claims k ON k.hash = p.hash AND k.run_id = ? WHERE p.hash = ? AND ${this.eligibleSql()}`
+    )
+    const mark = this.db.prepare('UPDATE sorter_cloud_claims SET counted = 1 WHERE hash = ? AND run_id = ?')
+    const admitted: string[] = []
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      let left = Math.max(0, Math.floor(o.limit) - this.allowanceUsed(o.night))
+      let added = 0
+      let overLimit = 0
+      for (const h of hashes) {
+        const r = q.get(o.runId, h, o.sorterVersion, o.model, o.promptVersion) as { counted: number } | undefined
+        if (!r) continue
+        if (!Number(r.counted)) {
+          if (left <= 0) {
+            overLimit++
+            continue
+          }
+          mark.run(h, o.runId)
+          left--
+          added++
+        }
+        admitted.push(h)
+      }
+      if (added) {
+        this.db
+          .prepare('INSERT INTO sorter_cloud_allowance (night, sent) VALUES (?, ?) ON CONFLICT(night) DO UPDATE SET sent = sorter_cloud_allowance.sent + excluded.sent')
+          .run(o.night, added)
+      }
+      this.db.exec('COMMIT')
+      return { admitted, overLimit }
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
+  /** End of a run: its claims go. The allowance holds only what went into a request, so nothing is given back. */
+  releaseClaims(runId: string): void {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('DELETE FROM sorter_cloud_claims WHERE run_id = ?').run(runId)
+      this.db.exec('COMMIT')
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
+  /** Luna's answers for this model + prompt, by hash. */
+  cloudAnswers(model: string, promptVersion: string): Map<string, LunaAnswer> {
+    const rows = this.db.prepare('SELECT hash, verdict, confidence, reason FROM sorter_cloud_answers WHERE model = ? AND prompt_version = ?').all(model, promptVersion) as Array<{ hash: string; verdict: LunaAnswer['verdict']; confidence: number; reason: string }>
+    return new Map(rows.map((r) => [r.hash, { verdict: r.verdict, confidence: Number(r.confidence), reason: r.reason }]))
+  }
+
+  /**
+   * Record Luna's answers and, in the same transaction, the proposals they lead to. A proposal is
+   * changed only while it is still doubtful, unanswered and without a decision of his in Triage
+   * (review or Triage may have got there first). Reasons arrive already redacted (cloud/service.ts).
+   * Returns the hashes whose proposal changed.
+   */
+  saveCloudResults(answers: CloudAnswerRow[], proposals: Array<Pick<ProposalRow, 'hash' | 'proposal' | 'confidence' | 'pKeep' | 'reason' | 'decidedBy'>>): string[] {
+    if (!answers.length && !proposals.length) return []
+    const now = new Date().toISOString()
+    const putAnswer = this.db.prepare(
+      `INSERT INTO sorter_cloud_answers (hash, verdict, confidence, reason, model, prompt_version, asked_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(hash) DO UPDATE SET verdict = excluded.verdict, confidence = excluded.confidence, reason = excluded.reason,
+         model = excluded.model, prompt_version = excluded.prompt_version, asked_at = excluded.asked_at`
+    )
+    const putProposal = this.db.prepare(
+      `UPDATE sorter_proposals SET proposal = ?, confidence = ?, p_keep = ?, reason = ?, decided_by = ?, proposed_at = ?,
+         throwaway_since = CASE WHEN ? = 'throwaway' THEN ? END
+       WHERE hash = ? AND proposal = 'doubtful' AND answered_at IS NULL
+         ${hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = sorter_proposals.hash)' : ''}`
+    )
+    const changed: string[] = []
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const a of answers) putAnswer.run(a.hash, a.verdict, a.confidence, a.reason, a.model, a.promptVersion, a.askedAt)
+      for (const p of proposals) if (Number(putProposal.run(p.proposal, p.confidence, p.pKeep, p.reason, p.decidedBy ?? null, now, p.proposal, now, p.hash).changes)) changed.push(p.hash)
+      this.db.exec('COMMIT')
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+    return changed
   }
 
   /** Proposals for screenshots he has still not decided, by label. */

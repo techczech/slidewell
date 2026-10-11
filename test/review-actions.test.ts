@@ -567,7 +567,10 @@ describe('IPC guard: Triage answers the main window only', () => {
 describe('the sorter cannot write his decisions', () => {
   it('no sorter source writes triage_decisions', () => {
     const dir = join(__dirname, '..', 'src', 'main', 'sorter')
-    for (const f of readdirSync(dir)) {
+    // every source file, subfolders included (the cloud step lives in sorter/cloud/)
+    const files = (readdirSync(dir, { recursive: true }) as string[]).filter((f) => /\.tsx?$/.test(f))
+    expect(files.some((f) => f.includes('cloud'))).toBe(true)
+    for (const f of files) {
       const text = readFileSync(join(dir, f), 'utf8')
       expect(text, f).not.toMatch(/(INSERT\s+(OR\s+\w+\s+)?INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM)\s+triage_decisions/i)
       expect(text, f).not.toMatch(/putTriageDecision|setTriageDecision|promoteTriageHashes|importSelectedTriage/)

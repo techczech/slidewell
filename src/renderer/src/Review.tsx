@@ -73,6 +73,13 @@ function Shot({ card, caption, className = '' }: { card: ReviewCard; caption?: s
   )
 }
 
+// Which sorter step made the call (ticket 07), in the words the card shows.
+const STEP_WORDS: Record<NonNullable<ReviewCard['decidedBy']>, string> = { rules: 'by rules', history: 'by your history', luna: 'asked Luna' }
+const step = (c: ReviewCard): string | null => (c.by === 'sorter' && c.decidedBy ? STEP_WORDS[c.decidedBy] : null)
+function Step({ card }: { card: ReviewCard }): JSX.Element | null {
+  const w = step(card)
+  return w ? <span className={`rv-step${card.decidedBy === 'luna' ? ' luna' : ''}`}>{w}</span> : null
+}
 const title = (c: ReviewCard): string => [c.app, c.windowTitle].filter(Boolean).join(' · ') || c.filename
 
 export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => void; onToast: (m: string) => void }): JSX.Element {
@@ -282,9 +289,10 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
                 >
                   {c.by === 'you' && <span className="rv-tag you">you kept</span>}
                   <Shot card={c} caption={takenLabel(c)} />
-                  <div className="rv-m">
+                  <div className="rv-m" title={c.reason}>
                     <b>{c.app || c.filename}</b>
                     <span>{c.windowTitle || (c.app ? c.filename : '')}</span>
+                    <Step card={c} />
                   </div>
                   {focus.col === 'kept' && focus.index === i && (
                     <div className="rv-pc-acts">
@@ -328,10 +336,11 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
                   onClick={() => setFocus({ col: 'right', index: i })}
                 >
                   <Shot card={c} />
-                  <div className="rv-tr-text">
+                  <div className="rv-tr-text" title={c.reason}>
                     <b>{c.app || c.filename}</b>
                     <span>{c.windowTitle || (c.app ? c.filename : '')}</span>
                     <em>{c.pile === 'bin' ? 'in the Bin' : days(c.binInDays)}</em>
+                    <Step card={c} />
                   </div>
                   {focus.col === 'right' && focus.index === i && (
                     <button className="rv-rescue" onClick={(e) => { e.stopPropagation(); void act(c, 'rescue') }}><kbd>K</kbd> Keep</button>
@@ -413,7 +422,10 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
                 )}
               </div>
               <div className="rv-why-l">Why it is asking</div>
-              <p className="rv-why">{current.reason}</p>
+              <p className="rv-why">
+                {current.reason}
+                {current.decidedBy === 'luna' && <span className="rv-why-step"> · asked Luna</span>}
+              </p>
               <p className="rv-lean">
                 If you skip it, it stays <b>kept</b>. Only sure throwaways go to the Throwaway pile.
               </p>
@@ -446,7 +458,10 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
               <Shot card={c} />
               <div>
                 <div className="rv-un">{title(c)}</div>
-                <div className="rv-ur">{c.reason}</div>
+                <div className="rv-ur">
+                  {c.reason}
+                  {c.decidedBy === 'luna' ? ' · asked Luna' : ''}
+                </div>
               </div>
               <span className="rv-num">{i + 2}</span>
             </div>
@@ -477,10 +492,11 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
         {stripOpen && (
           <div className="rv-strip-body">
             {ov.confidentSample.map((c) => (
-              <div className="rv-sample" key={c.hash} title={c.reason}>
+              <div className="rv-sample" key={c.hash} title={step(c) ? `${c.reason} (${step(c)})` : c.reason}>
                 <Shot card={c} />
                 <span className={c.pile === 'kept' ? 'rv-lbl keep' : 'rv-lbl toss'}>{c.pile === 'kept' ? 'kept' : c.pile === 'bin' ? 'in the Bin' : days(c.binInDays)}</span>
                 <span className="rv-sample-t">{title(c)}</span>
+                <Step card={c} />
               </div>
             ))}
             <button className="rv-link" onClick={openPiles}>All of them in both piles ›</button>

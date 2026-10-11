@@ -1,0 +1,24 @@
+{
+  "id": "resp_test_0001",
+  "object": "response",
+  "created_at": 1791590400,
+  "status": "completed",
+  "model": "gpt-6-luna",
+  "output": [
+    { "id": "rs_test_0001", "type": "reasoning", "summary": [] },
+    {
+      "id": "msg_test_0001",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "annotations": [],
+          "text": "{\"items\":[{\"id\":\"s1\",\"verdict\":\"keep\",\"confidence\":0.93,\"reason\":\"A chart comparing model costs, useful for a slide.\"},{\"id\":\"s2\",\"verdict\":\"throwaway\",\"confidence\":0.96,\"reason\":\"A Wi-Fi settings pane with nothing worth keeping.\"},{\"id\":\"s3\",\"verdict\":\"throwaway\",\"confidence\":0.71,\"reason\":\"Looks like a file picker, but part of a document shows.\"},{\"id\":\"s4\",\"verdict\":\"unsure\",\"confidence\":0.5,\"reason\":\"A blurry chat window; hard to tell.\"},{\"id\":\"s99\",\"verdict\":\"throwaway\",\"confidence\":0.99,\"reason\":\"An id that was never asked about.\"}]}"
+        }
+      ]
+    }
+  ],
+  "usage": { "input_tokens": 5120, "output_tokens": 180, "total_tokens": 5300 }
+}

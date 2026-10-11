@@ -103,3 +103,21 @@ describe('picture store: triage kind', () => {
     store.close()
   })
 })
+
+describe('sorter store: cloud step columns (ticket 07)', () => {
+  it('an older sorter_proposals table gains decided_by; the review reads it onto the card row', async () => {
+    const db = new DatabaseSync(join(well, 'triage.db'))
+    db.exec(`DROP TABLE IF EXISTS sorter_proposals;
+      CREATE TABLE sorter_proposals (hash TEXT PRIMARY KEY, proposal TEXT NOT NULL, confidence REAL NOT NULL, p_keep REAL NOT NULL, reason TEXT NOT NULL, rule TEXT,
+        sorter_version TEXT NOT NULL, model_id TEXT, proposed_at TEXT NOT NULL, throwaway_since TEXT, answered_at TEXT, answer TEXT);
+      INSERT INTO sorter_proposals VALUES ('hold', 'doubtful', 0.6, 0.4, 'r', NULL, 'v', NULL, '2026-10-01', NULL, NULL, NULL);`)
+    db.close()
+    const s = new SorterStore(well)
+    s.writeProposals([{ hash: 'hnew1', proposal: 'keep', confidence: 0.9, pKeep: 0.9, reason: 'r', rule: 'own-apps', decidedBy: 'rules' }], 'v', null)
+    s.close()
+    const { readReviewRows } = await import('../src/main/review/store')
+    const rows = new Map(readReviewRows(well).map((r) => [r.hash, r]))
+    expect(rows.get('hnew1')?.decidedBy).toBe('rules')
+    expect(rows.get('hold')?.decidedBy).toBeNull()
+  })
+})

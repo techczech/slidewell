@@ -102,6 +102,7 @@ export class ReviewService {
       proposal: i.row.proposal,
       pile: i.view.pile as ReviewCard['pile'],
       by: i.view.by,
+      decidedBy: i.row.decidedBy,
       binInDays: i.view.binInDays,
       thumbUrl: abs ? this.deps.thumbUrl(abs) : null,
       offline: Boolean(f?.offline)

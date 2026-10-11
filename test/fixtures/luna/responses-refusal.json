@@ -1,0 +1,9 @@
+{
+  "id": "resp_test_0002",
+  "object": "response",
+  "status": "completed",
+  "model": "gpt-6-luna",
+  "output": [
+    { "id": "msg_test_0002", "type": "message", "role": "assistant", "content": [{ "type": "refusal", "refusal": "I can't help with that." }] }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "resp_test_0003",
+  "object": "response",
+  "status": "incomplete",
+  "incomplete_details": { "reason": "max_output_tokens" },
+  "model": "gpt-6-luna",
+  "output": [
+    { "id": "msg_test_0003", "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "{\"items\":[{\"id\":\"s1\",\"verdict\":\"keep\",\"confid" }] }
+  ]
+}

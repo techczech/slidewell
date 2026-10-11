@@ -1682,3 +1682,63 @@ body {
 }
 .used-in-box .used-in-row + .used-in-row { margin-top: 0.35rem; }
 .used-in-box .link { margin-left: 0; font-weight: 600; }
+
+/* Settings › Screenshot sorter › Ask Luna (ticket 07) */
+.sorter-cloud {
+  border-top: 1px solid var(--line);
+  padding-top: 0.8rem;
+}
+.sorter-cloud .pic-note + .pic-note,
+.sorter-cloud .pic-note {
+  margin-top: 0.5rem;
+}
+.sorter-cloud-key-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.sorter-cloud-key .pic-ready {
+  flex: 1;
+}
+.pic-check input.sorter-cloud-time,
+.pic-check input.sorter-cloud-cap {
+  width: auto;
+  height: auto;
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 0.15rem 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+.pic-check input.sorter-cloud-cap {
+  width: 5.5rem;
+}
+.sorter-cloud-overlay {
+  z-index: 60;
+}
+.sorter-cloud-confirm {
+  background: var(--card, #fff);
+  border-radius: 12px;
+  padding: 22px 24px;
+  max-width: 480px;
+  box-shadow: 0 12px 40px #0005;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.sorter-cloud-confirm h3 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+.sorter-cloud-confirm p {
+  margin: 0 0 10px;
+}
+.sorter-cloud-confirm-btns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}

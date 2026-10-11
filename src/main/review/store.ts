@@ -31,6 +31,8 @@ export type ReviewRow = PileFacts & {
   reason: string
   answeredAt: string | null
   answer: string | null
+  /** Which sorter step made the call (ticket 07): rules | history | luna; null for a local doubtful or an older row. */
+  decidedBy: 'rules' | 'history' | 'luna' | null
   decision: { state: string; decidedAt: string | null; wellId: string | null } | null
   file: ReviewFile | null
 }
@@ -51,6 +53,7 @@ type ProposalJoin = {
   throwaway_since: string | null
   answered_at: string | null
   answer: string | null
+  decided_by: string | null
   state: string | null
   decided_at: string | null
   well_id: string | null
@@ -67,10 +70,12 @@ export function readReviewRows(wellRoot: string): ReviewRow[] {
     if (!hasTable(db, 'sorter_proposals')) return []
     const decisions = hasTable(db, 'triage_decisions')
     const reviewCols = hasColumn(db, 'sorter_proposals', 'throwaway_since')
+    const byCol = hasColumn(db, 'sorter_proposals', 'decided_by')
     const rows = db
       .prepare(
         `SELECT p.hash AS hash, p.proposal AS proposal, p.confidence AS confidence, p.reason AS reason, p.proposed_at AS proposed_at,
            ${reviewCols ? 'p.throwaway_since, p.answered_at, p.answer' : "CASE WHEN p.proposal = 'throwaway' THEN p.proposed_at END AS throwaway_since, NULL AS answered_at, NULL AS answer"},
+           ${byCol ? 'p.decided_by AS decided_by' : 'NULL AS decided_by'},
            ${decisions ? 'd.state AS state, d.decided_at AS decided_at, d.well_id AS well_id' : 'NULL AS state, NULL AS decided_at, NULL AS well_id'}
          FROM sorter_proposals p ${decisions ? 'LEFT JOIN triage_decisions d ON d.hash = p.hash' : ''}`
       )
@@ -94,6 +99,7 @@ export function readReviewRows(wellRoot: string): ReviewRow[] {
         throwawaySince: r.throwaway_since,
         answeredAt: r.answered_at,
         answer: r.answer,
+        decidedBy: r.decided_by === 'rules' || r.decided_by === 'history' || r.decided_by === 'luna' ? r.decided_by : null,
         decision: r.state ? { state: r.state, decidedAt: r.decided_at, wellId: r.well_id } : null,
         file: f
           ? {
