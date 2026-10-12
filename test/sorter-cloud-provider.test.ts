@@ -69,7 +69,7 @@ describe('provider selection', () => {
 
   it('stored settings without a provider, or with an unknown one, mean OpenAI; the opt-in read is the selected provider’s own', () => {
     const at = '2026-10-11T09:00:00.000Z'
-    expect(normaliseCloudSettings({ optedInAt: at })).toEqual({ enabled: true, batchTime: '02:00', provider: 'openai' })
+    expect(normaliseCloudSettings({ optedInAt: at })).toEqual({ enabled: true, batchTime: '02:00', provider: 'openai', nightly: true, secondOpinions: true, agreedAt: { openai: at, anthropic: null } })
     expect(normaliseCloudSettings({ optedInAt: at, provider: 'google' } as never)).toMatchObject({ enabled: true, provider: 'openai' })
     // opted in to OpenAI only: selecting Anthropic is off
     expect(normaliseCloudSettings({ optedInAt: at, provider: 'anthropic' })).toMatchObject({ enabled: false, provider: 'anthropic' })
@@ -84,8 +84,8 @@ describe('provider selection', () => {
     const luna = new CloudSorter(cloudDeps(w, { anthropicKeyValue: null })).status()
     expect(luna).toMatchObject({ model: 'gpt-6-luna', name: 'Luna', company: 'OpenAI', hasKey: true, longEdge: 1456, nightlyLimit: 300 })
     expect(luna.providers).toEqual([
-      { id: 'openai', name: 'Luna', company: 'OpenAI', model: 'gpt-6-luna', hasKey: true },
-      { id: 'anthropic', name: 'Haiku', company: 'Anthropic', model: 'claude-haiku-5-5', hasKey: false }
+      { id: 'openai', name: 'Luna', company: 'OpenAI', model: 'gpt-6-luna', hasKey: true, agreedAt: '2026-10-01T09:00:00.000Z' },
+      { id: 'anthropic', name: 'Haiku', company: 'Anthropic', model: 'claude-haiku-5-5', hasKey: false, agreedAt: '2026-10-01T09:00:00.000Z' }
     ])
     const haiku = new CloudSorter(cloudDeps(w, { anthropicKeyValue: null, settings: { provider: 'anthropic' } })).status()
     expect(haiku).toMatchObject({ model: 'claude-haiku-5-5', name: 'Haiku', company: 'Anthropic', hasKey: false })

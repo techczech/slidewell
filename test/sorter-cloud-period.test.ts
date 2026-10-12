@@ -208,7 +208,7 @@ describe('the period in words, with the count for that period', () => {
     const a = app('all')
     // Luna answers everything first; edge, justout and quarter stay unsure
     expect(await a.svc.runNightly()).toMatchObject({ asked: 7 })
-    const b = new CloudSorter({ ...a.d, settings: () => ({ enabled: true, batchTime: '02:00', provider: 'anthropic' as const }), period: () => '30d' })
+    const b = new CloudSorter({ ...a.d, settings: () => ({ ...a.d.settings(), provider: 'anthropic' as const }), period: () => '30d' })
     const p = await b.prepare()
     expect(p).toMatchObject({ provider: 'anthropic', period: '30d', doubtful: 2, toSend: 2, secondOpinions: 2, secondNote: '2 of them ones Luna was unsure about' })
     expect(p.message).toBe('Last 30 days: ask Haiku about 2 screenshots, 2 of them ones Luna was unsure about?')
@@ -341,7 +341,7 @@ describe('the period is bound into the prepared batch', () => {
   it('the renderer cannot widen it: prepare and send read no period, date or list from their arguments', async () => {
     const a = app('7d')
     const sender = {}
-    registerCloudIpc(a.svc, { openai: { set: () => ({ ok: false, saved: false }), clear: () => undefined }, anthropic: { set: () => ({ ok: false, saved: false }), clear: () => undefined } }, () => undefined, () => ({}), (s) => s === sender)
+    registerCloudIpc(a.svc, { openai: { set: () => ({ ok: false, saved: false }) }, anthropic: { set: () => ({ ok: false, saved: false }) } }, () => undefined, () => ({}), (s) => s === sender)
     const widen = { period: 'all', window: { period: 'all', cutoff: null }, cutoff: '1970-01-01T00:00:00', since: '1970-01-01', hashes: NAMES.map(hashOf), only: NAMES.map(hashOf) }
     const p = (await ipc.get('cloud:prepare')!({ sender }, widen, 'all')) as Awaited<ReturnType<typeof a.svc.prepare>>
     expect(p).toMatchObject({ period: '7d', toSend: 2 })

@@ -12,10 +12,10 @@ const PERIODS: CloudStatus['periods'] = [
 // Settings › cloud step in the browser preview: pretend key flags and settings; nothing is ever sent.
 function cloudMock(): SwApi['cloud'] {
   const providers: CloudStatus['providers'] = [
-    { id: 'openai', name: 'Luna', company: 'OpenAI', model: 'gpt-6-luna', hasKey: false },
-    { id: 'anthropic', name: 'Haiku', company: 'Anthropic', model: 'claude-haiku-5-5', hasKey: false }
+    { id: 'openai', name: 'Luna', company: 'OpenAI', model: 'gpt-6-luna', hasKey: false, agreedAt: null },
+    { id: 'anthropic', name: 'Haiku', company: 'Anthropic', model: 'claude-haiku-5-5', hasKey: false, agreedAt: null }
   ]
-  const st: CloudStatus = { phase: 'idle', done: 0, total: 0, hasKey: false, encryptionAvailable: true, settings: { enabled: false, batchTime: '02:00', provider: 'openai' }, nightlyLimit: 300, lastRun: null, nextRunAt: null, model: 'gpt-6-luna', name: 'Luna', company: 'OpenAI', longEdge: 1456, providers, period: 'all', periods: PERIODS }
+  const st: CloudStatus = { phase: 'idle', done: 0, total: 0, hasKey: false, encryptionAvailable: true, settings: { enabled: false, batchTime: '02:00', provider: 'openai', nightly: true, secondOpinions: true, agreedAt: { openai: null, anthropic: null } }, nightlyLimit: 300, leftTonight: 300, lastRun: null, nextRunAt: null, model: 'gpt-6-luna', name: 'Luna', company: 'OpenAI', longEdge: 1456, providers, period: 'all', periods: PERIODS }
   const sync = (): CloudStatus => {
     const p = providers.find((x) => x.id === st.settings.provider) ?? providers[0]
     Object.assign(st, { hasKey: p.hasKey, model: p.model, name: p.name, company: p.company })
@@ -38,8 +38,16 @@ function cloudMock(): SwApi['cloud'] {
       st.settings = { ...st.settings, ...patch }
       return sync()
     },
+    setNightly: async (on) => {
+      st.settings = { ...st.settings, nightly: on }
+      return { ok: true, status: sync() }
+    },
+    setSecondOpinions: async (on) => {
+      st.settings = { ...st.settings, secondOpinions: on }
+      return { ok: true, status: sync() }
+    },
     prepare: async () => ({ local: { ok: false, message: 'not available in the browser preview' }, provider: st.settings.provider, period: 'all' as const, periodLabel: 'Everything', periodPrefix: '', periodNote: 'Period: everything, whatever the date.', doubtful: 0, toSend: 0, secondOpinions: 0, secondNote: '', cap: st.nightlyLimit, leftTonight: st.nightlyLimit, estimate: { screenshots: 0, requests: 0, inputTokens: 0, outputTokens: 0, usd: 0 }, costLabel: 'Estimated cost', costNote: '', blocked: 'nothing-doubtful' as const, token: null, message: `Nothing doubtful is waiting for ${st.name}.` }),
-    send: async () => ({ at: new Date().toISOString(), trigger: 'manual' as const, provider: st.settings.provider, local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, skipped: 'nothing-doubtful' as const, error: null, message: `Nothing doubtful was waiting for ${st.name}.` }),
+    send: async () => ({ at: new Date().toISOString(), trigger: 'manual' as const, provider: st.settings.provider, local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, sent: 0, settled: 0, stillUnsure: 0, skipped: 'nothing-doubtful' as const, error: null, message: `Nothing doubtful was waiting for ${st.name}.` }),
     cancel: async () => undefined,
     onStatus: () => () => undefined
   }
@@ -76,7 +84,7 @@ export function installMock(): void {
       onStatus: () => () => undefined
     },
     sorter: {
-      status: async () => ({ phase: 'idle' as const, done: 0, total: 0, message: '', error: null, modelReady: false, report: null, canRunUnattended: false, retrainNeeded: false, minHeldBack: { total: 20, perLabel: 5 }, pending: { keep: 0, throwaway: 0, doubtful: 0, lastProposedAt: null }, period: 'all' as const, periods: PERIODS }),
+      status: async () => ({ phase: 'idle' as const, done: 0, total: 0, message: '', error: null, modelReady: false, report: null, canRunUnattended: false, retrainNeeded: false, minHeldBack: { total: 20, perLabel: 5 }, pending: { keep: 0, throwaway: 0, doubtful: 0, lastProposedAt: null }, period: 'all' as const, periods: PERIODS, lastRun: null, undecided: null, learnable: null }),
       train: async () => ({ ok: false, error: 'not available in the browser preview' }),
       sort: async () => ({ ok: false, error: 'not available in the browser preview' }),
       setPeriod: async () => ({ ok: false, period: 'all' as const, error: 'not available in the browser preview' }),
@@ -114,8 +122,8 @@ export function installMock(): void {
         wellRoot: '~/ppt-archive/well',
         vaultRoot: null,
         vaultAvailable: false,
-        screenshotRoot: null,
-        screenshotAvailable: false,
+        screenshotRoot: '~/Screenshots',
+        screenshotAvailable: true,
         captureSources: [],
         captureDefaults: { desktop: { path: '~/Desktop', namedOnly: true }, cleanshot: null },
         conversionsRoot: null,
@@ -144,7 +152,7 @@ export function installMock(): void {
     },
     triage: {
       scan: async () => ({ ok: false, indexed: 0, total: 0, offline: 0 }),
-      list: async () => ({ items: [], counts: { undecided: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }),
+      list: async () => ({ items: [], counts: { undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }),
       decide: async () => ({ state: 'undecided' }),
       paste: async () => null,
       importSelected: async () => ({ imported: 0, skipped: 0, gated: 0 }),

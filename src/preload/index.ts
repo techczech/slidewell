@@ -310,7 +310,14 @@ export type SorterStatus = {
   pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
   period: SortPeriod | null // the period both sort buttons are limited to; null when the stored one cannot be read (main then sorts nothing)
   periods: ReadonlyArray<{ id: SortPeriod; label: string }>
+  lastRun: SorterLocalRun | null // the last sort on this Mac as numbers; kept across restarts
+  // undecided screenshots a sort would look at, in the chosen period (inPeriod is null when the period cannot be read) and in all;
+  // counted in main when status() is called, after a sort and when the period changes; null until first counted
+  undecided: { period: SortPeriod | null; inPeriod: number | null; all: number } | null
+  learnable: { kept: number; binned: number } | null // his choices the sorter can learn from (with a readable picture); counted with undecided
 }
+// One sort on this Mac: when it ended, its period, how many it looked at, how many got keep or throwaway, how many stayed doubtful.
+export type SorterLocalRun = { at: string; period: SortPeriod; lookedAt: number; confident: number; needLook: number }
 // The period a manual sort is limited to, by each screenshot's capture time (src/main/sorter/period.ts).
 // The renderer only names one of these; main stores it, works out the cut-off from its own clock and
 // refuses anything else. The nightly sort ignores it.
@@ -319,10 +326,15 @@ export type SortResult = { ok: boolean; sorted?: number; counts?: { keep: number
 
 // Screenshot sorter, cloud step (tickets 07, 16). Same shapes as src/main/sorter/cloud/service.ts.
 // provider = which company is asked: OpenAI (Luna) or Anthropic (Haiku).
-// enabled = his recorded opt-in to that provider (main stores when; opting in to one is not opting in to
-// the other); the per-night limit is fixed in main (nightlyLimit) and shared by both providers
+// enabled = the service is on and he has agreed to that provider (main stores when; agreeing to one is not
+// agreeing to the other; off keeps provider, keys and agreements); nightly = the nightly batch runs (only while
+// enabled); secondOpinions = a provider may be asked about what the other was unsure about; agreedAt = when he
+// agreed to each provider (read only); the per-night limit is fixed in main (nightlyLimit) and shared by both
 export type CloudProviderId = 'openai' | 'anthropic'
-export type CloudSettings = { enabled: boolean; batchTime: string; provider: CloudProviderId }
+export type CloudSettings = { enabled: boolean; batchTime: string; provider: CloudProviderId; nightly: boolean; secondOpinions: boolean; agreedAt: Record<CloudProviderId, string | null> }
+// What cloud.setSettings takes; the two switches have their own calls, and nothing else can be set.
+export type CloudSettingsPatch = Partial<Pick<CloudSettings, 'enabled' | 'batchTime' | 'provider'>>
+export type CloudSwitchResult = { ok: boolean; error?: string; status: CloudStatus }
 export type CloudRunSummary = {
   at: string
   trigger: 'nightly' | 'manual'
@@ -334,7 +346,10 @@ export type CloudRunSummary = {
   keep: number
   throwaway: number
   stayedDoubtful: number
-  skipped: 'unavailable' | 'off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | 'period-changed' | 'batch-changed' | 'date-changed' | null
+  sent: number // the run as three numbers: screenshots sent,
+  settled: number // those the provider settled (keep or throwaway),
+  stillUnsure: number // and those sent that it left unsure
+  skipped: 'unavailable' | 'off' | 'nightly-off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | 'period-changed' | 'batch-changed' | 'date-changed' | null
   error: string | null
   message: string
 }
@@ -368,13 +383,14 @@ export type CloudStatus = {
   encryptionAvailable: boolean
   settings: CloudSettings
   nightlyLimit: number
+  leftTonight: number | null // what is left of tonight's limit; null when it could not be read
   lastRun: CloudRunSummary | null
-  nextRunAt: string | null
+  nextRunAt: string | null // null while the service or the nightly switch is off
   model: string // the selected provider's model, short name and company
   name: string
   company: string
   longEdge: number
-  providers: Array<{ id: CloudProviderId; name: string; company: string; model: string; hasKey: boolean }>
+  providers: Array<{ id: CloudProviderId; name: string; company: string; model: string; hasKey: boolean; agreedAt: string | null }> // agreedAt: when he agreed to it
   period: SortPeriod | null // the same setting as SorterStatus.period
   periods: ReadonlyArray<{ id: SortPeriod; label: string }>
 }
@@ -418,7 +434,10 @@ const api = {
     status: (): Promise<CloudStatus> => ipcRenderer.invoke('cloud:status'),
     setKey: (provider: CloudProviderId, key: string): Promise<{ ok: boolean; saved: boolean; error?: string; status: CloudStatus }> => ipcRenderer.invoke('cloud:set-key', provider, key),
     clearKey: (provider: CloudProviderId): Promise<CloudStatus> => ipcRenderer.invoke('cloud:clear-key', provider),
-    setSettings: (patch: Partial<CloudSettings>): Promise<CloudStatus> => ipcRenderer.invoke('cloud:set-settings', patch),
+    setSettings: (patch: CloudSettingsPatch): Promise<CloudStatus> => ipcRenderer.invoke('cloud:set-settings', patch),
+    // the nightly batch on or off (it runs only while the service is on), and second opinions on or off; main takes true or false only
+    setNightly: (on: boolean): Promise<CloudSwitchResult> => ipcRenderer.invoke('cloud:set-nightly', on),
+    setSecondOpinions: (on: boolean): Promise<CloudSwitchResult> => ipcRenderer.invoke('cloud:set-second-opinions', on),
     prepare: (): Promise<CloudPreview> => ipcRenderer.invoke('cloud:prepare'),
     send: (token: string): Promise<CloudRunSummary> => ipcRenderer.invoke('cloud:send', token),
     cancel: (): Promise<void> => ipcRenderer.invoke('cloud:cancel'),

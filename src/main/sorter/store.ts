@@ -86,11 +86,14 @@ export type CloudAnswerRow = LunaAnswer & { hash: string; provider: ProviderId; 
 
 /**
  * Which proposals and answers count for the cloud step: the current sorter; the provider that is
- * asking, with its current model and prompt; `others`, the other providers with theirs; and
+ * asking, with its current model and prompt; `others`, the other providers with theirs;
  * `throwawayAt`, the confidence from which a throwaway answer is a decision (the sorter's throwaway
- * threshold, cascade.ts isConfident).
+ * threshold, cascade.ts isConfident); and `secondOpinions`, the switch in Settings: false means a
+ * screenshot another provider has answered is never eligible, whatever that answer was and whatever
+ * model or prompt it was given under (absent: they are allowed, as before there was a switch;
+ * cloud/service.ts always says which).
  */
-export type CloudScope = AnswerScope & { sorterVersion: string; others?: ReadonlyArray<AnswerScope>; throwawayAt: number }
+export type CloudScope = AnswerScope & { sorterVersion: string; others?: ReadonlyArray<AnswerScope>; throwawayAt: number; secondOpinions?: boolean }
 
 /** A stored answer with who gave it, the model + prompt it was given under, and when. */
 export type StoredCloudAnswer = LunaAnswer & { provider: ProviderId; model: string; promptVersion: string; askedAt: string }
@@ -432,18 +435,23 @@ export class SorterStore {
    * That leaves two kinds: screenshots no provider has answered, and screenshots another provider
    * answered and was unsure about (a second opinion). Once every provider has answered one, it is
    * never eligible again, whichever is selected. An answer counts only under its provider's current
-   * model + prompt. Parameters: eligibleArgs(scope).
+   * model + prompt. With second opinions switched off (scope.secondOpinions false) the second kind
+   * goes too, and there the other provider is told by its identity alone: any stored answer that is
+   * not this provider's makes the screenshot ineligible, whatever model or prompt it was given under
+   * (an answer from an older model is still an answer he would be asking a second opinion on).
+   * Parameters: eligibleArgs(scope).
    */
   private eligibleSql(o: CloudScope): string {
     const decisions = hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = p.hash)' : ''
     const others = (o.others ?? []).map(() => ANSWERED_BY).join(' OR ')
-    const decidedElsewhere = others ? ` OR ((${others}) AND ${CONFIDENT_SQL})` : ''
+    const decidedElsewhere = o.secondOpinions === false ? ' OR c.provider != ?' : !others ? '' : ` OR ((${others}) AND ${CONFIDENT_SQL})`
     return `p.proposal = 'doubtful' AND p.answered_at IS NULL AND p.sorter_version = ?
       AND NOT EXISTS (SELECT 1 FROM sorter_cloud_answers c WHERE c.hash = p.hash AND (${ANSWERED_BY}${decidedElsewhere})) ${decisions}`
   }
 
   private eligibleArgs(o: CloudScope): Array<string | number> {
     const others = o.others ?? []
+    if (o.secondOpinions === false) return [o.sorterVersion, ...scopeArgs(o), o.provider]
     return [o.sorterVersion, ...scopeArgs(o), ...others.flatMap(scopeArgs), ...(others.length ? [o.throwawayAt] : [])]
   }
 
@@ -517,11 +525,22 @@ export class SorterStore {
    * outside. If any is outside (outOfPeriod, how many), the batch is no longer the one that was
    * confirmed: nothing is admitted and nothing is counted by this call, and the caller stops its run.
    * What an earlier call counted stays counted.
+   *
+   * `confirmed` is the count main's dialog gave for a manual send (absent for the nightly batch, which
+   * goes with what fits): that many go or none. Checked here, in the transaction that counts, so no
+   * other run can use the allowance between the check and the count:
+   *   - before anything of the run is counted (its first request): the run must hold exactly
+   *     `confirmed` claims, every one still eligible, and all of them must fit in what is left of
+   *     `limit`;
+   *   - afterwards: what the run has not yet counted and may still ask about must still fit.
+   * If not (`short`), nothing is admitted or counted by this call and the run's claims are deleted
+   * here; the caller sends nothing more. Only this request's screenshots are counted by a call that
+   * passes: the rest are counted when their own requests are made (nothing is set aside for them).
    */
   admitForRequest(
     hashes: string[],
-    o: CloudScope & { runId: string; night: string; limit: number; window?: PeriodWindow; paths?: ReadonlyMap<string, string> }
-  ): { admitted: string[]; overLimit: number; outOfPeriod?: number } {
+    o: CloudScope & { runId: string; night: string; limit: number; window?: PeriodWindow; paths?: ReadonlyMap<string, string>; confirmed?: number }
+  ): { admitted: string[]; overLimit: number; outOfPeriod?: number; short?: true } {
     this.needAnswers()
     const limited = o.window && !isEverything(o.window) ? o.window : null
     const q = this.db.prepare(
@@ -546,6 +565,17 @@ export class SorterStore {
         if (outOfPeriod) {
           this.db.exec('COMMIT')
           return { admitted: [], overLimit: 0, outOfPeriod }
+        }
+      }
+      if (o.confirmed !== undefined) {
+        const mine = this.db.prepare('SELECT hash, counted FROM sorter_cloud_claims WHERE run_id = ?').all(o.runId) as Array<{ hash: string; counted: number }>
+        const open = mine.filter((c) => !Number(c.counted)).filter((c) => q.get(o.runId, c.hash, ...this.eligibleArgs(o)))
+        const first = mine.every((c) => !Number(c.counted))
+        const short = first ? mine.length !== o.confirmed || open.length !== o.confirmed || o.confirmed > left : open.length > left
+        if (short) {
+          this.db.prepare('DELETE FROM sorter_cloud_claims WHERE run_id = ?').run(o.runId)
+          this.db.exec('COMMIT')
+          return { admitted: [], overLimit: 0, short: true }
         }
       }
       for (const { hash: h, counted } of held) {

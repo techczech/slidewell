@@ -79,7 +79,7 @@ describe('consent is per provider', () => {
     expect(a.d.prompts).toHaveLength(1)
     expect(a.d.prompts[0]).toMatchObject({ kind: 'turn-on', provider: 'anthropic', count: 4, message: 'Turn on asking Haiku?' })
     expect(a.d.prompts[0].detail).toMatch(/Anthropic \(claude-haiku-5-5\) receives the picture.*app name and window title/s)
-    expect(a.box.stored).toEqual({ provider: 'anthropic', optedInAt: null, anthropicOptedInAt: T1, batchTime: '02:00' })
+    expect(a.box.stored).toEqual({ enabled: true, provider: 'anthropic', optedInAt: null, anthropicOptedInAt: T1, batchTime: '02:00', nightly: true, secondOpinions: true })
     expect(normaliseCloudSettings(a.box.stored)).toMatchObject({ enabled: true, provider: 'anthropic' })
   })
 
@@ -92,7 +92,7 @@ describe('consent is per provider', () => {
     expect(a.d.prompts[0]).toMatchObject({ kind: 'turn-on', provider: 'anthropic', message: 'Ask Haiku instead of Luna?' })
     expect(a.d.prompts[0].detail).toMatch(/the screenshots go to Anthropic instead; this is a separate agreement/)
     expect(a.d.prompts[0].detail).toMatch(/Anthropic \(claude-haiku-5-5\) receives the picture, resized to 1456 pixels on its long edge, with the app name and window title/)
-    expect(a.box.stored).toEqual({ provider: 'openai', optedInAt: T1, anthropicOptedInAt: null, batchTime: '02:00' })
+    expect(a.box.stored).toEqual({ enabled: true, provider: 'openai', optedInAt: T1, anthropicOptedInAt: null, batchTime: '02:00', nightly: true, secondOpinions: true })
     // still Luna, still on: the next run goes to OpenAI and nowhere else
     expect(await a.svc.runNightly()).toMatchObject({ provider: 'openai', asked: 4 })
     expect(new Set(net.urls)).toEqual(new Set([OPENAI_URL]))
@@ -105,7 +105,7 @@ describe('consent is per provider', () => {
     a.at(T2)
     await a.change({ provider: 'anthropic' })
     expect(a.d.prompts.map((p) => [p.kind, p.provider])).toEqual([['turn-on', 'anthropic']])
-    expect(a.box.stored).toEqual({ provider: 'anthropic', optedInAt: T1, anthropicOptedInAt: T2, batchTime: '03:00' })
+    expect(a.box.stored).toEqual({ enabled: true, provider: 'anthropic', optedInAt: T1, anthropicOptedInAt: T2, batchTime: '03:00', nightly: true, secondOpinions: true })
     expect(await a.svc.runNightly()).toMatchObject({ provider: 'anthropic', asked: 4 })
     expect(new Set(net.urls)).toEqual(new Set([ANTHROPIC_URL]))
     // back to Luna: he agreed to OpenAI before and has not turned it off, so no second dialog
@@ -120,7 +120,7 @@ describe('consent is per provider', () => {
     const a = app(w, {}, { http: net.http }, [false, true])
     await a.change({ provider: 'anthropic' })
     expect(a.d.prompts).toHaveLength(0)
-    expect(normaliseCloudSettings(a.box.stored)).toEqual({ enabled: false, batchTime: '02:00', provider: 'anthropic' })
+    expect(normaliseCloudSettings(a.box.stored)).toEqual({ enabled: false, batchTime: '02:00', provider: 'anthropic', nightly: true, secondOpinions: true, agreedAt: { openai: null, anthropic: null } })
     expect(await a.svc.runNightly()).toMatchObject({ skipped: 'off', asked: 0 })
     expect(await a.svc.prepare()).toMatchObject({ blocked: 'off', token: null })
     await a.change({ enabled: true }) // declined
@@ -135,25 +135,35 @@ describe('consent is per provider', () => {
     const w = four()
     const a = app(w, {}, {}, [false, true])
     await a.change({ enabled: true, provider: 'anthropic', batchTime: '04:30' })
-    expect(a.box.stored).toEqual({ provider: 'openai', optedInAt: null, anthropicOptedInAt: null, batchTime: '04:30' })
+    expect(a.box.stored).toEqual({ enabled: false, provider: 'openai', optedInAt: null, anthropicOptedInAt: null, batchTime: '04:30', nightly: true, secondOpinions: true })
     await a.change({ enabled: true, provider: 'anthropic' })
     expect(a.d.prompts.map((p) => [p.provider, p.message])).toEqual([
       ['anthropic', 'Turn on asking Haiku?'],
       ['anthropic', 'Turn on asking Haiku?']
     ])
-    expect(a.box.stored).toEqual({ provider: 'anthropic', optedInAt: null, anthropicOptedInAt: T1, batchTime: '04:30' })
+    expect(a.box.stored).toEqual({ enabled: true, provider: 'anthropic', optedInAt: null, anthropicOptedInAt: T1, batchTime: '04:30', nightly: true, secondOpinions: true })
   })
 
-  it('turning off clears both opt-ins: afterwards either provider needs its dialog again', async () => {
+  it('turning off keeps the provider and both agreements (ticket 18); it is off all the same, and a provider he never agreed to still needs its dialog', async () => {
     const w = four()
-    const a = app(w, { provider: 'anthropic', optedInAt: T1, anthropicOptedInAt: T1 })
+    const net = bothStubs()
+    const a = app(w, { provider: 'anthropic', anthropicOptedInAt: T1 }, { http: net.http })
     await a.change({ enabled: false })
-    expect(a.box.stored).toEqual({ provider: 'anthropic', optedInAt: null, anthropicOptedInAt: null, batchTime: '02:00' })
+    expect(a.box.stored).toEqual({ enabled: false, provider: 'anthropic', optedInAt: null, anthropicOptedInAt: T1, batchTime: '02:00', nightly: true, secondOpinions: true })
+    expect(normaliseCloudSettings(a.box.stored)).toMatchObject({ enabled: false, provider: 'anthropic', agreedAt: { openai: null, anthropic: T1 } })
+    // the agreement is kept, and it is not a licence to send while off
+    expect(await a.svc.prepare()).toMatchObject({ blocked: 'off', token: null })
+    expect(await a.svc.runNightly()).toMatchObject({ skipped: 'off', asked: 0 })
+    expect(await a.svc.tick()).toBeNull()
+    expect(net.urls).toEqual([])
+    // Luna was never agreed to: selecting it while off raises nothing, turning on raises its own dialog
     await a.change({ provider: 'openai' })
     expect(normaliseCloudSettings(a.box.stored)).toMatchObject({ enabled: false, provider: 'openai' })
     expect(a.d.prompts).toHaveLength(0)
+    a.at(T2)
     await a.change({ enabled: true })
     expect(a.d.prompts.map((p) => p.provider)).toEqual(['openai'])
+    expect(a.box.stored).toMatchObject({ enabled: true, provider: 'openai', optedInAt: T2, anthropicOptedInAt: T1 })
   })
 
   it('the stored settings alone can never opt in to a provider by selecting it', () => {
@@ -161,14 +171,14 @@ describe('consent is per provider', () => {
     const onLuna: StoredCloudSettings = { provider: 'openai', optedInAt: T1 }
     // selecting Haiku without enabled: true leaves Anthropic not opted in, so off
     const switched = applySettingsPatch(onLuna, { provider: 'anthropic' }, now)
-    expect(switched).toEqual({ provider: 'anthropic', optedInAt: T1, anthropicOptedInAt: null, batchTime: '02:00' })
+    expect(switched).toEqual({ enabled: false, provider: 'anthropic', optedInAt: T1, anthropicOptedInAt: null, batchTime: '02:00', nightly: true, secondOpinions: true })
     expect(normaliseCloudSettings(switched).enabled).toBe(false)
     // enabled: true opts in to the provider the patch leaves selected, and to no other
     expect(applySettingsPatch({}, { provider: 'anthropic', enabled: true }, now)).toMatchObject({ optedInAt: null, anthropicOptedInAt: T2 })
     expect(applySettingsPatch({ provider: 'anthropic' }, { enabled: true }, now)).toMatchObject({ optedInAt: null, anthropicOptedInAt: T2 })
     expect(applySettingsPatch({}, { enabled: true }, now)).toMatchObject({ optedInAt: T2, anthropicOptedInAt: null })
     // an unknown provider, or opt-in times passed in the patch, are not read
-    expect(applySettingsPatch(onLuna, { provider: 'google', anthropicOptedInAt: T1, optedIn: { anthropic: T1 } }, now)).toEqual({ provider: 'openai', optedInAt: T1, anthropicOptedInAt: null, batchTime: '02:00' })
+    expect(applySettingsPatch(onLuna, { provider: 'google', anthropicOptedInAt: T1, optedIn: { anthropic: T1 } }, now)).toEqual({ enabled: true, provider: 'openai', optedInAt: T1, anthropicOptedInAt: null, batchTime: '02:00', nightly: true, secondOpinions: true })
     expect(applySettingsPatch({ anthropicOptedInAt: 'yes', provider: 'anthropic' } as never, {}, now).anthropicOptedInAt).toBeNull()
   })
 
@@ -177,7 +187,7 @@ describe('consent is per provider', () => {
     const a = app(w, { provider: 'openai', optedInAt: T1 }, {}, [false])
     await a.change({ provider: 'anthropic', enabled: true, anthropicOptedInAt: T1 })
     expect(a.d.prompts.map((p) => p.provider)).toEqual(['anthropic'])
-    expect(a.box.stored).toEqual({ provider: 'openai', optedInAt: T1, anthropicOptedInAt: null, batchTime: '02:00' })
+    expect(a.box.stored).toEqual({ enabled: true, provider: 'openai', optedInAt: T1, anthropicOptedInAt: null, batchTime: '02:00', nightly: true, secondOpinions: true })
   })
 
   it('if the stored provider changes while the dialog is open, the opt-in still goes to the provider the dialog named', async () => {
@@ -191,7 +201,7 @@ describe('consent is per provider', () => {
     }
     await a.change({ provider: 'anthropic' })
     expect(a.d.prompts[0].provider).toBe('anthropic')
-    expect(a.box.stored).toEqual({ provider: 'anthropic', optedInAt: null, anthropicOptedInAt: T1, batchTime: '02:00' })
+    expect(a.box.stored).toEqual({ enabled: true, provider: 'anthropic', optedInAt: null, anthropicOptedInAt: T1, batchTime: '02:00', nightly: true, secondOpinions: true })
   })
 })
 
@@ -416,7 +426,12 @@ describe('the key IPC names its provider', () => {
     const svc = new CloudSorter(d)
     ipc.clear()
     const store = (id: 'openai' | 'anthropic') => ({ set: (k: unknown) => ((saved[id] = String(k)), { ok: true, saved: true }), clear: () => void (saved[id] = null) })
-    registerCloudIpc(svc, { openai: store('openai'), anthropic: store('anthropic') }, () => undefined, () => ({}), () => true)
+    // a key is removed by the settings write that withdraws the agreement (settings.ts removeKey)
+    const save = (s: Record<string, unknown>): void => {
+      if ('keyEnc' in s) saved.openai = null
+      if ('anthropicKeyEnc' in s) saved.anthropic = null
+    }
+    registerCloudIpc(svc, { openai: store('openai'), anthropic: store('anthropic') }, save, () => ({}), () => true)
     const call = (channel: string, ...args: unknown[]): Promise<any> => Promise.resolve(ipc.get(channel)!({ sender: null }, ...args)) // eslint-disable-line @typescript-eslint/no-explicit-any
     return { saved, call }
   }

@@ -38,13 +38,13 @@ import { startPictureQueryServer, PICTURE_QUERY_SOCKET, type QueryServer } from 
 import { WebGpuEmbedder } from './picture-search/webgpu-embedder'
 import { electronEmbedHost, registerEmbedProtocol, EMBED_SCHEME } from './picture-search/electron-embed-host'
 import { modelDir as pictureModelDir } from './picture-search/model-store'
-import { SorterService, changePeriod, registerSorterIpc } from './sorter/service'
+import { SorterService, changePeriod, registerSorterIpc, type LocalRunSummary } from './sorter/service'
 import createTrainWorker from './sorter/train-worker?nodeWorker'
 import type { Job, JobResult } from './sorter/jobs'
 import type { FetchLike } from './picture-search/model-store'
 import { ReviewService } from './review/service'
 import { registerReviewIpc } from './review/ipc'
-import { CloudSorter, normaliseCloudSettings, registerCloudIpc, type CloudRunSummary, type CloudSettings, type StoredCloudSettings } from './sorter/cloud/service'
+import { CloudSorter, KEY_FIELD, normaliseCloudSettings, registerCloudIpc, type CloudRunSummary, type CloudSettings, type StoredCloudSettings } from './sorter/cloud/service'
 import { ApiKeyStore } from './sorter/cloud/key-store'
 import { shrinkForLuna } from './sorter/cloud/images'
 import type { HttpPost } from './sorter/cloud/client'
@@ -91,12 +91,16 @@ type Config = {
   // sorter cloud step (tickets 07, 16): each provider's key only as safeStorage ciphertext (keyEnc = OpenAI,
   // anthropicKeyEnc = Anthropic), never in plain text; provider = which one is asked (absent = OpenAI);
   // optedInAt / anthropicOptedInAt = when he agreed to that provider (absent = not agreed, so off);
-  // the per-night limit is fixed in code
+  // enabled = the service on or off (absent = on whenever the selected provider is agreed to, as before it was
+  // stored; off keeps provider, keys and agreements); nightly / secondOpinions = the two switches (absent = on,
+  // anything but true = off; sorter/cloud/settings.ts); the per-night limit is fixed in code
   sorterCloud?: StoredCloudSettings & { keyEnc?: string; anthropicKeyEnc?: string; lastRunAt?: string | null; since?: string | null; lastRun?: CloudRunSummary | null }
   // the period both sort buttons in Settings are limited to: '7d' | '30d' | '90d' | 'all' (sorter/period.ts);
   // absent = everything; present with anything else (null included) = unreadable, and no manual sort runs
   // (period.ts storedPeriod). Only main reads it and works out the cut-off; the nightly sort ignores it
   sorterPeriod?: string
+  // the last sort on this Mac as numbers (sorter/service.ts storedLocalRun reads it; anything else = none)
+  sorterLastRun?: LocalRunSummary
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -439,7 +443,9 @@ app.whenReady().then(() => {
     broadcast: (st) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('sorter:status', st)
     },
-    period: () => readConfig().sorterPeriod
+    period: () => readConfig().sorterPeriod,
+    lastRun: () => readConfig().sorterLastRun,
+    saveLastRun: (r) => writeConfig({ sorterLastRun: r })
   })
   // the period is one setting for both sort buttons: a change drops the cloud step's prepared batch and both sections are told
   registerSorterIpc(sorter, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents), (period) =>
@@ -457,8 +463,8 @@ app.whenReady().then(() => {
   const saveCloudCfg = (patch: Partial<NonNullable<Config['sorterCloud']>>): void => writeConfig({ sorterCloud: { ...cloudCfg(), ...patch } })
   const keychain = { available: () => safeStorage.isEncryptionAvailable(), encrypt: (k: string) => safeStorage.encryptString(k), decrypt: (b: Buffer) => safeStorage.decryptString(b) }
   const cloudKeys = {
-    openai: new ApiKeyStore(() => cloudCfg().keyEnc, (enc) => saveCloudCfg({ keyEnc: enc }), keychain, PROVIDERS.openai.keyRule),
-    anthropic: new ApiKeyStore(() => cloudCfg().anthropicKeyEnc, (enc) => saveCloudCfg({ anthropicKeyEnc: enc }), keychain, PROVIDERS.anthropic.keyRule)
+    openai: new ApiKeyStore(() => cloudCfg()[KEY_FIELD.openai], (enc) => saveCloudCfg({ [KEY_FIELD.openai]: enc }), keychain, PROVIDERS.openai.keyRule),
+    anthropic: new ApiKeyStore(() => cloudCfg()[KEY_FIELD.anthropic], (enc) => saveCloudCfg({ [KEY_FIELD.anthropic]: enc }), keychain, PROVIDERS.anthropic.keyRule)
   }
   // redirect 'error': a request carries a key and pictures, and is never followed to another address
   const cloudHttp: HttpPost = (url, init) => net.fetch(url, { method: init.method, headers: init.headers, body: init.body, signal: init.signal, redirect: init.redirect })

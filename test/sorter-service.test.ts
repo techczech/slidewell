@@ -303,3 +303,80 @@ describe('sorter service: the cascade on re-sort (ticket 07)', () => {
     }
   })
 })
+
+describe('sorter service: numbers for the Auto sorting tab (ticket 18)', () => {
+  const NOW = new Date(2026, 9, 12, 12, 0, 0)
+  const date = (w: string, hash: string, takenAt: string): void => {
+    const db = new DatabaseSync(join(w, 'triage.db'))
+    db.prepare('UPDATE triage_fts SET taken_at = ? WHERE hash = ?').run(takenAt, hash)
+    db.close()
+  }
+
+  it('counts the undecided screenshots in the chosen period and in all, and his usable choices, only when asked', async () => {
+    const w = well(70, 30)
+    date(w, 'new0', '2026-10-10T09:00:00') // two days ago
+    date(w, 'new1', '2026-09-01T09:00:00') // six weeks ago; new2 has no date
+    let period: unknown = '7d'
+    const svc = new SorterService(deps(w, { period: () => period, now: () => NOW }))
+    expect(svc.status()).toMatchObject({ undecided: null, learnable: null, lastRun: null }) // not counted yet
+    expect(svc.status({ count: true })).toMatchObject({ undecided: { period: '7d', inPeriod: 1, all: 3 }, learnable: { kept: 70, binned: 30 } })
+    expect(svc.status().undecided).toEqual({ period: '7d', inPeriod: 1, all: 3 }) // a status in between carries the last count
+    period = '90d'
+    expect(svc.status({ count: true }).undecided).toEqual({ period: '90d', inPeriod: 2, all: 3 })
+    period = undefined // never chosen: everything, the undated one included
+    expect(svc.status({ count: true }).undecided).toEqual({ period: 'all', inPeriod: 3, all: 3 })
+    // a stored period that is not one of the four is not everything: no count for it
+    for (const bad of [null, 'bogus', 30]) {
+      period = bad
+      expect(svc.status({ count: true }).undecided).toEqual({ period: null, inPeriod: null, all: 3 })
+    }
+    // a choice whose picture is gone is nothing to learn from; one he decides is no longer undecided
+    rmSync(join(w, 'source', 'bin0.png'))
+    const db = new DatabaseSync(join(w, 'triage.db'))
+    db.prepare("INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES ('new0', 'included', '2026-10-12', NULL)").run()
+    db.close()
+    period = '7d'
+    expect(svc.status({ count: true })).toMatchObject({ undecided: { period: '7d', inPeriod: 0, all: 2 }, learnable: { kept: 71, binned: 29 } })
+  })
+
+  it('the count for the period is the number a manual sort then looks at, and the period change pushes a fresh count', async () => {
+    const w = well(70, 30)
+    date(w, 'new0', '2026-10-10T09:00:00')
+    date(w, 'new1', '2026-10-11T09:00:00')
+    let period: unknown = '7d'
+    const pushed: Array<ReturnType<InstanceType<typeof SorterService>['status']>> = []
+    const svc = new SorterService(deps(w, { period: () => period, now: () => NOW, broadcast: (s) => void pushed.push(s) }))
+    expect((await svc.trainAndTest()).ok).toBe(true)
+    const counted = svc.status({ count: true }).undecided!.inPeriod
+    expect(counted).toBe(2)
+    expect(await svc.sortManual()).toMatchObject({ ok: true, sorted: counted, period: '7d' })
+    period = 'all'
+    svc.notify()
+    expect(pushed.at(-1)!.undecided).toEqual({ period: 'all', inPeriod: 3, all: 3 })
+  })
+
+  it('records each sort as numbers, kept across a restart; a refused sort records nothing', async () => {
+    const w = well(70, 30)
+    const box: { run: unknown } = { run: undefined }
+    const kept = { lastRun: () => box.run, saveLastRun: (r: unknown) => void (box.run = r), now: () => NOW }
+    const svc = new SorterService(deps(w, { ...kept, thresholds: { throwaway: 0.999, keep: 0.999 } }))
+    expect((await svc.sortUndecided()).ok).toBe(false) // not trained yet
+    expect(box.run).toBeUndefined()
+    expect(svc.status().lastRun).toBeNull()
+    expect((await svc.trainAndTest()).ok).toBe(true)
+    const r = await svc.sortUndecided()
+    expect(r).toMatchObject({ ok: true, sorted: 3, counts: { doubtful: 3 } })
+    expect(box.run).toEqual({ at: NOW.toISOString(), period: 'all', lookedAt: 3, confident: 0, needLook: 3 })
+    expect(svc.status()).toMatchObject({ lastRun: box.run, undecided: { all: 3 } }) // and the counts were taken again
+    // a restart: another service over the same stored value
+    const again = new SorterService(deps(w, kept))
+    expect(again.status().lastRun).toEqual(box.run)
+    const plain = await again.sortUndecided()
+    expect(box.run).toEqual({ at: NOW.toISOString(), period: 'all', lookedAt: 3, confident: plain.counts!.keep + plain.counts!.throwaway, needLook: plain.counts!.doubtful })
+    // what is stored but is not a run is no run
+    for (const bad of [null, 'yesterday', {}, { at: 'x', period: 'all', lookedAt: 3, confident: 1, needLook: 2 }, { at: NOW.toISOString(), period: 'week', lookedAt: 3, confident: 1, needLook: 2 }, { at: NOW.toISOString(), period: 'all', lookedAt: '3', confident: 1, needLook: 2 }, { at: NOW.toISOString(), period: 'all', lookedAt: -1, confident: 1, needLook: 2 }]) {
+      box.run = bad
+      expect(again.status().lastRun).toBeNull()
+    }
+  })
+})
