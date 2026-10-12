@@ -257,8 +257,8 @@ describe('F: a run is bound to the key it started with', () => {
       ipc.clear()
       registerCloudIpc(
         svc,
-        { openai: { set: (k) => ((key = String(k)), { ok: true, saved: true }), clear: () => void (key = null) }, anthropic: { set: () => ({ ok: false, saved: false }), clear: () => undefined } },
-        () => undefined,
+        { openai: { set: (k) => ((key = String(k)), { ok: true, saved: true }) }, anthropic: { set: () => ({ ok: false, saved: false }) } },
+        (s) => void ('keyEnc' in s && (key = null)), // a key is removed by the settings write that withdraws the agreement
         () => ({}),
         () => true
       )

@@ -4,8 +4,11 @@
  * Rules:
  *   - The batch time is 'HH:MM' (default 02:00). The latest slot is the most recent local HH:MM at
  *     or before now.
- *   - Due when the nightly run is on and the latest slot falls after the anchor: the last run, or,
- *     before the first run, the moment the schedule started (so a fresh install never runs at once).
+ *   - Due when the nightly run is on and the latest slot falls after the anchor: the later of the
+ *     last run and the moment the schedule started. The schedule starts at the first check (so a
+ *     fresh install never runs at once) and starts again whenever the cloud step or the nightly
+ *     switch is turned on (service.ts restartSchedule), so a slot that passed while either was off
+ *     is not caught up.
  *   - The app checks while it is running and at launch; a slot missed while the app was closed runs
  *     once at the next launch, however many nights were missed.
  */
@@ -45,14 +48,15 @@ export type ScheduleInput = {
   batchTime: string
   /** ISO time of the last nightly run (started), or null. */
   lastRunAt: string | null
-  /** ISO time the schedule started (set on first check), or null when not yet set. */
+  /** ISO time the schedule started (set on first check, and again when the cloud step or the nightly switch is turned on), or null when not yet set. */
   since: string | null
 }
 
 export function isBatchDue(s: ScheduleInput): boolean {
   if (!s.enabled) return false
-  const anchor = Date.parse(s.lastRunAt ?? s.since ?? '')
-  if (!Number.isFinite(anchor)) return false
+  const times = [s.lastRunAt, s.since].map((t) => Date.parse(t ?? '')).filter((t) => Number.isFinite(t))
+  if (!times.length) return false
+  const anchor = Math.max(...times)
   const slot = latestSlot(s.now, s.batchTime).getTime()
   return slot > anchor && slot <= s.now.getTime()
 }

@@ -44,7 +44,7 @@ import type { Job, JobResult } from './sorter/jobs'
 import type { FetchLike } from './picture-search/model-store'
 import { ReviewService } from './review/service'
 import { registerReviewIpc } from './review/ipc'
-import { CloudSorter, normaliseCloudSettings, registerCloudIpc, type CloudRunSummary, type CloudSettings, type StoredCloudSettings } from './sorter/cloud/service'
+import { CloudSorter, KEY_FIELD, normaliseCloudSettings, registerCloudIpc, type CloudRunSummary, type CloudSettings, type StoredCloudSettings } from './sorter/cloud/service'
 import { ApiKeyStore } from './sorter/cloud/key-store'
 import { shrinkForLuna } from './sorter/cloud/images'
 import type { HttpPost } from './sorter/cloud/client'
@@ -463,8 +463,8 @@ app.whenReady().then(() => {
   const saveCloudCfg = (patch: Partial<NonNullable<Config['sorterCloud']>>): void => writeConfig({ sorterCloud: { ...cloudCfg(), ...patch } })
   const keychain = { available: () => safeStorage.isEncryptionAvailable(), encrypt: (k: string) => safeStorage.encryptString(k), decrypt: (b: Buffer) => safeStorage.decryptString(b) }
   const cloudKeys = {
-    openai: new ApiKeyStore(() => cloudCfg().keyEnc, (enc) => saveCloudCfg({ keyEnc: enc }), keychain, PROVIDERS.openai.keyRule),
-    anthropic: new ApiKeyStore(() => cloudCfg().anthropicKeyEnc, (enc) => saveCloudCfg({ anthropicKeyEnc: enc }), keychain, PROVIDERS.anthropic.keyRule)
+    openai: new ApiKeyStore(() => cloudCfg()[KEY_FIELD.openai], (enc) => saveCloudCfg({ [KEY_FIELD.openai]: enc }), keychain, PROVIDERS.openai.keyRule),
+    anthropic: new ApiKeyStore(() => cloudCfg()[KEY_FIELD.anthropic], (enc) => saveCloudCfg({ [KEY_FIELD.anthropic]: enc }), keychain, PROVIDERS.anthropic.keyRule)
   }
   // redirect 'error': a request carries a key and pictures, and is never followed to another address
   const cloudHttp: HttpPost = (url, init) => net.fetch(url, { method: init.method, headers: init.headers, body: init.body, signal: init.signal, redirect: init.redirect })

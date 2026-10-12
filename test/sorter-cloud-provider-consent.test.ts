@@ -426,7 +426,12 @@ describe('the key IPC names its provider', () => {
     const svc = new CloudSorter(d)
     ipc.clear()
     const store = (id: 'openai' | 'anthropic') => ({ set: (k: unknown) => ((saved[id] = String(k)), { ok: true, saved: true }), clear: () => void (saved[id] = null) })
-    registerCloudIpc(svc, { openai: store('openai'), anthropic: store('anthropic') }, () => undefined, () => ({}), () => true)
+    // a key is removed by the settings write that withdraws the agreement (settings.ts removeKey)
+    const save = (s: Record<string, unknown>): void => {
+      if ('keyEnc' in s) saved.openai = null
+      if ('anthropicKeyEnc' in s) saved.anthropic = null
+    }
+    registerCloudIpc(svc, { openai: store('openai'), anthropic: store('anthropic') }, save, () => ({}), () => true)
     const call = (channel: string, ...args: unknown[]): Promise<any> => Promise.resolve(ipc.get(channel)!({ sender: null }, ...args)) // eslint-disable-line @typescript-eslint/no-explicit-any
     return { saved, call }
   }

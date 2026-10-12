@@ -5,8 +5,8 @@
  * Four things are stored, each on its own:
  *   - Agreement, per provider: the time he confirmed main's dialog naming that provider (optedInAt
  *     for OpenAI, anthropicOptedInAt for Anthropic). Turning the service off does not remove it;
- *     removing that provider's key does (withdrawAgreement). Nothing is ever sent to a provider
- *     without it.
+ *     removing that provider's key does, in the same write that removes the key (removeKey). Nothing
+ *     is ever sent to a provider without it.
  *   - The service: `enabled` and `provider`. It is on only when `enabled` is not false AND the
  *     selected provider has an agreement. A config written before `enabled` was stored has no such
  *     field, and reads as it always did: on exactly when the selected provider has an agreement.
@@ -117,4 +117,18 @@ export function withdrawAgreement(cur: StoredCloudSettings, provider: ProviderId
   const kept = { optedInAt: agreedAt(cur, 'openai'), anthropicOptedInAt: agreedAt(cur, 'anthropic') }
   kept[OPT_IN_FIELD[provider]] = null
   return { ...kept, enabled: storedSwitch(cur, 'enabled') && Boolean(kept[OPT_IN_FIELD[storedProvider(cur)]]) }
+}
+
+/** Where config.json keeps each provider's key, as safeStorage ciphertext (key-store.ts). */
+export type StoredKeys = { keyEnc?: string; anthropicKeyEnc?: string }
+export const KEY_FIELD: Record<ProviderId, keyof StoredKeys> = { openai: 'keyEnc', anthropic: 'anthropicKeyEnc' }
+
+/**
+ * One provider's key removed, as what to store in one write: its ciphertext gone (undefined, which
+ * the merge into config.json drops) together with withdrawAgreement for that provider. The two are
+ * never written apart: an agreement left behind by a write that did not happen would count for
+ * whatever key is saved next.
+ */
+export function removeKey(cur: StoredCloudSettings, provider: ProviderId): ReturnType<typeof withdrawAgreement> & StoredKeys {
+  return { ...withdrawAgreement(cur, provider), [KEY_FIELD[provider]]: undefined }
 }

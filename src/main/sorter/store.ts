@@ -89,8 +89,9 @@ export type CloudAnswerRow = LunaAnswer & { hash: string; provider: ProviderId; 
  * asking, with its current model and prompt; `others`, the other providers with theirs;
  * `throwawayAt`, the confidence from which a throwaway answer is a decision (the sorter's throwaway
  * threshold, cascade.ts isConfident); and `secondOpinions`, the switch in Settings: false means a
- * screenshot another provider has answered is never eligible, whatever that answer was (absent: they
- * are allowed, as before there was a switch; cloud/service.ts always says which).
+ * screenshot another provider has answered is never eligible, whatever that answer was and whatever
+ * model or prompt it was given under (absent: they are allowed, as before there was a switch;
+ * cloud/service.ts always says which).
  */
 export type CloudScope = AnswerScope & { sorterVersion: string; others?: ReadonlyArray<AnswerScope>; throwawayAt: number; secondOpinions?: boolean }
 
@@ -435,19 +436,23 @@ export class SorterStore {
    * answered and was unsure about (a second opinion). Once every provider has answered one, it is
    * never eligible again, whichever is selected. An answer counts only under its provider's current
    * model + prompt. With second opinions switched off (scope.secondOpinions false) the second kind
-   * goes too: any answer from another provider makes it ineligible. Parameters: eligibleArgs(scope).
+   * goes too, and there the other provider is told by its identity alone: any stored answer that is
+   * not this provider's makes the screenshot ineligible, whatever model or prompt it was given under
+   * (an answer from an older model is still an answer he would be asking a second opinion on).
+   * Parameters: eligibleArgs(scope).
    */
   private eligibleSql(o: CloudScope): string {
     const decisions = hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = p.hash)' : ''
     const others = (o.others ?? []).map(() => ANSWERED_BY).join(' OR ')
-    const decidedElsewhere = !others ? '' : o.secondOpinions === false ? ` OR (${others})` : ` OR ((${others}) AND ${CONFIDENT_SQL})`
+    const decidedElsewhere = o.secondOpinions === false ? ' OR c.provider != ?' : !others ? '' : ` OR ((${others}) AND ${CONFIDENT_SQL})`
     return `p.proposal = 'doubtful' AND p.answered_at IS NULL AND p.sorter_version = ?
       AND NOT EXISTS (SELECT 1 FROM sorter_cloud_answers c WHERE c.hash = p.hash AND (${ANSWERED_BY}${decidedElsewhere})) ${decisions}`
   }
 
   private eligibleArgs(o: CloudScope): Array<string | number> {
     const others = o.others ?? []
-    return [o.sorterVersion, ...scopeArgs(o), ...others.flatMap(scopeArgs), ...(others.length && o.secondOpinions !== false ? [o.throwawayAt] : [])]
+    if (o.secondOpinions === false) return [o.sorterVersion, ...scopeArgs(o), o.provider]
+    return [o.sorterVersion, ...scopeArgs(o), ...others.flatMap(scopeArgs), ...(others.length ? [o.throwawayAt] : [])]
   }
 
   /**

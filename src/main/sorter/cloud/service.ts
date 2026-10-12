@@ -92,7 +92,7 @@ import { LunaResponseError, REASON_MAX, planChunks, selectForCloud, type CloudCa
 import { clipRedacted, LunaHttpError, pool, postCloud, redact, type HttpPost } from './client'
 import type { LunaRequest } from './luna'
 import { DEFAULT_PROVIDER, isProviderId, otherProviders, PROVIDER_IDS, providerOf, PROVIDERS, type CloudProvider, type ProviderId } from './provider'
-import { applySettingsPatch, isSwitch, optedIn, serviceOn, storedProvider, storedSwitch, withdrawAgreement, type CloudSettings, type StoredCloudSettings } from './settings'
+import { applySettingsPatch, isSwitch, optedIn, removeKey, serviceOn, storedProvider, storedSwitch, type CloudSettings, type StoredCloudSettings, type StoredKeys } from './settings'
 import { readVerified, type VerifyRefusal } from './images'
 import { isBatchDue, nextSlot, nightOf } from './schedule'
 import { EVERYTHING, inWindow, isEverything, isSortPeriod, PERIOD_CHOICES, PERIOD_UNREADABLE, periodLabel, periodNote, periodPhrase, periodPrefix, periodWindow, storedPeriod, type PeriodWindow, type SortPeriod } from '../period'
@@ -102,7 +102,7 @@ export const NIGHTLY_LIMIT = 300
 /** How long a prepared Sort now batch can be sent. */
 export const PREPARED_TTL_MS = 10 * 60 * 1000
 
-export { agreedAt, applySettingsPatch, isSwitch, normaliseCloudSettings, optedIn, serviceOn, storedProvider, storedSwitch, withdrawAgreement, type CloudSettings, type StoredCloudSettings } from './settings'
+export { agreedAt, applySettingsPatch, isSwitch, KEY_FIELD, normaliseCloudSettings, optedIn, removeKey, serviceOn, storedProvider, storedSwitch, withdrawAgreement, type CloudSettings, type StoredCloudSettings, type StoredKeys } from './settings'
 
 export type CloudSkip = 'unavailable' | 'off' | 'nightly-off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | 'period-changed' | 'batch-changed' | 'date-changed'
 
@@ -483,12 +483,14 @@ export class CloudSorter {
   }
 
   /**
-   * A provider's key was removed or a key was saved for it (Settings). A run is bound to the key it
-   * started with, so a running batch that asks that provider stops at once: no further request or
-   * retry, its claims released. A change to the other provider's key does not concern the run.
+   * A provider's key was removed or a key was saved for it (Settings). A prepared batch can no longer
+   * be sent: its count was confirmed for the keys as they were. A run is bound to the key it started
+   * with, so a running batch that asks that provider stops at once: no further request or retry, its
+   * claims released. A change to the other provider's key does not concern the run.
    */
   keyChanged(provider: ProviderId, change: 'cleared' | 'saved'): void {
     this.keyChanges[provider]++
+    this.prepared = null
     if (!this.running || this.running.provider !== provider) return
     this.log(`the ${PROVIDERS[provider].company} key was ${change === 'cleared' ? 'removed' : 'changed'}: stopping the run`)
     this.running.revoke(change === 'cleared' ? 'no-key' : 'revoked')
@@ -523,6 +525,16 @@ export class CloudSorter {
     if (!this.running || on) return
     this.log('asking was turned off: stopping the run')
     this.running.revoke('off')
+  }
+
+  /**
+   * The cloud step or the nightly switch is being turned on. The schedule starts again from now
+   * (`since`, which schedule.ts isBatchDue honours when it is later than the last run), so a slot
+   * that passed while it was off is not caught up: the next nightly batch is the one status() gives
+   * as nextRunAt. A service that was on all along is not touched, and still catches up at launch.
+   */
+  restartSchedule(): void {
+    this.deps.saveState({ since: this.now().toISOString() })
   }
 
   /**
@@ -862,6 +874,13 @@ export class CloudSorter {
     const runId = randomUUID()
     const { claimed, leftBefore } = this.withStore((s) => s.claimForCloud(wanted.map((c) => c.hash), { ...this.scope(provider), night, limit: NIGHTLY_LIMIT, runId, now: this.now() }))
     if (!claimed.length) return finish({ skipped: leftBefore === 0 ? 'limit-reached' : 'nothing-doubtful', stayedDoubtful: list.length })
+    // main's dialog gave a count: a manual send is that many or none. Fewer were claimed (tonight's
+    // allowance shrank, or another run holds some): the claims go and he is asked to start again.
+    // The nightly batch has no confirmed count and goes with what fits.
+    if (o.confirm && claimed.length !== wanted.length) {
+      this.withStore((s) => s.releaseClaims(runId))
+      return finish({ skipped: 'batch-changed', stayedDoubtful: list.length })
+    }
     const claimedSet = new Set(claimed)
     const selected = wanted.filter((c) => claimedSet.has(c.hash))
 
@@ -876,6 +895,8 @@ export class CloudSorter {
     let revoked: Revoked | null = null
     // a capture date left the window after sending began: the run stops, nothing more is sent
     let dateChanged = false
+    // the night this run counts against ended (local noon passed): nothing more is admitted
+    let nightEnded = false
     const paths = new Map(selected.map((c) => [c.hash, c.path]))
     let chunkError: string | null = null
     const refused = new Map<NotSent, number>()
@@ -906,7 +927,7 @@ export class CloudSorter {
         planChunks(selected, provider.chunkSize),
         provider.concurrency,
         async (chunk) => {
-          if (ctl.signal.aborted) return
+          if (ctl.signal.aborted || nightEnded) return
           try {
             consent()
           } catch {
@@ -945,6 +966,16 @@ export class CloudSorter {
               // tonight's allowance, counted here for what goes into the request (store.ts admitForRequest)
               before: (attempt) => {
                 consent()
+                // the allowance is counted against the night the run began in; past its end (noon) a
+                // request would be charged to a night that is over, so none is made, first try or retry.
+                // Requests already out finish; the claims not sent go when the run ends
+                if (nightEnded || nightOf(this.now()) !== night) {
+                  nightEnded = true
+                  refuse('night-ended', current.length)
+                  current = []
+                  last.req = null
+                  return 'skip'
+                }
                 const { admitted, overLimit, outOfPeriod } = this.withStore((s) => s.admitForRequest(current.map((i) => i.hash), { ...this.scope(provider), runId, night, limit: NIGHTLY_LIMIT, ...(o.window ? { window, paths } : {}) }))
                 if (outOfPeriod) {
                   // nothing was admitted or counted for this request; it is not made, and no other starts
@@ -1007,7 +1038,7 @@ export class CloudSorter {
             this.push()
           }
         },
-        () => ctl.signal.aborted
+        () => ctl.signal.aborted || nightEnded
       )
     } finally {
       this.abort = null
@@ -1028,6 +1059,12 @@ export class CloudSorter {
       const skipped: CloudSkip | null = f.kind === 'offline' ? 'offline' : f.kind === 'auth' ? 'key-rejected' : f.kind === 'cancelled' ? 'cancelled' : null
       return finish({ ...counts, stayedDoubtful, skipped, error: skipped === 'offline' || skipped === 'cancelled' ? null : scrub(f.message) })
     }
+    if (nightEnded) {
+      // no outcome of its own (the outcomes are a type the renderer shares): stopped, with the reason in words
+      const s = finish({ ...counts, stayedDoubtful, skipped: 'cancelled' })
+      s.message = `Stopped${s.asked ? ` after asking ${provider.name} about ${plural(s.asked, 'screenshot')}` : ''}: the night this run counted against ended at noon. Nothing more was sent.${stayedDoubtful ? ` ${plural(stayedDoubtful, 'screenshot')} still need${stayedDoubtful === 1 ? 's' : ''} a look.` : ''}`
+      return s
+    }
     return finish({ ...counts, stayedDoubtful, error: chunkError })
   }
 }
@@ -1046,7 +1083,7 @@ const within = (list: CloudCandidate[], w: PeriodWindow): CloudCandidate[] => (i
 /** How many of these the other provider answered and was unsure about. */
 const secondOf = (batch: ReadonlyArray<{ hash: string }>, pending: Map<string, CloudPending>): number => batch.filter((c) => pending.get(c.hash)?.secondOpinion).length
 
-type NotSent = VerifyRefusal | 'no-longer-eligible' | 'limit-reached' | 'out-of-period'
+type NotSent = VerifyRefusal | 'no-longer-eligible' | 'limit-reached' | 'out-of-period' | 'night-ended'
 /** Log words for a screenshot that was not sent (never its path or name). */
 const REFUSAL_WORDS: Record<NotSent, string> = {
   'limit-reached': 'tonight’s limit was reached',
@@ -1056,7 +1093,8 @@ const REFUSAL_WORDS: Record<NotSent, string> = {
   'too-large': 'the file is too large',
   unreadable: 'the file could not be read',
   'no-longer-eligible': 'decided or answered meanwhile',
-  'out-of-period': 'its date is no longer in the period'
+  'out-of-period': 'its date is no longer in the period',
+  'night-ended': 'the night the run counted against had ended'
 }
 
 /** One plain sentence for Settings. */
@@ -1115,9 +1153,11 @@ export function describe(s: CloudRunSummary): string {
  * and turning it on afterwards asks for that provider. A provider he has already agreed to is
  * selected, or turned on again after being off, without a second dialog: turning the cloud step off
  * keeps both agreements. Whenever the cloud step ends up on where it was off, or off where it was on,
- * the service is told (serviceChanged).
+ * the service is told (serviceChanged). Where it ends up on having been off, the nightly schedule
+ * starts again from now, before the change is stored (restartSchedule): a slot that passed while it
+ * was off is not caught up.
  */
-export async function changeSettings(svc: Pick<CloudSorter, 'consentToTurnOn' | 'providerChanged'> & Partial<Pick<CloudSorter, 'serviceChanged'>>, patch: unknown, current: () => StoredCloudSettings, save: (s: StoredCloudSettings) => void, now: () => Date): Promise<void> {
+export async function changeSettings(svc: Pick<CloudSorter, 'consentToTurnOn' | 'providerChanged'> & Partial<Pick<CloudSorter, 'serviceChanged' | 'restartSchedule'>>, patch: unknown, current: () => StoredCloudSettings, save: (s: StoredCloudSettings) => void, now: () => Date): Promise<void> {
   let p: Record<string, unknown> = patch && typeof patch === 'object' ? { ...(patch as Record<string, unknown>) } : {}
   if (!isProviderId(p.provider)) delete p.provider // only the two ids select a provider
   const before = current()
@@ -1135,6 +1175,7 @@ export async function changeSettings(svc: Pick<CloudSorter, 'consentToTurnOn' | 
   }
   const latest = current() // read again: the dialog may have stood open a while
   const next = applySettingsPatch(latest, p, now())
+  if (next.enabled && !serviceOn(latest)) svc.restartSchedule?.() // first: stored on with the old anchor, the next check would catch up
   save(next)
   if (next.provider !== storedProvider(latest)) svc.providerChanged()
   if (next.enabled !== serviceOn(latest)) svc.serviceChanged?.()
@@ -1147,10 +1188,13 @@ export const SWITCH_REFUSED = 'That is neither on nor off, so nothing was change
 /**
  * The nightly switch, set from the renderer. Only true or false is stored; anything else is refused
  * and what is stored stays as it was. It turns nothing on by itself: the nightly batch still needs
- * the cloud step on, which needs his agreement.
+ * the cloud step on, which needs his agreement. Turned on where it was off, the nightly schedule
+ * starts again from now, before the switch is stored (restartSchedule): a slot that passed while it
+ * was off is not caught up.
  */
-export function changeNightly(value: unknown, save: (s: StoredCloudSettings) => void): SwitchResult {
+export function changeNightly(value: unknown, save: (s: StoredCloudSettings) => void, current?: () => StoredCloudSettings, svc?: Pick<CloudSorter, 'restartSchedule'>): SwitchResult {
   if (!isSwitch(value)) return { ok: false, error: SWITCH_REFUSED }
+  if (value && current && !storedSwitch(current(), 'nightly')) svc?.restartSchedule()
   save({ nightly: value })
   return { ok: true }
 }
@@ -1171,12 +1215,15 @@ export function changeSecondOpinions(svc: Pick<CloudSorter, 'secondOpinionsChang
  * IPC for Settings › Screenshot sorter › cloud step. Types: src/preload/index.ts. Never returns a key.
  * A key is saved or removed for the provider the call names (one of the two ids, or it is refused):
  * there is no default and no guessing from the key, so a key cannot land in the other provider's store.
- * `saveSettings` merges what it is given into the stored settings (index.ts).
+ * `saveSettings` merges what it is given into the stored settings (index.ts), in one write of
+ * config.json per call. Removing a key is one such call: the ciphertext, his agreement to that
+ * provider and the resulting on/off go together (settings.ts removeKey), so no failure between two
+ * writes can leave an agreement without its key.
  */
 export function registerCloudIpc(
   svc: CloudSorter,
-  keys: Record<ProviderId, { set(k: unknown): { ok: boolean; saved: boolean; error?: string }; clear(): void }>,
-  saveSettings: (s: StoredCloudSettings) => void,
+  keys: Record<ProviderId, { set(k: unknown): { ok: boolean; saved: boolean; error?: string } }>,
+  saveSettings: (s: StoredCloudSettings & StoredKeys) => void,
   current: () => StoredCloudSettings,
   allowed: (sender: Electron.WebContents) => boolean
 ): void {
@@ -1195,10 +1242,10 @@ export function registerCloudIpc(
   })
   handle('cloud:clear-key', (provider: unknown) => {
     if (!isProviderId(provider)) return svc.status()
-    keys[provider].clear()
-    // removing a key withdraws his agreement to that provider: a key saved later needs the dialog again
+    // removing a key withdraws his agreement to that provider: a key saved later needs the dialog again.
+    // One write for the key, the agreement and on/off; only then is the service told
     const before = current()
-    saveSettings(withdrawAgreement(before, provider))
+    saveSettings(removeKey(before, provider))
     svc.keyChanged(provider, 'cleared')
     if (serviceOn(before) !== serviceOn(current())) svc.serviceChanged()
     return svc.status()
@@ -1209,7 +1256,7 @@ export function registerCloudIpc(
     return svc.status()
   })
   // the two switches take true or false and nothing else; neither turns the cloud step on
-  handle('cloud:set-nightly', (value: unknown) => ({ ...changeNightly(value, saveSettings), status: svc.status() }))
+  handle('cloud:set-nightly', (value: unknown) => ({ ...changeNightly(value, saveSettings, current, svc), status: svc.status() }))
   handle('cloud:set-second-opinions', (value: unknown) => ({ ...changeSecondOpinions(svc, value, current, saveSettings), status: svc.status() }))
   handle('cloud:prepare', () => svc.prepare())
   handle('cloud:send', (token: unknown) => svc.send(token))
