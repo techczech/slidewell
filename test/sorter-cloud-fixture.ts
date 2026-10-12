@@ -174,7 +174,7 @@ export function cloudDeps(
   const logs: string[] = []
   const key = keyValue === undefined ? FAKE_OPENAI_KEY : keyValue
   const antKey = anthropicKeyValue === undefined ? FAKE_ANTHROPIC_KEY : anthropicKeyValue
-  const settings: CloudSettings = { enabled: true, batchTime: '02:00', provider: 'openai', ...settingsPatch }
+  const settings: CloudSettings = { enabled: true, batchTime: '02:00', provider: 'openai', nightly: true, secondOpinions: true, agreedAt: { openai: '2026-10-01T09:00:00.000Z', anthropic: '2026-10-01T09:00:00.000Z' }, ...settingsPatch }
   const out = {
     wellRoot: () => well,
     sortLocal: async () => {

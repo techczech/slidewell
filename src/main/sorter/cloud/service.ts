@@ -9,10 +9,20 @@
  *     (deps.confirm: count waiting, estimated cost, which company receives what); only then does main
  *     record the moment for that provider (optedInAt for OpenAI, anthropicOptedInAt for Anthropic, in
  *     config.json; changeSettings). Saving a key does not turn it on. Off means no nightly upload and
- *     no Sort now upload. It is on only while the provider selected in Settings has a recorded opt-in.
- *   - Opting in to one provider is not consent to the other. Choosing the other provider while the
+ *     no Sort now upload. It is on only while it is turned on and the provider selected in Settings
+ *     has a recorded agreement (settings.ts).
+ *   - Agreeing to one provider is not consent to the other. Choosing the other provider while the
  *     cloud step is on raises main's dialog again, naming that company; declined, nothing changes.
- *     Turning the cloud step off clears both opt-ins.
+ *     Turning the cloud step off keeps the provider, both keys and both agreements, so turning it on
+ *     again for a provider he has agreed to raises no dialog. Removing a provider's key withdraws his
+ *     agreement to that provider (settings.ts withdrawAgreement). Turning it off (serviceChanged)
+ *     drops the prepared batch and stops a running one.
+ *   - The nightly batch is its own switch (`nightly`): it runs only while the cloud step is on and
+ *     that switch is on. Sort now needs only the cloud step on.
+ *   - Second opinions are a switch too (`secondOpinions`). Off, a provider is never asked about a
+ *     screenshot the other one answered, in the nightly batch or in Sort now: such a screenshot is
+ *     not eligible (store.ts eligibleSql), which is read again before every request. A change of the
+ *     switch (secondOpinionsChanged) drops the prepared batch, like a change of provider.
  *   - Sort now: prepare() runs the local sorter, picks the batch and returns its count, cost and a
  *     one-time token; send(token) sends exactly that batch (less anything no longer eligible by the
  *     time main's dialog is raised, which gives the count that then goes), and
@@ -82,8 +92,9 @@ import { LunaResponseError, REASON_MAX, planChunks, selectForCloud, type CloudCa
 import { clipRedacted, LunaHttpError, pool, postCloud, redact, type HttpPost } from './client'
 import type { LunaRequest } from './luna'
 import { DEFAULT_PROVIDER, isProviderId, otherProviders, PROVIDER_IDS, providerOf, PROVIDERS, type CloudProvider, type ProviderId } from './provider'
+import { applySettingsPatch, isSwitch, optedIn, serviceOn, storedProvider, storedSwitch, withdrawAgreement, type CloudSettings, type StoredCloudSettings } from './settings'
 import { readVerified, type VerifyRefusal } from './images'
-import { DEFAULT_BATCH_TIME, isBatchDue, nextSlot, nightOf, normaliseBatchTime } from './schedule'
+import { isBatchDue, nextSlot, nightOf } from './schedule'
 import { EVERYTHING, inWindow, isEverything, isSortPeriod, PERIOD_CHOICES, PERIOD_UNREADABLE, periodLabel, periodNote, periodPhrase, periodPrefix, periodWindow, storedPeriod, type PeriodWindow, type SortPeriod } from '../period'
 
 /** Screenshots sent to a cloud model per night window: nightly and Sort now together, both providers together. Fixed; not a setting. */
@@ -91,63 +102,9 @@ export const NIGHTLY_LIMIT = 300
 /** How long a prepared Sort now batch can be sent. */
 export const PREPARED_TTL_MS = 10 * 60 * 1000
 
-/** The settings as the service reads them. `enabled` is true only after his recorded opt-in to `provider`. */
-export type CloudSettings = { enabled: boolean; batchTime: string; provider: ProviderId }
-/**
- * What config.json stores for them. `optedInAt` is his opt-in to OpenAI (the name ticket 07 gave it),
- * `anthropicOptedInAt` his opt-in to Anthropic; `provider` is absent in a config written before there
- * were two, which means OpenAI.
- */
-export type StoredCloudSettings = { provider?: ProviderId; optedInAt?: string | null; anthropicOptedInAt?: string | null; batchTime?: string }
+export { agreedAt, applySettingsPatch, isSwitch, normaliseCloudSettings, optedIn, serviceOn, storedProvider, storedSwitch, withdrawAgreement, type CloudSettings, type StoredCloudSettings } from './settings'
 
-const OPT_IN_FIELD: Record<ProviderId, 'optedInAt' | 'anthropicOptedInAt'> = { openai: 'optedInAt', anthropic: 'anthropicOptedInAt' }
-type Raw = StoredCloudSettings | Record<string, unknown> | undefined
-
-/** The provider selected in the stored settings (OpenAI when none or an unknown one is stored). */
-export function storedProvider(raw: Raw): ProviderId {
-  const p = ((raw ?? {}) as Record<string, unknown>).provider
-  return isProviderId(p) ? p : DEFAULT_PROVIDER
-}
-
-/** Whether the stored settings hold his opt-in to this provider (a readable time in its own field). */
-export function optedIn(raw: Raw, provider: ProviderId): boolean {
-  const v = ((raw ?? {}) as Record<string, unknown>)[OPT_IN_FIELD[provider]]
-  return typeof v === 'string' && Number.isFinite(Date.parse(v))
-}
-
-export function normaliseCloudSettings(raw: Raw): CloudSettings {
-  const r = (raw ?? {}) as Record<string, unknown>
-  const provider = storedProvider(raw)
-  return { enabled: optedIn(raw, provider), batchTime: normaliseBatchTime(r.batchTime ?? DEFAULT_BATCH_TIME), provider }
-}
-
-/**
- * A settings change, as what to store. `provider` selects a provider (an unknown one is ignored);
- * `enabled: true` records the opt-in now for the provider the patch leaves selected (kept if already
- * there) and for no other; `enabled: false` clears both opt-ins; `batchTime` is normalised. Nothing
- * else is read. Selecting a provider never opts in to it: without its own opt-in the result is off.
- * Whether he confirmed the dialog for that provider is changeSettings' business, which is the only
- * caller outside tests.
- */
-export function applySettingsPatch(cur: StoredCloudSettings, patch: unknown, now: Date): Required<StoredCloudSettings> {
-  const p = patch && typeof patch === 'object' ? (patch as Record<string, unknown>) : {}
-  const provider = isProviderId(p.provider) ? p.provider : storedProvider(cur)
-  const out: Required<StoredCloudSettings> = {
-    provider,
-    optedInAt: optedIn(cur, 'openai') ? (cur.optedInAt ?? null) : null,
-    anthropicOptedInAt: optedIn(cur, 'anthropic') ? (cur.anthropicOptedInAt ?? null) : null,
-    batchTime: normaliseBatchTime(cur.batchTime ?? DEFAULT_BATCH_TIME)
-  }
-  if (p.enabled === true && !out[OPT_IN_FIELD[provider]]) out[OPT_IN_FIELD[provider]] = now.toISOString()
-  if (p.enabled === false) {
-    out.optedInAt = null
-    out.anthropicOptedInAt = null
-  }
-  if (p.batchTime !== undefined) out.batchTime = normaliseBatchTime(p.batchTime)
-  return out
-}
-
-export type CloudSkip = 'unavailable' | 'off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | 'period-changed' | 'batch-changed' | 'date-changed'
+export type CloudSkip = 'unavailable' | 'off' | 'nightly-off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | 'period-changed' | 'batch-changed' | 'date-changed'
 
 /**
  * What main's native confirm dialog shows (index.ts raises it with dialog.showMessageBox on the main
@@ -171,9 +128,25 @@ export type CloudRunSummary = {
   keep: number
   throwaway: number
   stayedDoubtful: number
+  /** The run as three numbers: screenshots sent, those the provider settled (keep or throwaway), and those sent that it left unsure. */
+  sent: number
+  settled: number
+  stillUnsure: number
   skipped: CloudSkip | null
   error: string | null
   message: string
+}
+
+/** The three numbers of a run, from its counts. */
+const numbersOf = (s: { asked: number; keep: number; throwaway: number }): Pick<CloudRunSummary, 'sent' | 'settled' | 'stillUnsure'> => ({ sent: s.asked, settled: s.keep + s.throwaway, stillUnsure: Math.max(0, s.asked - s.keep - s.throwaway) })
+const count = (x: unknown): number => (typeof x === 'number' && Number.isFinite(x) && x > 0 ? Math.floor(x) : 0)
+
+/** A stored summary with its three numbers; one stored before they were kept gets them from its counts. Null when what is stored is not a summary. */
+export function withNumbers(raw: unknown): CloudRunSummary | null {
+  if (!raw || typeof raw !== 'object') return null
+  const s = raw as CloudRunSummary
+  if (typeof s.at !== 'string' || typeof s.message !== 'string') return null
+  return { ...s, ...numbersOf({ asked: count(s.asked), keep: count(s.keep), throwaway: count(s.throwaway) }) }
 }
 
 export type CloudPreview = {
@@ -218,15 +191,18 @@ export type CloudStatus = {
   encryptionAvailable: boolean
   settings: CloudSettings
   nightlyLimit: number
+  /** What is left of tonight's limit, nightly and Sort now together; null when the count could not be read. */
+  leftTonight: number | null
   lastRun: CloudRunSummary | null
+  /** When the nightly batch runs next; null while the cloud step or the nightly switch is off. */
   nextRunAt: string | null
   /** The selected provider's model, short name and company. */
   model: string
   name: string
   company: string
   longEdge: number
-  /** Both providers, for the choice and the two key rows in Settings. */
-  providers: Array<{ id: ProviderId; name: string; company: string; model: string; hasKey: boolean }>
+  /** Both providers, for the choice and the two key rows in Settings. `agreedAt`: when he agreed to that provider; null when he has not. */
+  providers: Array<{ id: ProviderId; name: string; company: string; model: string; hasKey: boolean; agreedAt: string | null }>
   /** The period Sort now is limited to (the same setting as the local sorter's button); null when the stored one cannot be read. */
   period: SortPeriod | null
   periods: ReadonlyArray<{ id: SortPeriod; label: string }>
@@ -275,6 +251,10 @@ const costNote = (p: CloudProvider): string => (p.costNote ? ` ${p.costNote}` : 
 const UNAVAILABLE = 'The answers stored on this Mac could not be read, so nothing can be sent. The stored answers were left as they are.'
 /** Shown when a prepared batch is older than PREPARED_TTL_MS, at send() or once main's dialog has returned. */
 const TOO_OLD = 'The prepared batch is too old. Press Sort now again to see the current count.'
+/** Shown when the second-opinions switch moved between prepare() and the send, or while main's dialog was open. */
+const SECOND_CHANGED = 'The second opinions setting was changed, so the count no longer holds. Press Sort now again.'
+/** Shown when the cloud step was turned off and on again while main's dialog was open. */
+const SERVICE_CHANGED = 'Asking was turned off while the question was open. Press Sort now again.'
 
 /**
  * The second opinions among `count` screenshots, in words: '5 of them ones Luna was unsure about';
@@ -338,8 +318,9 @@ export function sendPrompt(count: number, provider: CloudProvider = PROVIDERS[DE
  * What counts for a provider's run: its own answers (under its model + prompt), the other provider's
  * (under its own), and the confidence from which a throwaway answer is a decision.
  */
-function scopeOf(p: CloudProvider, t: Thresholds): CloudScope {
+function scopeOf(p: CloudProvider, t: Thresholds, secondOpinions: boolean): CloudScope {
   return {
+    secondOpinions,
     sorterVersion: SORTER_VERSION,
     provider: p.id,
     model: p.model,
@@ -350,7 +331,7 @@ function scopeOf(p: CloudProvider, t: Thresholds): CloudScope {
 }
 
 /** Why a run stops before its next request. */
-type Revoked = 'off' | 'no-key' | 'revoked' | 'provider-changed'
+type Revoked = 'off' | 'nightly-off' | 'no-key' | 'revoked' | 'provider-changed'
 
 export class CloudSorter {
   private phase: CloudStatus['phase'] = 'idle'
@@ -360,7 +341,7 @@ export class CloudSorter {
   /** The running batch: the provider it is bound to and how to stop it at once (key or provider changed); null when idle. */
   private running: { provider: ProviderId; revoke: (why: Revoked) => void } | null = null
   /** The batch prepare() showed him, bound to the provider and the period window it was prepared for. */
-  private prepared: { token: string; hashes: string[]; expiresAt: number; madeAt: number; provider: ProviderId; window: PeriodWindow } | null = null
+  private prepared: { token: string; hashes: string[]; expiresAt: number; madeAt: number; provider: ProviderId; window: PeriodWindow; secondOpinions: boolean } | null = null
   /**
    * Counts every provider change and, per provider, every key change signalled from Settings. A send
    * waiting on main's dialog has used up `prepared` and is not yet `running`, so neither can stop it;
@@ -371,6 +352,9 @@ export class CloudSorter {
   /** Counts every change of period signalled from Settings, for the same reason: a prepare or a send that began under one period ends with nothing when it has moved. */
   private periodChanges = 0
   private keyChanges: Record<ProviderId, number> = { openai: 0, anthropic: 0 }
+  /** Counts every time the cloud step was turned on or off, and every change of the second-opinions switch, for the same reason. */
+  private serviceChanges = 0
+  private secondOpinionChanges = 0
 
   constructor(private deps: CloudDeps) {}
 
@@ -430,8 +414,27 @@ export class CloudSorter {
     }
   }
 
+  /** Whether second opinions may be asked for now, read from main's state; anything but a stored true is no. */
+  private secondOpinions(): boolean {
+    try {
+      return this.deps.settings().secondOpinions === true
+    } catch {
+      return false
+    }
+  }
+
+  /** What counts for a provider's run now. Read again wherever it is used, so a change of the second-opinions switch holds from the next read. */
   private scope(provider: CloudProvider): CloudScope {
-    return scopeOf(provider, this.thresholds())
+    return scopeOf(provider, this.thresholds(), this.secondOpinions())
+  }
+
+  /** What is left of tonight's limit; null when the count cannot be read. */
+  private leftTonight(): number | null {
+    try {
+      return Math.max(0, NIGHTLY_LIMIT - this.withStore((s) => s.allowanceUsed(nightOf(this.now()))))
+    } catch {
+      return null
+    }
   }
 
   private withStore<T>(fn: (s: SorterStore) => T): T {
@@ -454,13 +457,14 @@ export class CloudSorter {
       encryptionAvailable: this.deps.keys[provider.id].encryptionAvailable(),
       settings,
       nightlyLimit: NIGHTLY_LIMIT,
-      lastRun: this.deps.state().lastRun,
-      nextRunAt: settings.enabled ? nextSlot(this.now(), settings.batchTime).toISOString() : null,
+      leftTonight: this.leftTonight(),
+      lastRun: withNumbers(this.deps.state().lastRun),
+      nextRunAt: settings.enabled === true && settings.nightly === true ? nextSlot(this.now(), settings.batchTime).toISOString() : null,
       model: provider.model,
       name: provider.name,
       company: provider.company,
       longEdge: provider.longEdge,
-      providers: PROVIDER_IDS.map((id) => ({ id, name: PROVIDERS[id].name, company: PROVIDERS[id].company, model: PROVIDERS[id].model, hasKey: this.deps.keys[id].has() })),
+      providers: PROVIDER_IDS.map((id) => ({ id, name: PROVIDERS[id].name, company: PROVIDERS[id].company, model: PROVIDERS[id].model, hasKey: this.deps.keys[id].has(), agreedAt: settings.agreedAt?.[id] ?? null })),
       period: this.period(),
       periods: PERIOD_CHOICES
     }
@@ -504,6 +508,36 @@ export class CloudSorter {
   }
 
   /**
+   * The cloud step was turned on or off in Settings. A prepared batch can no longer be sent, a send
+   * waiting on main's dialog sends nothing, and when it is off now a running batch stops at once.
+   */
+  serviceChanged(): void {
+    this.serviceChanges++
+    this.prepared = null
+    let on = false
+    try {
+      on = this.deps.settings().enabled === true
+    } catch {
+      on = false
+    }
+    if (!this.running || on) return
+    this.log('asking was turned off: stopping the run')
+    this.running.revoke('off')
+  }
+
+  /**
+   * The second-opinions switch was changed in Settings. A batch prepared under the earlier position
+   * can no longer be sent, and a send waiting on main's dialog sends nothing. A running batch is not
+   * stopped: each of its requests reads the switch again as it is admitted (store.ts eligibleSql),
+   * so with the switch off no further second opinion goes.
+   */
+  secondOpinionsChanged(): void {
+    this.secondOpinionChanges++
+    this.prepared = null
+    this.push()
+  }
+
+  /**
    * Another period was chosen in Settings. A batch prepared for the earlier one can no longer be sent;
    * a prepare still sorting, or a send waiting on main's dialog, ends with nothing. A batch already
    * confirmed and being sent is left to finish: it is the one he was shown and confirmed.
@@ -536,10 +570,11 @@ export class CloudSorter {
 
   /**
    * The selected provider, its opt-in and its key, read again from main's state; the reason to stop
-   * when another provider is selected by now, asking was turned off, the key is gone, or it is no
-   * longer the key the run started with. Read before every request and every retry.
+   * when another provider is selected by now, asking was turned off (or, for the nightly batch, the
+   * nightly switch was), the key is gone, or it is no longer the key the run started with. Read
+   * before every request and every retry.
    */
-  private liveConsent(provider: CloudProvider, runKey: string): { ok: true } | { revoked: Revoked } {
+  private liveConsent(provider: CloudProvider, runKey: string, trigger: CloudRunSummary['trigger']): { ok: true } | { revoked: Revoked } {
     let settings: CloudSettings | null = null
     try {
       settings = this.deps.settings()
@@ -549,6 +584,8 @@ export class CloudSorter {
     if (!settings) return { revoked: 'off' }
     if (settings.provider !== provider.id) return { revoked: 'provider-changed' }
     if (settings.enabled !== true) return { revoked: 'off' }
+    // the nightly batch also needs its own switch; Sort now does not
+    if (trigger === 'nightly' && settings.nightly !== true) return { revoked: 'nightly-off' }
     const key = this.safeKey(provider.id)
     if (!key) return { revoked: 'no-key' }
     return key === runKey ? { ok: true } : { revoked: 'revoked' }
@@ -661,7 +698,7 @@ export class CloudSorter {
     let token: string | null = null
     if (!blocked) {
       token = randomUUID()
-      this.prepared = { token, hashes: batch.map((c) => c.hash), expiresAt: this.now().getTime() + PREPARED_TTL_MS, madeAt: this.monotonic(), provider: provider.id, window }
+      this.prepared = { token, hashes: batch.map((c) => c.hash), expiresAt: this.now().getTime() + PREPARED_TTL_MS, madeAt: this.monotonic(), provider: provider.id, window, secondOpinions: settings.secondOpinions === true }
     }
     return { local, provider: provider.id, ...inWords(window.period), doubtful: list.length, toSend, secondOpinions, secondNote, cap: NIGHTLY_LIMIT, leftTonight, estimate: provider.estimateCost(toSend), costLabel: provider.costLabel, costNote: provider.costNote, blocked, token, message }
   }
@@ -687,7 +724,9 @@ export class CloudSorter {
             ? this.refused('manual', `The batch was prepared for ${PROVIDERS[p.provider].name}, and another provider is selected now. Press Sort now again.`, this.selected().id)
             : this.period() !== p.window.period
               ? this.refused('manual', `The batch was prepared for ${periodLabel(p.window.period).toLowerCase()}, and another period is selected now. Press Sort now again.`, p.provider)
-              : await this.runCloud({ trigger: 'manual', local: null, provider: p.provider, only: p.hashes, confirm: true, window: p.window, expired: () => this.tooOld(p) })
+              : this.secondOpinions() !== p.secondOpinions
+                ? this.refused('manual', SECOND_CHANGED, p.provider)
+                : await this.runCloud({ trigger: 'manual', local: null, provider: p.provider, only: p.hashes, confirm: true, window: p.window, expired: () => this.tooOld(p) })
     }
     this.deps.saveState({ lastRun: summary })
     this.push()
@@ -696,7 +735,7 @@ export class CloudSorter {
 
   private refused(trigger: CloudRunSummary['trigger'], error: string, provider: ProviderId): CloudRunSummary {
     this.log(`${trigger} send refused: not prepared`)
-    const s: CloudRunSummary = { at: this.now().toISOString(), trigger, provider, local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, skipped: 'not-prepared', error, message: '' }
+    const s: CloudRunSummary = { at: this.now().toISOString(), trigger, provider, local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, sent: 0, settled: 0, stillUnsure: 0, skipped: 'not-prepared', error, message: '' }
     s.message = describe(s)
     return s
   }
@@ -704,8 +743,15 @@ export class CloudSorter {
   /**
    * The nightly batch: local sorter, then the selected provider's model for what it left doubtful
    * (within tonight's limit). It ignores the period chosen in Settings: both steps take everything.
+   * It runs only while the cloud step and the nightly switch are both on.
    */
   async runNightly(): Promise<CloudRunSummary> {
+    // the nightly switch is off: nothing is sorted, nothing is asked and nothing is recorded
+    if (this.deps.settings().nightly !== true) {
+      const s: CloudRunSummary = { at: this.now().toISOString(), trigger: 'nightly', provider: this.selected().id, local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, sent: 0, settled: 0, stillUnsure: 0, skipped: 'nightly-off', error: null, message: '' }
+      s.message = describe(s)
+      return s
+    }
     this.deps.saveState({ lastRunAt: this.now().toISOString() }) // first, so a crash mid-run is not retried every minute
     let local: { ok: boolean; message: string }
     try {
@@ -728,7 +774,7 @@ export class CloudSorter {
       return null
     }
     const s = this.deps.settings()
-    if (this.busy() || !isBatchDue({ now: this.now(), enabled: s.enabled, batchTime: s.batchTime, lastRunAt: st.lastRunAt, since: st.since })) return null
+    if (this.busy() || !isBatchDue({ now: this.now(), enabled: s.enabled === true && s.nightly === true, batchTime: s.batchTime, lastRunAt: st.lastRunAt, since: st.since })) return null
     this.log('nightly batch due')
     return this.runNightly()
   }
@@ -745,11 +791,11 @@ export class CloudSorter {
     const { trigger, local } = o
     const window = o.window ?? EVERYTHING
     const provider = providerOf(o.provider)
-    const scope = this.scope(provider)
     const at = this.now().toISOString()
-    const base: CloudRunSummary = { at, trigger, provider: provider.id, ...(o.window ? { period: window.period } : {}), local, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, skipped: null, error: null, message: '' }
+    const base: CloudRunSummary = { at, trigger, provider: provider.id, ...(o.window ? { period: window.period } : {}), local, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, sent: 0, settled: 0, stillUnsure: 0, skipped: null, error: null, message: '' }
     const finish = (patch: Partial<CloudRunSummary>): CloudRunSummary => {
       const s = { ...base, ...patch }
+      Object.assign(s, numbersOf(s))
       s.message = describe(s)
       this.log(`${trigger} run (${provider.name}): asked ${s.asked}, answered ${s.answered} (keep ${s.keep}, throwaway ${s.throwaway}, still doubtful ${s.stayedDoubtful})${s.skipped ? `, skipped: ${s.skipped}` : ''}${s.error ? `, error: ${s.error}` : ''}`)
       return s
@@ -768,7 +814,8 @@ export class CloudSorter {
     // the opt-in read here is the selected provider's; a run for any other provider does not start
     const settings = this.deps.settings()
     if (settings.provider !== provider.id) return finish({ skipped: 'provider-changed', stayedDoubtful: list.length })
-    if (!settings.enabled) return finish({ skipped: 'off', stayedDoubtful: list.length })
+    if (settings.enabled !== true) return finish({ skipped: 'off', stayedDoubtful: list.length })
+    if (trigger === 'nightly' && settings.nightly !== true) return finish({ skipped: 'nightly-off', stayedDoubtful: list.length })
     const key = this.deps.keys[provider.id].get()
     // a key that is not this provider's kind is no key: it is never put into a request to this provider
     if (!key || provider.keyRule(key) !== null) return finish({ skipped: 'no-key', stayedDoubtful: list.length })
@@ -780,6 +827,8 @@ export class CloudSorter {
       const providerChanges = this.providerChanges
       const periodChanges = this.periodChanges
       const keyChanges = this.keyChanges[provider.id]
+      const serviceChanges = this.serviceChanges
+      const secondOpinionChanges = this.secondOpinionChanges
       const counted = { count: wanted.length, second: secondOf(wanted, pending) }
       const ok = await this.deps.confirm(sendPrompt(counted.count, provider, counted.second, window.period)).catch(() => false)
       if (ok !== true) return finish({ skipped: 'not-confirmed', stayedDoubtful: list.length })
@@ -791,8 +840,12 @@ export class CloudSorter {
       // the dialog may have stood open a while: the confirmation counts only for the provider it named
       // and only if no other provider was selected meanwhile, even one switched away from and back to
       if (this.providerChanges !== providerChanges) return finish({ skipped: 'provider-changed', stayedDoubtful: list.length })
-      const live = this.liveConsent(provider, key)
+      const live = this.liveConsent(provider, key, trigger)
       if (!('ok' in live)) return finish({ skipped: live.revoked, stayedDoubtful: list.length })
+      // nor if the cloud step was turned off meanwhile, even when it is on again by now
+      if (this.serviceChanges !== serviceChanges) return finish({ skipped: 'not-prepared', error: SERVICE_CHANGED, stayedDoubtful: list.length })
+      // nor if the second-opinions switch was changed: the dialog counted the batch under the earlier position
+      if (this.secondOpinionChanges !== secondOpinionChanges) return finish({ skipped: 'not-prepared', error: SECOND_CHANGED, stayedDoubtful: list.length })
       // nor if this provider's key was removed or saved meanwhile, even when the same key is stored again
       if (this.keyChanges[provider.id] !== keyChanges) return finish({ skipped: 'revoked', stayedDoubtful: list.length })
       // the dialog gave a count: what goes is exactly that batch or nothing. If any of it is by now
@@ -807,7 +860,7 @@ export class CloudSorter {
     // claim the batch in one transaction: tonight's limit and other runs (other processes too) are checked there
     const night = nightOf(this.now())
     const runId = randomUUID()
-    const { claimed, leftBefore } = this.withStore((s) => s.claimForCloud(wanted.map((c) => c.hash), { ...scope, night, limit: NIGHTLY_LIMIT, runId, now: this.now() }))
+    const { claimed, leftBefore } = this.withStore((s) => s.claimForCloud(wanted.map((c) => c.hash), { ...this.scope(provider), night, limit: NIGHTLY_LIMIT, runId, now: this.now() }))
     if (!claimed.length) return finish({ skipped: leftBefore === 0 ? 'limit-reached' : 'nothing-doubtful', stayedDoubtful: list.length })
     const claimedSet = new Set(claimed)
     const selected = wanted.filter((c) => claimedSet.has(c.hash))
@@ -831,7 +884,7 @@ export class CloudSorter {
     // is another by now, the opt-in has gone, or the key is no longer the one this run started with,
     // stop the whole run (requests only ever carry `key`, and only ever go to `provider`)
     const consent = (): void => {
-      const c = this.liveConsent(provider, key)
+      const c = this.liveConsent(provider, key, trigger)
       if ('ok' in c) return
       revoked ??= c.revoked
       ctl.abort()
@@ -886,12 +939,13 @@ export class CloudSorter {
               sleep: this.deps.sleep,
               onRetry: (attempt, why, wait) => this.log(`retry ${attempt} after ${why}, waiting ${wait} ms`),
               // before the first attempt and before every retry: provider, consent and key again (else stop
-              // the run), then eligibility per item (he may have decided or answered one meanwhile), the
+              // the run), then eligibility per item (he may have decided or answered one meanwhile, or
+              // turned second opinions off: the scope is read again here), the
               // capture dates against the batch's window (a manual run; one outside stops the run), and
               // tonight's allowance, counted here for what goes into the request (store.ts admitForRequest)
               before: (attempt) => {
                 consent()
-                const { admitted, overLimit, outOfPeriod } = this.withStore((s) => s.admitForRequest(current.map((i) => i.hash), { ...scope, runId, night, limit: NIGHTLY_LIMIT, ...(o.window ? { window, paths } : {}) }))
+                const { admitted, overLimit, outOfPeriod } = this.withStore((s) => s.admitForRequest(current.map((i) => i.hash), { ...this.scope(provider), runId, night, limit: NIGHTLY_LIMIT, ...(o.window ? { window, paths } : {}) }))
                 if (outOfPeriod) {
                   // nothing was admitted or counted for this request; it is not made, and no other starts
                   dateChanged = true
@@ -980,6 +1034,7 @@ export class CloudSorter {
 
 const REVOKED_WORDS: Record<Revoked, (p: CloudProvider) => string> = {
   off: (p) => `Asking ${p.name} was turned off`,
+  'nightly-off': () => 'Nightly sorting was turned off',
   'no-key': (p) => `The ${p.company} key was removed`,
   revoked: (p) => `The ${p.company} key was changed`,
   'provider-changed': () => 'Another provider was selected'
@@ -1020,6 +1075,8 @@ export function describe(s: CloudRunSummary): string {
       return s.asked
         ? `Stopped after asking ${name} about ${plural(s.asked, 'screenshot')}: asking ${name} was turned off.${waiting}`
         : `${name} was not asked: asking ${name} is turned off.${waiting}`
+    case 'nightly-off':
+      return s.asked ? `Stopped after asking ${name} about ${plural(s.asked, 'screenshot')}: nightly sorting was turned off.${waiting}` : `${name} was not asked: nightly sorting is turned off.${waiting}`
     case 'limit-reached':
       return `${name} was not asked: ${NIGHTLY_LIMIT.toLocaleString('en-GB')} screenshots have been sent tonight, the most per night.${waiting}`
     case 'period-changed':
@@ -1055,16 +1112,18 @@ export function describe(s: CloudRunSummary): string {
  * on, and selecting another provider while it is on. Declined, the provider stays as it was and the
  * cloud step is not turned on; everything else in the patch (the batch time) still applies. While
  * the cloud step is off, a provider can be selected without a dialog: nothing is sent while it is off,
- * and turning it on afterwards asks for that provider. A provider he has already opted in to (and
- * not turned off since) is selected without a second dialog.
+ * and turning it on afterwards asks for that provider. A provider he has already agreed to is
+ * selected, or turned on again after being off, without a second dialog: turning the cloud step off
+ * keeps both agreements. Whenever the cloud step ends up on where it was off, or off where it was on,
+ * the service is told (serviceChanged).
  */
-export async function changeSettings(svc: Pick<CloudSorter, 'consentToTurnOn' | 'providerChanged'>, patch: unknown, current: () => StoredCloudSettings, save: (s: StoredCloudSettings) => void, now: () => Date): Promise<void> {
+export async function changeSettings(svc: Pick<CloudSorter, 'consentToTurnOn' | 'providerChanged'> & Partial<Pick<CloudSorter, 'serviceChanged'>>, patch: unknown, current: () => StoredCloudSettings, save: (s: StoredCloudSettings) => void, now: () => Date): Promise<void> {
   let p: Record<string, unknown> = patch && typeof patch === 'object' ? { ...(patch as Record<string, unknown>) } : {}
   if (!isProviderId(p.provider)) delete p.provider // only the two ids select a provider
   const before = current()
   const from = storedProvider(before)
   const to = isProviderId(p.provider) ? p.provider : from
-  const on = optedIn(before, from)
+  const on = serviceOn(before)
   const wantsOn = p.enabled === true || (p.enabled !== false && on)
   if (wantsOn && !optedIn(before, to)) {
     if (await svc.consentToTurnOn(to, on && to !== from ? from : null)) {
@@ -1078,12 +1137,41 @@ export async function changeSettings(svc: Pick<CloudSorter, 'consentToTurnOn' | 
   const next = applySettingsPatch(latest, p, now())
   save(next)
   if (next.provider !== storedProvider(latest)) svc.providerChanged()
+  if (next.enabled !== serviceOn(latest)) svc.serviceChanged?.()
+}
+
+type SwitchResult = { ok: boolean; error?: string }
+/** Shown when a switch is set to anything but on or off. */
+export const SWITCH_REFUSED = 'That is neither on nor off, so nothing was changed.'
+
+/**
+ * The nightly switch, set from the renderer. Only true or false is stored; anything else is refused
+ * and what is stored stays as it was. It turns nothing on by itself: the nightly batch still needs
+ * the cloud step on, which needs his agreement.
+ */
+export function changeNightly(value: unknown, save: (s: StoredCloudSettings) => void): SwitchResult {
+  if (!isSwitch(value)) return { ok: false, error: SWITCH_REFUSED }
+  save({ nightly: value })
+  return { ok: true }
+}
+
+/**
+ * The second-opinions switch, set from the renderer. Only true or false is stored; anything else is
+ * refused. A change of position drops the prepared batch (secondOpinionsChanged).
+ */
+export function changeSecondOpinions(svc: Pick<CloudSorter, 'secondOpinionsChanged'>, value: unknown, current: () => StoredCloudSettings, save: (s: StoredCloudSettings) => void): SwitchResult {
+  if (!isSwitch(value)) return { ok: false, error: SWITCH_REFUSED }
+  const before = storedSwitch(current(), 'secondOpinions')
+  save({ secondOpinions: value })
+  if (before !== value) svc.secondOpinionsChanged()
+  return { ok: true }
 }
 
 /**
  * IPC for Settings › Screenshot sorter › cloud step. Types: src/preload/index.ts. Never returns a key.
  * A key is saved or removed for the provider the call names (one of the two ids, or it is refused):
  * there is no default and no guessing from the key, so a key cannot land in the other provider's store.
+ * `saveSettings` merges what it is given into the stored settings (index.ts).
  */
 export function registerCloudIpc(
   svc: CloudSorter,
@@ -1108,14 +1196,21 @@ export function registerCloudIpc(
   handle('cloud:clear-key', (provider: unknown) => {
     if (!isProviderId(provider)) return svc.status()
     keys[provider].clear()
+    // removing a key withdraws his agreement to that provider: a key saved later needs the dialog again
+    const before = current()
+    saveSettings(withdrawAgreement(before, provider))
     svc.keyChanged(provider, 'cleared')
+    if (serviceOn(before) !== serviceOn(current())) svc.serviceChanged()
     return svc.status()
   })
-  // only the provider, on/off (his opt-in per provider, recorded here with its time after main's own dialog) and the batch time can be set; the limit is fixed
+  // only the provider, on/off (his agreement per provider is recorded here with its time after main's own dialog; off keeps it) and the batch time can be set; the limit is fixed
   handle('cloud:set-settings', async (patch: unknown) => {
     await changeSettings(svc, patch, current, saveSettings, () => new Date())
     return svc.status()
   })
+  // the two switches take true or false and nothing else; neither turns the cloud step on
+  handle('cloud:set-nightly', (value: unknown) => ({ ...changeNightly(value, saveSettings), status: svc.status() }))
+  handle('cloud:set-second-opinions', (value: unknown) => ({ ...changeSecondOpinions(svc, value, current, saveSettings), status: svc.status() }))
   handle('cloud:prepare', () => svc.prepare())
   handle('cloud:send', (token: unknown) => svc.send(token))
   handle('cloud:cancel', () => svc.cancel())

@@ -10,6 +10,12 @@
  *     not read, embedded or written.
  *   sortManual(): the "Sort undecided screenshots now" button: sortUndecided for the period chosen in
  *     Settings, with the cut-off worked out here from main's clock. The renderer passes no period.
+ *   status(): besides the run in progress and the report, three things worked out here and nowhere
+ *     else: the last sort as numbers (kept in config, so it is there after a restart), how many
+ *     undecided screenshots there are (in the chosen period and in all), and how many of his choices
+ *     the sorter can learn from. The two counts read every row and look at every file, so they are
+ *     taken only when asked for (the status call from the renderer), after a sort and when the period
+ *     changes; a status pushed in between carries the last count.
  *
  * Sorting writes proposals only: it never moves, deletes or decides anything (binning is later
  * work), and it never writes his triage decisions. Nothing here makes a network call: the cloud step
@@ -78,6 +84,27 @@ export type SorterStatus = {
   period: SortPeriod | null
   /** The periods that can be chosen, in the order shown. */
   periods: ReadonlyArray<{ id: SortPeriod; label: string }>
+  /** The last sort on this Mac as numbers (whichever button or the nightly batch started it); null when none is recorded. */
+  lastRun: LocalRunSummary | null
+  /**
+   * Undecided screenshots a sort would look at: in the chosen period (`period`; `inPeriod` is null
+   * when the stored period cannot be read) and in all. Null until first counted.
+   */
+  undecided: { period: SortPeriod | null; inPeriod: number | null; all: number } | null
+  /** His choices the sorter can learn from: kept and binned screenshots with a readable picture on this Mac. Null until first counted. */
+  learnable: { kept: number; binned: number } | null
+}
+
+/** One sort on this Mac as numbers: when it ended, the period it was limited to, how many it looked at, and of those how many got a keep or throwaway proposal and how many stayed doubtful. */
+export type LocalRunSummary = { at: string; period: SortPeriod; lookedAt: number; confident: number; needLook: number }
+
+/** A stored LocalRunSummary; null when what is stored is not one (nothing is guessed from it). */
+export function storedLocalRun(raw: unknown): LocalRunSummary | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const n = (x: unknown): x is number => typeof x === 'number' && Number.isInteger(x) && x >= 0
+  if (typeof r.at !== 'string' || !Number.isFinite(Date.parse(r.at)) || !isSortPeriod(r.period) || !n(r.lookedAt) || !n(r.confident) || !n(r.needLook)) return null
+  return { at: r.at, period: r.period, lookedAt: r.lookedAt, confident: r.confident, needLook: r.needLook }
 }
 
 export type SortResult = { ok: boolean; sorted?: number; counts?: { keep: number; throwaway: number; doubtful: number }; error?: string; /** The period this run was limited to, and it inside a sentence (' from the last 30 days'; '' for everything). */ period?: SortPeriod; periodPhrase?: string }
@@ -97,6 +124,9 @@ export type SorterDeps = {
   runJob?: <J extends Job>(job: J, signal: AbortSignal) => Promise<JobResult<J>>
   /** The period stored in config, as stored (period.ts storedPeriod reads it). Absent: everything. */
   period?: () => unknown
+  /** The last sort as stored in config (storedLocalRun reads it), and where to store one. Absent: none is kept. */
+  lastRun?: () => unknown
+  saveLastRun?: (r: LocalRunSummary) => void
   now?: () => Date
 }
 
@@ -111,8 +141,42 @@ export class SorterService {
   private run: Run = { phase: 'idle', done: 0, total: 0, message: '', error: null }
   private abort: AbortController | null = null
   private lastPush = 0
+  /** The two counts as last taken (count()); null until then. */
+  private counts: Pick<SorterStatus, 'undecided' | 'learnable'> = { undecided: null, learnable: null }
 
   constructor(private deps: SorterDeps) {}
+
+  private now(): Date {
+    return this.deps.now ? this.deps.now() : new Date()
+  }
+
+  /**
+   * Count the undecided screenshots and his usable choices now. The undecided ones are the list a
+   * sort reads (loadUndecided) under the window a manual sort would use (period.ts), so the number is
+   * the number a sort would look at. If either cannot be read, the last count stays.
+   */
+  private count(): void {
+    try {
+      const period = this.period()
+      const window = period ? periodWindow(period, this.now()) : null
+      const undecided = loadUndecided(this.deps.wellRoot())
+      const labelled = loadLabelled(this.deps.wellRoot()).filter((s) => s.image)
+      this.counts = {
+        undecided: { period, inPeriod: window ? undecided.filter((s) => inWindow(s.takenAt, window)).length : null, all: undecided.length },
+        learnable: { kept: labelled.filter((s) => s.truth === 'keep').length, binned: labelled.filter((s) => s.truth === 'throwaway').length }
+      }
+    } catch {
+      /* the last count stays */
+    }
+  }
+
+  private lastRun(): LocalRunSummary | null {
+    try {
+      return storedLocalRun(this.deps.lastRun?.())
+    } catch {
+      return null
+    }
+  }
 
   private thresholds(): Thresholds {
     return this.deps.thresholds ?? DEFAULT_THRESHOLDS
@@ -127,11 +191,13 @@ export class SorterService {
     }
   }
 
-  status(): SorterStatus {
+  /** `count: true` takes the two counts afresh (the renderer's status call); otherwise the status carries the last ones. */
+  status(opts: { count?: boolean } = {}): SorterStatus {
+    if (opts.count) this.count()
     const { rec, pending } = this.withStore((s) => ({ rec: s.latestModel<SorterReport>(), pending: s.pendingCounts() }))
     const current = rec ? isCurrent(rec) : false
     const report = current ? rec!.report : null
-    return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: current && enoughToMeasure(report?.heldBack), retrainNeeded: Boolean(rec) && !current, minHeldBack: MIN_HELD_BACK, pending, period: this.period(), periods: PERIOD_CHOICES }
+    return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: current && enoughToMeasure(report?.heldBack), retrainNeeded: Boolean(rec) && !current, minHeldBack: MIN_HELD_BACK, pending, period: this.period(), periods: PERIOD_CHOICES, lastRun: this.lastRun(), ...this.counts }
   }
 
   /** The period chosen in Settings; null when what is stored is not a period. */
@@ -139,9 +205,9 @@ export class SorterService {
     return storedPeriod(this.deps.period ? this.deps.period() : undefined)
   }
 
-  /** Push the status again (the period was changed). */
+  /** Push the status again (the period was changed, so the count for the period is taken again). */
   notify(): void {
-    this.deps.broadcast(this.status())
+    this.deps.broadcast(this.status({ count: true }))
   }
 
   /**
@@ -150,7 +216,7 @@ export class SorterService {
    */
   async sortManual(opts: { limit?: number } = {}): Promise<SortResult> {
     const p = this.period()
-    const window = p ? periodWindow(p, this.deps.now ? this.deps.now() : new Date()) : null
+    const window = p ? periodWindow(p, this.now()) : null
     if (!window) return { ok: false, error: PERIOD_UNREADABLE }
     return this.sortUndecided({ ...opts, window })
   }
@@ -281,6 +347,15 @@ export class SorterService {
     this.abort = ctl
     const counts = { keep: 0, throwaway: 0, doubtful: 0 }
     let sorted = 0
+    // a sort that ended (or was stopped) is recorded as numbers and the counts are taken again, before the last status goes out
+    const record = (): void => {
+      try {
+        this.deps.saveLastRun?.({ at: this.now().toISOString(), period: window.period, lookedAt: sorted, confident: counts.keep + counts.throwaway, needLook: counts.doubtful })
+      } catch {
+        /* the sort itself stands */
+      }
+      this.count()
+    }
     try {
       let shots = loadUndecided(this.deps.wellRoot()).filter((s) => inWindow(s.takenAt, window))
       if (opts.limit !== undefined) shots = shots.slice(0, Math.max(0, opts.limit))
@@ -320,11 +395,13 @@ export class SorterService {
         sorted += rows.length
         this.set({ done: Math.min(shots.length, i + chunk.length) })
       }
+      record()
       this.set({ phase: 'idle', done: 0, total: 0, message: '' }, true)
       return { ok: true, sorted, counts, ...within }
     } catch (e) {
       if (ctl.signal.aborted) {
         // Stop ended the worker mid-chunk: proposals already written stay, nothing more is recorded
+        record()
         this.set({ phase: 'idle', done: 0, total: 0, message: '' }, true)
         return { ok: true, sorted, counts, ...within }
       }
@@ -362,7 +439,7 @@ export function registerSorterIpc(svc: SorterService, allowed: (sender: Electron
       return fn(...args)
     })
   }
-  handle('sorter:status', () => svc.status())
+  handle('sorter:status', () => svc.status({ count: true }))
   handle('sorter:train', () => svc.trainAndTest())
   handle('sorter:sort', (opts?: { limit?: number }) => svc.sortManual({ limit: typeof opts?.limit === 'number' ? opts.limit : undefined }))
   handle('sorter:set-period', (period: unknown) => setPeriod(period))

@@ -86,11 +86,13 @@ export type CloudAnswerRow = LunaAnswer & { hash: string; provider: ProviderId; 
 
 /**
  * Which proposals and answers count for the cloud step: the current sorter; the provider that is
- * asking, with its current model and prompt; `others`, the other providers with theirs; and
+ * asking, with its current model and prompt; `others`, the other providers with theirs;
  * `throwawayAt`, the confidence from which a throwaway answer is a decision (the sorter's throwaway
- * threshold, cascade.ts isConfident).
+ * threshold, cascade.ts isConfident); and `secondOpinions`, the switch in Settings: false means a
+ * screenshot another provider has answered is never eligible, whatever that answer was (absent: they
+ * are allowed, as before there was a switch; cloud/service.ts always says which).
  */
-export type CloudScope = AnswerScope & { sorterVersion: string; others?: ReadonlyArray<AnswerScope>; throwawayAt: number }
+export type CloudScope = AnswerScope & { sorterVersion: string; others?: ReadonlyArray<AnswerScope>; throwawayAt: number; secondOpinions?: boolean }
 
 /** A stored answer with who gave it, the model + prompt it was given under, and when. */
 export type StoredCloudAnswer = LunaAnswer & { provider: ProviderId; model: string; promptVersion: string; askedAt: string }
@@ -432,19 +434,20 @@ export class SorterStore {
    * That leaves two kinds: screenshots no provider has answered, and screenshots another provider
    * answered and was unsure about (a second opinion). Once every provider has answered one, it is
    * never eligible again, whichever is selected. An answer counts only under its provider's current
-   * model + prompt. Parameters: eligibleArgs(scope).
+   * model + prompt. With second opinions switched off (scope.secondOpinions false) the second kind
+   * goes too: any answer from another provider makes it ineligible. Parameters: eligibleArgs(scope).
    */
   private eligibleSql(o: CloudScope): string {
     const decisions = hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = p.hash)' : ''
     const others = (o.others ?? []).map(() => ANSWERED_BY).join(' OR ')
-    const decidedElsewhere = others ? ` OR ((${others}) AND ${CONFIDENT_SQL})` : ''
+    const decidedElsewhere = !others ? '' : o.secondOpinions === false ? ` OR (${others})` : ` OR ((${others}) AND ${CONFIDENT_SQL})`
     return `p.proposal = 'doubtful' AND p.answered_at IS NULL AND p.sorter_version = ?
       AND NOT EXISTS (SELECT 1 FROM sorter_cloud_answers c WHERE c.hash = p.hash AND (${ANSWERED_BY}${decidedElsewhere})) ${decisions}`
   }
 
   private eligibleArgs(o: CloudScope): Array<string | number> {
     const others = o.others ?? []
-    return [o.sorterVersion, ...scopeArgs(o), ...others.flatMap(scopeArgs), ...(others.length ? [o.throwawayAt] : [])]
+    return [o.sorterVersion, ...scopeArgs(o), ...others.flatMap(scopeArgs), ...(others.length && o.secondOpinions !== false ? [o.throwawayAt] : [])]
   }
 
   /**

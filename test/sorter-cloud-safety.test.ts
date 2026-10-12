@@ -60,10 +60,13 @@ describe('finding 1: consent lives in main', () => {
     expect(normaliseCloudSettings({}).enabled).toBe(false)
     const now = new Date('2026-10-11T09:00:00Z')
     const on = applySettingsPatch({}, { enabled: true, nightlyCap: 5000 }, now)
-    expect(on).toEqual({ provider: 'openai', optedInAt: '2026-10-11T09:00:00.000Z', anthropicOptedInAt: null, batchTime: '02:00' })
+    expect(on).toEqual({ enabled: true, provider: 'openai', optedInAt: '2026-10-11T09:00:00.000Z', anthropicOptedInAt: null, batchTime: '02:00', nightly: true, secondOpinions: true })
     expect(normaliseCloudSettings(on).enabled).toBe(true)
-    expect(applySettingsPatch(on, { batchTime: '03:15' }, new Date('2026-10-12T09:00:00Z'))).toEqual({ provider: 'openai', optedInAt: '2026-10-11T09:00:00.000Z', anthropicOptedInAt: null, batchTime: '03:15' }) // opt-in time kept
-    expect(applySettingsPatch(on, { enabled: false }, now).optedInAt).toBeNull()
+    expect(applySettingsPatch(on, { batchTime: '03:15' }, new Date('2026-10-12T09:00:00Z'))).toEqual({ enabled: true, provider: 'openai', optedInAt: '2026-10-11T09:00:00.000Z', anthropicOptedInAt: null, batchTime: '03:15', nightly: true, secondOpinions: true }) // opt-in time kept
+    // off keeps the agreement (ticket 18) and is off all the same
+    const off = applySettingsPatch(on, { enabled: false }, now)
+    expect(off).toMatchObject({ enabled: false, optedInAt: '2026-10-11T09:00:00.000Z' })
+    expect(normaliseCloudSettings(off).enabled).toBe(false)
     expect(applySettingsPatch({}, { batchTime: '04:00' }, now).optedInAt).toBeNull() // changing the time never opts in
   })
 
