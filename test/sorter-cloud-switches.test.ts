@@ -11,6 +11,7 @@ import { join } from 'node:path'
 const ipc = vi.hoisted(() => new Map<string, (e: { sender: unknown }, ...args: unknown[]) => unknown>())
 vi.mock('electron', () => ({ ipcMain: { handle: (channel: string, fn: (e: { sender: unknown }, ...args: unknown[]) => unknown) => void ipc.set(channel, fn) } }))
 const { CloudSorter, NIGHTLY_LIMIT, SWITCH_REFUSED, applySettingsPatch, normaliseCloudSettings, registerCloudIpc, withdrawAgreement } = await import('../src/main/sorter/cloud/service')
+const { isBatchDue } = await import('../src/main/sorter/cloud/schedule')
 const { SorterStore } = await import('../src/main/sorter/store')
 const { DEFAULT_THRESHOLDS, SORTER_VERSION } = await import('../src/main/sorter/decide')
 const { makeCloudWell, bothStubs, cloudDeps, hashOf, ANTHROPIC_URL, OPENAI_URL, FAKE_ANTHROPIC_KEY, FAKE_OPENAI_KEY } = await import('./sorter-cloud-fixture')
@@ -75,12 +76,33 @@ const sent = (stub: { seen: Array<{ windows: string[] }> }): string[] => stub.se
 
 /**
  * The app as index.ts wires it: config (the box) → normaliseCloudSettings; settings saved by merging
- * into the box; each provider's key in its own slot; every change made through the IPC handlers.
- * `answers` are what main's dialog returns, in order (then: confirmed).
+ * into the box, one write per call; each provider's key in its own field of the same config (the
+ * made-up key stands in for its ciphertext); every change made through the IPC handlers.
+ * `answers` are what main's dialog returns, in order (then: confirmed). `writes` is the config after
+ * each write; `failWrite` makes the next write throw before anything is stored.
  */
 function app(w: string, stored: Record<string, unknown>, extra: Parameters<typeof cloudDeps>[1] = {}, answers: boolean[] = []) {
-  const box = { stored: stored as StoredCloudSettings }
-  const keys: Record<ProviderId, string | null> = { openai: FAKE_OPENAI_KEY, anthropic: FAKE_ANTHROPIC_KEY }
+  type Cfg = StoredCloudSettings & { keyEnc?: string; anthropicKeyEnc?: string }
+  const FIELD = { openai: 'keyEnc', anthropic: 'anthropicKeyEnc' } as const
+  const box = { stored: { keyEnc: FAKE_OPENAI_KEY, anthropicKeyEnc: FAKE_ANTHROPIC_KEY, ...stored } as Cfg }
+  const writes: Cfg[] = []
+  const fail = { next: false }
+  const write = (s: Cfg): void => {
+    if (fail.next) {
+      fail.next = false
+      throw new Error('config.json could not be written')
+    }
+    box.stored = JSON.parse(JSON.stringify({ ...box.stored, ...s })) // as writeConfig does: what is undefined is not stored
+    writes.push(box.stored)
+  }
+  const keys = {
+    get openai(): string | null {
+      return box.stored.keyEnc ?? null
+    },
+    get anthropic(): string | null {
+      return box.stored.anthropicKeyEnc ?? null
+    }
+  }
   const access = (id: ProviderId) => ({ get: () => keys[id], has: () => Boolean(keys[id]), encryptionAvailable: () => true })
   const net = bothStubs()
   const d = cloudDeps(w, { http: net.http, ...extra, key: access('openai'), anthropicKey: access('anthropic') })
@@ -91,10 +113,11 @@ function app(w: string, stored: Record<string, unknown>, extra: Parameters<typeo
   }
   const svc = new CloudSorter(d)
   ipc.clear()
-  const keyStore = (id: ProviderId) => ({ set: (k: unknown) => ((keys[id] = String(k)), { ok: true, saved: true }), clear: () => void (keys[id] = null) })
-  registerCloudIpc(svc, { openai: keyStore('openai'), anthropic: keyStore('anthropic') }, (s) => void (box.stored = { ...box.stored, ...s }), () => box.stored, () => true)
-  const call = <T>(channel: string, ...args: unknown[]): Promise<T> => Promise.resolve(ipc.get(channel)!({ sender: null }, ...args)) as Promise<T>
-  return { svc, d, box, net, keys, call, set: (patch: unknown) => call<CloudStatus>('cloud:set-settings', patch) }
+  // as ApiKeyStore: a key is saved, or removed, by a write of its own field
+  const keyStore = (id: ProviderId) => ({ set: (k: unknown) => (write({ [FIELD[id]]: String(k) }), { ok: true, saved: true }), clear: () => write({ [FIELD[id]]: undefined }) })
+  registerCloudIpc(svc, { openai: keyStore('openai'), anthropic: keyStore('anthropic') }, write, () => box.stored, () => true)
+  const call = <T>(channel: string, ...args: unknown[]): Promise<T> => new Promise<T>((resolve) => resolve(ipc.get(channel)!({ sender: null }, ...args) as T))
+  return { svc, d, box, net, keys, writes, failWrite: () => void (fail.next = true), call, set: (patch: unknown) => call<CloudStatus>('cloud:set-settings', patch) }
 }
 type Switched = { ok: boolean; error?: string; status: CloudStatus }
 /** Everything that is not true or false, as it might arrive from a renderer. */
@@ -336,7 +359,7 @@ describe('nightly sorting is its own switch', () => {
   it('the switch turns nothing on and records no agreement', async () => {
     const a = app(four(), {})
     expect(await a.call<Switched>('cloud:set-nightly', true)).toMatchObject({ ok: true, status: { nextRunAt: null, settings: { enabled: false, nightly: true, agreedAt: { openai: null, anthropic: null } } } })
-    expect(a.box.stored).toEqual({ nightly: true })
+    expect(a.box.stored).toEqual({ keyEnc: FAKE_OPENAI_KEY, anthropicKeyEnc: FAKE_ANTHROPIC_KEY, nightly: true })
     expect(a.d.prompts).toHaveLength(0)
   })
 })
@@ -496,5 +519,245 @@ describe('status for the Auto sorting tab', () => {
       a.d.stateBox.lastRun = bad as never
       expect(a.svc.status().lastRun).toBeNull()
     }
+  })
+})
+
+describe('second opinions off goes by who answered, not by which model', () => {
+  it('an answer the other provider gave under an older model or prompt still keeps the screenshot from this one', async () => {
+    const w = five()
+    let now = night1()
+    useAllowance(w, NIGHT1, NIGHTLY_LIMIT - 4)
+    const a = app(w, { ...BOTH, secondOpinions: false }, { now: () => now })
+    expect(await a.svc.runNightly()).toMatchObject({ provider: 'openai', asked: 4 }) // d3 and d4 left unsure, d5 not asked about
+    // Luna has since moved to another model and prompt: its stored answers are from the earlier ones
+    const db = new DatabaseSync(join(w, 'triage.db'))
+    db.prepare("UPDATE sorter_cloud_answers SET model = 'luna-earlier-model', prompt_version = 'luna-earlier-prompt' WHERE provider = 'openai'").run()
+    db.close()
+    await a.set({ provider: 'anthropic' })
+    now = night2()
+    const me = { provider: 'anthropic' as const, model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1' }
+    const scope = (secondOpinions: boolean) => ({ sorterVersion: SORTER_VERSION, ...me, others: [{ provider: 'openai' as const, model: 'gpt-6-luna', promptVersion: 'luna-prompt-1' }], throwawayAt: DEFAULT_THRESHOLDS.throwaway, secondOpinions })
+    withStore(w, (st) => {
+      expect(st.cloudPending(scope(false)).map((p) => p.hash)).toEqual([hashOf('d5')])
+      // with second opinions on, the version rules stand: an answer under an earlier model is no answer
+      expect(st.cloudPending(scope(true)).map((p) => p.hash).sort()).toEqual(['d3', 'd4', 'd5'].map(hashOf).sort())
+      const run = { night: '2026-10-11', limit: NIGHTLY_LIMIT, runId: 'run-b', now: night2() }
+      expect(st.claimForCloud(['d3', 'd4', 'd5'].map(hashOf), { ...scope(false), ...run }).claimed).toEqual([hashOf('d5')])
+      st.releaseClaims('run-b')
+    })
+    const p = await a.call<CloudPreview>('cloud:prepare')
+    expect(p).toMatchObject({ provider: 'anthropic', toSend: 1, secondOpinions: 0 })
+    expect(await a.svc.runNightly()).toMatchObject({ provider: 'anthropic', asked: 1 })
+    expect(sent(a.net.haiku)).toEqual(['fresh'])
+  })
+
+  it('an earlier answer of the asking provider’s own does not count against it', async () => {
+    const w = four()
+    const a = app(w, { ...BOTH, secondOpinions: false }, { now: night1 })
+    expect(await a.svc.runNightly()).toMatchObject({ provider: 'openai', asked: 4 })
+    const db = new DatabaseSync(join(w, 'triage.db'))
+    db.prepare("UPDATE sorter_cloud_answers SET model = 'luna-earlier-model' WHERE provider = 'openai'").run()
+    db.close()
+    const scope = { sorterVersion: SORTER_VERSION, provider: 'openai' as const, model: 'gpt-6-luna', promptVersion: 'luna-prompt-1', others: [{ provider: 'anthropic' as const, model: 'claude-haiku-5-5', promptVersion: 'haiku-prompt-1' }], throwawayAt: DEFAULT_THRESHOLDS.throwaway, secondOpinions: false }
+    expect(withStore(w, (st) => st.cloudPending(scope).map((p) => p.hash).sort())).toEqual(['d3', 'd4'].map(hashOf).sort())
+  })
+})
+
+describe('removing a key is one write', () => {
+  /** A config that holds an agreement to a provider whose key is not there. */
+  const agreedWithoutKey = (c: Record<string, unknown>): boolean => (Boolean(c.optedInAt) && !c.keyEnc) || (Boolean(c.anthropicOptedInAt) && !c.anthropicKeyEnc)
+
+  it('the key, the agreement and on/off go together: no stored config ever has the agreement without the key', async () => {
+    const a = app(four(), { ...BOTH })
+    const st = await a.call<CloudStatus>('cloud:clear-key', 'openai')
+    expect(a.writes).toHaveLength(1)
+    expect(a.writes[0]).toEqual({ provider: 'openai', anthropicKeyEnc: FAKE_ANTHROPIC_KEY, optedInAt: null, anthropicOptedInAt: T1, enabled: false })
+    expect(a.writes.some(agreedWithoutKey)).toBe(false)
+    expect(st).toMatchObject({ hasKey: false, settings: { enabled: false, agreedAt: { openai: null, anthropic: T1 } } })
+    // the other provider, not selected: one write as well, and the service stays as it was
+    const b = app(four(), { ...BOTH })
+    await b.call('cloud:clear-key', 'anthropic')
+    expect(b.writes).toEqual([{ provider: 'openai', keyEnc: FAKE_OPENAI_KEY, optedInAt: T1, anthropicOptedInAt: null, enabled: true }])
+  })
+
+  it('a write that fails leaves the key and the agreement both in place; a key saved afterwards rides on nothing', async () => {
+    const a = app(four(), { ...BOTH }, { now: night1 })
+    const p = await a.call<CloudPreview>('cloud:prepare')
+    a.failWrite()
+    await expect(a.call('cloud:clear-key', 'openai')).rejects.toThrow(/could not be written/)
+    expect(a.box.stored).toMatchObject({ keyEnc: FAKE_OPENAI_KEY, optedInAt: T1 })
+    expect(agreedWithoutKey(a.box.stored)).toBe(false)
+    // nothing was removed, so nothing was signalled: the prepared batch is still his to send
+    expect(await a.call<CloudRunSummary>('cloud:send', p.token)).toMatchObject({ asked: 4 })
+    // removed for real, then another key saved: no agreement is left for it, and nothing goes
+    await a.call('cloud:clear-key', 'openai')
+    await a.call('cloud:set-key', 'openai', 'sk-test-ANOTHERFAKEKEY0123456789abcd')
+    expect(a.writes.some(agreedWithoutKey)).toBe(false)
+    expect(a.svc.status().settings).toMatchObject({ enabled: false, agreedAt: { openai: null } })
+    expect(await a.call<CloudPreview>('cloud:prepare')).toMatchObject({ token: null })
+    const requests = a.net.urls.length
+    expect(await a.svc.runNightly()).toMatchObject({ asked: 0 })
+    expect(a.net.urls).toHaveLength(requests)
+  })
+})
+
+describe('turning it on does not catch up a slot that passed while it was off', () => {
+  const at = (d: number, h: number, m = 0): Date => new Date(2026, 9, d, h, m)
+  for (const [what, off, on] of [
+    ['the service', { channel: 'cloud:set-settings', arg: { enabled: false } }, { channel: 'cloud:set-settings', arg: { enabled: true } }],
+    ['the nightly switch', { channel: 'cloud:set-nightly', arg: false }, { channel: 'cloud:set-nightly', arg: true }]
+  ] as const) {
+    it(`${what} off before the slot and on after it: nothing runs until the time nextRunAt gives`, async () => {
+      let now = at(9, 9)
+      const a = app(many(8), { ...BOTH }, { now: () => now })
+      useAllowance(a.d.wellRoot(), '2026-10-09', NIGHTLY_LIMIT - 2)
+      expect(await a.svc.tick()).toBeNull() // starts the clock
+      now = at(10, 2)
+      expect(await a.svc.tick()).toMatchObject({ trigger: 'nightly', asked: 2 }) // a last run is stored: the anchor the scheduler goes by
+      now = at(10, 20)
+      await a.call(off.channel, off.arg)
+      now = at(11, 8) // the 02:00 slot passed while it was off
+      expect(await a.svc.tick()).toBeNull()
+      await a.call(on.channel, on.arg)
+      expect(a.d.prompts).toHaveLength(0) // agreed to already: no dialog stands between the switch and a send
+      expect(a.svc.status().nextRunAt).toBe(at(12, 2).toISOString())
+      const sentBefore = a.net.urls.length
+      expect(await a.svc.tick()).toBeNull()
+      now = at(12, 1, 59)
+      expect(await a.svc.tick()).toBeNull()
+      expect(a.net.urls).toHaveLength(sentBefore)
+      now = at(12, 2)
+      expect(await a.svc.tick()).toMatchObject({ trigger: 'nightly', asked: 8 - 2 })
+    })
+  }
+
+  it('on all along, a slot missed while the app was closed still runs at the next check; setting a switch to the position it has moves nothing', async () => {
+    let now = at(9, 9)
+    const a = app(four(), { ...BOTH }, { now: () => now })
+    await a.svc.tick()
+    now = at(11, 8) // two slots passed with the app closed
+    await a.call('cloud:set-nightly', true)
+    await a.set({ enabled: true })
+    await a.set({ batchTime: '02:00' })
+    expect(a.d.stateBox.since).toBe(at(9, 9).toISOString())
+    expect(await a.svc.tick()).toMatchObject({ trigger: 'nightly', asked: 4 })
+  })
+
+  it('the scheduler goes by the later of the last run and the start of the schedule', () => {
+    const base = { enabled: true, batchTime: '02:00' }
+    const iso = (d: Date): string => d.toISOString()
+    expect(isBatchDue({ ...base, lastRunAt: iso(at(10, 2)), since: iso(at(9, 9)), now: at(11, 8) })).toBe(true)
+    expect(isBatchDue({ ...base, lastRunAt: iso(at(10, 2)), since: iso(at(11, 8)), now: at(11, 8, 1) })).toBe(false)
+    expect(isBatchDue({ ...base, lastRunAt: iso(at(10, 2)), since: iso(at(11, 8)), now: at(12, 2) })).toBe(true)
+    expect(isBatchDue({ ...base, lastRunAt: 'not a time', since: iso(at(9, 9)), now: at(10, 2) })).toBe(true)
+    expect(isBatchDue({ ...base, lastRunAt: null, since: null, now: at(10, 2) })).toBe(false)
+  })
+})
+
+describe('a prepared batch does not outlive a key change', () => {
+  for (const [what, change] of [
+    ['another key saved for the provider', ['cloud:set-key', 'openai', 'sk-test-ANOTHERFAKEKEY0123456789abcd']],
+    ['the same key saved again', ['cloud:set-key', 'openai', FAKE_OPENAI_KEY]],
+    ['the other provider’s key saved', ['cloud:set-key', 'anthropic', FAKE_ANTHROPIC_KEY]]
+  ] as const) {
+    it(`${what} between the count and the click: the send is refused and nothing goes`, async () => {
+      const a = app(four(), { ...BOTH }, { now: night1 })
+      const p = await a.call<CloudPreview>('cloud:prepare')
+      expect(p).toMatchObject({ blocked: null, toSend: 4 })
+      await a.call(change[0], change[1], change[2])
+      expect(await a.call<CloudRunSummary>('cloud:send', p.token)).toMatchObject({ skipped: 'not-prepared', asked: 0, sent: 0 })
+      expect(a.d.prompts).toHaveLength(0)
+      expect(a.net.urls).toEqual([])
+      // prepared again, it goes with the key stored now
+      const again = await a.call<CloudPreview>('cloud:prepare')
+      expect(await a.call<CloudRunSummary>('cloud:send', again.token)).toMatchObject({ asked: 4 })
+    })
+  }
+})
+
+describe('the allowance is counted against the night a request goes in', () => {
+  it('a run that is still preparing when the night ends at noon sends nothing more; its claims go and neither night is charged', async () => {
+    const w = four()
+    let now = new Date(2026, 9, 11, 11, 59) // the night of 10 October, a minute before it ends
+    const a = app(w, { ...BOTH }, { now: () => now })
+    useAllowance(w, NIGHT1, NIGHTLY_LIMIT - 1)
+    a.d.shrink = async () => {
+      now = new Date(2026, 9, 11, 12, 1) // noon passes while the pictures are made ready
+      return { mime: 'image/jpeg', base64: 'AAAA' }
+    }
+    const s = await a.svc.runNightly()
+    expect(s).toMatchObject({ asked: 0, sent: 0, skipped: 'cancelled', stayedDoubtful: 4 })
+    expect(s.message).toBe('Stopped: the night this run counted against ended at noon. Nothing more was sent. 4 screenshots still need a look.')
+    expect(a.net.urls).toEqual([])
+    expect(claimsLeft(w)).toBe(0)
+    expect(withStore(w, (st) => [st.allowanceUsed(NIGHT1), st.allowanceUsed('2026-10-11')])).toEqual([NIGHTLY_LIMIT - 1, 0])
+    // the next run counts against the new night, from nothing
+    expect(await a.svc.runNightly()).toMatchObject({ asked: 4, skipped: null })
+    expect(withStore(w, (st) => [st.allowanceUsed(NIGHT1), st.allowanceUsed('2026-10-11')])).toEqual([NIGHTLY_LIMIT - 1, 4])
+  })
+
+  it('a retry that comes due after noon is not made', async () => {
+    const w = four()
+    let now = new Date(2026, 9, 11, 11, 59)
+    const a = app(w, { ...BOTH }, { now: () => now })
+    let calls = 0
+    a.d.http = async () => {
+      calls++
+      return { status: 503, headers: { get: () => null }, text: async () => '' }
+    }
+    a.d.sleep = async () => void (now = new Date(2026, 9, 11, 12, 1)) // the wait before the retry crosses noon
+    const s = await a.svc.runNightly()
+    expect(calls).toBe(1)
+    expect(s).toMatchObject({ asked: 4, answered: 0, skipped: 'cancelled' })
+    expect(s.message).toMatch(/^Stopped after asking Luna about 4 screenshots: the night this run counted against ended at noon\./)
+    expect(claimsLeft(w)).toBe(0)
+    expect(withStore(w, (st) => [st.allowanceUsed(NIGHT1), st.allowanceUsed('2026-10-11')])).toEqual([4, 0])
+  })
+})
+
+describe('a manual send is the count he confirmed or nothing', () => {
+  it('tonight’s allowance shrinks while main’s dialog is open: fewer could be claimed, so none is sent and the claims go', async () => {
+    const w = four()
+    const a = app(w, { ...BOTH }, { now: night1 })
+    const p = await a.call<CloudPreview>('cloud:prepare')
+    expect(p).toMatchObject({ blocked: null, toSend: 4 })
+    a.d.confirm = async (prompt) => {
+      a.d.prompts.push(prompt)
+      useAllowance(w, NIGHT1, NIGHTLY_LIMIT - 2) // another process sent screenshots of its own meanwhile
+      return true
+    }
+    const s = await a.call<CloudRunSummary>('cloud:send', p.token)
+    expect(a.d.prompts.map((x) => x.count)).toEqual([4])
+    expect(s).toMatchObject({ trigger: 'manual', asked: 0, sent: 0, skipped: 'batch-changed', stayedDoubtful: 4 })
+    expect(s.message).toMatch(/^Nothing was sent: the screenshots changed while the question was open\. Press Sort now again\./)
+    expect(a.net.urls).toEqual([])
+    expect(claimsLeft(w)).toBe(0)
+    expect(withStore(w, (st) => st.allowanceUsed(NIGHT1))).toBe(NIGHTLY_LIMIT - 2)
+    // prepared again he is shown, and sends, the two that fit
+    const again = await a.call<CloudPreview>('cloud:prepare')
+    expect(again).toMatchObject({ toSend: 2 })
+    a.d.confirm = async () => true
+    expect(await a.call<CloudRunSummary>('cloud:send', again.token)).toMatchObject({ asked: 2, sent: 2 })
+  })
+
+  it('another run holds one of them when he confirms: none is sent', async () => {
+    const w = four()
+    const a = app(w, { ...BOTH }, { now: night1 })
+    const p = await a.call<CloudPreview>('cloud:prepare')
+    a.d.confirm = async () => {
+      const scope = { sorterVersion: SORTER_VERSION, provider: 'openai' as const, model: 'gpt-6-luna', promptVersion: 'luna-prompt-1', throwawayAt: DEFAULT_THRESHOLDS.throwaway }
+      withStore(w, (st) => st.claimForCloud([hashOf('d2')], { ...scope, night: NIGHT1, limit: NIGHTLY_LIMIT, runId: 'another-process', now: night1() }))
+      return true
+    }
+    expect(await a.call<CloudRunSummary>('cloud:send', p.token)).toMatchObject({ asked: 0, skipped: 'batch-changed' })
+    expect(a.net.urls).toEqual([])
+    expect(claimsLeft(w)).toBe(1) // the other run's claim; this run's three went
+  })
+
+  it('the nightly batch has no confirmed count and still goes with what fits', async () => {
+    const w = four()
+    const a = app(w, { ...BOTH }, { now: night1 })
+    useAllowance(w, NIGHT1, NIGHTLY_LIMIT - 2)
+    expect(await a.svc.runNightly()).toMatchObject({ trigger: 'nightly', asked: 2, sent: 2 })
   })
 })
