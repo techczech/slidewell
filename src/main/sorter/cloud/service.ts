@@ -1073,7 +1073,11 @@ export class CloudSorter {
             this.push()
           }
         },
-        () => ctl.signal.aborted || nightEnded
+        () => ctl.signal.aborted || nightEnded,
+        // a worker threw (a status broadcast, a store write): the run is aborted and no chunk starts;
+        // pool waits for every request still out before it rethrows, so the cleanup below never
+        // releases claims or marks the sorter idle while one of this run's requests is outstanding
+        () => ctl.abort()
       )
       for (const [why, n] of refused) this.log(`${n} screenshot(s) not sent: ${REFUSAL_WORDS[why]}`)
       const stayedDoubtful = list.length - counts.keep - counts.throwaway

@@ -314,3 +314,65 @@ describe('3. a run that holds claims always ends with them released and the sort
     expect(a.d.logs.some((l) => l.includes('its claims could not be released'))).toBe(true)
   })
 })
+
+describe('4. cleanup waits for every request of the run', () => {
+  it('one worker throws while another request is out: the run is aborted, and the claims stay and the sorter stays busy until that request has settled', async () => {
+    const shots: ShotSpec[] = Array.from({ length: 20 }, (_, i) => ({ hash: `r${i}`, proposal: 'doubtful' as const, window: `smudged-${i}`, takenAt: `2026-10-01T10:${String(i).padStart(2, '0')}:00` }))
+    const w = makeCloudWell(shots)
+    dirs.push(w)
+    const net = bothStubs()
+    // the first request is answered once the second is out; the second stays out until the test lets it go, whatever its signal says
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    let bothOut!: () => void
+    const overlap = new Promise<void>((r) => (bothOut = r))
+    const signals: AbortSignal[] = []
+    let thrown = 0
+    const d = cloudDeps(w, {
+      now: () => at(11, 2),
+      period: () => 'all',
+      http: async (url, init) => {
+        signals.push(init.signal)
+        if (signals.length === 1) await overlap
+        else {
+          bothOut()
+          await gate
+        }
+        return net.http(url, init)
+      },
+      broadcast: (s: CloudStatus) => {
+        if (s.phase === 'asking' && s.done > 0 && !thrown++) throw new Error('the window had gone')
+      }
+    })
+    const svc = new CloudSorter(d)
+    const writesWhileBusy: boolean[] = []
+    const realSave = SorterStore.prototype.saveCloudResults
+    vi.spyOn(SorterStore.prototype, 'saveCloudResults').mockImplementation(function (this: InstanceType<typeof SorterStore>, ...args: Parameters<typeof realSave>) {
+      writesWhileBusy.push(svc.busy())
+      return realSave.apply(this, args)
+    })
+    const p = await svc.prepare()
+    let settled = false
+    const sending = svc.send(p.token).finally(() => (settled = true))
+    sending.catch(() => undefined)
+    for (let i = 0; i < 50 && !(thrown && signals.length === 2); i++) await new Promise((r) => setTimeout(r, 5))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(thrown).toBe(1)
+    expect(signals).toHaveLength(2)
+    // the second request is still out: aborted, but nothing is released and no other run can start
+    expect(signals[1].aborted).toBe(true)
+    expect(settled).toBe(false)
+    expect(svc.busy()).toBe(true)
+    expect(claims(w)).toHaveLength(20)
+    release()
+    await expect(sending).rejects.toThrow('the window had gone')
+    expect(signals).toHaveLength(2)
+    expect(claims(w)).toEqual([])
+    expect(svc.busy()).toBe(false)
+    // whatever was written was written before the cleanup, never after it
+    expect(writesWhileBusy.length).toBeGreaterThan(0)
+    expect(writesWhileBusy.every(Boolean)).toBe(true)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(writesWhileBusy.every(Boolean)).toBe(true)
+  })
+})

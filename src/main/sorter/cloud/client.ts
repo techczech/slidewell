@@ -224,14 +224,31 @@ export function postLuna(body: unknown, o: Omit<PostOptions, 'wire'>): Promise<u
   return postCloud(body, { ...o, wire: LUNA_WIRE })
 }
 
-/** Run `fn` over `items` with at most `limit` at a time. Stops starting new ones once `stop()` is true. */
-export async function pool<T>(items: T[], limit: number, fn: (item: T, index: number) => Promise<void>, stop: () => boolean = () => false): Promise<void> {
+/**
+ * Run `fn` over `items` with at most `limit` at a time. Stops starting new ones once `stop()` is true.
+ * When one throws, no new one starts, `onError` is called once (the caller aborts what is in flight)
+ * and every one already started is awaited before this rejects, with the first error thrown: when
+ * the promise settles, nothing started here is still running.
+ */
+export async function pool<T>(items: T[], limit: number, fn: (item: T, index: number) => Promise<void>, stop: () => boolean = () => false, onError?: (e: unknown) => void): Promise<void> {
   let next = 0
+  const failure: { first?: { error: unknown } } = {}
   const worker = async (): Promise<void> => {
-    while (next < items.length && !stop()) {
+    while (next < items.length && !failure.first && !stop()) {
       const i = next++
-      await fn(items[i], i)
+      try {
+        await fn(items[i], i)
+      } catch (e) {
+        if (failure.first) continue
+        failure.first = { error: e }
+        try {
+          onError?.(e)
+        } catch {
+          // the first error is the one thrown
+        }
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker))
+  if (failure.first) throw failure.first.error
 }
