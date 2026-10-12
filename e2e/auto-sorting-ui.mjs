@@ -55,7 +55,75 @@ function installFake() {
     nightlyLimit: 300, leftTonight: 300, nextRunAt: new Date(Date.now() + 86400000).toISOString(), model: 'claude-haiku-5-5', name: 'Haiku', company: 'Anthropic', longEdge: 1456, providers, period: '30d', periods: PERIODS,
     lastRun: { at: today(2, 1), trigger: 'nightly', provider: 'anthropic', local: null, asked: 58, answered: 58, keep: 10, throwaway: 7, stayedDoubtful: 41, sent: 58, settled: 17, stillUnsure: 41, skipped: null, error: null, message: 'Asked Haiku about 58 screenshots.' }
   }
-  const calls = { sort: 0, train: 0, prepare: 0, send: [], cancel: 0, cloudCancel: 0, decide: 0, setSettings: [], setNightly: [], setSecond: [] }
+  const calls = { sort: 0, train: 0, prepare: 0, send: [], cancel: 0, cloudCancel: 0, decide: 0, setSettings: [], setNightly: [], setSecond: [], list: [], decideAll: [], setAppRule: [], runPiles: [], runPage: [] }
+  // --- ticket 20 (main) for ticket 21 (renderer): apps, per-app rules, sort runs. Invented numbers and titles. ---
+  // one row per app: his kept / thrown away / still undecided, the built-in rule for the app name, his rule ('' = app not known)
+  const apps = [
+    { app: 'Brightloom', kept: 40, thrownAway: 11, undecided: 412, builtIn: null, rule: null },
+    { app: 'Claude', kept: 2, thrownAway: 19, undecided: 60, builtIn: 'keep', rule: null },
+    { app: 'Quillpad', kept: 17, thrownAway: 9, undecided: 188, builtIn: null, rule: null },
+    { app: 'TalkWeaver', kept: 4, thrownAway: 60, undecided: 214, builtIn: 'throwaway', rule: null },
+    { app: 'Mossgrid', kept: 3, thrownAway: 47, undecided: 97, builtIn: null, rule: null },
+    { app: 'Finder', kept: 1, thrownAway: 118, undecided: 74, builtIn: 'throwaway', rule: null },
+    { app: '', kept: 28, thrownAway: 60, undecided: 305, builtIn: null, rule: null }
+  ]
+  const WORDS = { keep: { says: 'keep', did: 'kept', control: 'Usually keep' }, throwaway: { says: 'throw away', did: 'threw away', control: 'Usually throw away' } }
+  // the same rule as main (sorter/app-rules.ts suggestionFor): 20 decided, 85% one way, rule in force does not say so already
+  const suggest = (a) => {
+    const decided = a.kept + a.thrownAway
+    const way = a.kept >= a.thrownAway ? 'keep' : 'throwaway'
+    const most = Math.max(a.kept, a.thrownAway)
+    const inForce = a.rule ?? a.builtIn
+    if (decided < 20 || most * 100 < 85 * decided || inForce === way) return null
+    const share = most / decided
+    const did = `you ${WORDS[way].did} ${Math.round(share * 100)}%`
+    if (!inForce) return { kind: 'make', rule: way, share, against: null, text: `Y${did.slice(1)} — make it a rule?`, action: 'Make rule' }
+    return { kind: 'change', rule: way, share, against: a.rule ? 'yours' : 'built-in', text: `${a.rule ? 'Your rule' : 'Built-in rule'} says ${WORDS[inForce].says}, but ${did} — change to ${WORDS[way].control}?`, action: 'Change rule' }
+  }
+  const goesBy = () => ({
+    apps: apps.map((a) => ({ app: a.app, kept: a.kept, keptShare: a.kept + a.thrownAway ? a.kept / (a.kept + a.thrownAway) : null, thrownAway: a.thrownAway, undecided: a.undecided, builtIn: a.builtIn, rule: a.rule, suggestion: suggest(a) })),
+    builtIn: { keep: ['Claude or ChatGPT answer', 'Slides on screen', 'Looks like a chart'], throwaway: ['TalkWeaver, WriteFlex or SlideWell screen', 'Terminal window', 'System Settings window', 'Finder window'] }
+  })
+  const appOf = (name) => apps.find((a) => a.app.toLowerCase() === String(name).trim().toLowerCase())
+  const appCounts = (state) =>
+    apps
+      .map((a) => ({ app: a.app, count: state === 'undecided' ? a.undecided : state === 'excluded' ? a.thrownAway : state === 'selected' ? a.kept : state === 'all' ? a.undecided + a.kept + a.thrownAway : 0, kept: a.kept, thrownAway: a.thrownAway, keptShare: a.kept / (a.kept + a.thrownAway) }))
+      .filter((a) => a.count > 0)
+  // sort runs, newest first; each run's cards are made once, his later decisions kept beside them
+  const runDefs = [
+    { id: 'run-a', startedAt: today(14, 19), finishedAt: today(14, 20), period: '30d', trigger: 'manual', n: [41, 73, 12] },
+    { id: 'run-b', startedAt: today(2, 0), finishedAt: today(2, 1), period: 'all', trigger: 'nightly', n: [20, 22, 6] },
+    { id: 'run-c', startedAt: new Date(Date.now() - 2 * 86400000).toISOString(), finishedAt: new Date(Date.now() - 2 * 86400000 + 60000).toISOString(), period: '7d', trigger: 'manual', n: [50, 30, 8] }
+  ]
+  const WHO = ['rules', 'history', 'luna', 'haiku']
+  const CARD_APPS = ['Brightloom', 'Quillpad', 'TalkWeaver', 'Mossgrid', 'Finder', null]
+  const REASONS = { keep: ['Looks like a chart — usually kept', 'Looks like screenshots you kept before', 'A diagram with labels'], throwaway: ['TalkWeaver, WriteFlex or SlideWell screen — usually throwaway', 'Finder window — usually throwaway; looks like screenshots you binned before', 'Looks like screenshots you binned before'], doubtful: ['Not sure: it looks a bit like screenshots you kept, but not clearly'] }
+  const decisions = {} // hash → 'selected' | 'excluded'
+  const cardsOf = {}
+  for (const r of runDefs) {
+    cardsOf[r.id] = []
+    ;['keep', 'throwaway', 'doubtful'].forEach((proposal, pi) => {
+      for (let i = 0; i < r.n[pi]; i++) {
+        const low = i % 5 === 2
+        const confidence = proposal === 'doubtful' ? (low ? 0.55 : 0.66) : proposal === 'keep' ? (low ? 0.74 : 0.93) : low ? 0.92 : 0.97
+        cardsOf[r.id].push({ hash: `${r.id}-${proposal[0]}${i}`, filename: `Invented capture ${r.id} ${proposal} ${i}.png`, app: CARD_APPS[i % CARD_APPS.length], windowTitle: CARD_APPS[i % CARD_APPS.length] ? `Invented window ${i}` : null, takenAt: null, reason: REASONS[proposal][i % REASONS[proposal].length], confidence, lowConfidence: low, proposal, decidedBy: proposal === 'doubtful' ? null : WHO[i % WHO.length], thumbUrl: null, offline: false })
+      }
+    })
+  }
+  const pileNow = (c) => (decisions[c.hash] === 'selected' ? 'kept' : decisions[c.hash] === 'excluded' ? 'throwaway' : c.proposal === 'keep' ? 'kept' : c.proposal === 'throwaway' ? 'throwaway' : 'unsure')
+  const cardNow = (c) => ({ ...c, pile: pileNow(c), decision: decisions[c.hash] ?? null })
+  const runNow = (r) => {
+    const cs = cardsOf[r.id].map(cardNow)
+    const n = (p) => cs.filter((c) => c.pile === p).length
+    return { id: r.id, startedAt: r.startedAt, finishedAt: r.finishedAt, period: r.period, trigger: r.trigger, counts: { sorted: r.n[0] + r.n[1] + r.n[2], kept: r.n[0], thrownAway: r.n[1], unsure: r.n[2] }, now: { kept: n('kept'), thrownAway: n('throwaway'), unsure: n('unsure') } }
+  }
+  const pageOf = (runId, pile, after, limit) => {
+    const all = (cardsOf[runId] ?? []).map(cardNow).filter((c) => c.pile === pile)
+    const from = after ? Number(after) : 0
+    const size = limit ?? 60
+    return { total: all.length, items: all.slice(from, from + size), next: from + size < all.length ? String(from + size) : null }
+  }
+  const bulk = { drift: 0 } // set drift to make the next decideAll count differ (the refused case)
   const subs = { sorter: new Set(), cloud: new Set() }
   const snap = () => ({ ...cloud, settings: { ...cloud.settings }, providers: providers.map((p) => ({ ...p })) })
   const push = () => {
@@ -69,7 +137,7 @@ function installFake() {
     return snap()
   }
   window.__fake = {
-    sorter, cloud, calls, push,
+    sorter, cloud, calls, push, apps, decisions, runDefs, bulk,
     install(sw) {
       sw.sorter = {
         status: async () => ({ ...sorter }),
@@ -77,6 +145,21 @@ function installFake() {
         sort: async () => { calls.sort++; return { ok: true, sorted: 630, counts: { keep: 300, throwaway: 250, doubtful: 80 }, periodPhrase: ' from the last 30 days' } },
         setPeriod: async (p) => { sorter.period = p; cloud.period = p; sorter.undecided = { period: p, inPeriod: p === 'all' ? null : 100, all: 1482 }; push(); return { ok: true, period: p } },
         cancel: async () => { calls.cancel++ },
+        goesBy: async () => goesBy(),
+        setAppRule: async (app, rule) => {
+          calls.setAppRule.push([app, rule])
+          const a = appOf(app)
+          if (!a || !(rule === null || rule === 'keep' || rule === 'throwaway')) return { ok: false, error: 'That is not a rule the sorter knows.', goesBy: goesBy() }
+          a.rule = rule
+          return { ok: true, goesBy: goesBy() }
+        },
+        runs: async () => runDefs.map(runNow),
+        runPiles: async (runId, opts = {}) => {
+          calls.runPiles.push(runId)
+          const r = runDefs.find((x) => x.id === runId)
+          return { run: r ? runNow(r) : null, kept: pageOf(runId, 'kept', null, opts.kept), throwaway: pageOf(runId, 'throwaway', null, opts.throwaway), unsure: pageOf(runId, 'unsure', null, opts.unsure) }
+        },
+        runPage: async (runId, pile, after, limit) => { calls.runPage.push([runId, pile, after]); return pageOf(runId, pile, after, limit) },
         onStatus: (cb) => { subs.sorter.add(cb); return () => subs.sorter.delete(cb) }
       }
       sw.cloud = {
@@ -99,9 +182,31 @@ function installFake() {
         onStatus: (cb) => { subs.cloud.add(cb); return () => subs.cloud.delete(cb) }
       }
       const list = sw.triage.list
-      sw.triage.list = async (...a) => ({ ...(await list(...a)), counts: { undecided: 1530, selected: 96, included: 0, excluded: 2310, total: 3888 } })
+      // the sixth argument is the app filter (calls.list keeps every call's arguments)
+      sw.triage.list = async (...a) => { calls.list.push(a); return { ...(await list(...a)), counts: { undecided: 1530, selected: 96, included: 0, excluded: 2310, total: 3888 } } }
       const decide = sw.triage.decide
-      sw.triage.decide = async (...a) => { calls.decide++; return decide(...a) }
+      // a pile card moved across is his decision by hash; the piles read it back
+      sw.triage.decide = async (...a) => {
+        calls.decide++
+        const [hash, action] = a
+        if (action === 'reset') delete decisions[hash]
+        else decisions[hash] = action === 'exclude' ? 'excluded' : 'selected'
+        return decide(...a)
+      }
+      sw.triage.apps = async (state) => appCounts(state)
+      sw.triage.decideAll = async (names, action, expected) => {
+        calls.decideAll.push([names, action, expected])
+        const picked = names.map(appOf).filter(Boolean)
+        const count = picked.reduce((n, a) => n + a.undecided, 0) + bulk.drift
+        bulk.drift = 0
+        if (count !== expected) return { ok: false, changed: 0, count, refused: 'count-changed' }
+        for (const a of picked) {
+          if (action === 'exclude') a.thrownAway += a.undecided
+          else a.kept += a.undecided
+          a.undecided = 0
+        }
+        return { ok: true, changed: count, count }
+      }
     }
   }
 }

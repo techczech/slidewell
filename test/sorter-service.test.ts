@@ -380,3 +380,65 @@ describe('sorter service: numbers for the Auto sorting tab (ticket 18)', () => {
     }
   })
 })
+
+describe('sorter service: sort runs and his per-app rules (ticket 20)', () => {
+  const read = <T>(w: string, sql: string): T[] => {
+    const db = new DatabaseSync(join(w, 'triage.db'), { readOnly: true })
+    try {
+      return db.prepare(sql).all() as T[]
+    } finally {
+      db.close()
+    }
+  }
+
+  it('every sort gets a run record, manual or nightly, and each proposal carries the run that last proposed it', async () => {
+    const w = well(70, 30)
+    let clock = new Date('2026-10-13T14:20:00Z')
+    const svc = new SorterService(deps(w, { now: () => clock }))
+    expect((await svc.trainAndTest()).ok).toBe(true)
+    const decisionsBefore = read(w, 'SELECT * FROM triage_decisions ORDER BY hash')
+    const first = await svc.sortUndecided()
+    expect(first).toMatchObject({ ok: true, sorted: 3 })
+    const runs1 = read<{ id: string; started_at: string; finished_at: string | null; period: string; trigger: string; sorted: number; keep: number; throwaway: number; doubtful: number }>(w, 'SELECT * FROM sorter_runs')
+    expect(runs1).toHaveLength(1)
+    expect(runs1[0]).toMatchObject({ started_at: '2026-10-13T14:20:00.000Z', finished_at: '2026-10-13T14:20:00.000Z', period: 'all', trigger: 'manual', sorted: 3, ...first.counts })
+    expect(read<{ run_id: string }>(w, 'SELECT run_id FROM sorter_proposals').map((r) => r.run_id)).toEqual([runs1[0].id, runs1[0].id, runs1[0].id])
+
+    clock = new Date('2026-10-14T02:00:00Z')
+    const second = await svc.sortUndecided({ trigger: 'nightly', limit: 2 })
+    expect(second).toMatchObject({ ok: true, sorted: 2 })
+    const runs2 = read<{ id: string; trigger: string; sorted: number }>(w, 'SELECT id, trigger, sorted FROM sorter_runs ORDER BY started_at')
+    expect(runs2.map((r) => [r.trigger, r.sorted])).toEqual([['manual', 3], ['nightly', 2]])
+    // the two sorted again moved to the new run; the third stays in the first
+    const byRun = read<{ run_id: string; n: number }>(w, 'SELECT run_id, COUNT(*) AS n FROM sorter_proposals GROUP BY run_id')
+    expect(Object.fromEntries(byRun.map((r) => [r.run_id, Number(r.n)]))).toEqual({ [runs2[0].id]: 1, [runs2[1].id]: 2 })
+    // the sorter wrote none of his decisions
+    expect(read(w, 'SELECT * FROM triage_decisions ORDER BY hash')).toEqual(decisionsBefore)
+  })
+
+  it('a refused sort records no run', async () => {
+    const w = well(70, 30)
+    const svc = new SorterService(deps(w))
+    expect((await svc.sortUndecided()).ok).toBe(false)
+    expect(read(w, 'SELECT * FROM sorter_runs')).toEqual([])
+  })
+
+  it('the next sort uses his rule for an app; setting it sorts nothing', async () => {
+    const w = well(70, 30)
+    const t = new DatabaseSync(join(w, 'triage.db'))
+    t.exec("UPDATE triage_fts SET app = 'Brightloom' WHERE hash = 'new0'")
+    t.close()
+    let rules: unknown = []
+    const svc = new SorterService(deps(w, { appRules: () => rules }))
+    expect((await svc.trainAndTest()).ok).toBe(true)
+    await svc.sortUndecided()
+    const ruleOf = (): string | null => read<{ rule: string | null }>(w, "SELECT rule FROM sorter_proposals WHERE hash = 'new0'")[0].rule
+    const proposedAt = (): string => read<{ proposed_at: string }>(w, "SELECT proposed_at FROM sorter_proposals WHERE hash = 'new0'")[0].proposed_at
+    expect(ruleOf()).toBeNull()
+    const at = proposedAt()
+    rules = [{ app: 'brightloom', rule: 'keep' }]
+    expect(proposedAt()).toBe(at) // nothing was sorted again by the change
+    await svc.sortUndecided()
+    expect(ruleOf()).toBe('your-rule')
+  })
+})

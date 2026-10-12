@@ -15,7 +15,7 @@ import type { FileHandle } from 'node:fs/promises'
 import { join, relative, extname, basename, dirname } from 'node:path'
 import { query, run, safeFtsQuery } from './sqlite'
 import { ocrImage, ingestScreenshot, ingestVideo, makePoster, recordWellSource } from './well'
-import { tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
+import { appKey, tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
 import { parseScreenshotName, type NameTemplate } from './screenshot-name'
 import { downloadOnlineOnly as downloadInChild, downloadWithDeadline, openDownloaded, type DownloadOptions, type FileIdentity } from './online-only'
 import { walk } from './scan-walk'
@@ -394,8 +394,12 @@ async function hasProposals(db: string): Promise<boolean> {
  * Review piles (ticket 08): an emptied item is gone, and an item in the review's Bin is no longer
  * findable. Which items those are comes from the review's pure clock (piles.ts via hiddenFromLists),
  * never a second date rule here; an unreadable or missing date keeps an item in Throwaway, listed.
+ *
+ * `apps` (ticket 20): only screenshots from these apps; '' is "app not known". Names compare as
+ * appKey does (trimmed, without case): the spellings in the index that match are worked out here and
+ * the query names exactly those. Null or empty = every app.
  */
-export async function listTriage(wellRoot: string, raw: string, state: string, sort: TriageSort = 'scanned', limit = 150, offset = 0, now = Date.now()): Promise<TriageRow[]> {
+export async function listTriage(wellRoot: string, raw: string, state: string, sort: TriageSort = 'scanned', limit = 150, offset = 0, now = Date.now(), apps: string[] | null = null): Promise<TriageRow[]> {
   const db = triageDb(wellRoot)
   if (!existsSync(db)) return []
   const withProposals = await hasProposals(db)
@@ -403,15 +407,23 @@ export async function listTriage(wellRoot: string, raw: string, state: string, s
   const conds = ["COALESCE(d.state, 'undecided') != 'emptied'"]
   if (hidden.length) conds.push(`triage_fts.hash NOT IN (${hidden.map(() => '?').join(',')})`)
   if (state && state !== 'all') conds.push(`COALESCE(d.state, 'undecided') = '${state.replace(/[^a-z]/g, '')}'`)
+  let spellings: string[] = []
+  if (apps?.length) {
+    const wanted = new Set(apps.map(appKey))
+    const known = await query<{ app: string | null }>(db, "SELECT DISTINCT COALESCE(app, '') AS app FROM triage_fts", [])
+    spellings = known.map((r) => String(r.app ?? '')).filter((a) => wanted.has(appKey(a)))
+    if (!spellings.length) return []
+    conds.push(`COALESCE(triage_fts.app, '') IN (${spellings.map(() => '?').join(',')})`)
+  }
   const join = `triage_fts LEFT JOIN triage_decisions d ON d.hash = triage_fts.hash${withProposals ? ' LEFT JOIN sorter_proposals p ON p.hash = triage_fts.hash' : ''}`
   const cols = LIST_COLS + (withProposals ? ', d.decided_at, p.proposal, p.proposed_at, p.throwaway_since' : ', d.decided_at, NULL AS proposal, NULL AS proposed_at, NULL AS throwaway_since')
   const dateOrder = `ORDER BY CAST(triage_fts.mtime AS INTEGER) ${sort === 'date-asc' ? 'ASC' : 'DESC'}`
   const useDate = sort === 'date-asc' || sort === 'date-desc'
   if (raw && raw.trim().length >= 2) {
     const q = safeFtsQuery(raw)
-    return query<TriageRow>(db, `SELECT ${cols} FROM ${join} WHERE triage_fts MATCH ? AND ${conds.join(' AND ')} ${useDate ? dateOrder : 'ORDER BY rank'} LIMIT ? OFFSET ?`, [q, ...hidden, limit, offset])
+    return query<TriageRow>(db, `SELECT ${cols} FROM ${join} WHERE triage_fts MATCH ? AND ${conds.join(' AND ')} ${useDate ? dateOrder : 'ORDER BY rank'} LIMIT ? OFFSET ?`, [q, ...hidden, ...spellings, limit, offset])
   }
-  return query<TriageRow>(db, `SELECT ${cols} FROM ${join} WHERE ${conds.join(' AND ')} ${useDate ? dateOrder : 'ORDER BY triage_fts.scanned_at DESC'} LIMIT ? OFFSET ?`, [...hidden, limit, offset])
+  return query<TriageRow>(db, `SELECT ${cols} FROM ${join} WHERE ${conds.join(' AND ')} ${useDate ? dateOrder : 'ORDER BY triage_fts.scanned_at DESC'} LIMIT ? OFFSET ?`, [...hidden, ...spellings, limit, offset])
 }
 
 export async function triageCounts(wellRoot: string): Promise<TriageCounts> {

@@ -16,8 +16,12 @@
  *                    decided_by TEXT,                  which step made the call: rules | history | luna | haiku;
  *                                                      NULL for a local doubtful (tickets 07, 16). luna =
  *                                                      OpenAI's Luna, haiku = Anthropic's Haiku
- *                    decided_model TEXT)               the model id when a cloud model made the call
+ *                    decided_model TEXT,               the model id when a cloud model made the call
  *                                                      (gpt-6-luna, claude-haiku-5-5); NULL otherwise
+ *                    run_id TEXT)                      the sort run that last proposed it (ticket 20); NULL for
+ *                                                      a proposal from before runs. A cloud answer changes the
+ *                                                      row in place and leaves this as it is
+ *   sorter_runs(...)                                   one row per sort: runs.ts
  *   sorter_cloud_answers(hash TEXT, provider TEXT,    one row per screenshot AND provider (PRIMARY KEY
  *                    verdict TEXT, confidence REAL,    (hash, provider)): what that provider's model answered,
  *                    reason TEXT, model TEXT,          so a provider is asked about a screenshot once and the
@@ -57,6 +61,7 @@ import type { DecidedBy } from './cloud/cascade'
 import type { LunaAnswer } from './cloud/luna'
 import { providerOfModel, type AnswerScope, type ProviderId } from './cloud/provider'
 import { inWindow, isEverything, type PeriodWindow } from './period'
+import { ensureRunsTable, finishRun, startRun, type RunEnd, type RunStart } from './runs'
 
 const IMAGE_EXT = /\.(webp|png|jpe?g|gif|bmp|tiff?)$/i
 
@@ -258,6 +263,7 @@ export function migrateProposalColumns(db: DatabaseSync): void {
   if (!cols.has('answer')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN answer TEXT')
   if (!cols.has('decided_by')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN decided_by TEXT')
   if (!cols.has('decided_model')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN decided_model TEXT')
+  if (!cols.has('run_id')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN run_id TEXT')
 }
 
 const answersTableSql = (name: string): string => `
@@ -350,7 +356,8 @@ export class SorterStore {
         answered_at TEXT,
         answer TEXT,
         decided_by TEXT,
-        decided_model TEXT
+        decided_model TEXT,
+        run_id TEXT
       );
       ${answersTableSql('IF NOT EXISTS sorter_cloud_answers')};
       CREATE TABLE IF NOT EXISTS sorter_cloud_claims (
@@ -372,6 +379,7 @@ export class SorterStore {
       );
     `)
     migrateProposalColumns(this.db)
+    ensureRunsTable(this.db)
     const claimCols = new Set((this.db.prepare("SELECT name FROM pragma_table_info('sorter_cloud_claims')").all() as Array<{ name: string }>).map((c) => c.name))
     if (!claimCols.has('counted')) this.db.exec('ALTER TABLE sorter_cloud_claims ADD COLUMN counted INTEGER NOT NULL DEFAULT 0')
     try {
@@ -402,23 +410,36 @@ export class SorterStore {
     return r ? { id: r.id, trainedAt: r.trained_at, sorterVersion: r.sorter_version, model: JSON.parse(r.model), report: JSON.parse(r.report) } : null
   }
 
-  /** Record proposals (one transaction). Never touches triage_decisions. */
-  writeProposals(rows: ProposalRow[], sorterVersion: string, modelId: string | null): void {
+  /** A sort begins: its run record (runs.ts). */
+  startRun(run: RunStart): void {
+    startRun(this.db, run)
+  }
+
+  /** A sort ended (or was stopped): its numbers; runs beyond the newest RUNS_KEPT are dropped. */
+  finishRun(id: string, end: RunEnd): void {
+    finishRun(this.db, id, end)
+  }
+
+  /**
+   * Record proposals (one transaction). Never touches triage_decisions. `runId` is the sort run
+   * making them: a screenshot proposed again moves to the new run.
+   */
+  writeProposals(rows: ProposalRow[], sorterVersion: string, modelId: string | null, runId: string | null = null): void {
     if (!rows.length) return
     const now = new Date().toISOString()
     const put = this.db.prepare(
-      `INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, rule, sorter_version, model_id, proposed_at, decided_by, decided_model, throwaway_since)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'throwaway' THEN ? END)
+      `INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, rule, sorter_version, model_id, proposed_at, decided_by, decided_model, run_id, throwaway_since)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'throwaway' THEN ? END)
        ON CONFLICT(hash) DO UPDATE SET proposal = excluded.proposal, confidence = excluded.confidence, p_keep = excluded.p_keep,
          reason = excluded.reason, rule = excluded.rule, sorter_version = excluded.sorter_version, model_id = excluded.model_id, proposed_at = excluded.proposed_at,
-         decided_by = excluded.decided_by, decided_model = excluded.decided_model,
+         decided_by = excluded.decided_by, decided_model = excluded.decided_model, run_id = excluded.run_id,
          throwaway_since = CASE WHEN excluded.proposal != 'throwaway' THEN NULL
                                 WHEN sorter_proposals.proposal = 'throwaway' AND sorter_proposals.throwaway_since IS NOT NULL THEN sorter_proposals.throwaway_since
                                 ELSE excluded.proposed_at END`
     )
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      for (const r of rows) put.run(r.hash, r.proposal, r.confidence, r.pKeep, r.reason, r.rule, sorterVersion, modelId, now, r.decidedBy ?? null, r.decidedModel ?? null, r.proposal, now)
+      for (const r of rows) put.run(r.hash, r.proposal, r.confidence, r.pKeep, r.reason, r.rule, sorterVersion, modelId, now, r.decidedBy ?? null, r.decidedModel ?? null, runId, r.proposal, now)
       this.db.exec('COMMIT')
     } catch (e) {
       this.db.exec('ROLLBACK')
@@ -660,7 +681,8 @@ export class SorterStore {
    * Record a cloud model's answers and, in the same transaction, the proposals they lead to. An answer
    * takes its own provider's row for that screenshot; another provider's row for it is left as it is.
    * A proposal is changed only while it is still doubtful, unanswered and without a decision of his in
-   * Triage (review or Triage may have got there first). Reasons arrive already redacted
+   * Triage (review or Triage may have got there first). The row is updated in place: it stays in the
+   * sort run that proposed it (run_id is not written here). Reasons arrive already redacted
    * (cloud/service.ts). Returns the hashes whose proposal changed.
    */
   saveCloudResults(answers: CloudAnswerRow[], proposals: Array<Pick<ProposalRow, 'hash' | 'proposal' | 'confidence' | 'pKeep' | 'reason' | 'decidedBy' | 'decidedModel'>>): string[] {

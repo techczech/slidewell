@@ -13,8 +13,9 @@ import type { Tier } from '../look-alike/groups'
  * or the evaluation procedure change. Sorting uses only a model trained under the current version.
  * 2: calibrated, near-duplicates grouped, evidence gate.
  * 3: a copy of a kept screenshot leans throwaway (look-alike signal).
+ * 4: the own-apps rule turned round (usually throwaway) and no longer fires on a mention in the text.
  */
-export const SORTER_VERSION = 'sorter-local-3'
+export const SORTER_VERSION = 'sorter-local-4'
 
 export type Proposal = 'keep' | 'throwaway' | 'doubtful'
 
@@ -60,7 +61,7 @@ const sigmoid = (z: number): number => 1 / (1 + Math.exp(-z))
 
 /** Strip the trailing "— usually …" from a rule reason, for use inside a longer sentence. */
 const bare = (reason: string): string =>
-  reason.replace(/\s+—\s+usually (kept|throwaway)$/, '').replace(/^(Looks|Mentions|Slides)\b/, (w) => w.toLowerCase())
+  reason.replace(/\s+—\s+usually (kept|throwaway)$/, '').replace(/^(Looks|Slides|Your)\b/, (w) => w.toLowerCase())
 
 function reasonFor(proposal: Proposal, rule: RuleVerdict | null, pKeepModel: number | null, copy: KeptCopy = null): string {
   const base = reasonBase(proposal, rule, pKeepModel)

@@ -17,6 +17,10 @@
  *     taken only when asked for (the status call from the renderer), after a sort and when the period
  *     changes; a status pushed in between carries the last count.
  *
+ * Every sort that starts gets a run record (runs.ts) and its proposals carry the run's id, so the tab
+ * can show what one sort did. His per-app rules (app-rules.ts, kept in config) join the built-in rules
+ * in training's test and in sorting; changing one sorts nothing.
+ *
  * Sorting writes proposals only: it never moves, deletes or decides anything (binning is later
  * work), and it never writes his triage decisions. Nothing here makes a network call: the cloud step
  * (cloud/service.ts) runs after it. Each proposal records which step made the call (cloud/cascade.ts);
@@ -34,6 +38,9 @@ import { accuracyReport, enoughToMeasure, holdOutSplit, MIN_HELD_BACK, type Accu
 import { loadLabelled, loadUndecided, SorterStore, type ProposalRow, type Shot } from './store'
 import { applyCloud, decidedByLocal, settledAnswer } from './cloud/cascade'
 import { answerScopes, voiceOfAnswer } from './cloud/provider'
+import { appRuleLookup, storedAppRules } from './app-rules'
+import { newRunId, type RunTrigger } from './runs'
+import type { AppRuleLookup } from './rules'
 import { EVERYTHING, inWindow, isSortPeriod, PERIOD_CHOICES, PERIOD_REFUSED, PERIOD_UNREADABLE, periodPhrase, periodWindow, storedPeriod, type PeriodWindow, type SortPeriod } from './period'
 
 export const HOLD_OUT_FRACTION = 0.2
@@ -127,6 +134,8 @@ export type SorterDeps = {
   /** The last sort as stored in config (storedLocalRun reads it), and where to store one. Absent: none is kept. */
   lastRun?: () => unknown
   saveLastRun?: (r: LocalRunSummary) => void
+  /** His per-app rules as stored in config (app-rules.ts storedAppRules reads them). Absent: none. */
+  appRules?: () => unknown
   now?: () => Date
 }
 
@@ -176,6 +185,11 @@ export class SorterService {
     } catch {
       return null
     }
+  }
+
+  /** His per-app rules as they are now (read once per training or sort). */
+  private mine(): AppRuleLookup {
+    return appRuleLookup(storedAppRules(this.deps.appRules?.()))
   }
 
   private thresholds(): Thresholds {
@@ -283,8 +297,9 @@ export class SorterService {
       const trainKept = trainSet.filter((s) => s.truth === 'keep').map((s) => vectors.get(s.image!.id)!)
       const testTiers = await job({ kind: 'kept-tiers', vectors: test.map((s) => vectors.get(s.image!.id)!), kept: trainKept }) // in the worker
       if (ctl.signal.aborted) throw new Error('cancelled')
+      const mine = this.mine()
       for (const [ti, s] of test.entries()) {
-        const rule = applyRules(s.facts)
+        const rule = applyRules(s.facts, mine)
         const v = vectors.get(s.image!.id)!
         const p = predictKeep(held, v)
         scored.push({ p, keep: s.truth === 'keep' })
@@ -331,9 +346,10 @@ export class SorterService {
   /**
    * Propose keep / throwaway / doubtful for every undecided screenshot, or, given a period window,
    * for those taken inside it (period.ts inWindow; one with no date in its name is inside Everything
-   * only). Writes proposals only, and none for a screenshot outside the window.
+   * only). Writes proposals only, and none for a screenshot outside the window. `trigger` says who
+   * started it, for the run record (the nightly batch passes 'nightly').
    */
-  async sortUndecided(opts: { limit?: number; window?: PeriodWindow } = {}): Promise<SortResult> {
+  async sortUndecided(opts: { limit?: number; window?: PeriodWindow; trigger?: RunTrigger } = {}): Promise<SortResult> {
     const window = opts.window ?? EVERYTHING
     if (!isSortPeriod(window.period)) return { ok: false, error: PERIOD_REFUSED }
     const within = { period: window.period, periodPhrase: periodPhrase(window.period) }
@@ -347,8 +363,15 @@ export class SorterService {
     this.abort = ctl
     const counts = { keep: 0, throwaway: 0, doubtful: 0 }
     let sorted = 0
+    const started = this.now()
+    const runId = newRunId(started)
     // a sort that ended (or was stopped) is recorded as numbers and the counts are taken again, before the last status goes out
     const record = (): void => {
+      try {
+        this.withStore((st) => st.finishRun(runId, { finishedAt: this.now().toISOString(), counts: { sorted, ...counts } }))
+      } catch {
+        /* the sort itself stands */
+      }
       try {
         this.deps.saveLastRun?.({ at: this.now().toISOString(), period: window.period, lookedAt: sorted, confident: counts.keep + counts.throwaway, needLook: counts.doubtful })
       } catch {
@@ -357,6 +380,8 @@ export class SorterService {
       this.count()
     }
     try {
+      this.withStore((st) => st.startRun({ id: runId, startedAt: started.toISOString(), period: window.period, trigger: opts.trigger === 'nightly' ? 'nightly' : 'manual' }))
+      const mine = this.mine()
       let shots = loadUndecided(this.deps.wellRoot()).filter((s) => inWindow(s.takenAt, window))
       if (opts.limit !== undefined) shots = shots.slice(0, Math.max(0, opts.limit))
       const t = this.thresholds()
@@ -381,7 +406,7 @@ export class SorterService {
           if (!s.hash) continue
           const v = s.image ? vectors.get(s.image.id) : undefined
           if (s.image && !v && ctl.signal.aborted) continue // not reached before cancel: no proposal
-          const rule = applyRules(s.facts)
+          const rule = applyRules(s.facts, mine)
           const verdict = decide(rule, v ? predictKeep(rec.model, v) : null, t, v ? (tierOf.get(s) ?? null) : null)
           const local = { proposal: verdict.proposal, confidence: verdict.confidence, pKeep: verdict.pKeep, reason: verdict.reason, decidedBy: decidedByLocal(verdict, rule, t) }
           // more than one provider may have answered it: the answer that is a decision stands, else the one asked last
@@ -391,7 +416,7 @@ export class SorterService {
           rows.push({ hash: s.hash, ...row, rule: rule?.rule ?? null })
           counts[row.proposal]++
         }
-        this.withStore((st) => st.writeProposals(rows, SORTER_VERSION, rec.id))
+        this.withStore((st) => st.writeProposals(rows, SORTER_VERSION, rec.id, runId))
         sorted += rows.length
         this.set({ done: Math.min(shots.length, i + chunk.length) })
       }
@@ -406,6 +431,12 @@ export class SorterService {
         return { ok: true, sorted, counts, ...within }
       }
       const msg = (e as Error)?.message ?? String(e)
+      try {
+        // the run that failed is closed with what it had sorted; lastRun is not written for a failed sort, as before
+        this.withStore((st) => st.finishRun(runId, { finishedAt: this.now().toISOString(), counts: { sorted, ...counts } }))
+      } catch {
+        /* the error below is the one reported */
+      }
       this.set({ phase: 'error', message: '', error: msg }, true)
       return { ok: false, sorted, counts, error: msg, ...within }
     } finally {

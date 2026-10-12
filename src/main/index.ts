@@ -42,6 +42,10 @@ import { SorterService, changePeriod, registerSorterIpc, type LocalRunSummary } 
 import createTrainWorker from './sorter/train-worker?nodeWorker'
 import type { Job, JobResult } from './sorter/jobs'
 import type { FetchLike } from './picture-search/model-store'
+import { registerGoesByAndRunsIpc } from './sorter/goes-by-and-runs-ipc'
+import { SortRuns } from './sorter/runs'
+import type { AppRule } from './sorter/app-rules'
+import { appCounts, cleanAppList, decideAllFromApps } from './triage-apps'
 import { ReviewService } from './review/service'
 import { registerReviewIpc } from './review/ipc'
 import { CloudSorter, KEY_FIELD, normaliseCloudSettings, registerCloudIpc, type CloudRunSummary, type CloudSettings, type StoredCloudSettings } from './sorter/cloud/service'
@@ -101,6 +105,9 @@ type Config = {
   sorterPeriod?: string
   // the last sort on this Mac as numbers (sorter/service.ts storedLocalRun reads it; anything else = none)
   sorterLastRun?: LocalRunSummary
+  // his per-app rules for the sorter: usually keep / usually throw away, by app name (sorter/app-rules.ts
+  // storedAppRules reads them; anything else = no rule). Kept here, never in the rebuildable triage index
+  sorterAppRules?: AppRule[]
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -445,7 +452,8 @@ app.whenReady().then(() => {
     },
     period: () => readConfig().sorterPeriod,
     lastRun: () => readConfig().sorterLastRun,
-    saveLastRun: (r) => writeConfig({ sorterLastRun: r })
+    saveLastRun: (r) => writeConfig({ sorterLastRun: r }),
+    appRules: () => readConfig().sorterAppRules
   })
   // the period is one setting for both sort buttons: a change drops the cloud step's prepared batch and both sections are told
   registerSorterIpc(sorter, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents), (period) =>
@@ -471,7 +479,7 @@ app.whenReady().then(() => {
   const cloudSettings = (): CloudSettings => normaliseCloudSettings(cloudCfg())
   const cloud = new CloudSorter({
     wellRoot: wellRootResolved,
-    sortLocal: (window) => sorter.sortUndecided({ window }),
+    sortLocal: (window, trigger) => sorter.sortUndecided({ window, trigger }),
     period: () => readConfig().sorterPeriod,
     canSortLocal: () => {
       const st = sorter.status()
@@ -521,6 +529,15 @@ app.whenReady().then(() => {
     }
   })
   registerReviewIpc(review, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+
+  // --- what the sorter goes by (his per-app rules, in config) and the piles of each sort (sorter/runs.ts): reads, plus the one config write ---
+  registerGoesByAndRunsIpc({
+    allowed: (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents),
+    wellRoot: wellRootResolved,
+    appRules: () => readConfig().sorterAppRules,
+    saveAppRules: (rules) => writeConfig({ sorterAppRules: rules }),
+    runs: new SortRuns({ wellRoot: wellRootResolved, sourceRoot: () => triageSources()[0]?.path ?? null, thumbUrl: swThumb })
+  })
 
   // --- IPC: the typed contract lives in src/preload/index.ts ---
   ipcMain.handle('archive:available', () => archiveAvailable())
@@ -1145,7 +1162,7 @@ app.whenReady().then(() => {
     afterRun: ({ stopped }) => void scanAllSources({ downloads: !stopped }).then(() => mainWindow?.webContents.send('triage:changed')),
     captureDownloads
   })
-  guardedHandle(ipcMain, fromMainWindow, 'triage:list', async (_e, q: string, state: string, sort?: string, limit?: number, offset?: number) => {
+  guardedHandle(ipcMain, fromMainWindow, 'triage:list', async (_e, q: string, state: string, sort?: string, limit?: number, offset?: number, apps?: unknown) => {
     const src = triageSources()[0]?.path ?? null
     const wellR = wellRootResolved()
     const empty = { items: [], counts: { undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }
@@ -1154,7 +1171,10 @@ app.whenReady().then(() => {
       const s = sort === 'date-desc' || sort === 'date-asc' ? sort : 'scanned'
       const lim = typeof limit === 'number' && limit > 0 ? Math.min(limit, 500) : 150
       const off = typeof offset === 'number' && offset > 0 ? offset : 0
-      const rows = await listTriage(wellR, q ?? '', state ?? 'undecided', s, lim, off)
+      // the app filter (ticket 20): absent = every app; a list that is not a list of names lists nothing
+      const only = apps === undefined || apps === null ? null : cleanAppList(apps)
+      if (apps !== undefined && apps !== null && !only) return { ...empty, counts: await triageCounts(wellR) }
+      const rows = await listTriage(wellR, q ?? '', state ?? 'undecided', s, lim, off, Date.now(), only)
       const counts = await triageCounts(wellR)
       return { items: rows.map((r) => triageToWire(r, src, wellR)), counts, hasMore: rows.length === lim }
     } catch {
@@ -1169,6 +1189,23 @@ app.whenReady().then(() => {
     } catch {
       return { state: 'undecided' }
     }
+  })
+  // The App menu (ticket 20): each app with its count in this state tab and his kept share for it.
+  const LIST_STATES = new Set(['undecided', 'selected', 'included', 'excluded', 'all'])
+  guardedHandle(ipcMain, fromMainWindow, 'triage:apps', async (_e, state: unknown) => {
+    try {
+      return appCounts(wellRootResolved(), typeof state === 'string' && LIST_STATES.has(state) ? state : 'undecided')
+    } catch {
+      return []
+    }
+  })
+  // Exclude all / select all undecided from the ticked apps: his decision for many at once (triage-apps.ts
+  // decideAllFromApps: one transaction, counted again inside it, refused when the count is not the one he saw).
+  guardedHandle(ipcMain, fromMainWindow, 'triage:decide-all', async (_e, apps: unknown, action: unknown, expected: unknown) => {
+    const list = cleanAppList(apps)
+    if (!list || !list.length || (action !== 'select' && action !== 'exclude') || typeof expected !== 'number' || !Number.isSafeInteger(expected) || expected < 0) return { ok: false, changed: 0, count: 0, refused: 'bad-arguments' }
+    if (!triageSources()[0]) return { ok: false, changed: 0, count: 0, refused: 'count-changed' }
+    return decideAllFromApps(wellRootResolved(), list, action, expected)
   })
   // One Triage import run at a time; a second click (or a reopened panel) joins the run that is going.
   const triageImport = createImportRunner({

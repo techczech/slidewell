@@ -123,6 +123,72 @@ export type TriageItem = {
   pile?: ReviewPile | null // review pile when the sorter made a proposal (a throwaway shows 'bin in N days')
   binInDays?: number | null
 }
+// Triage by source app (ticket 20). An app name is the one parsed from a CleanShot file name; '' = app not known.
+// Names compare trimmed and without case; `app` is the most common spelling.
+export type TriageAppCount = {
+  app: string
+  count: number // file rows in the state tab asked for
+  kept: number // his decisions for pictures from this app: selected or included
+  thrownAway: number // ... excluded
+  keptShare: number | null // kept / (kept + thrownAway); null when he has decided none
+}
+// Bulk decide: `count` is what main counted; refused 'count-changed' = it differs from the count shown, nothing was decided
+export type TriageBulkResult = { ok: boolean; changed: number; count: number; refused?: 'count-changed' | 'bad-arguments' }
+// "What the sorter goes by" (ticket 20). Same shapes as src/main/sorter/app-rules.ts.
+export type AppLean = 'keep' | 'throwaway'
+export type SorterAppSuggestion = {
+  kind: 'make' | 'change' // make a rule (none in force) or change the one in force (it says the opposite)
+  rule: AppLean // the rule suggested; setAppRule(app, rule) accepts it
+  share: number // the share of his decisions that went that way (0.85..1)
+  against: 'built-in' | 'yours' | null // whose rule a change is against
+  text: string // the chip, e.g. "You threw away 94% — make it a rule?"
+  action: string // the chip's button: "Make rule" | "Change rule"
+}
+export type SorterAppReading = {
+  app: string
+  kept: number
+  keptShare: number | null
+  thrownAway: number
+  undecided: number // file rows, as the Undecided tab counts them
+  builtIn: AppLean | null // the built-in rule that fires on this app name alone
+  rule: AppLean | null // his rule; when set it takes the place of the built-in one
+  suggestion: SorterAppSuggestion | null
+}
+export type SorterGoesBy = {
+  apps: SorterAppReading[] // most screenshots first, "app not known" last
+  builtIn: { keep: string[]; throwaway: string[] } // the built-in rules in words
+}
+// Sort runs (ticket 20). Same shapes as src/main/sorter/runs.ts.
+export type SortRun = {
+  id: string
+  startedAt: string
+  finishedAt: string | null // null while it runs (or when the app quit mid-sort)
+  period: SortPeriod
+  trigger: 'manual' | 'nightly'
+  counts: { sorted: number; kept: number; thrownAway: number; unsure: number } // as the sort ended
+  // the screenshots this run still holds (one sorted again later is in its latest sort only), by pile as it is now:
+  // his decision when he has made one, else the sorter's proposal
+  now: { kept: number; thrownAway: number; unsure: number }
+}
+export type SortRunPile = 'kept' | 'throwaway' | 'unsure'
+export type SortRunCard = {
+  hash: string // triage content hash; triage.decide(hash, …) moves it
+  filename: string
+  app: string | null
+  windowTitle: string | null
+  takenAt: string | null
+  reason: string
+  confidence: number
+  lowConfidence: boolean
+  proposal: 'keep' | 'throwaway' | 'doubtful' // what the sorter said
+  pile: SortRunPile // where it is now
+  decidedBy: 'rules' | 'history' | 'luna' | 'haiku' | null // rules / past choices / Luna / Haiku; null for a local unsure
+  decision: 'selected' | 'included' | 'excluded' | null // his own decision, if he has since made one
+  thumbUrl: string | null
+  offline: boolean
+}
+export type SortRunPage = { total: number; items: SortRunCard[]; next: string | null } // next: cursor for sorter.runPage
+export type SortRunPiles = { run: SortRun | null; kept: SortRunPage; throwaway: SortRunPage; unsure: SortRunPage } // run null = no such sort (any more)
 // Review screen (ticket 08): one screenshot the sorter proposed something for, as a card.
 export type ReviewPile = 'doubtful' | 'kept' | 'throwaway' | 'bin'
 export type ReviewCard = {
@@ -423,6 +489,15 @@ const api = {
     // one of the four period ids, nothing else: no date and no list of screenshots ever goes to main
     setPeriod: (period: SortPeriod): Promise<{ ok: boolean; period: SortPeriod | null; error?: string }> => ipcRenderer.invoke('sorter:set-period', period),
     cancel: (): Promise<void> => ipcRenderer.invoke('sorter:cancel'),
+    // "What the sorter goes by" (ticket 20): his choices per app with the rule in force and a suggestion, and the built-in rules in words
+    goesBy: (): Promise<SorterGoesBy> => ipcRenderer.invoke('sorter:goes-by'),
+    // His rule for an app ('' = app not known): 'keep' | 'throwaway' | null (none). Saved at once; used from the next sort. Answers with the table as it is now.
+    setAppRule: (app: string, rule: AppLean | null): Promise<{ ok: boolean; error?: string; goesBy: SorterGoesBy }> => ipcRenderer.invoke('sorter:set-app-rule', app, rule),
+    // Sort runs, newest first (at most 20 are kept), and the piles of one: kept, thrown away, unsure.
+    // Moving a card is triage.decide(hash, 'select' | 'exclude' | 'reset'); then read the piles again.
+    runs: (): Promise<SortRun[]> => ipcRenderer.invoke('sorter:runs'),
+    runPiles: (runId: string, opts?: { kept?: number; throwaway?: number; unsure?: number }): Promise<SortRunPiles> => ipcRenderer.invoke('sorter:run-piles', runId, opts ?? {}),
+    runPage: (runId: string, pile: SortRunPile, after: string | null, limit?: number): Promise<SortRunPage> => ipcRenderer.invoke('sorter:run-page', runId, pile, after, limit),
     onStatus: (cb: (s: SorterStatus) => void): (() => void) => {
       const handler = (_e: Electron.IpcRendererEvent, s: SorterStatus): void => cb(s)
       ipcRenderer.on('sorter:status', handler)
@@ -563,8 +638,14 @@ const api = {
       state: string,
       sort?: 'scanned' | 'date-desc' | 'date-asc',
       limit?: number,
-      offset?: number
-    ): Promise<{ items: TriageItem[]; counts: TriageCounts; hasMore: boolean }> => ipcRenderer.invoke('triage:list', query, state, sort, limit, offset),
+      offset?: number,
+      apps?: string[] // only these apps ('' = app not known); absent or empty = every app
+    ): Promise<{ items: TriageItem[]; counts: TriageCounts; hasMore: boolean }> => ipcRenderer.invoke('triage:list', query, state, sort, limit, offset, apps?.length ? apps : undefined),
+    // The App menu: each app with rows in this state tab ('undecided' | 'selected' | 'included' | 'excluded' | 'all'), most rows first, app not known ('') last
+    apps: (state: string): Promise<TriageAppCount[]> => ipcRenderer.invoke('triage:apps', state),
+    // Exclude all / select all undecided screenshots from these apps: his decision. `expected` is the count shown and confirmed;
+    // main counts again and, if it differs, decides nothing (refused: 'count-changed'). No undo.
+    decideAll: (apps: string[], action: 'select' | 'exclude', expected: number): Promise<TriageBulkResult> => ipcRenderer.invoke('triage:decide-all', apps, action, expected),
     // refused: the item was emptied from the Bin (permanent); nothing changed
     decide: (hash: string, action: 'select' | 'exclude' | 'reset', force?: boolean): Promise<{ state: string; refused?: string }> =>
       ipcRenderer.invoke('triage:decide', hash, action, force),

@@ -223,8 +223,8 @@ export type KeyAccess = { get(): string | null; has(): boolean; encryptionAvaila
 
 export type CloudDeps = {
   wellRoot: () => string
-  /** The local sorter (sorter/service.ts sortUndecided), on the screenshots inside the window only. */
-  sortLocal: (window: PeriodWindow) => Promise<{ ok: boolean; sorted?: number; error?: string }>
+  /** The local sorter (sorter/service.ts sortUndecided), on the screenshots inside the window only. `trigger` is for its run record. */
+  sortLocal: (window: PeriodWindow, trigger: 'manual' | 'nightly') => Promise<{ ok: boolean; sorted?: number; error?: string }>
   /** The period stored in config, as stored (period.ts storedPeriod reads it). Absent: everything. */
   period?: () => unknown
   /** The local sorter has a current model with enough held-back evidence to run unattended. */
@@ -641,12 +641,12 @@ export class CloudSorter {
     }
   }
 
-  private async runLocal(window: PeriodWindow): Promise<{ ok: boolean; message: string }> {
+  private async runLocal(window: PeriodWindow, trigger: 'manual' | 'nightly' = 'manual'): Promise<{ ok: boolean; message: string }> {
     if (!this.deps.canSortLocal()) return { ok: false, message: 'The sorter on this Mac is not trained enough to sort on its own yet; only screenshots it already found doubtful can be asked about.' }
     this.phase = 'sorting'
     this.push()
     try {
-      const r = await this.deps.sortLocal(window)
+      const r = await this.deps.sortLocal(window, trigger)
       return r.ok ? { ok: true, message: `Sorted ${plural(r.sorted ?? 0, 'screenshot')}${periodPhrase(window.period)} on this Mac.` } : { ok: false, message: r.error ?? 'The sorter on this Mac stopped.' }
     } catch (e) {
       return { ok: false, message: (e as Error)?.message ?? 'The sorter on this Mac stopped.' }
@@ -777,7 +777,7 @@ export class CloudSorter {
     this.deps.saveState({ lastRunAt: this.now().toISOString() }) // first, so a crash mid-run is not retried every minute
     let local: { ok: boolean; message: string }
     try {
-      local = await this.runLocal(EVERYTHING)
+      local = await this.runLocal(EVERYTHING, 'nightly')
     } finally {
       this.phase = 'idle'
     }

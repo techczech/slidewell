@@ -7,6 +7,11 @@ export type TriageState = 'undecided' | 'selected' | 'included' | 'excluded'
 
 export type TriageCounts = { undecided: number; selected: number; included: number; excluded: number; total: number }
 
+/** How app names compare everywhere (filter, tallies, his per-app rules): trimmed, without case. '' = app not known. */
+export function appKey(name: string | null | undefined): string {
+  return (name ?? '').trim().toLowerCase()
+}
+
 /**
  * Bucket a `GROUP BY state` result. An unknown/NULL state counts as undecided. `hashes` (distinct
  * content hashes in the bucket) is optional: when given, the *selected* count uses it, because
