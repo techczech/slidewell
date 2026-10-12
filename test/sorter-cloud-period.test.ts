@@ -126,7 +126,7 @@ describe('what the cloud step is offered under each period', () => {
   it('the local sorter is given the same window: the stored period and a cut-off from main’s clock', async () => {
     const a = app('30d')
     await a.svc.prepare()
-    expect(a.sorted).toEqual([{ period: '30d', cutoff: '2026-09-12T16:00:00' }])
+    expect(a.sorted).toEqual([{ period: '30d', cutoff: '2026-09-12T16:00:00', upper: '2026-10-13T16:00:00' }])
     const b = app(undefined) // nothing stored: everything
     expect(await b.svc.prepare()).toMatchObject({ period: 'all', doubtful: 7 })
     expect(b.sorted).toEqual([EVERYTHING])
@@ -326,7 +326,7 @@ describe('the period is bound into the prepared batch', () => {
   })
 
   it('a stored period that is not a period prepares nothing and sorts nothing (it is not everything)', async () => {
-    for (const bad of ['everything', '365d', 30, '', { period: 'all' }]) {
+    for (const bad of ['everything', '365d', 30, '', { period: 'all' }, null]) {
       const a = app(bad)
       expect(a.svc.status().period).toBeNull()
       const p = await a.svc.prepare()
@@ -345,7 +345,7 @@ describe('the period is bound into the prepared batch', () => {
     const widen = { period: 'all', window: { period: 'all', cutoff: null }, cutoff: '1970-01-01T00:00:00', since: '1970-01-01', hashes: NAMES.map(hashOf), only: NAMES.map(hashOf) }
     const p = (await ipc.get('cloud:prepare')!({ sender }, widen, 'all')) as Awaited<ReturnType<typeof a.svc.prepare>>
     expect(p).toMatchObject({ period: '7d', toSend: 2 })
-    expect(a.sorted).toEqual([{ period: '7d', cutoff: '2026-10-05T16:00:00' }])
+    expect(a.sorted).toEqual([{ period: '7d', cutoff: '2026-10-05T16:00:00', upper: '2026-10-13T16:00:00' }])
     // a token that is not the string main issued is no token
     expect(await ipc.get('cloud:send')!({ sender }, { token: p.token, ...widen })).toMatchObject({ skipped: 'not-prepared' })
     const q = (await ipc.get('cloud:prepare')!({ sender })) as typeof p

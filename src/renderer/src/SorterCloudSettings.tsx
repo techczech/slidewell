@@ -208,7 +208,6 @@ export function SorterCloudSettings(): JSX.Element {
             <h3>{preview.message}</h3>
             {preview.local.message && <p>{preview.local.message}</p>}
             <p>
-              <span className="sorter-cloud-period">{preview.periodPrefix}</span>
               {n(preview.toSend)} screenshot{preview.toSend === 1 ? '' : 's'} the sorter could not call
               {preview.secondNote ? <span className="sorter-cloud-second">, {preview.secondNote},</span> : null} will be sent to {prepared.company} ({prepared.model}) in{' '}
               {n(preview.estimate.requests)} request

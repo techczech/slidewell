@@ -92,7 +92,8 @@ type Config = {
   // the per-night limit is fixed in code
   sorterCloud?: StoredCloudSettings & { keyEnc?: string; anthropicKeyEnc?: string; lastRunAt?: string | null; since?: string | null; lastRun?: CloudRunSummary | null }
   // the period both sort buttons in Settings are limited to: '7d' | '30d' | '90d' | 'all' (sorter/period.ts);
-  // absent = everything. Only main reads it and works out the cut-off; the nightly sort ignores it
+  // absent = everything; present with anything else (null included) = unreadable, and no manual sort runs
+  // (period.ts storedPeriod). Only main reads it and works out the cut-off; the nightly sort ignores it
   sorterPeriod?: string
   pythonPath?: string
   windowBounds?: { width: number; height: number }

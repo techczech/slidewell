@@ -5,8 +5,11 @@
  * Shot.takenAt): local wall-clock time, 'YYYY-MM-DDTHH:MM:SS', '' when the name carries none. The
  * cut-off is the same kind of value: the wall-clock time `days` calendar days before `now`, same time
  * of day, so the two compare as text and a clock change (summer time) in between moves nothing.
- * A screenshot is in the period when its time is at or after the cut-off. One with no usable date is
- * in no period except Everything.
+ * A limited period also has an upper bound, frozen at the same moment: the wall-clock time one
+ * calendar day after `now` (UPPER_TOLERANCE_DAYS, for a capture stamped by a clock that runs ahead of
+ * this Mac's). A screenshot is in the period when its time is at or after the cut-off and at or
+ * before the upper bound; a name dated further ahead than that is in no limited period. One with no
+ * usable date is in no period except Everything, which has neither bound.
  *
  * Only this module turns a period into a cut-off, and only from a value it has checked: an unknown
  * period gives no window at all (periodWindow returns null), never Everything.
@@ -24,12 +27,12 @@ export function isSortPeriod(x: unknown): x is SortPeriod {
 }
 
 /**
- * The period stored in config: the default when none was ever stored (undefined or null), the stored
- * one when it is one of the four, and null for anything else. Null is not Everything: nothing is
- * sorted or sent until a period is chosen again.
+ * The period stored in config: the default only when none was ever stored (the property is absent:
+ * undefined), the stored one when it is one of the four, and null for anything else, an explicit
+ * null included. Null is not Everything: nothing is sorted or sent until a period is chosen again.
  */
 export function storedPeriod(raw: unknown): SortPeriod | null {
-  if (raw === undefined || raw === null) return DEFAULT_SORT_PERIOD
+  if (raw === undefined) return DEFAULT_SORT_PERIOD
   return isSortPeriod(raw) ? raw : null
 }
 
@@ -70,9 +73,24 @@ const p2 = (n: number): string => String(n).padStart(2, '0')
  */
 export function cutoffFor(p: SortPeriod, now: Date): string | null {
   const days = DAYS[p]
-  if (days === null) return null
+  return days === null ? null : wallClock(now, -days)
+}
+
+/** How far ahead of this Mac's clock a capture time may be and still count as taken in a limited period. */
+export const UPPER_TOLERANCE_DAYS = 1
+
+/**
+ * The upper bound for a period at `now`: local wall-clock time UPPER_TOLERANCE_DAYS calendar days
+ * later, in the same form as the cut-off; null for everything, which has no bound.
+ */
+export function upperFor(p: SortPeriod, now: Date): string | null {
+  return DAYS[p] === null ? null : wallClock(now, UPPER_TOLERANCE_DAYS)
+}
+
+/** The local wall-clock time `days` calendar days from `now` (earlier when negative), as 'YYYY-MM-DDTHH:MM:SS'. */
+function wallClock(now: Date, days: number): string {
   // calendar arithmetic on the local date and time, done in UTC so no clock change touches it
-  const t = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate() - days, now.getHours(), now.getMinutes(), now.getSeconds()))
+  const t = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate() + days, now.getHours(), now.getMinutes(), now.getSeconds()))
   return `${String(t.getUTCFullYear()).padStart(4, '0')}-${p2(t.getUTCMonth() + 1)}-${p2(t.getUTCDate())}T${p2(t.getUTCHours())}:${p2(t.getUTCMinutes())}:${p2(t.getUTCSeconds())}`
 }
 
@@ -89,29 +107,36 @@ export function usableTakenAt(takenAt: unknown): takenAt is string {
 }
 
 /**
- * A period with its cut-off, as one manual run uses it from start to finish. Made only by
- * periodWindow (and EVERYTHING); the cut-off is always main's own, never a value from the renderer.
+ * A period with its cut-off and its upper bound, as one manual run uses it from start to finish:
+ * both are worked out once, when the window is made, and never again. Made only by periodWindow (and
+ * EVERYTHING); both bounds are always main's own, never a value from the renderer.
  */
-export type PeriodWindow = { readonly period: SortPeriod; readonly cutoff: string | null }
+export type PeriodWindow = { readonly period: SortPeriod; readonly cutoff: string | null; readonly upper: string | null }
 
 /** No limit: the nightly run, and a manual run under Everything. */
-export const EVERYTHING: PeriodWindow = Object.freeze({ period: 'all', cutoff: null })
+export const EVERYTHING: PeriodWindow = Object.freeze({ period: 'all', cutoff: null, upper: null })
+
+/** Whether a window is the one with no limit at all (then no date is looked at). */
+export function isEverything(w: PeriodWindow): boolean {
+  return w.period === 'all' && w.cutoff === null && (w.upper === null || w.upper === undefined)
+}
 
 /** The window for a period value at `now`; null when the value is not one of the four periods. */
 export function periodWindow(period: unknown, now: Date): PeriodWindow | null {
   if (!isSortPeriod(period)) return null
-  return Object.freeze({ period, cutoff: cutoffFor(period, now) })
+  return Object.freeze({ period, cutoff: cutoffFor(period, now), upper: upperFor(period, now) })
 }
 
 /**
  * Whether a screenshot taken at `takenAt` is inside the window. Everything takes all of them, dated
- * or not; any other period takes only those with a usable date at or after the cut-off. A window
- * that is not everything and has no cut-off takes nothing.
+ * or not; any other period takes only those with a usable date at or after the cut-off and at or
+ * before the upper bound. A window that is not everything and lacks a usable cut-off or a usable
+ * upper bound takes nothing, and so does an everything that carries either.
  */
 export function inWindow(takenAt: unknown, w: PeriodWindow): boolean {
-  if (w.period === 'all') return w.cutoff === null
-  if (!w.cutoff || !usableTakenAt(w.cutoff)) return false
-  return usableTakenAt(takenAt) && takenAt >= w.cutoff
+  if (w.period === 'all') return isEverything(w)
+  if (!w.cutoff || !usableTakenAt(w.cutoff) || !w.upper || !usableTakenAt(w.upper)) return false
+  return usableTakenAt(takenAt) && takenAt >= w.cutoff && takenAt <= w.upper
 }
 
 /** Shown when the stored period is not one of the four. Nothing is sorted or sent then. */

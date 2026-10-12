@@ -494,7 +494,7 @@ try {
   await section.locator('button.sorter-cloud-sort').click()
   await dialog.waitFor({ timeout: 20000 })
   const periodText = (await dialog.innerText()).replace(/\s+/g, ' ')
-  check('under Last 7 days the confirm box gives the period in words and the count for it', /Last 7 days: ask Luna about 1 screenshot\?/.test(periodText) && /Last 7 days: 1 screenshot the sorter could not call will be sent to OpenAI \(gpt-6-luna\) in 1 request\./.test(periodText) && /Period: the last 7 days, by the date in each file name\. Screenshots taken before that, or with no date in their name, are not sorted or sent and stay as they are\./.test(periodText), periodText)
+  check('under Last 7 days the confirm box gives the period in its heading and its period sentence, and the count line does not repeat it', /Last 7 days: ask Luna about 1 screenshot\?/.test(periodText) && / 1 screenshot the sorter could not call will be sent to OpenAI \(gpt-6-luna\) in 1 request\./.test(periodText) && !/Last 7 days: 1 screenshot the sorter/.test(periodText) && (periodText.match(/Last 7 days/g) ?? []).length === 1 && /Period: the last 7 days, by the date in each file name\. Screenshots taken before that, or with no date in their name, are not sorted or sent and stay as they are\./.test(periodText), periodText)
   await win.screenshot({ path: join(screens, 'sorter-period-confirm.png') })
   await answerDialogs([true])
   await dialog.locator('button.sorter-cloud-send').click()

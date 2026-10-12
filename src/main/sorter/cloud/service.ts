@@ -14,7 +14,8 @@
  *     cloud step is on raises main's dialog again, naming that company; declined, nothing changes.
  *     Turning the cloud step off clears both opt-ins.
  *   - Sort now: prepare() runs the local sorter, picks the batch and returns its count, cost and a
- *     one-time token; send(token) sends exactly that batch (less anything no longer eligible), and
+ *     one-time token; send(token) sends exactly that batch (less anything no longer eligible by the
+ *     time main's dialog is raised, which gives the count that then goes), and
  *     refuses without the token of the batch prepared last, once it is PREPARED_TTL_MS old, or when
  *     the provider or the period selected now is not the one the batch was prepared for. Before
  *     anything is claimed, main asks again with its native dialog; nothing goes unless he confirms.
@@ -28,6 +29,18 @@
  *     change of period (periodChanged) drops the prepared batch, and a send waiting on main's dialog
  *     sends nothing when the period moved meanwhile. The nightly batch ignores the period: it takes
  *     everything, within the nightly limit.
+ *   - What goes is the batch main's dialog counted, or nothing. After the dialog returns OK the batch
+ *     is read again: if any screenshot in it is no longer eligible or no longer dated inside the
+ *     window, nothing is sent and no allowance is used ('batch-changed'); he presses Sort now again.
+ *     Once sending has started he is not asked again: each request, and each retry, re-reads the
+ *     capture time of what it carries inside the admission transaction (store.ts admitForRequest),
+ *     and a date that has left the window stops the run there ('date-changed'): that request is not
+ *     made, no further one starts, and what earlier requests carried stays sent and counted. (One he
+ *     decided or answered meanwhile is dropped from its request as before; that does not stop the run.)
+ *   - A prepared batch can be sent for PREPARED_TTL_MS. Its age is measured on a monotonic clock
+ *     (deps.monotonic), so setting the Mac's clock back does not keep it alive; the wall clock is
+ *     read as well, so time the Mac spent asleep counts. Both are checked when send() is called and
+ *     again after main's dialog returns, before anything is claimed.
  *   - Revocation: a run is bound to the provider and the key it started with. Before every request
  *     and every retry the selected provider, its opt-in and its key are read again from main's state;
  *     if the provider was changed, asking was turned off, or the key was removed or replaced, the run
@@ -61,6 +74,7 @@
  */
 import { ipcMain } from 'electron'
 import { randomUUID } from 'node:crypto'
+import { performance } from 'node:perf_hooks'
 import { CloudAnswersUnavailable, loadUndecided, SorterStore, type CloudAnswerRow, type CloudPending, type CloudScope } from '../store'
 import { checkThresholds, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from '../decide'
 import { applyCloud, type CascadeRow } from './cascade'
@@ -70,7 +84,7 @@ import type { LunaRequest } from './luna'
 import { DEFAULT_PROVIDER, isProviderId, otherProviders, PROVIDER_IDS, providerOf, PROVIDERS, type CloudProvider, type ProviderId } from './provider'
 import { readVerified, type VerifyRefusal } from './images'
 import { DEFAULT_BATCH_TIME, isBatchDue, nextSlot, nightOf, normaliseBatchTime } from './schedule'
-import { EVERYTHING, inWindow, isSortPeriod, PERIOD_CHOICES, PERIOD_UNREADABLE, periodLabel, periodNote, periodPhrase, periodPrefix, periodWindow, storedPeriod, type PeriodWindow, type SortPeriod } from '../period'
+import { EVERYTHING, inWindow, isEverything, isSortPeriod, PERIOD_CHOICES, PERIOD_UNREADABLE, periodLabel, periodNote, periodPhrase, periodPrefix, periodWindow, storedPeriod, type PeriodWindow, type SortPeriod } from '../period'
 
 /** Screenshots sent to a cloud model per night window: nightly and Sort now together, both providers together. Fixed; not a setting. */
 export const NIGHTLY_LIMIT = 300
@@ -133,7 +147,7 @@ export function applySettingsPatch(cur: StoredCloudSettings, patch: unknown, now
   return out
 }
 
-export type CloudSkip = 'unavailable' | 'off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | 'period-changed'
+export type CloudSkip = 'unavailable' | 'off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | 'period-changed' | 'batch-changed' | 'date-changed'
 
 /**
  * What main's native confirm dialog shows (index.ts raises it with dialog.showMessageBox on the main
@@ -246,6 +260,8 @@ export type CloudDeps = {
   log?: (line: string) => void
   thresholds?: Thresholds
   now?: () => Date
+  /** A clock that only runs forward, in milliseconds from any fixed point: the age of a prepared batch is measured on it. Absent: performance.now(). */
+  monotonic?: () => number
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
 }
 
@@ -257,6 +273,8 @@ const disclosure = (p: CloudProvider): string =>
 const costNote = (p: CloudProvider): string => (p.costNote ? ` ${p.costNote}` : '')
 /** Shown when the stored answers cannot be read (store.ts CloudAnswersUnavailable). Nothing is sent then. */
 const UNAVAILABLE = 'The answers stored on this Mac could not be read, so nothing can be sent. The stored answers were left as they are.'
+/** Shown when a prepared batch is older than PREPARED_TTL_MS, at send() or once main's dialog has returned. */
+const TOO_OLD = 'The prepared batch is too old. Press Sort now again to see the current count.'
 
 /**
  * The second opinions among `count` screenshots, in words: '5 of them ones Luna was unsure about';
@@ -342,7 +360,7 @@ export class CloudSorter {
   /** The running batch: the provider it is bound to and how to stop it at once (key or provider changed); null when idle. */
   private running: { provider: ProviderId; revoke: (why: Revoked) => void } | null = null
   /** The batch prepare() showed him, bound to the provider and the period window it was prepared for. */
-  private prepared: { token: string; hashes: string[]; expiresAt: number; provider: ProviderId; window: PeriodWindow } | null = null
+  private prepared: { token: string; hashes: string[]; expiresAt: number; madeAt: number; provider: ProviderId; window: PeriodWindow } | null = null
   /**
    * Counts every provider change and, per provider, every key change signalled from Settings. A send
    * waiting on main's dialog has used up `prepared` and is not yet `running`, so neither can stop it;
@@ -358,6 +376,22 @@ export class CloudSorter {
 
   private now(): Date {
     return this.deps.now ? this.deps.now() : new Date()
+  }
+
+  /** Milliseconds on a clock that cannot be set (deps.monotonic, else this process's own). */
+  private monotonic(): number {
+    return this.deps.monotonic ? this.deps.monotonic() : performance.now()
+  }
+
+  /**
+   * Whether a prepared batch can no longer be sent: PREPARED_TTL_MS have passed on the monotonic
+   * clock since it was made (`madeAt`), or the wall clock is past `expiresAt` (the monotonic clock
+   * may stand still while the Mac sleeps). A wall clock set back does not make it younger. A
+   * monotonic reading that is not a number, or is earlier than `madeAt`, counts as too old.
+   */
+  private tooOld(p: { expiresAt: number; madeAt: number }): boolean {
+    const age = this.monotonic() - p.madeAt
+    return !(age >= 0 && age <= PREPARED_TTL_MS) || this.now().getTime() > p.expiresAt
   }
 
   private log(line: string): void {
@@ -627,16 +661,17 @@ export class CloudSorter {
     let token: string | null = null
     if (!blocked) {
       token = randomUUID()
-      this.prepared = { token, hashes: batch.map((c) => c.hash), expiresAt: this.now().getTime() + PREPARED_TTL_MS, provider: provider.id, window }
+      this.prepared = { token, hashes: batch.map((c) => c.hash), expiresAt: this.now().getTime() + PREPARED_TTL_MS, madeAt: this.monotonic(), provider: provider.id, window }
     }
     return { local, provider: provider.id, ...inWords(window.period), doubtful: list.length, toSend, secondOpinions, secondNote, cap: NIGHTLY_LIMIT, leftTonight, estimate: provider.estimateCost(toSend), costLabel: provider.costLabel, costNote: provider.costNote, blocked, token, message }
   }
 
   /**
    * Sort now, step 2 (after his click): send the batch prepare() showed him. Refused without the
-   * token of the batch prepared last, once it is PREPARED_TTL_MS old, or when the provider or the
-   * period selected now is not the one the batch was prepared for; a token is used once. The batch
-   * goes under the window it was prepared with: nothing outside that period, whatever is selected.
+   * token of the batch prepared last, once it is PREPARED_TTL_MS old (tooOld; checked here and again
+   * after main's dialog), or when the provider or the period selected now is not the one the batch
+   * was prepared for; a token is used once. The batch goes under the window it was prepared with:
+   * nothing outside that period, whatever is selected.
    */
   async send(token: unknown): Promise<CloudRunSummary> {
     const p = this.prepared
@@ -646,13 +681,13 @@ export class CloudSorter {
     } else {
       this.prepared = null
       summary =
-        this.now().getTime() > p.expiresAt
-          ? this.refused('manual', 'The prepared batch is too old. Press Sort now again to see the current count.', p.provider)
+        this.tooOld(p)
+          ? this.refused('manual', TOO_OLD, p.provider)
           : this.selected().id !== p.provider
             ? this.refused('manual', `The batch was prepared for ${PROVIDERS[p.provider].name}, and another provider is selected now. Press Sort now again.`, this.selected().id)
             : this.period() !== p.window.period
               ? this.refused('manual', `The batch was prepared for ${periodLabel(p.window.period).toLowerCase()}, and another period is selected now. Press Sort now again.`, p.provider)
-              : await this.runCloud({ trigger: 'manual', local: null, provider: p.provider, only: p.hashes, confirm: true, window: p.window })
+              : await this.runCloud({ trigger: 'manual', local: null, provider: p.provider, only: p.hashes, confirm: true, window: p.window, expired: () => this.tooOld(p) })
     }
     this.deps.saveState({ lastRun: summary })
     this.push()
@@ -701,10 +736,12 @@ export class CloudSorter {
   /**
    * One run, bound from here on to `o.provider` and to that provider's key as read below: every
    * request goes to that provider's endpoint with that key, or is not made. `o.window` is the period
-   * window a manual batch was prepared with: nothing outside it is claimed, counted or sent. Without
-   * one (the nightly batch) the run takes everything.
+   * window a manual batch was prepared with: nothing outside it is claimed, counted or sent, and each
+   * request checks the dates again as it is admitted. Without one (the nightly batch) the run takes
+   * everything. `o.expired` says whether the prepared batch has grown too old; it is asked once
+   * main's dialog has returned.
    */
-  private async runCloud(o: { trigger: CloudRunSummary['trigger']; local: CloudRunSummary['local']; provider: ProviderId; only?: string[]; confirm?: boolean; window?: PeriodWindow }): Promise<CloudRunSummary> {
+  private async runCloud(o: { trigger: CloudRunSummary['trigger']; local: CloudRunSummary['local']; provider: ProviderId; only?: string[]; confirm?: boolean; window?: PeriodWindow; expired?: () => boolean }): Promise<CloudRunSummary> {
     const { trigger, local } = o
     const window = o.window ?? EVERYTHING
     const provider = providerOf(o.provider)
@@ -743,9 +780,12 @@ export class CloudSorter {
       const providerChanges = this.providerChanges
       const periodChanges = this.periodChanges
       const keyChanges = this.keyChanges[provider.id]
-      const ok = await this.deps.confirm(sendPrompt(wanted.length, provider, secondOf(wanted, pending), window.period)).catch(() => false)
+      const counted = { count: wanted.length, second: secondOf(wanted, pending) }
+      const ok = await this.deps.confirm(sendPrompt(counted.count, provider, counted.second, window.period)).catch(() => false)
       if (ok !== true) return finish({ skipped: 'not-confirmed', stayedDoubtful: list.length })
       if (this.busy()) return finish({ error: 'The sorter is already running.' })
+      // the dialog may have stood open past the batch's ten minutes: then it is as if it had never been prepared
+      if (o.expired?.()) return finish({ skipped: 'not-prepared', error: TOO_OLD, stayedDoubtful: list.length })
       // nor does it count for another period: the dialog gave the count for the one it named
       if (this.periodChanges !== periodChanges || this.period() !== window.period) return finish({ skipped: 'period-changed', stayedDoubtful: list.length })
       // the dialog may have stood open a while: the confirmation counts only for the provider it named
@@ -755,10 +795,13 @@ export class CloudSorter {
       if (!('ok' in live)) return finish({ skipped: live.revoked, stayedDoubtful: list.length })
       // nor if this provider's key was removed or saved meanwhile, even when the same key is stored again
       if (this.keyChanges[provider.id] !== keyChanges) return finish({ skipped: 'revoked', stayedDoubtful: list.length })
-      const after = this.candidates(provider)
+      // the dialog gave a count: what goes is exactly that batch or nothing. If any of it is by now
+      // decided, answered or dated outside the window, nothing is sent and he is asked to start again
+      const after = this.waiting(provider)
+      if (!after) return finish({ skipped: 'unavailable' })
       const still = new Set(within(after.list, window).map((c) => c.hash))
-      wanted = wanted.filter((c) => still.has(c.hash))
-      if (!wanted.length) return finish({ skipped: 'nothing-doubtful', stayedDoubtful: after.list.length })
+      const left = wanted.filter((c) => still.has(c.hash))
+      if (left.length !== counted.count || secondOf(left, after.pending) !== counted.second) return finish({ skipped: 'batch-changed', stayedDoubtful: after.list.length })
     }
 
     // claim the batch in one transaction: tonight's limit and other runs (other processes too) are checked there
@@ -778,6 +821,9 @@ export class CloudSorter {
     this.push()
     let fatal: LunaHttpError | null = null
     let revoked: Revoked | null = null
+    // a capture date left the window after sending began: the run stops, nothing more is sent
+    let dateChanged = false
+    const paths = new Map(selected.map((c) => [c.hash, c.path]))
     let chunkError: string | null = null
     const refused = new Map<NotSent, number>()
     const refuse = (why: NotSent, n = 1): void => void refused.set(why, (refused.get(why) ?? 0) + n)
@@ -840,11 +886,21 @@ export class CloudSorter {
               sleep: this.deps.sleep,
               onRetry: (attempt, why, wait) => this.log(`retry ${attempt} after ${why}, waiting ${wait} ms`),
               // before the first attempt and before every retry: provider, consent and key again (else stop
-              // the run), then eligibility per item (he may have decided or answered one meanwhile), and
+              // the run), then eligibility per item (he may have decided or answered one meanwhile), the
+              // capture dates against the batch's window (a manual run; one outside stops the run), and
               // tonight's allowance, counted here for what goes into the request (store.ts admitForRequest)
               before: (attempt) => {
                 consent()
-                const { admitted, overLimit } = this.withStore((s) => s.admitForRequest(current.map((i) => i.hash), { ...scope, runId, night, limit: NIGHTLY_LIMIT }))
+                const { admitted, overLimit, outOfPeriod } = this.withStore((s) => s.admitForRequest(current.map((i) => i.hash), { ...scope, runId, night, limit: NIGHTLY_LIMIT, ...(o.window ? { window, paths } : {}) }))
+                if (outOfPeriod) {
+                  // nothing was admitted or counted for this request; it is not made, and no other starts
+                  dateChanged = true
+                  refuse('out-of-period', outOfPeriod)
+                  ctl.abort()
+                  current = []
+                  last.req = null
+                  return 'skip'
+                }
                 const keep = new Set(admitted)
                 const next = current.filter((i) => keep.has(i.hash))
                 if (overLimit) refuse('limit-reached', overLimit)
@@ -912,6 +968,7 @@ export class CloudSorter {
     const stayedDoubtful = list.length - counts.keep - counts.throwaway
     const r = revoked as Revoked | null
     if (r) return finish({ ...counts, stayedDoubtful, skipped: r })
+    if (dateChanged) return finish({ ...counts, stayedDoubtful, skipped: 'date-changed' })
     const f = fatal as LunaHttpError | null
     if (f) {
       const skipped: CloudSkip | null = f.kind === 'offline' ? 'offline' : f.kind === 'auth' ? 'key-rejected' : f.kind === 'cancelled' ? 'cancelled' : null
@@ -930,11 +987,11 @@ const REVOKED_WORDS: Record<Revoked, (p: CloudProvider) => string> = {
 
 type Candidates = { list: CloudCandidate[]; pending: Map<string, CloudPending> }
 /** Those of the candidates taken inside the period window (period.ts inWindow, by capture time). */
-const within = (list: CloudCandidate[], w: PeriodWindow): CloudCandidate[] => (w.period === 'all' && w.cutoff === null ? list : list.filter((c) => inWindow(c.takenAt, w)))
+const within = (list: CloudCandidate[], w: PeriodWindow): CloudCandidate[] => (isEverything(w) ? list : list.filter((c) => inWindow(c.takenAt, w)))
 /** How many of these the other provider answered and was unsure about. */
 const secondOf = (batch: ReadonlyArray<{ hash: string }>, pending: Map<string, CloudPending>): number => batch.filter((c) => pending.get(c.hash)?.secondOpinion).length
 
-type NotSent = VerifyRefusal | 'no-longer-eligible' | 'limit-reached'
+type NotSent = VerifyRefusal | 'no-longer-eligible' | 'limit-reached' | 'out-of-period'
 /** Log words for a screenshot that was not sent (never its path or name). */
 const REFUSAL_WORDS: Record<NotSent, string> = {
   'limit-reached': 'tonight’s limit was reached',
@@ -943,7 +1000,8 @@ const REFUSAL_WORDS: Record<NotSent, string> = {
   'not-a-file': 'the path is not a regular file',
   'too-large': 'the file is too large',
   unreadable: 'the file could not be read',
-  'no-longer-eligible': 'decided or answered meanwhile'
+  'no-longer-eligible': 'decided or answered meanwhile',
+  'out-of-period': 'its date is no longer in the period'
 }
 
 /** One plain sentence for Settings. */
@@ -966,6 +1024,10 @@ export function describe(s: CloudRunSummary): string {
       return `${name} was not asked: ${NIGHTLY_LIMIT.toLocaleString('en-GB')} screenshots have been sent tonight, the most per night.${waiting}`
     case 'period-changed':
       return `Nothing was sent: the period was changed in Settings. Press Sort now again.${waiting}`
+    case 'batch-changed':
+      return `Nothing was sent: the screenshots changed while the question was open. Press Sort now again.${waiting}`
+    case 'date-changed':
+      return `Stopped${s.asked ? ` after asking ${name} about ${plural(s.asked, 'screenshot')}` : ''}: a screenshot’s date changed and it is no longer in the period. Nothing more was sent. Press Sort now again.${waiting}`
     case 'nothing-doubtful':
       return `Nothing doubtful${words} was waiting for ${name}.`
     case 'no-key':

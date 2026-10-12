@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 
 const ipc = vi.hoisted(() => new Map<string, (e: { sender: unknown }, ...args: unknown[]) => unknown>())
 vi.mock('electron', () => ({ ipcMain: { handle: (channel: string, fn: (e: { sender: unknown }, ...args: unknown[]) => unknown) => void ipc.set(channel, fn) } }))
-const { SORT_PERIODS, EVERYTHING, PERIOD_REFUSED, PERIOD_UNREADABLE, cutoffFor, inWindow, isSortPeriod, periodLabel, periodNote, periodPhrase, periodPrefix, periodWindow, storedPeriod, usableTakenAt } = await import('../src/main/sorter/period')
+const { SORT_PERIODS, EVERYTHING, PERIOD_REFUSED, PERIOD_UNREADABLE, cutoffFor, inWindow, isSortPeriod, periodLabel, periodNote, periodPhrase, periodPrefix, periodWindow, storedPeriod, upperFor, usableTakenAt } = await import('../src/main/sorter/period')
 const { SorterService, changePeriod, registerSorterIpc } = await import('../src/main/sorter/service')
 const { triageImageId } = await import('../src/main/picture-search/vector-store')
 type Deps = ConstructorParameters<typeof SorterService>[0]
@@ -39,9 +39,9 @@ describe('the periods', () => {
     }
     // config: nothing stored is the default (everything); something stored that is not a period is unreadable
     expect(storedPeriod(undefined)).toBe('all')
-    expect(storedPeriod(null)).toBe('all')
     expect(storedPeriod('30d')).toBe('30d')
-    for (const x of ['', 'everything', 30, {}, '365d']) expect(storedPeriod(x)).toBeNull()
+    // only an absent value is the default: an explicit null is something stored that is not a period
+    for (const x of [null, '', 'everything', 30, 0, false, {}, [], '365d']) expect(storedPeriod(x)).toBeNull()
   })
 })
 
@@ -51,8 +51,14 @@ describe('period → cut-off, with a fixed clock', () => {
     expect(cutoffFor('30d', NOW)).toBe('2026-09-12T16:00:00')
     expect(cutoffFor('90d', NOW)).toBe('2026-07-14T16:00:00')
     expect(cutoffFor('all', NOW)).toBeNull()
-    expect(periodWindow('30d', NOW)).toEqual({ period: '30d', cutoff: '2026-09-12T16:00:00' })
+    // a limited window is frozen with an upper bound too: one day after the moment it was made
+    expect(periodWindow('30d', NOW)).toEqual({ period: '30d', cutoff: '2026-09-12T16:00:00', upper: '2026-10-13T16:00:00' })
+    expect(periodWindow('7d', NOW)).toEqual({ period: '7d', cutoff: '2026-10-05T16:00:00', upper: '2026-10-13T16:00:00' })
     expect(periodWindow('all', NOW)).toEqual(EVERYTHING)
+    expect(EVERYTHING).toEqual({ period: 'all', cutoff: null, upper: null })
+    expect(upperFor('7d', at(2026, 12, 31, 23, 59, 59))).toBe('2027-01-01T23:59:59')
+    expect(upperFor('90d', at(2028, 2, 28, 8, 0, 0))).toBe('2028-02-29T08:00:00')
+    expect(upperFor('all', NOW)).toBeNull()
   })
 
   it('crosses month and year ends and a leap day', () => {
@@ -67,7 +73,13 @@ describe('period → cut-off, with a fixed clock', () => {
     expect(inWindow('2026-10-05T15:59:59', w)).toBe(false)
     expect(inWindow('2026-10-05T16:00:01', w)).toBe(true)
     expect(inWindow('2026-10-12T16:00:00', w)).toBe(true) // now
-    expect(inWindow('2026-10-12T18:00:00', w)).toBe(true) // a name dated later today is not older than the period
+    // a name dated a little ahead of this Mac's clock is taken, up to one day (a clock that is off); beyond that it is not in the period
+    expect(inWindow('2026-10-12T18:00:00', w)).toBe(true)
+    expect(inWindow('2026-10-13T16:00:00', w)).toBe(true) // exactly one day ahead
+    expect(inWindow('2026-10-13T16:00:01', w)).toBe(false)
+    expect(inWindow('2026-10-20T10:00:00', w)).toBe(false)
+    for (const p of ['7d', '30d', '90d'] as const) expect(inWindow('2099-01-01T00:00:00', periodWindow(p, NOW)!)).toBe(false)
+    expect(inWindow('2099-01-01T00:00:00', periodWindow('all', NOW)!)).toBe(true) // everything has no upper bound
     expect(inWindow('2025-10-10T16:00:00', w)).toBe(false) // same day a year earlier
   })
 
@@ -100,9 +112,16 @@ describe('period → cut-off, with a fixed clock', () => {
   })
 
   it('a window that is not everything and has no usable cut-off takes nothing', () => {
-    expect(inWindow('2026-10-10T10:00:00', { period: '7d', cutoff: null })).toBe(false)
-    expect(inWindow('2026-10-10T10:00:00', { period: '7d', cutoff: '' })).toBe(false)
-    expect(inWindow('2026-10-10T10:00:00', { period: 'all', cutoff: '1970-01-01T00:00:00' })).toBe(false)
+    const upper = '2026-10-13T16:00:00'
+    expect(inWindow('2026-10-10T10:00:00', { period: '7d', cutoff: '2026-10-05T16:00:00', upper })).toBe(true)
+    expect(inWindow('2026-10-10T10:00:00', { period: '7d', cutoff: null, upper })).toBe(false)
+    expect(inWindow('2026-10-10T10:00:00', { period: '7d', cutoff: '', upper })).toBe(false)
+    expect(inWindow('2026-10-10T10:00:00', { period: 'all', cutoff: '1970-01-01T00:00:00', upper: null })).toBe(false)
+    // nor does one with no usable upper bound, or an everything that carries one
+    expect(inWindow('2026-10-10T10:00:00', { period: '7d', cutoff: '2026-10-05T16:00:00', upper: null })).toBe(false)
+    expect(inWindow('2026-10-10T10:00:00', { period: '7d', cutoff: '2026-10-05T16:00:00', upper: '' })).toBe(false)
+    expect(inWindow('2026-10-10T10:00:00', { period: '7d', cutoff: '2026-10-05T16:00:00' } as never)).toBe(false)
+    expect(inWindow('2026-10-10T10:00:00', { period: 'all', cutoff: null, upper })).toBe(false)
   })
 })
 
@@ -117,7 +136,8 @@ const UNDECIDED: Record<string, string> = {
   newQuarter: '2026-08-01T10:00:00',
   newOld: '2025-01-01T10:00:00',
   newNoDate: '',
-  newBadDate: 'last tuesday'
+  newBadDate: 'last tuesday',
+  newFuture: '2099-01-01T00:00:00' // a name dated far ahead: inside everything and no other period
 }
 
 function makeWell(kept = 70, binned = 30): string {
@@ -226,7 +246,7 @@ describe('“Sort undecided screenshots now” under each period', () => {
   })
 
   it('a stored period that is not a period sorts nothing (it is not everything)', async () => {
-    for (const bad of ['everything', '365d', 30, { period: 'all' }, '']) {
+    for (const bad of ['everything', '365d', 30, { period: 'all' }, '', null]) {
       const { svc, well, embedded } = await trained(bad)
       expect(svc.status().period).toBeNull()
       expect(await svc.sortManual()).toEqual({ ok: false, error: PERIOD_UNREADABLE })
@@ -243,7 +263,7 @@ describe('“Sort undecided screenshots now” under each period', () => {
 
   it('a window whose period is not one of the four is refused', async () => {
     const { svc, well } = await trained('7d')
-    expect(await svc.sortUndecided({ window: { period: 'everything' as never, cutoff: null } })).toEqual({ ok: false, error: PERIOD_REFUSED })
+    expect(await svc.sortUndecided({ window: { period: 'everything' as never, cutoff: null, upper: null } })).toEqual({ ok: false, error: PERIOD_REFUSED })
     expect(proposed(well)).toEqual([])
   })
 })
