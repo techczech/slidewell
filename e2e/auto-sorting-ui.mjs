@@ -39,7 +39,7 @@ function installFake() {
   ]
   const report = {
     trainedAt: today(2, 0), sorterVersion: 'x', thresholds: { throwaway: 0.9, keep: 0.8 }, holdOutFraction: 0.2, labelled: { keep: 228, throwaway: 84 }, usable: { keep: 228, throwaway: 84 }, keepFromWellCopy: 0,
-    grouping: { groups: 1, largest: 1, cosine: 0.9, minutes: 1 }, enoughToMeasure: true, trainedOn: { keep: 228, throwaway: 84 }, l2: 1,
+    grouping: { groups: 1, largest: 1, cosine: 0.9, minutes: 1 }, enoughToMeasure: true, trainedOn: { keep: 182, throwaway: 67 }, l2: 1,
     calibration: { chosen: 'platt', brier: { raw: 0.1, platt: 0.08, isotonic: 0.09 }, reliability: { platt: [], isotonic: [] } }, heldBackClassifier: { auc: 0.9, brier: 0.08, reliability: [] },
     heldBack: { sample: 60, truth: { keep: 44, throwaway: 16 }, keep: { proposed: 40, correct: 38, precision: 0.95 }, throwaway: { proposed: 11, correct: 10, precision: 0.91 }, doubtful: { count: 9, share: 0.15 }, keptProposedThrowaway: 1, binnedProposedKeep: 2 },
     rulesOnly: { sample: 60, truth: { keep: 44, throwaway: 16 }, keep: { proposed: 30, correct: 24, precision: 0.8 }, throwaway: { proposed: 5, correct: 4, precision: 0.8 }, doubtful: { count: 25, share: 0.42 }, keptProposedThrowaway: 1, binnedProposedKeep: 1 }
@@ -99,7 +99,7 @@ function installFake() {
         onStatus: (cb) => { subs.cloud.add(cb); return () => subs.cloud.delete(cb) }
       }
       const list = sw.triage.list
-      sw.triage.list = async (...a) => ({ ...(await list(...a)), counts: { undecided: 1482, selected: 96, included: 0, excluded: 2310, total: 3888 } })
+      sw.triage.list = async (...a) => ({ ...(await list(...a)), counts: { undecided: 1530, selected: 96, included: 0, excluded: 2310, total: 3888 } })
       const decide = sw.triage.decide
       sw.triage.decide = async (...a) => { calls.decide++; return decide(...a) }
     }
@@ -135,7 +135,10 @@ try {
   const box = await page.locator('.triage-panel').boundingBox()
   check('the panel spans the full width under the title bar', box.x === 0 && box.width === 1440 && box.y > 30, JSON.stringify(box))
   const gridTabs = (await page.locator('.triage-controls .scope-tab').allInnerTexts()).map((t) => t.trim())
-  check('tabs: Undecided, Selected, Excluded, All, Auto sorting', gridTabs.join('|') === 'Undecided 1482|Selected 96|Excluded 2310|All|Auto sorting', gridTabs.join('|'))
+  check('tabs: Undecided, Selected, Excluded, All, Auto sorting', gridTabs.join('|') === 'Undecided 1530|Selected 96|Excluded 2310|All|Auto sorting', gridTabs.join('|'))
+  const ph = await page.evaluate(() => { const el = document.querySelector('.triage-controls .search-input'); const cs = getComputedStyle(el); const c = document.createElement('canvas').getContext('2d'); c.font = cs.font; return { text: c.measureText(el.placeholder).width, room: el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) } })
+  check('Triage search placeholder fits at 1440 wide', ph.text <= ph.room, JSON.stringify(ph))
+  await shoot(page, 'auto-sorting-0-undecided.png')
   await page.keyboard.press('Escape')
   check('Esc no longer closes Triage', (await page.locator('.triage-panel').count()) === 1)
   await page.locator('.view-switch .scope-tab', { hasText: 'Search' }).click()
@@ -147,9 +150,11 @@ try {
   await page.waitForSelector('.as-tab .as-sort')
   check('grid controls are off, with the one-line note', (await page.locator('.triage-controls .search-input, .triage-controls .triage-cols, .triage-controls .triage-sort').count()) === 0 && (await text('.triage-auto-note')) === 'Search, grid size and date grouping apply to the first four tabs only.')
   check('Import, Paste, Rescan and Change folder stay in the head', (await page.locator('.triage-head-actions button').count()) === 4)
-  check('status line: trained on 312 choices', (await text('.as-status')).includes('on 312 of your choices (228 kept, 84 binned).'), await text('.as-status'))
+  check('status line: trained on 312 choices', (await text('.as-status')).includes('on 312 of your choices.'), await text('.as-status'))
   const sortText = await text('.as-sort')
-  check('Sort now: period count sentence', sortText.includes('630 undecided screenshots were taken in the last 30 days (1,482 undecided in all).'), sortText)
+  check('Training: no "since" sentence when nothing is new', !(await text('.as-training')).includes('you have made'))
+  check('Sort now: period count sentence', sortText.includes('630 undecided pictures from the last 30 days can be sorted (1,482 in all).'), sortText)
+  check('Sort now: Triage count sentence', sortText.includes('Triage counts 1,530 undecided files; videos, files not downloaded to this Mac and extra copies of the same picture are not sorted.'), sortText)
   check('Sort now: service line with the allowance', sortText.includes('Haiku is on. Unsure ones go to Haiku, within tonight’s allowance of 300. You confirm the count and cost before anything is sent.'), sortText)
   check('one Sort now button, one Period select', (await page.locator('button', { hasText: /^Sort now$/ }).count()) === 1 && (await page.locator('select.sorter-period-select').count()) === 1)
   check('no Teach the sorter button and no chart', (await page.getByText('Teach the sorter').count()) === 0 && (await page.locator('.as-tab svg').count()) === 0)
@@ -165,6 +170,11 @@ try {
   const side = await text('.as-side')
   check('side card: service state and Change in Settings', side.includes('Haiku is on') && side.includes('Second opinions on · key saved') && side.includes('Unsure screenshots go to Haiku at 02:00, up to 300 a night.') && side.includes('Change in Settings →'), side)
   await shoot(page, 'auto-sorting-1-trained.png')
+  await fake(() => { window.__fake.sorter.learnable = { kept: 240, binned: 90 }; window.__fake.push() })
+  await page.waitForFunction(() => document.querySelector('.as-training')?.textContent?.includes('you have made'))
+  check('Training: since-training sentence when new choices exist', (await text('.as-training')).includes('330 choices so far.') && (await text('.as-training')).includes('It last trained on 312 of them; you have made 18 since. Train again to include them.'), await text('.as-training'))
+  await shoot(page, 'auto-sorting-1b-new-choices.png')
+  await fake(() => { window.__fake.sorter.learnable = { kept: 228, binned: 84 }; window.__fake.push() })
 
   // grid keys are off
   await page.keyboard.press('s')

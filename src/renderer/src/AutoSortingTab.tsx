@@ -63,7 +63,7 @@ function lastRunNumbers(st: SorterStatus, cl: CloudStatus): { label: string; at:
   }
 }
 
-export function AutoSortingTab({ onReview, onSettings }: { onReview: () => void; onSettings: () => void }): JSX.Element {
+export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onReview: () => void; onSettings: () => void; triageUndecided?: number }): JSX.Element {
   const st = useSorterStatus()
   const [cl, setCl] = useCloudStatus()
   const [result, setResult] = useState<string | null>(null)
@@ -121,6 +121,9 @@ export function AutoSortingTab({ onReview, onSettings }: { onReview: () => void;
   const kept = st.learnable?.kept ?? rep?.trainedOn.keep ?? 0
   const binned = st.learnable?.binned ?? rep?.trainedOn.throwaway ?? 0
   const choices = kept + binned
+  // the model in use is retrained on all usable choices after the test (service.ts trainAndTest: fitModel(usable)), so report.usable is what it learnt from
+  const trainedOnAll = rep ? rep.usable.keep + rep.usable.throwaway : 0
+  const sinceTraining = Math.max(0, choices - trainedOnAll)
   // why Sort now and the nightly switch are off, in his words; null when sorting can run
   const whyNot = !st.modelReady
     ? 'Needs the picture search model (in Settings › Picture search).'
@@ -180,12 +183,15 @@ export function AutoSortingTab({ onReview, onSettings }: { onReview: () => void;
         <p>
           {u.period && st.period !== 'all' && u.inPeriod !== null ? (
             <>
-              <b>{n(u.inPeriod)}</b> undecided {u.inPeriod === 1 ? 'screenshot was' : 'screenshots were'} taken in the {periodLabel} ({n(u.all)} undecided in all).
+              <b>{n(u.inPeriod)}</b> undecided {u.inPeriod === 1 ? 'picture' : 'pictures'} from the {periodLabel} can be sorted ({n(u.all)} in all).
             </>
           ) : (
             <>
-              <b>{n(u.all)}</b> undecided {u.all === 1 ? 'screenshot' : 'screenshots'} in all.
+              <b>{n(u.all)}</b> undecided {u.all === 1 ? 'picture' : 'pictures'} can be sorted.
             </>
+          )}
+          {triageUndecided !== undefined && triageUndecided > u.all && (
+            <span className="as-muted"> Triage counts {n(triageUndecided)} undecided files; videos, files not downloaded to this Mac and extra copies of the same picture are not sorted.</span>
           )}
         </p>
       )}
@@ -312,7 +318,7 @@ export function AutoSortingTab({ onReview, onSettings }: { onReview: () => void;
     <div className="as-status">
       <span className="as-dot" />
       <div>
-        <b>{trainedWhen(rep.trainedAt)}</b> on {n(rep.trainedOn.keep + rep.trainedOn.throwaway)} of your choices ({n(rep.trainedOn.keep)} kept, {n(rep.trainedOn.throwaway)} binned).
+        <b>{trainedWhen(rep.trainedAt)}</b> on {n(trainedOnAll)} of your choices.
       </div>
     </div>
   ) : null
@@ -353,6 +359,9 @@ export function AutoSortingTab({ onReview, onSettings }: { onReview: () => void;
     <div className="as-block as-training">
       <h2>Training</h2>
       <div className="as-training-head">{plural(choices, 'choice')} so far.</div>
+      {sinceTraining > 0 && (
+        <p className="as-muted">It last trained on {n(trainedOnAll)} of them; you have made {n(sinceTraining)} since. Train again to include them.</p>
+      )}
       <div className="as-training-body">
         <div className="as-learnt">What it has learnt from</div>
         <BalanceBar kept={kept} binned={binned} />

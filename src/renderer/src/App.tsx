@@ -1469,7 +1469,7 @@ function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToast }: {
                 <input
                   ref={searchRef}
                   className="search-input"
-                  placeholder="Search text in screenshots…   /  focus · S select · X exclude · U unselect · Space toggle · ⌘Y full · [ ] page"
+                  placeholder="Search text in screenshots…  / focus · S select · X exclude"
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
                 />
@@ -1492,7 +1492,7 @@ function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToast }: {
           </div>
 
           {tab === 'auto' ? (
-            <AutoSortingTab onReview={onReview} onSettings={onSettings} />
+            <AutoSortingTab onReview={onReview} onSettings={onSettings} triageUndecided={counts.undecided} />
           ) : root === undefined ? (
             <div className="triage-empty">loading…</div>
           ) : root === null ? (
