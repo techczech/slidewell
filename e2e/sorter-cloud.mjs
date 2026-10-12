@@ -2,7 +2,7 @@
 // the OpenAI Responses API. Synthetic data only: a scratch well whose triage.db holds five generated
 // screenshots with sorter proposals (three doubtful, one keep, one throwaway).
 //
-//   1. Settings › Ask Luna: save a made-up key; config.json holds only ciphertext; saving the key
+//   1. Settings › Screenshot sorter: save a made-up key; config.json holds only ciphertext; saving the key
 //      does not turn asking Luna on; a send from the renderer without a prepared batch is refused;
 //      turning it on raises main's own native dialog (count, cost, what is sent); declined, nothing is
 //      recorded; confirmed, main records the time.
@@ -233,6 +233,26 @@ try {
   await win.waitForLoadState('domcontentloaded')
   await win.setViewportSize({ width: 1440, height: 900 })
   await win.waitForFunction(() => Boolean(window.sw?.cloud))
+  // Settings holds the service, the keys and the agreements; Sort now and the period are in Triage > Auto sorting
+  const closeSettings = async () => {
+    if (await win.locator('.settings-modal').count()) await win.locator('.settings-modal .modal-head button', { hasText: 'close' }).click()
+  }
+  const openAuto = async () => {
+    await closeSettings()
+    await win.locator('.view-switch .scope-tab', { hasText: 'Triage' }).click()
+    await win.locator('.triage-controls .scope-tab.new').click()
+    await win.waitForSelector('.as-sort')
+  }
+  // The scratch profile has no picture model and no trained sorter, so the tab keeps Sort now disabled (its own
+  // rule, shown in e2e/auto-sorting-ui.mjs); React drops clicks on a disabled button, so the button's own onClick is
+  // called, which runs main's prepare, the confirm box and the send exactly as a click would.
+  const sortNow = async () => {
+    await openAuto()
+    await win.evaluate(() => {
+      const b = document.querySelector('button.sorter-cloud-sort')
+      b[Object.keys(b).find((k) => k.startsWith('__reactProps'))].onClick()
+    })
+  }
 
   // 1. the key
   await win.locator('button.tb-btn[title^="Settings"]').click()
@@ -242,8 +262,8 @@ try {
   const openaiRow = section.locator('.sorter-cloud-key-openai')
   const anthropicRow = section.locator('.sorter-cloud-key-anthropic')
   check('Settings shows the Luna section with no key yet, and a key field for each provider', (await openaiRow.locator('.sorter-cloud-key-input').count()) === 1 && (await anthropicRow.locator('.sorter-cloud-key-input').count()) === 1)
-  check('Settings says the other provider can be asked once about what the first left unsure', /When one was unsure about a screenshot, the other can be asked about it once/.test(await section.innerText()) && !/is not sent to the other/.test(await section.innerText()))
-  check('Luna is the provider until he chooses otherwise', (await section.locator('input.sorter-cloud-provider-openai').isChecked()) && !(await section.locator('input.sorter-cloud-provider-anthropic').isChecked()))
+  check('Settings says the other provider can be asked once about what the first left unsure', /If Luna was unsure about a screenshot, Haiku can be asked about it once/.test(await section.innerText()) && !/is not sent to the other/.test(await section.innerText()))
+  check('the service is Off until he chooses one, Luna being the provider kept', (await section.locator('input.sorter-cloud-provider-off').isChecked()) && !(await section.locator('input.sorter-cloud-provider-anthropic').isChecked()) && (await win.evaluate(() => window.sw.cloud.status())).settings.provider === 'openai')
   await section.screenshot({ path: join(screens, 'sorter-cloud-settings-no-key.png') })
   await openaiRow.locator('.sorter-cloud-key-input').fill(FAKE_KEY)
   await openaiRow.locator('button', { hasText: 'Save key' }).click()
@@ -259,20 +279,20 @@ try {
   const offPrep = await win.evaluate(() => window.sw.cloud.prepare())
   check('while off, Sort now offers nothing to send', offPrep.blocked === 'off' && offPrep.token === null, JSON.stringify(offPrep))
   await answerDialogs([false, true])
-  await section.locator('input.sorter-cloud-enabled').click() // declined in main's dialog
+  await section.locator('input.sorter-cloud-provider-openai').click() // declined in main's dialog
   for (let i = 0; i < 50 && (await dialogsShown()).length < 1; i++) await sleep(100)
   await sleep(300)
   check('declining main’s dialog leaves asking Luna off', (await win.evaluate(() => window.sw.cloud.status())).settings.enabled === false && !JSON.parse(readFileSync(join(userData, 'config.json'), 'utf8')).sorterCloud?.optedInAt)
   const turnOn = (await dialogsShown())[0]
   check('turning on raises main’s own dialog on the main window: count, cost and what is sent', Boolean(turnOn?.parent) && /3 doubtful screenshots are waiting now/.test(turnOn?.detail ?? '') && /Estimated cost: (about \$|under \$)/.test(turnOn?.detail ?? '') && /app name and window title/.test(turnOn?.detail ?? ''), JSON.stringify(turnOn))
-  await section.locator('input.sorter-cloud-enabled').click() // controlled input: it ticks once main answers
+  await section.locator('input.sorter-cloud-provider-openai').click() // controlled input: it ticks once main answers
   await win.waitForFunction(async () => (await window.sw.cloud.status()).settings.enabled === true)
   const optedIn = JSON.parse(readFileSync(join(userData, 'config.json'), 'utf8')).sorterCloud?.optedInAt
   check('turning it on is recorded in main with its time', typeof optedIn === 'string' && Number.isFinite(Date.parse(optedIn)), String(optedIn))
   await section.screenshot({ path: join(screens, 'sorter-cloud-settings.png') })
 
   // 2. offline
-  await section.locator('button.sorter-cloud-sort').click()
+  await sortNow()
   const dialog = win.locator('.sorter-cloud-confirm')
   await dialog.waitFor({ timeout: 20000 })
   const dialogText = await dialog.innerText()
@@ -282,17 +302,17 @@ try {
   check('nothing was sent before the click', seen.length === 0 && (await app.evaluate(() => globalThis.__cloudE2E.calls)) === 0)
   await answerDialogs([false])
   await dialog.locator('button.sorter-cloud-send').click()
-  const result0 = section.locator('.sorter-cloud-result')
+  const result0 = win.locator('.sorter-cloud-result')
   await result0.waitFor({ timeout: 60000 })
   const declinedText = await result0.innerText()
   const sendDialog = (await dialogsShown()).at(-1)
   check('Send in the app raises main’s own dialog with count and cost; declined, nothing is sent', /Send 3 screenshots to Luna\?/.test(sendDialog?.message ?? '') && /Estimated cost/.test(sendDialog?.detail ?? '') && /did not confirm/.test(declinedText) && (await app.evaluate(() => globalThis.__cloudE2E.calls)) === 0, `${JSON.stringify(sendDialog)} ${declinedText}`)
   await answerDialogs([true, true])
-  await section.locator('button.sorter-cloud-sort').click()
+  await sortNow()
   await dialog.waitFor({ timeout: 20000 })
   await dialog.locator('button.sorter-cloud-send').click()
   await win.waitForFunction(() => /offline/.test(document.querySelector('.sorter-cloud-result')?.textContent ?? ''), null, { timeout: 60000 })
-  const result = section.locator('.sorter-cloud-result')
+  const result = win.locator('.sorter-cloud-result')
   await result.waitFor({ timeout: 60000 })
   const offlineText = await result.innerText()
   check('offline run completes with the cloud step skipped', /offline/.test(offlineText), offlineText)
@@ -301,7 +321,7 @@ try {
 
   // 3. online, through the stub
   await route('stub')
-  await section.locator('button.sorter-cloud-sort').click()
+  await sortNow()
   await dialog.waitFor({ timeout: 20000 })
   await dialog.locator('button.sorter-cloud-send').click()
   await win.waitForFunction(() => /Asked Luna about/.test(document.querySelector('.sorter-cloud-result')?.textContent ?? ''), null, { timeout: 60000 })
@@ -317,7 +337,7 @@ try {
   check('the local proposals were not touched', proposal('e2e-local-keep').reason === 'Looks like screenshots you kept before' && proposal('e2e-local-toss').proposal === 'throwaway')
 
   // Review: the doubtful card and the confident items name the step
-  await win.locator('.settings-modal .modal-head button', { hasText: 'close' }).click()
+  await closeSettings()
   await win.locator('.view-switch .scope-tab', { hasText: 'Review' }).click()
   await win.waitForSelector('.rv-big', { timeout: 30000 })
   const why = await win.locator('.rv-why').innerText()
@@ -385,7 +405,7 @@ try {
   const stBoth = await win.evaluate(() => window.sw.cloud.status())
   check('status says both keys are saved and carries neither', stBoth.providers.every((p) => p.hasKey) && !/sk-|LEAKCHECK/.test(JSON.stringify(stBoth)), JSON.stringify(stBoth.providers))
   await section.screenshot({ path: join(screens, 'sorter-cloud-settings-haiku.png') })
-  await section.locator('button.sorter-cloud-sort').click()
+  await sortNow()
   await dialog.waitFor({ timeout: 20000 })
   const haikuText = await dialog.innerText()
   check('Sort now with Haiku: count, list-price estimate, the free-credits line and the company', /Ask Haiku about 3 screenshots, 1 of them one Luna was unsure about\?/.test(haikuText) && /Estimated cost at list price: (about \$|under \$)/.test(haikuText) && /free monthly Anthropic API credits/.test(haikuText) && /sent to Anthropic \(claude-haiku-5-5\)/.test(haikuText) && !/OpenAI/.test(haikuText), haikuText)
@@ -412,7 +432,7 @@ try {
   check("Luna's earlier decisions are untouched", proposal('e2e-doubt-keep').decided_by === 'luna' && proposal('e2e-doubt-keep').decided_model === 'gpt-6-luna' && proposal('e2e-doubt-toss').proposal === 'throwaway' && proposal('e2e-local-keep').decided_model === null, JSON.stringify(proposal('e2e-doubt-keep')))
   const hosts = await app.evaluate(() => globalThis.__cloudE2E.hosts ?? [])
   check('the Haiku run called api.anthropic.com only', hosts.at(-1) === 'api.anthropic.com' && hosts.filter((h) => h === 'api.anthropic.com').length === 1, JSON.stringify(hosts))
-  await win.locator('.settings-modal .modal-head button', { hasText: 'close' }).click()
+  await closeSettings()
   // Review was open behind Settings and still shows what it loaded before the Haiku run: leave and come back
   await win.locator('.view-switch .scope-tab', { hasText: 'Search' }).click()
   await win.locator('.view-switch .scope-tab', { hasText: 'Review' }).click()
@@ -476,22 +496,20 @@ try {
   for (const bad of ['everything', '365d', '', null, { period: 'all' }, '1970-01-01T00:00:00']) refusedPeriod.push(await win.evaluate((bad) => window.sw.sorter.setPeriod(bad), bad))
   check('main refuses a period that is not one of the four and stores nothing', refusedPeriod.every((r) => r.ok === false && r.period === 'all') && storedPeriod() === undefined, JSON.stringify(refusedPeriod))
 
-  if (!(await win.locator('.sorter-cloud').isVisible().catch(() => false))) await win.locator('button.tb-btn[title^="Settings"]').click()
-  await section.waitFor()
-  await section.scrollIntoViewIfNeeded()
+  await openAuto()
   const selects = win.locator('select.sorter-period-select')
-  const optionTexts = await section.locator('select.sorter-period-select option').allInnerTexts()
-  check('a period choice sits beside both sort buttons: Last 7 days, Last 30 days, Last 90 days, Everything (the default)', (await selects.count()) === 2 && JSON.stringify(optionTexts) === JSON.stringify(['Last 7 days', 'Last 30 days', 'Last 90 days', 'Everything']) && (await selects.nth(0).inputValue()) === 'all' && (await selects.nth(1).inputValue()) === 'all', JSON.stringify(optionTexts))
-  check('Settings says the nightly sort takes everything', /The nightly sort takes everything, within the nightly limit\./.test(await section.innerText()), await section.innerText())
-  await section.locator('select.sorter-period-select').selectOption('7d')
+  const optionTexts = await selects.first().locator('option').allInnerTexts()
+  check('one period choice sits beside Sort now: Last 7 days, Last 30 days, Last 90 days, Everything (the default)', (await selects.count()) === 1 && JSON.stringify(optionTexts) === JSON.stringify(['Last 7 days', 'Last 30 days', 'Last 90 days', 'Everything']) && (await selects.nth(0).inputValue()) === 'all', JSON.stringify(optionTexts))
+  check('the tab says the nightly sort takes everything', /The nightly sort takes everything\./.test(await win.locator('.as-sort').innerText()), await win.locator('.as-sort').innerText())
+  await selects.first().selectOption('7d')
   await win.waitForFunction(async () => (await window.sw.cloud.status()).period === '7d')
   await sleep(300)
-  check('choosing Last 7 days is stored in config and shown beside the other sort button too', storedPeriod() === '7d' && (await selects.nth(0).inputValue()) === '7d' && (await selects.nth(1).inputValue()) === '7d' && (await win.evaluate(() => window.sw.sorter.status())).period === '7d', String(storedPeriod()))
+  check('choosing Last 7 days is stored in config', storedPeriod() === '7d' && (await selects.nth(0).inputValue()) === '7d' && (await win.evaluate(() => window.sw.sorter.status())).period === '7d', String(storedPeriod()))
   check('the batch prepared under Everything can no longer be sent', (await win.evaluate((token) => window.sw.cloud.send(token), everything.token)).skipped === 'not-prepared' && seen.length + seenHaiku.length === stubCalls)
-  await win.locator('.sorter-settings').screenshot({ path: join(screens, 'sorter-period-settings.png') })
+  await win.locator('.as-sort').screenshot({ path: join(screens, 'sorter-period-sort-now.png') })
 
   const periodDialogs = (await dialogsShown()).length
-  await section.locator('button.sorter-cloud-sort').click()
+  await sortNow()
   await dialog.waitFor({ timeout: 20000 })
   const periodText = (await dialog.innerText()).replace(/\s+/g, ' ')
   check('under Last 7 days the confirm box gives the period in its heading and its period sentence, and the count line does not repeat it', /Last 7 days: ask Luna about 1 screenshot\?/.test(periodText) && / 1 screenshot the sorter could not call will be sent to OpenAI \(gpt-6-luna\) in 1 request\./.test(periodText) && !/Last 7 days: 1 screenshot the sorter/.test(periodText) && (periodText.match(/Last 7 days/g) ?? []).length === 1 && /Period: the last 7 days, by the date in each file name\. Screenshots taken before that, or with no date in their name, are not sorted or sent and stay as they are\./.test(periodText), periodText)

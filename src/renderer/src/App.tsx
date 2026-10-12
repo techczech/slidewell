@@ -3,7 +3,9 @@ import { nextPreviewIndex } from '../../main/triage-logic'
 import { IDLE, adoptStatus, applySnapshot, failureMessage, importButtonLabel, importLine, isWorking, startClick, type ImportState } from '../../main/triage-import-progress'
 import { PictureSearchSettings, PictureSearchStatusBar, usePictureStatus } from './PictureSearch'
 import { BacklogImportSettings } from './BacklogImport'
-import { SorterSettings } from './SorterSettings'
+import { SorterServiceSettings } from './SorterServiceSettings'
+import { AutoSortingTab } from './AutoSortingTab'
+import { useSorterBusy } from './sorter-hooks'
 import { ReviewScreen } from './Review'
 import { RELATED_SHOWN, relatedFold } from './match-fold'
 import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency, FromFilter, KindFilter, FromCounts, MatchMode, MoreLikeThisResult } from '../../preload'
@@ -93,11 +95,12 @@ export default function App(): JSX.Element {
   const [showImport, setShowImport] = useState(false)
   const [showConvert, setShowConvert] = useState(false)
   const [showStats, setShowStats] = useState(false)
-  const [showTriage, setShowTriage] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
-  // Search | Review (locked frames 1 and 2); the Review tab carries how many need a look
-  const [appView, setAppView] = useState<'search' | 'review'>('search')
+  // Search | Review | Triage (locked 2026-10-12); the Review tab carries how many need a look, the Triage tab a dot while the sorter runs
+  const [appView, setAppView] = useState<'search' | 'review' | 'triage'>('search')
+  const [triageTab, setTriageTab] = useState<TriageTab>('undecided') // kept while he is on another tab
+  const sorterBusy = useSorterBusy()
   const [reviewCount, setReviewCount] = useState(0)
   const [stats, setStats] = useState<Stats | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
@@ -404,7 +407,7 @@ export default function App(): JSX.Element {
       setSel(best >= 0 ? best : dir > 0 ? navCount - 1 : 0)
     }
     const onKey = (e: KeyboardEvent): void => {
-      if (showTriage || showSettings || appView === 'review') return // these own the keyboard while open
+      if (showSettings || appView !== 'search') return // Settings, Review and Triage own the keyboard while open
       const el = document.activeElement as HTMLElement | null
       const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
       const cmd = e.metaKey || e.ctrlKey
@@ -555,7 +558,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navCount, sel, activeItem, runAction, activateCurrent, paletteOpen, lightbox, deckMode, inspectorOpen, showHelp, showStats, showImport, showConvert, showTriage, showSettings, deckFilter, filters, openStats, appView])
+  }, [navCount, sel, activeItem, runAction, activateCurrent, paletteOpen, lightbox, deckMode, inspectorOpen, showHelp, showStats, showImport, showConvert, showSettings, deckFilter, filters, openStats, appView])
 
   // when inspecting a deck, fetch its full metadata (re-fetches as selection moves)
   useEffect(() => {
@@ -599,6 +602,10 @@ export default function App(): JSX.Element {
           <button role="tab" aria-selected={appView === 'review'} className={appView === 'review' ? 'scope-tab active' : 'scope-tab'} onClick={() => setAppView('review')}>
             Review {reviewCount > 0 && <span className="rv-tab-n">{reviewCount}</span>}
           </button>
+          <button role="tab" aria-selected={appView === 'triage'} className={appView === 'triage' ? 'scope-tab active' : 'scope-tab'} onClick={() => setAppView('triage')}>
+            Triage
+            {sorterBusy && <span className="pulse-dot" role="img" aria-label="sorting" />}
+          </button>
         </div>
         <div className="titlebar-actions">
           <button
@@ -611,7 +618,7 @@ export default function App(): JSX.Element {
           >
             📊 Stats
           </button>
-          <button className="tb-btn" onClick={() => setShowTriage(true)} title="Triage screenshots & videos from your source folder">
+          <button className="tb-btn" onClick={() => setAppView('triage')} title="Triage screenshots & videos from your source folder">
             ⛏ Triage
           </button>
           <button className="tb-btn" onClick={() => setShowImport(true)} title="Import PowerPoint into the archive (O)">
@@ -634,6 +641,9 @@ export default function App(): JSX.Element {
       </header>
 
       {appView === 'review' && <ReviewScreen onCount={setReviewCount} onToast={setToast} />}
+      {appView === 'triage' && (
+        <TriagePanel tab={triageTab} onTab={setTriageTab} onReview={() => setAppView('review')} onSettings={() => setShowSettings(true)} onChanged={() => setRefreshKey((k) => k + 1)} onToast={setToast} />
+      )}
       {appView === 'search' && (<>
       <div className="searchbar">
         <input
@@ -1100,11 +1110,16 @@ export default function App(): JSX.Element {
 
       {showConvert && <ConvertPanel onClose={() => setShowConvert(false)} />}
 
-      {showTriage && <TriagePanel onClose={() => setShowTriage(false)} onChanged={() => setRefreshKey((k) => k + 1)} onToast={setToast} />}
-
       {showStats && <StatsPanel stats={stats} onClose={() => setShowStats(false)} />}
 
-      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onChanged={() => setRefreshKey((k) => k + 1)} />}
+      {showSettings && <SettingsPanel
+          onClose={() => setShowSettings(false)}
+          onOpenAutoSorting={() => {
+            setShowSettings(false)
+            setTriageTab('auto')
+            setAppView('triage')
+          }}
+          onChanged={() => setRefreshKey((k) => k + 1)} />}
 
       {toast && <div className="toast">{toast}</div>}
     </div>
@@ -1130,8 +1145,11 @@ function groupByDateList(items: TriageItem[]): Array<[string, TriageItem[]]> {
 
 // ADR-0029: triage a source folder of screenshots/videos. Reads but never owns the folder; include
 // promotes a file into the well, exclude remembers its hash. The App's global keyboard layer yields
-// to this panel (it bails while showTriage), so we run our own.
-function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onChanged: () => void; onToast: (m: string) => void }): JSX.Element {
+// to this panel (it bails while the Triage tab is showing), so we run our own. Triage is a main tab;
+// its fifth tab, Auto sorting, is not a grid: the grid controls and grid keys are off there.
+type TriageTab = 'undecided' | 'selected' | 'excluded' | 'all' | 'auto'
+function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToast }: { tab: TriageTab; onTab: (t: TriageTab) => void; onReview: () => void; onSettings: () => void; onChanged: () => void; onToast: (m: string) => void }): JSX.Element {
+  const sorterBusy = useSorterBusy()
   const [root, setRoot] = useState<string | null | undefined>(undefined) // undefined = loading, null = unset
   const [items, setItems] = useState<TriageItem[]>([])
   const [counts, setCounts] = useState<TriageCounts>({ undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 })
@@ -1145,7 +1163,7 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
   const gridVars = { ['--triage-cols']: cols, ['--triage-thumb-h']: `${THUMB_H[cols] ?? 150}px` } as React.CSSProperties
   const [q, setQ] = useState('')
   const [debq, setDebq] = useState('')
-  const [stateFilter, setStateFilter] = useState<'undecided' | 'selected' | 'excluded' | 'all'>('undecided')
+  const stateFilter = tab === 'auto' ? 'undecided' : tab // the grid behind the counts; Auto sorting lists nothing
   const [sort, setSort] = useState<'scanned' | 'date-desc' | 'date-asc'>('scanned')
   const [groupByDate, setGroupByDate] = useState(false)
   const [scanning, setScanning] = useState(false)
@@ -1320,9 +1338,9 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
     const onKey = (e: KeyboardEvent): void => {
       const el = document.activeElement as HTMLElement | null
       const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
+      if (tab === 'auto') return // no grid here: the tab has its own controls
       if (e.key === 'Escape') {
         if (preview) setPreview(null)
-        else onClose()
         return
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {
@@ -1395,12 +1413,11 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [items, sel, preview, hasMore, decide, decideInPreview, paste, onClose, cols, importSelected])
+  }, [items, sel, preview, hasMore, decide, decideInPreview, paste, cols, importSelected, tab])
 
   return (
     <>
-      <div className="overlay triage-overlay" onClick={onClose}>
-        <div className="triage-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="triage-panel">
           <div className="triage-head">
             <b>⛏ Triage</b>
             {typeof root === 'string' && (
@@ -1431,24 +1448,27 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
               <button className="tb-btn" onClick={() => void chooseFolder()}>
                 {root ? '⌖ Change folder' : '⌖ Choose folder'}
               </button>
-              <button className="copyref" onClick={onClose}>
-                close ✕
-              </button>
             </div>
           </div>
 
-          {root === undefined ? (
-            <div className="triage-empty">loading…</div>
-          ) : root === null ? (
-            <div className="triage-empty">
-              <p>Pick a screenshots folder to triage. SlideWell reads it but never moves, renames, or changes your files — only the ones you include are copied into the well.</p>
-              <button className="primary-btn" onClick={() => void chooseFolder()}>
-                ⌖ Choose folder
+          <div className="triage-controls">
+            <div className="scope" role="tablist" aria-label="Triage state">
+              {(['undecided', 'selected', 'excluded', 'all'] as const).map((s) => (
+                <button key={s} role="tab" aria-selected={tab === s} className={tab === s ? 'scope-tab active' : 'scope-tab'} onClick={() => onTab(s)}>
+                  {s[0].toUpperCase() + s.slice(1)}
+                  {s !== 'all' ? ` ${counts[s]}` : ''}
+                </button>
+              ))}
+              <span className="scope-sep" />
+              <button role="tab" aria-selected={tab === 'auto'} className={tab === 'auto' ? 'scope-tab new active' : 'scope-tab new'} onClick={() => onTab('auto')}>
+                Auto sorting
+                {sorterBusy && <span className="pulse-dot" role="img" aria-label="sorting" />}
               </button>
             </div>
-          ) : (
-            <>
-              <div className="triage-controls">
+            {tab === 'auto' ? (
+              <span className="triage-auto-note">Search, grid size and date grouping apply to the first four tabs only.</span>
+            ) : typeof root === 'string' ? (
+              <>
                 <input
                   ref={searchRef}
                   className="search-input"
@@ -1456,14 +1476,6 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
                 />
-                <div className="scope" role="tablist" aria-label="Triage state">
-                  {(['undecided', 'selected', 'excluded', 'all'] as const).map((s) => (
-                    <button key={s} role="tab" aria-selected={stateFilter === s} className={stateFilter === s ? 'scope-tab active' : 'scope-tab'} onClick={() => setStateFilter(s)}>
-                      {s[0].toUpperCase() + s.slice(1)}
-                      {s !== 'all' ? ` ${counts[s]}` : ''}
-                    </button>
-                  ))}
-                </div>
                 <select className="triage-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)} aria-label="Sort">
                   <option value="scanned">Recently scanned</option>
                   <option value="date-desc">Date — newest</option>
@@ -1477,9 +1489,24 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
                 <label className="toggle" title="Group by capture date">
                   <input type="checkbox" checked={groupByDate} onChange={(e) => setGroupByDate(e.target.checked)} /> Group by date
                 </label>
-                {progress && <span className="triage-progress">{progress}</span>}
-              </div>
+              </>
+            ) : null}
+            {progress && <span className="triage-progress">{progress}</span>}
+          </div>
 
+          {tab === 'auto' ? (
+            <AutoSortingTab onReview={onReview} onSettings={onSettings} />
+          ) : root === undefined ? (
+            <div className="triage-empty">loading…</div>
+          ) : root === null ? (
+            <div className="triage-empty">
+              <p>Pick a screenshots folder to triage. SlideWell reads it but never moves, renames, or changes your files — only the ones you include are copied into the well.</p>
+              <button className="primary-btn" onClick={() => void chooseFolder()}>
+                ⌖ Choose folder
+              </button>
+            </div>
+          ) : (
+            <>
               {items.length === 0 ? (
                 <div className="triage-empty">
                   <p>{scanning ? 'Scanning…' : counts.total === 0 ? 'Nothing scanned yet.' : `No ${stateFilter} items.`}</p>
@@ -1526,7 +1553,6 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
             </>
           )}
         </div>
-      </div>
       {preview && (
         <TriagePreview
           item={items.find((it) => it.relPath === preview.relPath) ?? preview}
@@ -1621,7 +1647,7 @@ function TriagePreview({ item, onClose, onDecide }: { item: TriageItem; onClose:
   )
 }
 
-function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }): JSX.Element {
+function SettingsPanel({ onClose, onChanged, onOpenAutoSorting }: { onClose: () => void; onChanged: () => void; onOpenAutoSorting: () => void }): JSX.Element {
   const [paths, setPaths] = useState<{ archiveRoot: string | null; wellRoot: string; vaultRoot: string | null; screenshotRoot: string | null; conversionsRoot: string | null; othersArchiveRoot: string } | null>(null)
   const [cleanshotOffered, setCleanshotOffered] = useState(false)
   const [captureSources, setCaptureSources] = useState<{ path: string; namedOnly: boolean; exists: boolean }[]>([])
@@ -1745,7 +1771,7 @@ function SettingsPanel({ onClose, onChanged }: { onClose: () => void; onChanged:
         </div>
 
         <PictureSearchSettings />
-        <SorterSettings />
+        <SorterServiceSettings onOpenAutoSorting={onOpenAutoSorting} />
 
         <div className="settings-section">Folders</div>
         <div className="settings-rows">
@@ -2949,7 +2975,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }): JSX.Element {
     ['C', 'Cluster near-identical'],
     ['S · O', 'Stats · Import'],
     ['Review', 'Review tab — K keep · T throwaway · ↓ skip · ⌘Z undo · both piles: arrows · Tab · Esc'],
-    ['⛏ Triage', 'Triage (toolbar) — Space select · U unselect · X exclude · ⌘Y full · sort/group by date'],
+    ['⛏ Triage', 'Triage (title bar tab or toolbar) — Space select · U unselect · X exclude · ⌘Y full · sort/group by date'],
     ['Esc', 'Close / back'],
     ['?', 'This help']
   ]
