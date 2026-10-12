@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage, safeStorage } from 'electron'
+import { app, BrowserWindow, Menu, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage, safeStorage } from 'electron'
 import sharp from 'sharp'
 import { join, basename } from 'path'
 import { homedir, tmpdir } from 'os'
@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { planSources, matchesFromKind, countFrom, type FilterableResult, type FromCounts, type SourcePlan } from './searchfilters'
 import { matchedSearch, rowIds, type MatchCluster, type MatchRow } from './matched-search'
+import { appMenuTemplate } from './app-menu'
 import { mergeLookAlikeClusters } from './look-alike/merge-clusters'
 import { cachedDHash } from './look-alike/fingerprint'
 import { runMoreLikeThis } from './more-like-this'
@@ -243,6 +244,12 @@ let mainWindow: BrowserWindow | null = null
 let pictureSearch: PictureSearchService | null = null
 let launchScanHook: () => void = () => undefined
 let refreshWatchers: () => void = () => undefined
+
+// ⌘, (the app menu's Settings… item) opens the Settings overlay in the renderer. Nothing happens
+// when the main window is missing or destroyed.
+function openSettingsFromMenu(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app:open-settings')
+}
 
 function createWindow(): BrowserWindow {
   const bounds = readConfig().windowBounds ?? { width: 1400, height: 900 }
@@ -1448,6 +1455,7 @@ app.whenReady().then(() => {
     return { ok: true, deleted: idList.length }
   })
 
+  Menu.setApplicationMenu(Menu.buildFromTemplate(appMenuTemplate(openSettingsFromMenu)))
   void startWell().finally(() => pictureSearch?.start())
   createWindow().webContents.once('did-finish-load', () => launchScanHook())
 

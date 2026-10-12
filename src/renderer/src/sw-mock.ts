@@ -54,6 +54,7 @@ export function installMock(): void {
     estimate: null
   }
   const mock: SwApi = {
+    app: { onOpenSettings: () => () => {} },
     picture: {
       status: async () => pictureStatus,
       estimate: async () => null,

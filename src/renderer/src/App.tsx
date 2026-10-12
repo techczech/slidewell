@@ -102,6 +102,8 @@ export default function App(): JSX.Element {
   const [refreshKey, setRefreshKey] = useState(0)
   // a scan of the talks finished: counts, pills and the inspector follow the new usage
   useEffect(() => window.sw.archive.onTalkUsageChanged((r) => { if (r.ok) setRefreshKey((k) => k + 1) }), [])
+  // ⌘, from the app menu (main process, so it works over Triage, Review and any overlay); already open = stays open
+  useEffect(() => window.sw.app.onOpenSettings(() => setShowSettings(true)), [])
   // keyboard selection + inspector + command palette
   const [sel, setSel] = useState(-1)
   const [inspectorOpen, setInspectorOpen] = useState(false)
@@ -2902,6 +2904,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }): JSX.Element {
     ['Enter · dbl-click', 'Open full size (presentation: open it)'],
     ['I  ·  Space', 'Toggle inspector sidebar'],
     ['⌘K', 'Command palette (actions)'],
+    ['⌘,', 'Settings'],
     ['⌘C  ·  ⌘⇧C', 'Copy image (WebP) · as PNG'],
     ['T · J · R', 'Copy text · structure · reference'],
     ['F · X', 'Reveal in Finder · See in context'],
