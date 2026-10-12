@@ -1,5 +1,5 @@
 {
-  "include": ["src/renderer/src/**/*", "src/preload/index.ts", "src/main/review/piles.ts"],
+  "include": ["src/renderer/src/**/*", "src/preload/index.ts", "src/main/review/piles.ts", "src/main/triage-import-progress.ts"],
   "compilerOptions": {
     "composite": true,
     "module": "ESNext",

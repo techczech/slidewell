@@ -1,7 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { Stats } from '../main/stats'
+import type { ImportSnapshot } from '../main/triage-import-progress'
 
 export type { Stats } from '../main/stats'
+export type { ImportSnapshot } from '../main/triage-import-progress'
 // From/Kind filter values. Kept here (not imported from main/searchfilters.ts, which holds the same
 // literals) so the web project needs no main-process file.
 export type FromFilter = 'all' | 'screenshots' | 'old-images' | 'old-slides' | 'talks'
@@ -524,8 +526,16 @@ const api = {
     // refused: the item was emptied from the Bin (permanent); nothing changed
     decide: (hash: string, action: 'select' | 'exclude' | 'reset', force?: boolean): Promise<{ state: string; refused?: string }> =>
       ipcRenderer.invoke('triage:decide', hash, action, force),
-    importSelected: (forceHashes?: string[]): Promise<{ imported: number; skipped: number; gated: number }> =>
+    // error: one plain sentence when the run failed (the counts are then 0)
+    importSelected: (forceHashes?: string[]): Promise<{ imported: number; skipped: number; gated: number; error?: string }> =>
       ipcRenderer.invoke('triage:import-selected', forceHashes ?? []),
+    // The run that is going now (null when none has run); progress snapshots stream while it works.
+    importStatus: (): Promise<ImportSnapshot | null> => ipcRenderer.invoke('triage:import-status'),
+    onImportProgress: (cb: (snap: ImportSnapshot) => void): (() => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, snap: ImportSnapshot): void => cb(snap)
+      ipcRenderer.on('triage:import-progress', handler)
+      return () => ipcRenderer.removeListener('triage:import-progress', handler)
+    },
     // Paste-to-include: ingest the clipboard image straight into the well. Returns the new id or null.
     paste: (): Promise<{ id: string } | null> => ipcRenderer.invoke('well:add-from-clipboard'),
     // A watched source got a new file and was re-scanned; re-list. Returns an unsubscribe function.

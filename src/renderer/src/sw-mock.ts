@@ -138,6 +138,9 @@ export function installMock(): void {
       list: async () => ({ items: [], counts: { undecided: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }),
       decide: async () => ({ state: 'undecided' }),
       paste: async () => null,
+      importSelected: async () => ({ imported: 0, skipped: 0, gated: 0 }),
+      importStatus: async () => null,
+      onImportProgress: () => () => {},
       onProgress: () => () => {},
       onChanged: () => () => {}
     },
