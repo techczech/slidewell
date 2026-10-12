@@ -137,7 +137,7 @@ export function AutoSortingTab({ onReview, onSettings }: { onReview: () => void;
   const holdBack = Math.round(choices / 5)
 
   const trainButton = (primary: boolean, label: string): JSX.Element => (
-    <button className={primary ? 'pic-primary as-train' : 'copyref as-train'} disabled={!st.modelReady || busy} onClick={() => void trainNow()}>
+    <button className={primary ? 'pic-primary as-train' : 'copyref as-train as-train-again'} disabled={!st.modelReady || busy} onClick={() => void trainNow()}>
       {label}
     </button>
   )

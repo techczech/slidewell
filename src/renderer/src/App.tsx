@@ -618,9 +618,6 @@ export default function App(): JSX.Element {
           >
             📊 Stats
           </button>
-          <button className="tb-btn" onClick={() => setAppView('triage')} title="Triage screenshots & videos from your source folder">
-            ⛏ Triage
-          </button>
           <button className="tb-btn" onClick={() => setShowImport(true)} title="Import PowerPoint into the archive (O)">
             ⤓ Import
           </button>
@@ -2975,7 +2972,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }): JSX.Element {
     ['C', 'Cluster near-identical'],
     ['S · O', 'Stats · Import'],
     ['Review', 'Review tab — K keep · T throwaway · ↓ skip · ⌘Z undo · both piles: arrows · Tab · Esc'],
-    ['⛏ Triage', 'Triage (title bar tab or toolbar) — Space select · U unselect · X exclude · ⌘Y full · sort/group by date'],
+    ['⛏ Triage', 'Triage (title bar tab) — Space select · U unselect · X exclude · ⌘Y full · sort/group by date'],
     ['Esc', 'Close / back'],
     ['?', 'This help']
   ]

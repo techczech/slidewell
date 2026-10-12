@@ -138,7 +138,9 @@ try {
   check('tabs: Undecided, Selected, Excluded, All, Auto sorting', gridTabs.join('|') === 'Undecided 1482|Selected 96|Excluded 2310|All|Auto sorting', gridTabs.join('|'))
   await page.keyboard.press('Escape')
   check('Esc no longer closes Triage', (await page.locator('.triage-panel').count()) === 1)
-  check('the toolbar button also switches to the tab', await (async () => { await page.locator('.view-switch .scope-tab', { hasText: 'Search' }).click(); await page.locator('.titlebar-actions .tb-btn', { hasText: 'Triage' }).click(); return (await page.locator('.triage-panel').count()) === 1 })())
+  await page.locator('.view-switch .scope-tab', { hasText: 'Search' }).click()
+  check('the redundant toolbar Triage button is gone', (await page.locator('.titlebar-actions .tb-btn', { hasText: 'Triage' }).count()) === 0)
+  await page.locator('.view-switch .scope-tab', { hasText: 'Triage' }).click()
 
   // --- Auto sorting, trained ---
   await page.locator('.triage-controls .scope-tab', { hasText: 'Auto sorting' }).click()
