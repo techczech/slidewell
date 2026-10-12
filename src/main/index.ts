@@ -27,6 +27,7 @@ import { createSourceWatcher } from './source-watcher'
 import { registerBacklogIpc } from './backlog-ipc'
 import { talkAbsPath, isVaultChangeRelevant } from './talk-usage'
 import { createTalkUsageService } from './talk-usage-service'
+import { createImportRunner } from './triage-import-run'
 import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
 import { convertPptxToOutline } from './convert'
 import { slugify } from './outline'
@@ -1151,17 +1152,25 @@ app.whenReady().then(() => {
       return { state: 'undecided' }
     }
   })
-  guardedHandle(ipcMain, fromMainWindow, 'triage:import-selected', async (_e, forceHashes?: string[]) => {
-    const src = triageSources()[0]?.path ?? null
-    if (!src) return { imported: 0, skipped: 0, gated: 0 }
-    try {
-      return await importSelectedTriage(archiveRoot(), wellRootResolved(), src, Array.isArray(forceHashes) ? forceHashes : [])
-    } catch {
-      return { imported: 0, skipped: 0, gated: 0 }
-    } finally {
-      pictureSearch?.poke()
+  // One Triage import run at a time; a second click (or a reopened panel) joins the run that is going.
+  const triageImport = createImportRunner({
+    emit: (snap) => void mainWindow?.webContents.send('triage:import-progress', snap),
+    work: async (onStep, forceHashes) => {
+      const src = triageSources()[0]?.path ?? null
+      if (!src) return { imported: 0, skipped: 0, gated: 0 }
+      try {
+        return await importSelectedTriage(archiveRoot(), wellRootResolved(), src, forceHashes, onStep)
+      } finally {
+        pictureSearch?.poke()
+      }
     }
   })
+  guardedHandle(ipcMain, fromMainWindow, 'triage:import-selected', async (_e, forceHashes?: string[]) => {
+    const r = await triageImport.start(Array.isArray(forceHashes) ? forceHashes : [])
+    if (!r.error) mainWindow?.webContents.send('triage:changed')
+    return r
+  })
+  guardedHandle(ipcMain, fromMainWindow, 'triage:import-status', async () => triageImport.status())
   // Paste-to-include: read an image off the clipboard and ingest it straight into the well (the paste
   // IS the keep decision, ADR-0029). Returns the new well id or null when the clipboard has no image.
   guardedHandle(ipcMain, fromMainWindow, 'well:add-from-clipboard', async () => {

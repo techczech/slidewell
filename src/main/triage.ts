@@ -557,7 +557,8 @@ export async function promoteTriageHashes(
   wellRoot: string,
   sourceRoot: string,
   onlyHashes: string[] | null,
-  forceHashes: string[] = []
+  forceHashes: string[] = [],
+  onStep?: (done: number, total: number) => void
 ): Promise<PromoteResult> {
   await ensureTriage(wellRoot)
   const db = triageDb(wellRoot)
@@ -585,6 +586,8 @@ export async function promoteTriageHashes(
   const plan = planSelectedImport(enriched, forceHashes, VIDEO_GATE_BYTES)
   const imported: PromoteResult['imported'] = []
   let failed = 0
+  let handled = 0
+  onStep?.(0, plan.toImport.length)
   for (const hash of plan.toImport) {
     const row = enriched.find((e) => e.hash === hash)
     if (!row) continue
@@ -614,6 +617,7 @@ export async function promoteTriageHashes(
       console.error(`[triage] import failed for ${row.abs} — ingest returned no id; left staged`)
       failed++
     }
+    onStep?.(++handled, plan.toImport.length)
   }
   return { imported, skipped: plan.skipped.length + failed, gated: plan.gated.length }
 }
@@ -626,8 +630,9 @@ export async function importSelectedTriage(
   archiveRoot: string,
   wellRoot: string,
   sourceRoot: string,
-  forceHashes: string[] = []
+  forceHashes: string[] = [],
+  onStep?: (done: number, total: number) => void
 ): Promise<{ imported: number; skipped: number; gated: number }> {
-  const r = await promoteTriageHashes(archiveRoot, wellRoot, sourceRoot, null, forceHashes)
+  const r = await promoteTriageHashes(archiveRoot, wellRoot, sourceRoot, null, forceHashes, onStep)
   return { imported: r.imported.length, skipped: r.skipped, gated: r.gated }
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { nextPreviewIndex } from '../../main/triage-logic'
+import { IDLE, adoptStatus, applySnapshot, failureMessage, importButtonLabel, importLine, isWorking, startClick, type ImportState } from '../../main/triage-import-progress'
 import { PictureSearchSettings, PictureSearchStatusBar, usePictureStatus } from './PictureSearch'
 import { BacklogImportSettings } from './BacklogImport'
 import { SorterSettings } from './SorterSettings'
@@ -1149,6 +1150,13 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
   const [groupByDate, setGroupByDate] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [progress, setProgress] = useState('')
+  // The import run (started here, or already going when the panel opened); its result line stays until dismissed or the next run.
+  const [imp, setImp] = useState<ImportState>(IDLE)
+  const impRef = useRef<ImportState>(IDLE)
+  const setImpState = (next: ImportState): void => {
+    impRef.current = next
+    setImp(next)
+  }
   const [sel, setSel] = useState(0)
   const [page, setPage] = useState(0)
   const [hasMore, setHasMore] = useState(false)
@@ -1200,9 +1208,21 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
         void refreshRef.current()
       }
     })
+    const offImport = window.sw.triage.onImportProgress((snap) => {
+      setImpState(applySnapshot(impRef.current, snap))
+      const now = Date.now()
+      if (snap.phase !== 'working' || now - lastTickRef.current > 600) {
+        lastTickRef.current = now
+        void refreshRef.current()
+      }
+    })
+    void window.sw.triage.importStatus().then((st) => {
+      if (!isWorking(impRef.current)) setImpState(adoptStatus(st))
+    })
     return () => {
       offChanged()
       offProgress()
+      offImport()
     }
   }, [])
 
@@ -1267,18 +1287,24 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
   )
 
   const importSelected = useCallback(async () => {
+    const click = startClick(impRef.current)
+    if (!click.start) return // a run is already going; its progress is on screen
+    setImpState(click.state) // working from the click, before main answers
     // staged large videos need an explicit confirm each (rare); only those currently in view can be
     // confirmed — others are reported as "over gate" and stay staged until imported from the Selected tab
     const forceHashes: string[] = []
     for (const v of items.filter((it) => it.state === 'selected' && it.kind === 'video' && it.large)) {
       if (window.confirm(`"${v.filename}" is ${v.sizeMB} MB — over the 20 MB video gate. Import it anyway?`)) forceHashes.push(v.hash)
     }
-    const r = await window.sw.triage.importSelected(forceHashes)
-    const extra = [r.skipped ? `${r.skipped} skipped` : '', r.gated ? `${r.gated} over gate` : ''].filter(Boolean).join(' · ')
-    onToast(`Imported ${r.imported} → well${extra ? ` · ${extra}` : ''}`)
+    try {
+      const r = await window.sw.triage.importSelected(forceHashes)
+      setImpState(r.error ? { phase: 'failed', message: r.error } : { phase: 'done', imported: r.imported, skipped: r.skipped, gated: r.gated })
+    } catch (err) {
+      setImpState({ phase: 'failed', message: failureMessage(err) })
+    }
     await refresh()
     onChanged()
-  }, [items, refresh, onChanged, onToast])
+  }, [items, refresh, onChanged])
 
   const paste = useCallback(async () => {
     const r = await window.sw.triage.paste()
@@ -1383,8 +1409,18 @@ function TriagePanel({ onClose, onChanged, onToast }: { onClose: () => void; onC
               </span>
             )}
             <div className="triage-head-actions">
-              <button className="primary-btn" onClick={() => void importSelected()} disabled={counts.selected === 0} title="Import all selected screenshots into the well">
-                ⤓ Import {counts.selected} → well
+              {imp.phase !== 'idle' && (
+                <span className={imp.phase === 'failed' ? 'triage-import-line failed' : 'triage-import-line'} role="status" data-testid="triage-import-line">
+                  {importLine(imp)}
+                  {!isWorking(imp) && (
+                    <button className="copyref" onClick={() => setImpState(IDLE)} aria-label="Dismiss">
+                      ✕
+                    </button>
+                  )}
+                </span>
+              )}
+              <button className="primary-btn" onClick={() => void importSelected()} disabled={counts.selected === 0 || isWorking(imp)} title="Import all selected screenshots into the well">
+                {importButtonLabel(imp, counts.selected)}
               </button>
               <button className="tb-btn" onClick={() => void paste()} title="Paste an image from the clipboard (⌘V)">
                 ⎘ Paste

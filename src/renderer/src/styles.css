@@ -1016,6 +1016,17 @@ body {
   font-size: 0.74rem;
   color: var(--muted);
 }
+.triage-import-line {
+  font-size: 0.74rem;
+  color: var(--muted);
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+  max-width: 34vw;
+}
+.triage-import-line.failed {
+  color: #a3361f;
+}
 .triage-empty {
   flex: 1;
   display: flex;
