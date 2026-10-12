@@ -38,7 +38,7 @@ import { startPictureQueryServer, PICTURE_QUERY_SOCKET, type QueryServer } from 
 import { WebGpuEmbedder } from './picture-search/webgpu-embedder'
 import { electronEmbedHost, registerEmbedProtocol, EMBED_SCHEME } from './picture-search/electron-embed-host'
 import { modelDir as pictureModelDir } from './picture-search/model-store'
-import { SorterService, registerSorterIpc } from './sorter/service'
+import { SorterService, changePeriod, registerSorterIpc } from './sorter/service'
 import createTrainWorker from './sorter/train-worker?nodeWorker'
 import type { Job, JobResult } from './sorter/jobs'
 import type { FetchLike } from './picture-search/model-store'
@@ -93,6 +93,10 @@ type Config = {
   // optedInAt / anthropicOptedInAt = when he agreed to that provider (absent = not agreed, so off);
   // the per-night limit is fixed in code
   sorterCloud?: StoredCloudSettings & { keyEnc?: string; anthropicKeyEnc?: string; lastRunAt?: string | null; since?: string | null; lastRun?: CloudRunSummary | null }
+  // the period both sort buttons in Settings are limited to: '7d' | '30d' | '90d' | 'all' (sorter/period.ts);
+  // absent = everything; present with anything else (null included) = unreadable, and no manual sort runs
+  // (period.ts storedPeriod). Only main reads it and works out the cut-off; the nightly sort ignores it
+  sorterPeriod?: string
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -434,9 +438,16 @@ app.whenReady().then(() => {
       }),
     broadcast: (st) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('sorter:status', st)
-    }
+    },
+    period: () => readConfig().sorterPeriod
   })
-  registerSorterIpc(sorter, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+  // the period is one setting for both sort buttons: a change drops the cloud step's prepared batch and both sections are told
+  registerSorterIpc(sorter, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents), (period) =>
+    changePeriod(period, () => readConfig().sorterPeriod, (p) => writeConfig({ sorterPeriod: p }), () => {
+      cloud.periodChanged()
+      sorter.notify()
+    })
+  )
   app.on('will-quit', () => sorter.cancel())
 
   // --- screenshot sorter, cloud step (sorter/cloud/service.ts): Luna or Haiku for the doubtful ones, nightly + Sort now ---
@@ -454,7 +465,8 @@ app.whenReady().then(() => {
   const cloudSettings = (): CloudSettings => normaliseCloudSettings(cloudCfg())
   const cloud = new CloudSorter({
     wellRoot: wellRootResolved,
-    sortLocal: () => sorter.sortUndecided(),
+    sortLocal: (window) => sorter.sortUndecided({ window }),
+    period: () => readConfig().sorterPeriod,
     canSortLocal: () => {
       const st = sorter.status()
       return st.canRunUnattended && st.modelReady

@@ -308,7 +308,14 @@ export type SorterStatus = {
   retrainNeeded: boolean
   minHeldBack: { total: number; perLabel: number }
   pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
+  period: SortPeriod | null // the period both sort buttons are limited to; null when the stored one cannot be read (main then sorts nothing)
+  periods: ReadonlyArray<{ id: SortPeriod; label: string }>
 }
+// The period a manual sort is limited to, by each screenshot's capture time (src/main/sorter/period.ts).
+// The renderer only names one of these; main stores it, works out the cut-off from its own clock and
+// refuses anything else. The nightly sort ignores it.
+export type SortPeriod = '7d' | '30d' | '90d' | 'all'
+export type SortResult = { ok: boolean; sorted?: number; counts?: { keep: number; throwaway: number; doubtful: number }; error?: string; period?: SortPeriod; periodPhrase?: string }
 
 // Screenshot sorter, cloud step (tickets 07, 16). Same shapes as src/main/sorter/cloud/service.ts.
 // provider = which company is asked: OpenAI (Luna) or Anthropic (Haiku).
@@ -320,13 +327,14 @@ export type CloudRunSummary = {
   at: string
   trigger: 'nightly' | 'manual'
   provider?: CloudProviderId
+  period?: SortPeriod // the period a manual run was limited to
   local: { ok: boolean; message: string } | null
   asked: number
   answered: number
   keep: number
   throwaway: number
   stayedDoubtful: number
-  skipped: 'unavailable' | 'off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | null
+  skipped: 'unavailable' | 'off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | 'period-changed' | 'batch-changed' | 'date-changed' | null
   error: string | null
   message: string
 }
@@ -334,7 +342,11 @@ export type CloudCostEstimate = { screenshots: number; requests: number; inputTo
 export type CloudPreview = {
   local: { ok: boolean; message: string }
   provider: CloudProviderId // the batch is bound to it: main refuses the send when another is selected by then
-  doubtful: number
+  period: SortPeriod | null // the batch is bound to it too: main refuses the send when another is selected by then
+  periodLabel: string // 'Last 30 days'
+  periodPrefix: string // 'Last 30 days: '; '' for everything
+  periodNote: string // a sentence on what the period leaves out
+  doubtful: number // doubtful screenshots in the period
   toSend: number
   secondOpinions: number // how many of toSend the other provider answered and was unsure about; the estimate covers all of toSend
   secondNote: string // those in words ('5 of them ones Luna was unsure about'); '' when none
@@ -343,7 +355,7 @@ export type CloudPreview = {
   estimate: CloudCostEstimate
   costLabel: string // the words before the cost figure
   costNote: string // a sentence after it ('' when none)
-  blocked: 'unavailable' | 'off' | 'no-key' | 'offline' | 'busy' | 'nothing-doubtful' | 'limit-reached' | null
+  blocked: 'unavailable' | 'off' | 'no-key' | 'offline' | 'busy' | 'nothing-doubtful' | 'limit-reached' | 'period' | null
   /** One-time token for send(): main sends only the batch it prepared and showed. */
   token: string | null
   message: string
@@ -363,6 +375,8 @@ export type CloudStatus = {
   company: string
   longEdge: number
   providers: Array<{ id: CloudProviderId; name: string; company: string; model: string; hasKey: boolean }>
+  period: SortPeriod | null // the same setting as SorterStatus.period
+  periods: ReadonlyArray<{ id: SortPeriod; label: string }>
 }
 
 const api = {
@@ -389,8 +403,9 @@ const api = {
   sorter: {
     status: (): Promise<SorterStatus> => ipcRenderer.invoke('sorter:status'),
     train: (): Promise<{ ok: boolean; cancelled?: boolean; report?: SorterReport; error?: string }> => ipcRenderer.invoke('sorter:train'),
-    sort: (opts?: { limit?: number }): Promise<{ ok: boolean; sorted?: number; counts?: { keep: number; throwaway: number; doubtful: number }; error?: string }> =>
-      ipcRenderer.invoke('sorter:sort', opts),
+    sort: (opts?: { limit?: number }): Promise<SortResult> => ipcRenderer.invoke('sorter:sort', opts),
+    // one of the four period ids, nothing else: no date and no list of screenshots ever goes to main
+    setPeriod: (period: SortPeriod): Promise<{ ok: boolean; period: SortPeriod | null; error?: string }> => ipcRenderer.invoke('sorter:set-period', period),
     cancel: (): Promise<void> => ipcRenderer.invoke('sorter:cancel'),
     onStatus: (cb: (s: SorterStatus) => void): (() => void) => {
       const handler = (_e: Electron.IpcRendererEvent, s: SorterStatus): void => cb(s)

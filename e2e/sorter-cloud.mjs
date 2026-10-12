@@ -22,6 +22,11 @@
 //      survives. The Haiku run in step 4 also gets the screenshot Luna was unsure about, shown as its
 //      own number in the app's confirm box and in main's dialogs. Back with Luna, the one Haiku was
 //      unsure about goes once; after that neither provider is offered anything, whichever is selected.
+//   5b. The period: two more doubtful screenshots, one two days old and one over a year old. Main
+//      refuses a period that is not one of the four; Last 7 days chosen beside Sort now is stored and
+//      shown beside the other sort button; the confirm box and main's dialog name the period and count
+//      only it; only the recent one reaches the stub and the old one stays as it was; a period change
+//      between the preview and the send invalidates the batch.
 //   6. Neither made-up key appears in config.json, the app's stdout/stderr or the profile folder.
 //
 // Run after `npm run build` (or `npx electron-vite build`):  node e2e/sorter-cloud.mjs
@@ -441,6 +446,74 @@ try {
   const carried = table.rows.find((r) => r.hash === 'e2e-old-answer')
   check('the row stored before the upgrade survived, attributed to OpenAI', carried?.provider === 'openai' && carried?.verdict === 'unsure' && carried?.reason === 'An earlier answer' && carried?.model === 'gpt-6-luna' && carried?.asked_at === '2026-10-08T02:00:00.000Z', JSON.stringify(carried))
   check('no screenshot has more than one answer per provider or more than two in all', Object.values(Object.groupBy(table.rows, (r) => r.hash)).every((rs) => rs.length <= 2 && new Set(rs.map((r) => r.provider)).size === rs.length), JSON.stringify(table.rows.map((r) => [r.hash, r.provider])))
+
+  // 5b. the period (one setting for both sort buttons): two more doubtful screenshots, one taken two days ago and one over a year ago
+  const p2 = (x) => String(x).padStart(2, '0')
+  const localTime = (d) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+  const periodShots = [
+    { hash: 'e2e-period-recent', proposal: 'doubtful', window: 'keep-period-recent', colour: '#7b4fa3', takenAt: localTime(new Date(Date.now() - 2 * 86400e3)) },
+    { hash: 'e2e-period-old', proposal: 'doubtful', window: 'keep-period-old', colour: '#a34f4f', takenAt: localTime(new Date(Date.now() - 400 * 86400e3)) }
+  ]
+  {
+    const t = new DatabaseSync(join(well, 'triage.db'))
+    const fts = t.prepare("INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, offline, ocr_text, source, taken_at, app, window_title) VALUES (?, 'image', ?, ?, 'png', ?, ?, '0', '', ?, ?, 'Test App', ?)")
+    const prop = t.prepare("INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, rule, sorter_version, model_id, proposed_at) VALUES (?, 'doubtful', 0.6, 0.4, ?, NULL, ?, NULL, ?)")
+    for (const s of periodShots) {
+      const f = join(source, nameOf(s))
+      await sharp({ create: { width: 3024, height: 1964, channels: 3, background: s.colour } }).png().toFile(f)
+      realHash.set(s.hash, createHash('sha256').update(readFileSync(f)).digest('hex').slice(0, 12))
+      const st = statSync(f)
+      fts.run(realHash.get(s.hash), nameOf(s), nameOf(s), String(st.size), String(Math.round(st.mtimeMs)), source, s.takenAt, s.window)
+      prop.run(realHash.get(s.hash), `Not sure: local reason for ${s.window}`, SORTER_VERSION, new Date().toISOString())
+    }
+    t.close()
+  }
+  const storedPeriod = () => JSON.parse(readFileSync(join(userData, 'config.json'), 'utf8')).sorterPeriod
+  await win.evaluate(() => window.sw.cloud.setSettings({ provider: 'openai' }))
+  const everything = await win.evaluate(() => window.sw.cloud.prepare())
+  check('with no period chosen, Sort now takes everything, as before', everything.period === 'all' && everything.toSend === 2 && everything.message === 'Ask Luna about 2 screenshots?' && storedPeriod() === undefined, JSON.stringify(everything))
+  const refusedPeriod = []
+  for (const bad of ['everything', '365d', '', null, { period: 'all' }, '1970-01-01T00:00:00']) refusedPeriod.push(await win.evaluate((bad) => window.sw.sorter.setPeriod(bad), bad))
+  check('main refuses a period that is not one of the four and stores nothing', refusedPeriod.every((r) => r.ok === false && r.period === 'all') && storedPeriod() === undefined, JSON.stringify(refusedPeriod))
+
+  if (!(await win.locator('.sorter-cloud').isVisible().catch(() => false))) await win.locator('button.tb-btn[title^="Settings"]').click()
+  await section.waitFor()
+  await section.scrollIntoViewIfNeeded()
+  const selects = win.locator('select.sorter-period-select')
+  const optionTexts = await section.locator('select.sorter-period-select option').allInnerTexts()
+  check('a period choice sits beside both sort buttons: Last 7 days, Last 30 days, Last 90 days, Everything (the default)', (await selects.count()) === 2 && JSON.stringify(optionTexts) === JSON.stringify(['Last 7 days', 'Last 30 days', 'Last 90 days', 'Everything']) && (await selects.nth(0).inputValue()) === 'all' && (await selects.nth(1).inputValue()) === 'all', JSON.stringify(optionTexts))
+  check('Settings says the nightly sort takes everything', /The nightly sort takes everything, within the nightly limit\./.test(await section.innerText()), await section.innerText())
+  await section.locator('select.sorter-period-select').selectOption('7d')
+  await win.waitForFunction(async () => (await window.sw.cloud.status()).period === '7d')
+  await sleep(300)
+  check('choosing Last 7 days is stored in config and shown beside the other sort button too', storedPeriod() === '7d' && (await selects.nth(0).inputValue()) === '7d' && (await selects.nth(1).inputValue()) === '7d' && (await win.evaluate(() => window.sw.sorter.status())).period === '7d', String(storedPeriod()))
+  check('the batch prepared under Everything can no longer be sent', (await win.evaluate((token) => window.sw.cloud.send(token), everything.token)).skipped === 'not-prepared' && seen.length + seenHaiku.length === stubCalls)
+  await win.locator('.sorter-settings').screenshot({ path: join(screens, 'sorter-period-settings.png') })
+
+  const periodDialogs = (await dialogsShown()).length
+  await section.locator('button.sorter-cloud-sort').click()
+  await dialog.waitFor({ timeout: 20000 })
+  const periodText = (await dialog.innerText()).replace(/\s+/g, ' ')
+  check('under Last 7 days the confirm box gives the period in its heading and its period sentence, and the count line does not repeat it', /Last 7 days: ask Luna about 1 screenshot\?/.test(periodText) && / 1 screenshot the sorter could not call will be sent to OpenAI \(gpt-6-luna\) in 1 request\./.test(periodText) && !/Last 7 days: 1 screenshot the sorter/.test(periodText) && (periodText.match(/Last 7 days/g) ?? []).length === 1 && /Period: the last 7 days, by the date in each file name\. Screenshots taken before that, or with no date in their name, are not sorted or sent and stay as they are\./.test(periodText), periodText)
+  await win.screenshot({ path: join(screens, 'sorter-period-confirm.png') })
+  await answerDialogs([true])
+  await dialog.locator('button.sorter-cloud-send').click()
+  await win.waitForFunction(() => /Asked Luna about 1 screenshot from the last 7 days/.test(document.querySelector('.sorter-cloud-result')?.textContent ?? ''), null, { timeout: 60000 })
+  const periodSend = (await dialogsShown()).at(-1)
+  check('main’s own dialog names the period and counts only it', (await dialogsShown()).length === periodDialogs + 1 && periodSend?.message === 'Send 1 screenshot from the last 7 days to Luna?' && /^Last 7 days: 1 screenshot the sorter could not call will go to OpenAI in 1 request\./.test(periodSend?.detail ?? '') && /Period: the last 7 days/.test(periodSend?.detail ?? ''), JSON.stringify(periodSend))
+  check('only the screenshot from the last 7 days went to the stub', seen.length + seenHaiku.length === stubCalls + 1 && JSON.stringify(seen.at(-1).windows) === JSON.stringify(['keep-period-recent']) && proposal('e2e-period-recent').proposal === 'keep', JSON.stringify(seen.at(-1)?.windows))
+  check('the older one is untouched: still doubtful, never asked about', proposal('e2e-period-old').proposal === 'doubtful' && proposal('e2e-period-old').decided_by === null && answerRows(`hash = '${realHash.get('e2e-period-old')}'`).rows.length === 0)
+  const nothingIn7 = await win.evaluate(() => window.sw.cloud.prepare())
+  check('nothing more is offered under Last 7 days, though an older one waits', nothingIn7.blocked === 'nothing-doubtful' && nothingIn7.token === null && nothingIn7.message === 'Nothing doubtful from the last 7 days is waiting for Luna.', JSON.stringify(nothingIn7))
+
+  // prepared under Everything, then the period is changed before the send: nothing goes
+  await win.evaluate(() => window.sw.sorter.setPeriod('all'))
+  const wide = await win.evaluate(() => window.sw.cloud.prepare())
+  const narrowed = await win.evaluate(() => window.sw.sorter.setPeriod('90d'))
+  const afterChange = await win.evaluate((token) => window.sw.cloud.send(token), wide.token)
+  check('a period change between the preview and the send invalidates the batch: nothing is sent', wide.toSend === 1 && wide.period === 'all' && narrowed.ok === true && afterChange.skipped === 'not-prepared' && afterChange.asked === 0 && seen.length + seenHaiku.length === stubCalls + 1 && (await dialogsShown()).length === periodDialogs + 1 && proposal('e2e-period-old').proposal === 'doubtful', JSON.stringify({ wide, afterChange }))
+  const in90 = await win.evaluate(() => window.sw.cloud.prepare())
+  check('Last 90 days does not reach it either', in90.period === '90d' && in90.blocked === 'nothing-doubtful' && in90.message === 'Nothing doubtful from the last 90 days is waiting for Luna.', JSON.stringify(in90))
 } catch (e) {
   failed++
   console.log(`FAIL  ${e?.stack ?? e}`)

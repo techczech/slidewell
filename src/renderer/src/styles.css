@@ -1682,6 +1682,33 @@ body {
   color: var(--muted);
   margin-left: 0.2rem;
 }
+/* the period choice beside both sort buttons (Settings › Screenshot sorter and its cloud step) */
+.sorter-period {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+.sorter-period-label {
+  color: var(--muted);
+}
+.sorter-period-select {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+}
+.sorter-period-select:disabled {
+  opacity: 0.6;
+}
+.sorter-period-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: -0.4rem 0 0.7rem;
+}
 /* used in talks: card pill and the inspector's Used in box */
 .badge.talks { background: #e3ebf7; font-weight: 600; }
 .used-in-box {

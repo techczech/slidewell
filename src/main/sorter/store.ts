@@ -56,6 +56,7 @@ import type { Proposal } from './decide'
 import type { DecidedBy } from './cloud/cascade'
 import type { LunaAnswer } from './cloud/luna'
 import { providerOfModel, type AnswerScope, type ProviderId } from './cloud/provider'
+import { inWindow, isEverything, type PeriodWindow } from './period'
 
 const IMAGE_EXT = /\.(webp|png|jpe?g|gif|bmp|tiff?)$/i
 
@@ -507,9 +508,22 @@ export class SorterStore {
    * counted against `night`'s allowance now, while room is left under `limit`; one that does not fit
    * is dropped (overLimit). A retry passes already-counted ones through without counting them again.
    * Returns the hashes that may go into this request, in order.
+   *
+   * `window` is the frozen period window of a manual batch (period.ts; absent, or EVERYTHING, for a
+   * run that takes everything: then no date is read). Under a limited window the capture time now
+   * recorded for each of these screenshots (triage_fts.taken_at, read inside this transaction) must
+   * be inside it. `paths` names, per hash, the file the run is about to send; the time checked is that
+   * file's row (every row for the hash when no path is given), and a screenshot with no row is
+   * outside. If any is outside (outOfPeriod, how many), the batch is no longer the one that was
+   * confirmed: nothing is admitted and nothing is counted by this call, and the caller stops its run.
+   * What an earlier call counted stays counted.
    */
-  admitForRequest(hashes: string[], o: CloudScope & { runId: string; night: string; limit: number }): { admitted: string[]; overLimit: number } {
+  admitForRequest(
+    hashes: string[],
+    o: CloudScope & { runId: string; night: string; limit: number; window?: PeriodWindow; paths?: ReadonlyMap<string, string> }
+  ): { admitted: string[]; overLimit: number; outOfPeriod?: number } {
     this.needAnswers()
+    const limited = o.window && !isEverything(o.window) ? o.window : null
     const q = this.db.prepare(
       `SELECT k.counted AS counted FROM sorter_proposals p JOIN sorter_cloud_claims k ON k.hash = p.hash AND k.run_id = ? WHERE p.hash = ? AND ${this.eligibleSql(o)}`
     )
@@ -520,10 +534,22 @@ export class SorterStore {
       let left = Math.max(0, Math.floor(o.limit) - this.allowanceUsed(o.night))
       let added = 0
       let overLimit = 0
+      // those this run holds and may still ask about, with whether each was already counted
+      const held: Array<{ hash: string; counted: boolean }> = []
       for (const h of hashes) {
         const r = q.get(o.runId, h, ...this.eligibleArgs(o)) as { counted: number } | undefined
-        if (!r) continue
-        if (!Number(r.counted)) {
+        if (r) held.push({ hash: h, counted: Boolean(Number(r.counted)) })
+      }
+      if (limited) {
+        const inside = this.takenInside(held.map((x) => x.hash), limited, o.paths)
+        const outOfPeriod = held.filter((x) => !inside.has(x.hash)).length
+        if (outOfPeriod) {
+          this.db.exec('COMMIT')
+          return { admitted: [], overLimit: 0, outOfPeriod }
+        }
+      }
+      for (const { hash: h, counted } of held) {
+        if (!counted) {
           if (left <= 0) {
             overLimit++
             continue
@@ -540,11 +566,34 @@ export class SorterStore {
           .run(o.night, added)
       }
       this.db.exec('COMMIT')
-      return { admitted, overLimit }
+      return limited ? { admitted, overLimit, outOfPeriod: 0 } : { admitted, overLimit }
     } catch (e) {
       this.db.exec('ROLLBACK')
       throw e
     }
+  }
+
+  /**
+   * Of `hashes`, those whose capture time as recorded now is inside the window. The rows read are
+   * the ones the cloud step picks from (pictures on this Mac: loadUndecided); for a hash with a path
+   * in `paths`, only that file's row. A hash with no such row, or with any such row outside the
+   * window, is not inside. One read for all of them (triage_fts has no index on hash).
+   */
+  private takenInside(hashes: string[], w: PeriodWindow, paths?: ReadonlyMap<string, string>): Set<string> {
+    const inside = new Set<string>()
+    if (!hashes.length || !hasTable(this.db, 'triage_fts')) return inside
+    const rows = this.db
+      .prepare(`SELECT hash, source, rel_path, taken_at FROM triage_fts WHERE kind = 'image' AND offline = '0' AND hash IN (${hashes.map(() => '?').join(', ')})`)
+      .all(...hashes) as Array<{ hash: string; source: string | null; rel_path: string | null; taken_at: string | null }>
+    const outside = new Set<string>()
+    for (const r of rows) {
+      const path = paths?.get(r.hash)
+      if (path !== undefined && (!r.source || !r.rel_path || join(r.source, r.rel_path) !== path)) continue
+      if (inWindow(r.taken_at, w)) inside.add(r.hash)
+      else outside.add(r.hash)
+    }
+    for (const h of outside) inside.delete(h)
+    return inside
   }
 
   /** End of a run: its claims go. The allowance holds only what went into a request, so nothing is given back. */
