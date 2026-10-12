@@ -47,6 +47,14 @@
  *     and a date that has left the window stops the run there ('date-changed'): that request is not
  *     made, no further one starts, and what earlier requests carried stays sent and counted. (One he
  *     decided or answered meanwhile is dropped from its request as before; that does not stop the run.)
+ *     The same transaction holds the count to the allowance: the run's first request goes only if the
+ *     run still holds every confirmed screenshot, each still eligible, and all of them fit in what is
+ *     left tonight; otherwise nothing is admitted or counted, the run's claims go there and nothing
+ *     is sent ('batch-changed'). A later request stops the run the same way when what the run has
+ *     still to send no longer fits. Nothing is set aside for requests not yet made.
+ *   - From the moment a run holds claims, everything it does runs under one cleanup: however it ends,
+ *     the sorter is idle again and the run's claims are released. If the release itself fails, the
+ *     sorter is still idle, and the run's result and the log say the claims were not released.
  *   - A prepared batch can be sent for PREPARED_TTL_MS. Its age is measured on a monotonic clock
  *     (deps.monotonic), so setting the Mac's clock back does not keep it alive; the wall clock is
  *     read as well, so time the Mac spent asleep counts. Both are checked when send() is called and
@@ -94,7 +102,7 @@ import type { LunaRequest } from './luna'
 import { DEFAULT_PROVIDER, isProviderId, otherProviders, PROVIDER_IDS, providerOf, PROVIDERS, type CloudProvider, type ProviderId } from './provider'
 import { applySettingsPatch, isSwitch, optedIn, removeKey, serviceOn, storedProvider, storedSwitch, type CloudSettings, type StoredCloudSettings, type StoredKeys } from './settings'
 import { readVerified, type VerifyRefusal } from './images'
-import { isBatchDue, nextSlot, nightOf } from './schedule'
+import { effectiveAnchor, isBatchDue, nextRunAt, nightOf } from './schedule'
 import { EVERYTHING, inWindow, isEverything, isSortPeriod, PERIOD_CHOICES, PERIOD_UNREADABLE, periodLabel, periodNote, periodPhrase, periodPrefix, periodWindow, storedPeriod, type PeriodWindow, type SortPeriod } from '../period'
 
 /** Screenshots sent to a cloud model per night window: nightly and Sort now together, both providers together. Fixed; not a setting. */
@@ -449,6 +457,7 @@ export class CloudSorter {
   status(): CloudStatus {
     const settings = this.deps.settings()
     const provider = providerOf(settings.provider)
+    const st = this.deps.state()
     return {
       phase: this.phase,
       done: this.done,
@@ -459,7 +468,8 @@ export class CloudSorter {
       nightlyLimit: NIGHTLY_LIMIT,
       leftTonight: this.leftTonight(),
       lastRun: withNumbers(this.deps.state().lastRun),
-      nextRunAt: settings.enabled === true && settings.nightly === true ? nextSlot(this.now(), settings.batchTime).toISOString() : null,
+      // from the same anchor tick() goes by (schedule.ts effectiveAnchor), so this is what the scheduler does
+      nextRunAt: nextRunAt({ now: this.now(), enabled: settings.enabled === true && settings.nightly === true, batchTime: settings.batchTime, lastRunAt: st.lastRunAt, since: st.since })?.toISOString() ?? null,
       model: provider.model,
       name: provider.name,
       company: provider.company,
@@ -529,7 +539,7 @@ export class CloudSorter {
 
   /**
    * The cloud step or the nightly switch is being turned on. The schedule starts again from now
-   * (`since`, which schedule.ts isBatchDue honours when it is later than the last run), so a slot
+   * (`since`, which schedule.ts effectiveAnchor honours when it is later than the last run), so a slot
    * that passed while it was off is not caught up: the next nightly batch is the one status() gives
    * as nextRunAt. A service that was on all along is not touched, and still catches up at launch.
    */
@@ -781,12 +791,25 @@ export class CloudSorter {
   /** Called at launch and every minute: start the nightly batch when one is due. */
   async tick(): Promise<CloudRunSummary | null> {
     const st = this.deps.state()
-    if (!st.since) {
-      this.deps.saveState({ since: this.now().toISOString() })
+    const now = this.now()
+    const s = this.deps.settings()
+    // decided on the stored times as they are, before `since` is written below
+    const due = isBatchDue({ now, enabled: s.enabled === true && s.nightly === true, batchTime: s.batchTime, lastRunAt: st.lastRunAt, since: st.since })
+    const { sinceMissing, rewriteSince } = effectiveAnchor({ now, lastRunAt: st.lastRunAt, since: st.since })
+    if (rewriteSince) {
+      // not a time, or later than the clock: it counted as now (nothing is caught up) and is stored as now
+      this.log('the stored schedule start was not a past time: the schedule starts again from now')
+      this.deps.saveState({ since: now.toISOString() })
       return null
     }
-    const s = this.deps.settings()
-    if (this.busy() || !isBatchDue({ now: this.now(), enabled: s.enabled === true && s.nightly === true, batchTime: s.batchTime, lastRunAt: st.lastRunAt, since: st.since })) return null
+    if (sinceMissing) {
+      // a fresh install has no last run, so nothing is due. A config from before `since` existed, on
+      // all along, keeps its one catch-up from the last run: `since` is stored only once that batch can
+      // start (while the sorter is busy it stays missing, and the next check comes back here)
+      if (due && this.busy()) return null
+      this.deps.saveState({ since: now.toISOString() })
+    }
+    if (!due || this.busy()) return null
     this.log('nightly batch due')
     return this.runNightly()
   }
@@ -874,55 +897,57 @@ export class CloudSorter {
     const runId = randomUUID()
     const { claimed, leftBefore } = this.withStore((s) => s.claimForCloud(wanted.map((c) => c.hash), { ...this.scope(provider), night, limit: NIGHTLY_LIMIT, runId, now: this.now() }))
     if (!claimed.length) return finish({ skipped: leftBefore === 0 ? 'limit-reached' : 'nothing-doubtful', stayedDoubtful: list.length })
-    // main's dialog gave a count: a manual send is that many or none. Fewer were claimed (tonight's
-    // allowance shrank, or another run holds some): the claims go and he is asked to start again.
-    // The nightly batch has no confirmed count and goes with what fits.
-    if (o.confirm && claimed.length !== wanted.length) {
-      this.withStore((s) => s.releaseClaims(runId))
-      return finish({ skipped: 'batch-changed', stayedDoubtful: list.length })
-    }
-    const claimedSet = new Set(claimed)
-    const selected = wanted.filter((c) => claimedSet.has(c.hash))
+    // From here the run holds claims. Everything else it does (setup and the first status broadcast
+    // included) runs inside `rest`, under the cleanup below: whatever is thrown or returned, the
+    // runtime state goes back to idle and this run's claims are released.
+    const rest = async (): Promise<CloudRunSummary> => {
+      // main's dialog gave a count: a manual send is that many or none. Fewer were claimed (tonight's
+      // allowance shrank, or another run holds some): the claims go and he is asked to start again.
+      // The nightly batch has no confirmed count and goes with what fits.
+      if (o.confirm && claimed.length !== wanted.length) return finish({ skipped: 'batch-changed', stayedDoubtful: list.length })
+      const claimedSet = new Set(claimed)
+      const selected = wanted.filter((c) => claimedSet.has(c.hash))
 
-    const t = this.thresholds()
-    const ctl = new AbortController()
-    this.abort = ctl
-    this.phase = 'asking'
-    this.done = 0
-    this.total = selected.length
-    this.push()
-    let fatal: LunaHttpError | null = null
-    let revoked: Revoked | null = null
-    // a capture date left the window after sending began: the run stops, nothing more is sent
-    let dateChanged = false
-    // the night this run counts against ended (local noon passed): nothing more is admitted
-    let nightEnded = false
-    const paths = new Map(selected.map((c) => [c.hash, c.path]))
-    let chunkError: string | null = null
-    const refused = new Map<NotSent, number>()
-    const refuse = (why: NotSent, n = 1): void => void refused.set(why, (refused.get(why) ?? 0) + n)
-    // revocation: the selected provider, its opt-in and its key from main's state; when the provider
-    // is another by now, the opt-in has gone, or the key is no longer the one this run started with,
-    // stop the whole run (requests only ever carry `key`, and only ever go to `provider`)
-    const consent = (): void => {
-      const c = this.liveConsent(provider, key, trigger)
-      if ('ok' in c) return
-      revoked ??= c.revoked
-      ctl.abort()
-      throw new LunaHttpError(REVOKED_WORDS[c.revoked](provider), 'revoked')
-    }
-    // a key or provider change signalled from Settings stops the run at once, in-flight requests included
-    this.running = {
-      provider: provider.id,
-      revoke: (why) => {
-        revoked ??= why
+      const t = this.thresholds()
+      const ctl = new AbortController()
+      this.abort = ctl
+      this.phase = 'asking'
+      this.done = 0
+      this.total = selected.length
+      this.push()
+      let fatal: LunaHttpError | null = null
+      let revoked: Revoked | null = null
+      // a capture date left the window after sending began: the run stops, nothing more is sent
+      let dateChanged = false
+      // the night this run counts against ended (local noon passed): nothing more is admitted
+      let nightEnded = false
+      // a manual send whose confirmed batch no longer goes whole (store.ts admitForRequest `confirmed`): nothing more is sent
+      let batchChanged = false
+      const paths = new Map(selected.map((c) => [c.hash, c.path]))
+      let chunkError: string | null = null
+      const refused = new Map<NotSent, number>()
+      const refuse = (why: NotSent, n = 1): void => void refused.set(why, (refused.get(why) ?? 0) + n)
+      // revocation: the selected provider, its opt-in and its key from main's state; when the provider
+      // is another by now, the opt-in has gone, or the key is no longer the one this run started with,
+      // stop the whole run (requests only ever carry `key`, and only ever go to `provider`)
+      const consent = (): void => {
+        const c = this.liveConsent(provider, key, trigger)
+        if ('ok' in c) return
+        revoked ??= c.revoked
         ctl.abort()
+        throw new LunaHttpError(REVOKED_WORDS[c.revoked](provider), 'revoked')
       }
-    }
-    // anything that may be stored, shown or logged is redacted against the run's key and the stored keys of both providers
-    const scrub = (text: string): string => redact(text, key, ...this.safeKeys())
-    const counts = { asked: 0, answered: 0, keep: 0, throwaway: 0 }
-    try {
+      // a key or provider change signalled from Settings stops the run at once, in-flight requests included
+      this.running = {
+        provider: provider.id,
+        revoke: (why) => {
+          revoked ??= why
+          ctl.abort()
+        }
+      }
+      // anything that may be stored, shown or logged is redacted against the run's key and the stored keys of both providers
+      const scrub = (text: string): string => redact(text, key, ...this.safeKeys())
+      const counts = { asked: 0, answered: 0, keep: 0, throwaway: 0 }
       await pool(
         planChunks(selected, provider.chunkSize),
         provider.concurrency,
@@ -976,11 +1001,21 @@ export class CloudSorter {
                   last.req = null
                   return 'skip'
                 }
-                const { admitted, overLimit, outOfPeriod } = this.withStore((s) => s.admitForRequest(current.map((i) => i.hash), { ...this.scope(provider), runId, night, limit: NIGHTLY_LIMIT, ...(o.window ? { window, paths } : {}) }))
+                const { admitted, overLimit, outOfPeriod, short } = this.withStore((s) => s.admitForRequest(current.map((i) => i.hash), { ...this.scope(provider), runId, night, limit: NIGHTLY_LIMIT, ...(o.window ? { window, paths } : {}), ...(o.confirm ? { confirmed: wanted.length } : {}) }))
                 if (outOfPeriod) {
                   // nothing was admitted or counted for this request; it is not made, and no other starts
                   dateChanged = true
                   refuse('out-of-period', outOfPeriod)
+                  ctl.abort()
+                  current = []
+                  last.req = null
+                  return 'skip'
+                }
+                if (short) {
+                  // nothing was admitted or counted for this request and the run's claims went in that
+                  // transaction; the request is not made, and no other starts
+                  batchChanged = true
+                  refuse('batch-changed', current.length)
                   ctl.abort()
                   current = []
                   last.req = null
@@ -1040,32 +1075,54 @@ export class CloudSorter {
         },
         () => ctl.signal.aborted || nightEnded
       )
+      for (const [why, n] of refused) this.log(`${n} screenshot(s) not sent: ${REFUSAL_WORDS[why]}`)
+      const stayedDoubtful = list.length - counts.keep - counts.throwaway
+      const r = revoked as Revoked | null
+      if (r) return finish({ ...counts, stayedDoubtful, skipped: r })
+      if (dateChanged) return finish({ ...counts, stayedDoubtful, skipped: 'date-changed' })
+      if (batchChanged) {
+        const s = finish({ ...counts, stayedDoubtful, skipped: 'batch-changed' })
+        // earlier requests went before the rest stopped fitting: say how many went and how many did not
+        // (the confirmed count is known only here; the summary's numbers already hold what went)
+        if (s.asked) s.message = partSent(s.asked, wanted.length, stayedDoubtful)
+        return s
+      }
+      const f = fatal as LunaHttpError | null
+      if (f) {
+        const skipped: CloudSkip | null = f.kind === 'offline' ? 'offline' : f.kind === 'auth' ? 'key-rejected' : f.kind === 'cancelled' ? 'cancelled' : null
+        return finish({ ...counts, stayedDoubtful, skipped, error: skipped === 'offline' || skipped === 'cancelled' ? null : scrub(f.message) })
+      }
+      if (nightEnded) {
+        // no outcome of its own (the outcomes are a type the renderer shares): stopped, with the reason in words
+        const s = finish({ ...counts, stayedDoubtful, skipped: 'cancelled' })
+        s.message = `Stopped${s.asked ? ` after asking ${provider.name} about ${plural(s.asked, 'screenshot')}` : ''}: the night this run counted against ended at noon. Nothing more was sent.${stayedDoubtful ? ` ${plural(stayedDoubtful, 'screenshot')} still need${stayedDoubtful === 1 ? 's' : ''} a look.` : ''}`
+        return s
+      }
+      return finish({ ...counts, stayedDoubtful, error: chunkError })
+    }
+    let summary: CloudRunSummary
+    let releaseFailed: string | null = null
+    try {
+      summary = await rest()
     } finally {
+      // first, and whatever the release below does: a sorter left busy would refuse every later run
       this.abort = null
       this.running = null
       this.phase = 'idle'
       this.done = 0
       this.total = 0
-      // claims go (unsent ones too); the allowance already holds only what went into a request
-      this.withStore((s) => s.releaseClaims(runId))
+      try {
+        // claims go (unsent ones too); the allowance already holds only what went into a request
+        this.withStore((s) => s.releaseClaims(runId))
+      } catch (e) {
+        releaseFailed = redact(e instanceof Error ? e.message : String(e), key, ...this.safeKeys())
+        this.log(`${trigger} run (${provider.name}): its claims could not be released: ${releaseFailed}`)
+      }
     }
-    for (const [why, n] of refused) this.log(`${n} screenshot(s) not sent: ${REFUSAL_WORDS[why]}`)
-    const stayedDoubtful = list.length - counts.keep - counts.throwaway
-    const r = revoked as Revoked | null
-    if (r) return finish({ ...counts, stayedDoubtful, skipped: r })
-    if (dateChanged) return finish({ ...counts, stayedDoubtful, skipped: 'date-changed' })
-    const f = fatal as LunaHttpError | null
-    if (f) {
-      const skipped: CloudSkip | null = f.kind === 'offline' ? 'offline' : f.kind === 'auth' ? 'key-rejected' : f.kind === 'cancelled' ? 'cancelled' : null
-      return finish({ ...counts, stayedDoubtful, skipped, error: skipped === 'offline' || skipped === 'cancelled' ? null : scrub(f.message) })
-    }
-    if (nightEnded) {
-      // no outcome of its own (the outcomes are a type the renderer shares): stopped, with the reason in words
-      const s = finish({ ...counts, stayedDoubtful, skipped: 'cancelled' })
-      s.message = `Stopped${s.asked ? ` after asking ${provider.name} about ${plural(s.asked, 'screenshot')}` : ''}: the night this run counted against ended at noon. Nothing more was sent.${stayedDoubtful ? ` ${plural(stayedDoubtful, 'screenshot')} still need${stayedDoubtful === 1 ? 's' : ''} a look.` : ''}`
-      return s
-    }
-    return finish({ ...counts, stayedDoubtful, error: chunkError })
+    if (!releaseFailed) return summary
+    // said in the result too: until the claims go stale these screenshots are held back from other runs
+    const note = `${RELEASE_FAILED} (${releaseFailed})`
+    return { ...summary, error: summary.error ? `${summary.error} ${note}` : note, message: `${summary.message} ${note}` }
   }
 }
 
@@ -1083,7 +1140,7 @@ const within = (list: CloudCandidate[], w: PeriodWindow): CloudCandidate[] => (i
 /** How many of these the other provider answered and was unsure about. */
 const secondOf = (batch: ReadonlyArray<{ hash: string }>, pending: Map<string, CloudPending>): number => batch.filter((c) => pending.get(c.hash)?.secondOpinion).length
 
-type NotSent = VerifyRefusal | 'no-longer-eligible' | 'limit-reached' | 'out-of-period' | 'night-ended'
+type NotSent = VerifyRefusal | 'no-longer-eligible' | 'limit-reached' | 'out-of-period' | 'night-ended' | 'batch-changed'
 /** Log words for a screenshot that was not sent (never its path or name). */
 const REFUSAL_WORDS: Record<NotSent, string> = {
   'limit-reached': 'tonight’s limit was reached',
@@ -1094,8 +1151,16 @@ const REFUSAL_WORDS: Record<NotSent, string> = {
   unreadable: 'the file could not be read',
   'no-longer-eligible': 'decided or answered meanwhile',
   'out-of-period': 'its date is no longer in the period',
-  'night-ended': 'the night the run counted against had ended'
+  'night-ended': 'the night the run counted against had ended',
+  'batch-changed': 'the confirmed batch could no longer go whole'
 }
+
+/** Added to a run's result when its claims could not be released at the end (they go stale after CLAIM_STALE_MS, store.ts). */
+export const RELEASE_FAILED = 'The screenshots this run had set aside could not be released; they are held back from other runs for up to six hours.'
+
+/** A manual send that stopped after some of its confirmed batch had gone: tonight's limit no longer had room for the rest. */
+export const partSent = (sent: number, confirmed: number, stayedDoubtful: number): string =>
+  `Sent ${sent.toLocaleString('en-GB')} of ${confirmed.toLocaleString('en-GB')}. The other ${plural(Math.max(0, confirmed - sent), 'screenshot')} ${confirmed - sent === 1 ? 'was' : 'were'} not sent because tonight’s limit was reached; press Sort now again to prepare them.${stayedDoubtful ? ` ${plural(stayedDoubtful, 'screenshot')} still need${stayedDoubtful === 1 ? 's' : ''} a look.` : ''}`
 
 /** One plain sentence for Settings. */
 export function describe(s: CloudRunSummary): string {
@@ -1120,6 +1185,8 @@ export function describe(s: CloudRunSummary): string {
     case 'period-changed':
       return `Nothing was sent: the period was changed in Settings. Press Sort now again.${waiting}`
     case 'batch-changed':
+      // some went (the run gives the exact sentence, partSent; this is for a summary read without it)
+      if (s.asked) return `Stopped after asking ${name} about ${plural(s.asked, 'screenshot')}: tonight’s limit was reached before the rest could go. Press Sort now again.${waiting}`
       return `Nothing was sent: the screenshots changed while the question was open. Press Sort now again.${waiting}`
     case 'date-changed':
       return `Stopped${s.asked ? ` after asking ${name} about ${plural(s.asked, 'screenshot')}` : ''}: a screenshot’s date changed and it is no longer in the period. Nothing more was sent. Press Sort now again.${waiting}`

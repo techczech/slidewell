@@ -525,11 +525,22 @@ export class SorterStore {
    * outside. If any is outside (outOfPeriod, how many), the batch is no longer the one that was
    * confirmed: nothing is admitted and nothing is counted by this call, and the caller stops its run.
    * What an earlier call counted stays counted.
+   *
+   * `confirmed` is the count main's dialog gave for a manual send (absent for the nightly batch, which
+   * goes with what fits): that many go or none. Checked here, in the transaction that counts, so no
+   * other run can use the allowance between the check and the count:
+   *   - before anything of the run is counted (its first request): the run must hold exactly
+   *     `confirmed` claims, every one still eligible, and all of them must fit in what is left of
+   *     `limit`;
+   *   - afterwards: what the run has not yet counted and may still ask about must still fit.
+   * If not (`short`), nothing is admitted or counted by this call and the run's claims are deleted
+   * here; the caller sends nothing more. Only this request's screenshots are counted by a call that
+   * passes: the rest are counted when their own requests are made (nothing is set aside for them).
    */
   admitForRequest(
     hashes: string[],
-    o: CloudScope & { runId: string; night: string; limit: number; window?: PeriodWindow; paths?: ReadonlyMap<string, string> }
-  ): { admitted: string[]; overLimit: number; outOfPeriod?: number } {
+    o: CloudScope & { runId: string; night: string; limit: number; window?: PeriodWindow; paths?: ReadonlyMap<string, string>; confirmed?: number }
+  ): { admitted: string[]; overLimit: number; outOfPeriod?: number; short?: true } {
     this.needAnswers()
     const limited = o.window && !isEverything(o.window) ? o.window : null
     const q = this.db.prepare(
@@ -554,6 +565,17 @@ export class SorterStore {
         if (outOfPeriod) {
           this.db.exec('COMMIT')
           return { admitted: [], overLimit: 0, outOfPeriod }
+        }
+      }
+      if (o.confirmed !== undefined) {
+        const mine = this.db.prepare('SELECT hash, counted FROM sorter_cloud_claims WHERE run_id = ?').all(o.runId) as Array<{ hash: string; counted: number }>
+        const open = mine.filter((c) => !Number(c.counted)).filter((c) => q.get(o.runId, c.hash, ...this.eligibleArgs(o)))
+        const first = mine.every((c) => !Number(c.counted))
+        const short = first ? mine.length !== o.confirmed || open.length !== o.confirmed || o.confirmed > left : open.length > left
+        if (short) {
+          this.db.prepare('DELETE FROM sorter_cloud_claims WHERE run_id = ?').run(o.runId)
+          this.db.exec('COMMIT')
+          return { admitted: [], overLimit: 0, short: true }
         }
       }
       for (const { hash: h, counted } of held) {

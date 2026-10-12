@@ -4,8 +4,8 @@
  * Rules:
  *   - The batch time is 'HH:MM' (default 02:00). The latest slot is the most recent local HH:MM at
  *     or before now.
- *   - Due when the nightly run is on and the latest slot falls after the anchor: the later of the
- *     last run and the moment the schedule started. The schedule starts at the first check (so a
+ *   - Due when the nightly run is on and the latest slot falls after the anchor (effectiveAnchor):
+ *     the later of the last run and the moment the schedule started. The schedule starts at the first check (so a
  *     fresh install never runs at once) and starts again whenever the cloud step or the nightly
  *     switch is turned on (service.ts restartSchedule), so a slot that passed while either was off
  *     is not caught up.
@@ -52,13 +52,47 @@ export type ScheduleInput = {
   since: string | null
 }
 
+/**
+ * The anchor the schedule goes by, from the two stored times as they read at `now`. Both isBatchDue
+ * and nextRunAt use it, so the next run shown is the one the scheduler makes.
+ *   - `since` that is not a time, or is later than now (the clock was ahead when it was written, or
+ *     the file was edited), counts as now: nothing is caught up, and it never falls back to an older
+ *     last run. `rewriteSince` is then true and service.ts tick() stores now in its place.
+ *   - `since` that is missing (null or empty: a fresh install, or a config from before the field
+ *     existed) gives no time of its own; the last run alone anchors, so a service that was on all
+ *     along still catches up once at launch. `sinceMissing` is then true and tick() stores now.
+ *   - a last run later than now is ignored.
+ * `anchor` is null when neither gives a time: nothing is due until tick() has stored `since`.
+ */
+export function effectiveAnchor(s: { now: Date; lastRunAt: string | null; since: string | null }): { anchor: number | null; sinceMissing: boolean; rewriteSince: boolean } {
+  const now = s.now.getTime()
+  const last = typeof s.lastRunAt === 'string' ? Date.parse(s.lastRunAt) : NaN
+  const times: number[] = Number.isFinite(last) && last <= now ? [last] : []
+  const sinceMissing = s.since === null || s.since === undefined || s.since === ''
+  let rewriteSince = false
+  if (!sinceMissing) {
+    const since = typeof s.since === 'string' ? Date.parse(s.since) : NaN
+    rewriteSince = !Number.isFinite(since) || since > now
+    times.push(rewriteSince ? now : since)
+  }
+  return { anchor: times.length ? Math.max(...times) : null, sinceMissing, rewriteSince }
+}
+
 export function isBatchDue(s: ScheduleInput): boolean {
   if (!s.enabled) return false
-  const times = [s.lastRunAt, s.since].map((t) => Date.parse(t ?? '')).filter((t) => Number.isFinite(t))
-  if (!times.length) return false
-  const anchor = Math.max(...times)
+  const { anchor } = effectiveAnchor(s)
+  if (anchor === null) return false
   const slot = latestSlot(s.now, s.batchTime).getTime()
   return slot > anchor && slot <= s.now.getTime()
+}
+
+/**
+ * When the scheduler next starts the nightly batch, or null while the nightly run is off: now when a
+ * batch is due (the next check starts it), otherwise the next slot after now.
+ */
+export function nextRunAt(s: ScheduleInput): Date | null {
+  if (!s.enabled) return null
+  return isBatchDue(s) ? new Date(s.now.getTime()) : nextSlot(s.now, s.batchTime)
 }
 
 /**
