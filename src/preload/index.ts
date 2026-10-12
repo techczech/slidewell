@@ -411,6 +411,14 @@ const api = {
       return () => ipcRenderer.removeListener('cloud:status', handler)
     }
   },
+  // Main-process menu events (⌘, → Settings). Subscribe once; call the returned function to unsubscribe.
+  app: {
+    onOpenSettings: (cb: () => void): (() => void) => {
+      const handler = (): void => cb()
+      ipcRenderer.on('app:open-settings', handler)
+      return () => ipcRenderer.removeListener('app:open-settings', handler)
+    }
+  },
   archive: {
     // Is the Core A (ppt-archive) extraction store present?
     available: (): Promise<boolean> => ipcRenderer.invoke('archive:available'),
