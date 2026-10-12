@@ -3,11 +3,14 @@
 // turns it on; main records when, per provider), the nightly batch time, and "Sort now", which runs
 // the sorter on this Mac, then shows how many screenshots would go to the chosen model, what is sent
 // with each and an estimated cost, and sends only that batch on a click (main checks the batch's
-// one-time token and that the provider is still the one it was prepared for). The main process owns
+// one-time token and that the provider and the period are still the ones it was prepared for). Sort
+// now is limited to the period chosen beside it (SortPeriodSelect; the same setting as the local
+// sorter's button); main states the period and the count for it. The main process owns
 // all of it (src/main/sorter/cloud/): no key ever comes back here, choosing a provider while asking
 // is on raises main's own dialog, and the per-night limit is fixed there.
 import { useCallback, useEffect, useState } from 'react'
 import type { CloudPreview, CloudProviderId, CloudStatus } from '../../preload'
+import { SortPeriodSelect } from './SortPeriodSelect'
 
 const n = (x: number): string => x.toLocaleString('en-GB')
 const when = (iso: string): string => new Date(iso).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
@@ -170,6 +173,7 @@ export function SorterCloudSettings(): JSX.Element {
             {preparing ? 'Sorting on this Mac…' : 'Sort now'}
           </button>
         )}
+        {!asking && <SortPeriodSelect period={st.period} periods={st.periods} disabled={busy} />}
         {asking && (
           <>
             <progress className="pic-progress" value={st.done} max={Math.max(1, st.total)} />
@@ -181,6 +185,9 @@ export function SorterCloudSettings(): JSX.Element {
             </button>
           </>
         )}
+      </div>
+      <div className="sorter-period-hint">
+        Sort now sorts, and asks {name} about, only the screenshots taken in the chosen period. The nightly sort takes everything, within the nightly limit.
       </div>
       {result && <div className="pic-note sorter-cloud-result">{result}</div>}
       {st.lastRun && !result && (
@@ -201,11 +208,13 @@ export function SorterCloudSettings(): JSX.Element {
             <h3>{preview.message}</h3>
             {preview.local.message && <p>{preview.local.message}</p>}
             <p>
+              <span className="sorter-cloud-period">{preview.periodPrefix}</span>
               {n(preview.toSend)} screenshot{preview.toSend === 1 ? '' : 's'} the sorter could not call
               {preview.secondNote ? <span className="sorter-cloud-second">, {preview.secondNote},</span> : null} will be sent to {prepared.company} ({prepared.model}) in{' '}
               {n(preview.estimate.requests)} request
               {preview.estimate.requests === 1 ? '' : 's'}. {preview.costLabel}: <b>{usd(preview.estimate.usd)}</b>.{preview.costNote ? ` ${preview.costNote}` : ''}
             </p>
+            <p className="sorter-cloud-period-note">{preview.periodNote}</p>
             <p className="sorter-cloud-what">
               With each picture, shrunk to {n(st.longEdge)} pixels, {prepared.company} receives the app name and window title from the file name. Window titles can name
               documents, people or folders. The file’s folder and the text read from the picture are not sent.

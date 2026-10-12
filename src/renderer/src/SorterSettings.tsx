@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { SorterAccuracy, SorterStatus } from '../../preload'
 import { SorterCloudSettings } from './SorterCloudSettings'
+import { SortPeriodSelect } from './SortPeriodSelect'
 
 function useSorterStatus(): SorterStatus | null {
   const [st, setSt] = useState<SorterStatus | null>(null)
@@ -52,7 +53,7 @@ export function SorterSettings(): JSX.Element {
   const sortNow = useCallback(async () => {
     setResult(null)
     const r = await window.sw.sorter.sort()
-    setResult(r.ok && r.counts ? `Sorted ${n(r.sorted ?? 0)}: ${n(r.counts.keep)} keep, ${n(r.counts.throwaway)} throwaway, ${n(r.counts.doubtful)} need a look.` : (r.error ?? null))
+    setResult(r.ok && r.counts ? `Sorted ${n(r.sorted ?? 0)}${r.periodPhrase ?? ''}: ${n(r.counts.keep)} keep, ${n(r.counts.throwaway)} throwaway, ${n(r.counts.doubtful)} need a look.` : (r.error ?? null))
   }, [])
 
   if (!st) return <div className="pic-settings sorter-settings" />
@@ -113,6 +114,7 @@ export function SorterSettings(): JSX.Element {
             <button className="copyref" disabled={!st.modelReady || !st.canRunUnattended} onClick={() => void sortNow()}>
               Sort undecided screenshots now
             </button>
+            <SortPeriodSelect period={st.period} periods={st.periods} />
           </>
         )}
         {running && (
@@ -128,6 +130,10 @@ export function SorterSettings(): JSX.Element {
             </button>
           </>
         )}
+      </div>
+      <div className="sorter-period-hint">
+        “Sort undecided screenshots now” sorts only the screenshots taken in the chosen period, by the date in each file name; one with no date in its name is sorted
+        only under Everything. The same period applies to Sort now below. The nightly sort takes everything.
       </div>
       {!st.modelReady && <div className="pic-note">Needs the picture search model (above).</div>}
       {st.error && <p className="pic-error">The sorter stopped: {st.error}</p>}

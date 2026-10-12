@@ -6,6 +6,10 @@
  *     model it will use on all of it. Saves model + report (store.ts).
  *   sortUndecided(): for every undecided screenshot in triage: rules + classifier → a proposal with
  *     confidence and reason, recorded in sorter_proposals. Needs a trained model with a report.
+ *     Given a period window (period.ts), it looks only at screenshots taken inside it; the rest are
+ *     not read, embedded or written.
+ *   sortManual(): the "Sort undecided screenshots now" button: sortUndecided for the period chosen in
+ *     Settings, with the cut-off worked out here from main's clock. The renderer passes no period.
  *
  * Sorting writes proposals only: it never moves, deletes or decides anything (binning is later
  * work), and it never writes his triage decisions. Nothing here makes a network call: the cloud step
@@ -24,6 +28,7 @@ import { accuracyReport, enoughToMeasure, holdOutSplit, MIN_HELD_BACK, type Accu
 import { loadLabelled, loadUndecided, SorterStore, type ProposalRow, type Shot } from './store'
 import { applyCloud, decidedByLocal, settledAnswer } from './cloud/cascade'
 import { answerScopes, voiceOfAnswer } from './cloud/provider'
+import { EVERYTHING, inWindow, isSortPeriod, PERIOD_CHOICES, PERIOD_REFUSED, PERIOD_UNREADABLE, periodPhrase, periodWindow, storedPeriod, type PeriodWindow, type SortPeriod } from './period'
 
 export const HOLD_OUT_FRACTION = 0.2
 
@@ -69,7 +74,13 @@ export type SorterStatus = {
   /** The least held-back evidence needed (shown in Settings when there is not enough yet). */
   minHeldBack: { total: number; perLabel: number }
   pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
+  /** The period a manual sort is limited to (one setting for both sort buttons); null when the stored one cannot be read. */
+  period: SortPeriod | null
+  /** The periods that can be chosen, in the order shown. */
+  periods: ReadonlyArray<{ id: SortPeriod; label: string }>
 }
+
+export type SortResult = { ok: boolean; sorted?: number; counts?: { keep: number; throwaway: number; doubtful: number }; error?: string; /** The period this run was limited to, and it inside a sentence (' from the last 30 days'; '' for everything). */ period?: SortPeriod; periodPhrase?: string }
 
 export type SorterDeps = {
   wellRoot: () => string
@@ -84,6 +95,9 @@ export type SorterDeps = {
    * main process never blocks. When `signal` aborts, the job must stop (terminate the worker) and reject.
    */
   runJob?: <J extends Job>(job: J, signal: AbortSignal) => Promise<JobResult<J>>
+  /** The period stored in config, as stored (period.ts storedPeriod reads it). Absent: everything. */
+  period?: () => unknown
+  now?: () => Date
 }
 
 /** A model counts only when it and its report were made under the current sorter version. */
@@ -117,7 +131,28 @@ export class SorterService {
     const { rec, pending } = this.withStore((s) => ({ rec: s.latestModel<SorterReport>(), pending: s.pendingCounts() }))
     const current = rec ? isCurrent(rec) : false
     const report = current ? rec!.report : null
-    return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: current && enoughToMeasure(report?.heldBack), retrainNeeded: Boolean(rec) && !current, minHeldBack: MIN_HELD_BACK, pending }
+    return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: current && enoughToMeasure(report?.heldBack), retrainNeeded: Boolean(rec) && !current, minHeldBack: MIN_HELD_BACK, pending, period: this.period(), periods: PERIOD_CHOICES }
+  }
+
+  /** The period chosen in Settings; null when what is stored is not a period. */
+  period(): SortPeriod | null {
+    return storedPeriod(this.deps.period ? this.deps.period() : undefined)
+  }
+
+  /** Push the status again (the period was changed). */
+  notify(): void {
+    this.deps.broadcast(this.status())
+  }
+
+  /**
+   * "Sort undecided screenshots now": the period chosen in Settings, its cut-off taken from this
+   * process's clock. Nothing is sorted when the stored period cannot be read.
+   */
+  async sortManual(opts: { limit?: number } = {}): Promise<SortResult> {
+    const p = this.period()
+    const window = p ? periodWindow(p, this.deps.now ? this.deps.now() : new Date()) : null
+    if (!window) return { ok: false, error: PERIOD_UNREADABLE }
+    return this.sortUndecided({ ...opts, window })
   }
 
   private set(patch: Partial<Run>, force = false): void {
@@ -227,8 +262,15 @@ export class SorterService {
     }
   }
 
-  /** Propose keep / throwaway / doubtful for every undecided screenshot. Writes proposals only. */
-  async sortUndecided(opts: { limit?: number } = {}): Promise<{ ok: boolean; sorted?: number; counts?: { keep: number; throwaway: number; doubtful: number }; error?: string }> {
+  /**
+   * Propose keep / throwaway / doubtful for every undecided screenshot, or, given a period window,
+   * for those taken inside it (period.ts inWindow; one with no date in its name is inside Everything
+   * only). Writes proposals only, and none for a screenshot outside the window.
+   */
+  async sortUndecided(opts: { limit?: number; window?: PeriodWindow } = {}): Promise<SortResult> {
+    const window = opts.window ?? EVERYTHING
+    if (!isSortPeriod(window.period)) return { ok: false, error: PERIOD_REFUSED }
+    const within = { period: window.period, periodPhrase: periodPhrase(window.period) }
     if (this.busy()) return { ok: false, error: 'the sorter is already running' }
     const rec = this.withStore((s) => s.latestModel<SorterReport>())
     if (!rec) return { ok: false, error: 'train the sorter on your past choices first; it needs an accuracy report before it sorts' }
@@ -240,7 +282,7 @@ export class SorterService {
     const counts = { keep: 0, throwaway: 0, doubtful: 0 }
     let sorted = 0
     try {
-      let shots = loadUndecided(this.deps.wellRoot())
+      let shots = loadUndecided(this.deps.wellRoot()).filter((s) => inWindow(s.takenAt, window))
       if (opts.limit !== undefined) shots = shots.slice(0, Math.max(0, opts.limit))
       const t = this.thresholds()
       // pictures of everything he kept: a look-alike of one of them leans throwaway
@@ -279,24 +321,41 @@ export class SorterService {
         this.set({ done: Math.min(shots.length, i + chunk.length) })
       }
       this.set({ phase: 'idle', done: 0, total: 0, message: '' }, true)
-      return { ok: true, sorted, counts }
+      return { ok: true, sorted, counts, ...within }
     } catch (e) {
       if (ctl.signal.aborted) {
         // Stop ended the worker mid-chunk: proposals already written stay, nothing more is recorded
         this.set({ phase: 'idle', done: 0, total: 0, message: '' }, true)
-        return { ok: true, sorted, counts }
+        return { ok: true, sorted, counts, ...within }
       }
       const msg = (e as Error)?.message ?? String(e)
       this.set({ phase: 'error', message: '', error: msg }, true)
-      return { ok: false, sorted, counts, error: msg }
+      return { ok: false, sorted, counts, error: msg, ...within }
     } finally {
       this.abort = null
     }
   }
 }
 
-/** IPC for Settings › Screenshot sorter. Types: src/preload/index.ts. */
-export function registerSorterIpc(svc: SorterService, allowed: (sender: Electron.WebContents) => boolean): void {
+/**
+ * A period chosen in Settings. Only one of the four period ids is stored; anything else is refused
+ * and what is stored stays as it was (it is never read as Everything). `changed` runs after a
+ * different period was stored (index.ts: the cloud step drops its prepared batch).
+ */
+export function changePeriod(period: unknown, current: () => unknown, save: (p: SortPeriod) => void, changed: () => void): { ok: boolean; period: SortPeriod | null; error?: string } {
+  if (!isSortPeriod(period)) return { ok: false, period: storedPeriod(current()), error: PERIOD_REFUSED }
+  const before = storedPeriod(current())
+  save(period)
+  if (before !== period) changed()
+  return { ok: true, period }
+}
+
+/**
+ * IPC for Settings › Screenshot sorter. Types: src/preload/index.ts. `sorter:sort` takes no period
+ * and no date: the period is the stored one and the cut-off is main's. `setPeriod` is changePeriod
+ * bound to the config (index.ts).
+ */
+export function registerSorterIpc(svc: SorterService, allowed: (sender: Electron.WebContents) => boolean, setPeriod: (period: unknown) => { ok: boolean; period: SortPeriod | null; error?: string } = () => ({ ok: false, period: svc.period(), error: PERIOD_REFUSED })): void {
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
     ipcMain.handle(channel, (e, ...args) => {
       if (!allowed(e.sender)) throw new Error(`${channel}: not allowed from this window`)
@@ -305,6 +364,7 @@ export function registerSorterIpc(svc: SorterService, allowed: (sender: Electron
   }
   handle('sorter:status', () => svc.status())
   handle('sorter:train', () => svc.trainAndTest())
-  handle('sorter:sort', (opts?: { limit?: number }) => svc.sortUndecided({ limit: typeof opts?.limit === 'number' ? opts.limit : undefined }))
+  handle('sorter:sort', (opts?: { limit?: number }) => svc.sortManual({ limit: typeof opts?.limit === 'number' ? opts.limit : undefined }))
+  handle('sorter:set-period', (period: unknown) => setPeriod(period))
   handle('sorter:cancel', () => svc.cancel())
 }
