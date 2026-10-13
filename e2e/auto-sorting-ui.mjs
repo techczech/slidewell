@@ -342,7 +342,9 @@ try {
   check('grid keys do nothing on Auto sorting', (await fake(() => window.__fake.calls.decide)) === 0)
 
   // --- What the sorter goes by (locked drawing 2) ---
-  check('section heading sits under the status line, above Sort now', (await page.locator('.as-main > div:has(.as-status) + .gb .gb-title').innerText()) === 'What the sorter goes by' && (await page.locator('.gb ~ .as-sort').count()) === 1)
+  const order = await page.evaluate(() => ['.as-status', '.as-sort', '.sp', '.gb', '.as-training', '.as-nightly'].map((q) => { const e = document.querySelector(q); return e ? Math.round(e.getBoundingClientRect().top + window.scrollY + (document.querySelector('.as-main')?.scrollTop ?? 0)) : -1 }))
+  check('order: status, Sort now, piles, "What the sorter goes by", Training, Nightly', order.every((v, k) => v >= 0 && (k === 0 || v > order[k - 1])) && (await text('.gb .gb-title')) === 'What the sorter goes by', order.join(','))
+  check('Sort now button is visible without scrolling at 1440x900', await page.evaluate(() => { for (const e of document.querySelectorAll('*')) if (e.scrollTop) e.scrollTop = 0; window.scrollTo(0, 0); const r = document.querySelector('.as-sort-btn').getBoundingClientRect(); return JSON.stringify([Math.round(r.top), Math.round(r.bottom), window.innerHeight]) && r.top >= 0 && r.bottom <= window.innerHeight }))
   const rowOf = (app) => page.locator(`.gb-table tr[data-app="${app}"]`)
   const brightloom = (await rowOf('Brightloom').innerText()).replace(/\s+/g, ' ')
   check('table row: kept with share, thrown away, still undecided', brightloom.startsWith('Brightloom 40 78% 11 412'), brightloom)

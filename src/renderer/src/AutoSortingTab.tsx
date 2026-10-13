@@ -402,10 +402,10 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
         {rep ? (
           <>
             <div className={busy ? 'as-dim' : ''}>{trainedStatus}</div>
-            <SorterGoesBy reloadKey={runsVersion} />
             {busy ? progress : sortNowBlock}
             <div className={busy ? 'as-dim as-stack' : 'as-stack'}>
               {pilesBlock}
+              <SorterGoesBy reloadKey={runsVersion} />
               {trainingBlock}
               {nightlyBlock}
               {lastRunBlock}
@@ -414,9 +414,9 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
         ) : (
           <>
             {busy && running && st.phase !== 'sorting' ? progress : untrainedCard}
-            <SorterGoesBy reloadKey={runsVersion} />
             {sortNowBlock}
             {pilesBlock}
+            <SorterGoesBy reloadKey={runsVersion} />
             {nightlyBlock}
           </>
         )}
