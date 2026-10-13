@@ -103,8 +103,13 @@ export function installMock(): void {
       onStatus: () => () => undefined
     },
     sorter: {
-      status: async () => ({ phase: 'idle' as const, done: 0, total: 0, message: '', error: null, modelReady: false, report: null, canRunUnattended: false, retrainNeeded: false, rulesChangedSinceTest: false, minHeldBack: { total: 20, perLabel: 5 }, pending: { keep: 0, throwaway: 0, doubtful: 0, lastProposedAt: null }, period: 'all' as const, periods: PERIODS, lastRun: null, undecided: null, learnable: null }),
+      status: async () => ({ phase: 'idle' as const, done: 0, total: 0, message: '', error: null, modelReady: false, report: null, canRunUnattended: false, retrainNeeded: false, rulesChangedSinceTest: false, minHeldBack: { total: 20, perLabel: 5 }, pending: { keep: 0, throwaway: 0, doubtful: 0, lastProposedAt: null }, period: 'all' as const, periods: PERIODS, lastRun: null, undecided: null, learnable: null, answersSinceTraining: 0, retrainEvery: 10, autoRetrain: true, autoRetrainOnBattery: false, retraining: null, waitingForPower: null, choicesNeeded: 0, lastRetrain: null }),
       train: async () => ({ ok: false, error: 'not available in the browser preview' }),
+      // teach the sorter (ticket 22): placeholders so the preview compiles; the renderer tickets (23, 24) fill them in
+      teachQueue: async () => ({ total: 0, items: [], next: null }),
+      learning: async () => ({ verdict: 'not-enough' as const, more: 92, minimum: 92, choices: 0, kept: 0, thrownAway: 0, heldBack: 0, points: [], trainedAt: null }),
+      retrainNow: async () => ({ ok: false, error: 'not available in the browser preview' }),
+      setAutoRetrain: async () => ({ ok: false, autoRetrain: true, autoRetrainOnBattery: false, error: 'not available in the browser preview' }),
       sort: async () => ({ ok: false, error: 'not available in the browser preview' }),
       setPeriod: async () => ({ ok: false, period: 'all' as const, error: 'not available in the browser preview' }),
       cancel: async () => undefined,

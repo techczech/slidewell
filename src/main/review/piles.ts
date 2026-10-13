@@ -138,6 +138,15 @@ export function pileKey(pile: Pile, binInDays: number | null, timeMs: number, ha
   return [pile === 'throwaway' ? -(binInDays ?? 0) : 0, -(Number.isFinite(timeMs) ? timeMs : 0), hash]
 }
 
+/**
+ * The teaching order (ticket 22) as a key for the same paging: the screenshot the sorter is least sure
+ * of first (p(keep) nearest 0.5), then newest first, then by hash.
+ */
+export function teachKey(pKeep: number, timeMs: number, hash: string): PileKey {
+  const p = Number.isFinite(pKeep) ? pKeep : 0.5
+  return [Math.abs(p - 0.5), -(Number.isFinite(timeMs) ? timeMs : 0), hash]
+}
+
 export function compareKeys(a: PileKey, b: PileKey): number {
   return a[0] - b[0] || a[1] - b[1] || (a[2] < b[2] ? -1 : a[2] > b[2] ? 1 : 0)
 }

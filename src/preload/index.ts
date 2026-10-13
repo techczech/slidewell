@@ -208,12 +208,19 @@ export type ReviewCard = {
   binInDays: number | null // Throwaway only: whole days before it moves to the Bin
   thumbUrl: string | null
   offline: boolean
+  // teach the sorter (ticket 22)
+  pKeep: number // the sorter's p(keep) for it, 0..1 (rule, your history and look-alike combined); throwaway = 1 - pKeep
+  leans: 'keep' | 'throwaway' // the way it leans: keep when pKeep is at least 0.5
+  why: string // the reason in plain words from his own history when there is one ("You kept 3 of the last 14 from Preview"), else `reason`
 }
+// Teach the sorter (ticket 22): the doubtful screenshots he has not decided, the one the sorter is least sure of first
+// (pKeep nearest 0.5; newest first when equal). `next` is an opaque cursor for sorter.teachQueue (null = no more).
+export type TeachQueue = { total: number; items: ReviewCard[]; next: string | null }
 export type ReviewOverview = {
   needALook: number
   confident: { kept: number; throwaway: number } // proposals he has not overridden
   lastSortedAt: string | null
-  queue: ReviewCard[] // the doubtful queue, newest first
+  queue: ReviewCard[] // the doubtful queue, newest first; with order 'teach', the one the sorter is least sure of first
   confidentSample: ReviewCard[]
   canUndo: boolean
 }
@@ -353,6 +360,7 @@ export type SorterReport = {
   keepFromWellCopy: number
   grouping: { groups: number; largest: number; cosine: number; minutes: number }
   enoughToMeasure: boolean
+  choicesAtTraining?: number // his choices with a readable picture when this was trained (absent on an older report: usable.keep + usable.throwaway)
   appRulesFingerprint?: string // his per-app rules as they were when this was measured (absent on an older report: no rules)
   trainedOn: { keep: number; throwaway: number }
   l2: number
@@ -385,6 +393,43 @@ export type SorterStatus = {
   // counted in main when status() is called, after a sort and when the period changes; null until first counted
   undecided: { period: SortPeriod | null; inPeriod: number | null; all: number } | null
   learnable: { kept: number; binned: number } | null // his choices the sorter can learn from (with a readable picture); counted with undecided
+} & SorterTeachStatus
+// Teach the sorter (ticket 22). Same shapes in src/main/sorter/retrain.ts (it imports these).
+export type RetrainTrigger = 'manual' | 'round' | 'auto' // Train / Retrain now; the end of a teaching round; by itself after ten answers
+export type SorterRightShares = { throwawayRight: number | null; keepRight: number | null } // 0..1 on the held-back sample; null = it proposed none of that kind
+// One retrain and what it moved. Kept across restarts.
+export type SorterRetrain = {
+  at: string
+  trigger: RetrainTrigger
+  choices: { before: number; after: number } // his choices the model before / the new model was trained with (before 0 = there was none)
+  needALook: { before: number; after: number } | null // doubtful proposals among his undecided screenshots, just before and after the re-score; null = what moved could not be checked
+  movedToSure: { keep: number; throwaway: number } | null // were doubtful, now keep / throwaway; null with needALook
+  accuracy: { before: SorterRightShares | null; after: SorterRightShares } // held-back accuracy of the model before (null = none) and after
+  movedHashes: string[] // up to 200 screenshots that moved to sure
+}
+export type SorterTeachStatus = {
+  answersSinceTraining: number // his choices now minus those the model in use was trained with (0 without a current model or before the first count)
+  retrainEvery: number // 10
+  autoRetrain: boolean // "Retrain by itself after every ten answers"
+  autoRetrainOnBattery: boolean // true = also while on battery ("Not while on battery" switched off)
+  retraining: RetrainTrigger | null // a retrain is running now, and what started it
+  waitingForPower: { answers: number } | null // ten or more answers are waiting and the Mac is on battery: it retrains when power returns or on Retrain now
+  choicesNeeded: number // how many more choices before a training can be measured (0 = enough); below it the sorter does not retrain by itself
+  lastRetrain: SorterRetrain | null
+}
+// "How much is enough" (ticket 22): the sorter trained on growing parts of his choices, each tested on the same held-back sample.
+export type SorterLearningPoint = { choices: number; throwawayRight: number | null; needALook: number | null } // shares 0..1; null = could not be measured at that size
+export type SorterLearning = {
+  verdict: 'not-enough' | 'still-helping' | 'levelling-off'
+  more: number // not-enough: how many more choices are needed; otherwise 0
+  minimum: number // the fewest choices a training can be measured with (92: 46 kept and 46 thrown away)
+  choices: number // kept + thrownAway
+  kept: number
+  thrownAway: number
+  heldBack: number // size of the held-back sample every point was tested on (0 when nothing was computed)
+  points: SorterLearningPoint[] // at most 6, growing; the last is all his choices
+  trainedAt: string | null // the training this reading was made for (it is computed once per training)
+  error?: string // why there are no points although there are enough choices
 }
 // One sort on this Mac: when it ended, its period, how many it looked at, how many got keep or throwaway, how many stayed doubtful.
 export type SorterLocalRun = { at: string; period: SortPeriod; lookedAt: number; confident: number; needLook: number }
@@ -493,6 +538,15 @@ const api = {
     // one of the four period ids, nothing else: no date and no list of screenshots ever goes to main
     setPeriod: (period: SortPeriod): Promise<{ ok: boolean; period: SortPeriod | null; error?: string }> => ipcRenderer.invoke('sorter:set-period', period),
     cancel: (): Promise<void> => ipcRenderer.invoke('sorter:cancel'),
+    // Teach the sorter (ticket 22). An answer is review.act / triage.decide: there is no separate write.
+    // teachQueue: the screenshots the sorter is least sure of, first page with after = null; limit defaults to 10 (at most 500)
+    teachQueue: (after?: string | null, limit?: number): Promise<TeachQueue> => ipcRenderer.invoke('sorter:teach-queue', after ?? null, limit),
+    // learning: computed in the background the first time after each training (several trainings: tens of seconds), then answered from the stored reading
+    learning: (): Promise<SorterLearning> => ipcRenderer.invoke('sorter:learning'),
+    // retrainNow: train + test + say what moved (status.lastRetrain). 'round' = the end of a teaching round; a retrain already running is joined
+    retrainNow: (trigger?: 'manual' | 'round'): Promise<{ ok: boolean; cancelled?: boolean; report?: SorterReport; error?: string }> => ipcRenderer.invoke('sorter:retrain-now', trigger),
+    // setAutoRetrain: either switch or both; onBattery true = retrain also on battery. Answers with both as stored
+    setAutoRetrain: (patch: { enabled?: boolean; onBattery?: boolean }): Promise<{ ok: boolean; autoRetrain: boolean; autoRetrainOnBattery: boolean; error?: string }> => ipcRenderer.invoke('sorter:set-auto-retrain', patch),
     // "What the sorter goes by" (ticket 20): his choices per app with the rule in force and a suggestion, and the built-in rules in words
     goesBy: (): Promise<SorterGoesBy> => ipcRenderer.invoke('sorter:goes-by'),
     // His rule for an app ('' = app not known): 'keep' | 'throwaway' | null (none). Saved at once; used from the next sort. Answers with the table as it is now.
@@ -681,7 +735,7 @@ const api = {
   // Review screen (ticket 08). act/undo/emptyBin write his decisions; nothing here deletes or moves any
   // file. emptyBin needs the token of the Bin he confirmed and only hides those items for good.
   review: {
-    overview: (opts?: { queue?: number; sample?: number }): Promise<ReviewOverview> => ipcRenderer.invoke('review:overview', opts ?? {}),
+    overview: (opts?: { queue?: number; sample?: number; order?: 'newest' | 'teach' }): Promise<ReviewOverview> => ipcRenderer.invoke('review:overview', opts ?? {}),
     piles: (opts?: { kept?: number; throwaway?: number; bin?: number }): Promise<ReviewPiles> => ipcRenderer.invoke('review:piles', opts ?? {}),
     // the page after a cursor (keyset; no cap on how far)
     page: (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number): Promise<ReviewPage> => ipcRenderer.invoke('review:page', pile, after, limit),

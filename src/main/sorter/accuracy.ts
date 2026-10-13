@@ -85,6 +85,9 @@ export function holdOutSplit<T>(items: T[], idOf: (t: T) => string, labelOf: (t:
   return { train, test }
 }
 
+/** The share of his choices held back from training, to measure the sorter on. */
+export const HOLD_OUT_FRACTION = 0.2
+
 /** Least held-back evidence before the sorter may run unattended. */
 export const MIN_HELD_BACK = { total: 20, perLabel: 5 }
 

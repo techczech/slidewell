@@ -12,14 +12,18 @@
  *     everywhere. "Emptying the Bin hides these for good. SlideWell never deletes your files."
  *   - Undo restores the exact earlier decision and answer mark. Its history entry is removed only
  *     after the restore has fully succeeded.
+ *
+ * Teaching the sorter (ticket 22) adds reads only: teachQueue() (the doubtful screenshots he has not
+ * decided, least sure first) and the same order for the overview's queue. A teaching answer is act().
  */
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import type { ReviewActResult, ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewUndoResult, EmptyBinResult } from '../../preload'
-import { binToken, keysetPage, pileKey, pileOf, planAction, summarise, BIN_AFTER_DAYS, type PileKey, type PileView, type ReviewAction } from './piles'
+import type { ReviewActResult, ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewUndoResult, EmptyBinResult, TeachQueue } from '../../preload'
+import { binToken, compareKeys, keysetPage, pileKey, pileOf, planAction, summarise, teachKey, BIN_AFTER_DAYS, type PileKey, type PileView, type ReviewAction } from './piles'
 import { newestFirst, readReviewRows, timeOf, type ReviewRow } from './store'
 import { putTriageDecision, promoteTriageHashes, writeEmptiedMarkers, type PromoteResult, type TriageDecisionRow } from '../triage'
 import { SorterStore } from '../sorter/store'
+import { SORTER_VERSION } from '../sorter/decide'
 
 export type ReviewDeps = {
   wellRoot: () => string
@@ -32,6 +36,8 @@ export type ReviewDeps = {
   promote?: (hashes: string[]) => Promise<PromoteResult>
   /** Something changed (re-list Triage, poke picture search). */
   changed?: () => void
+  /** `why` in plain words for these cards, by hash (sorter/why.ts whyReader). Absent: the sorter's reason. */
+  why?: (items: Array<{ hash: string; app: string | null; reason: string }>) => Map<string, string>
 }
 
 type Item = { row: ReviewRow; view: PileView }
@@ -86,7 +92,13 @@ export class ReviewService {
       .filter((i) => i.view.pile !== 'gone')
   }
 
-  private card(i: Item): ReviewCard {
+  /** Cards for a list he teaches from: each with its `why` (one read for all of them). */
+  private taught(items: Item[]): ReviewCard[] {
+    const why = this.deps.why?.(items.map((i) => ({ hash: i.row.hash, app: i.row.file?.app || null, reason: i.row.reason })))
+    return items.map((i) => this.card(i, why?.get(i.row.hash)))
+  }
+
+  private card(i: Item, why?: string): ReviewCard {
     const f = i.row.file
     const root = this.deps.wellRoot()
     let abs: string | null = null
@@ -105,8 +117,26 @@ export class ReviewService {
       decidedBy: i.row.decidedBy,
       binInDays: i.view.binInDays,
       thumbUrl: abs ? this.deps.thumbUrl(abs) : null,
-      offline: Boolean(f?.offline)
+      offline: Boolean(f?.offline),
+      pKeep: i.row.pKeep,
+      leans: i.row.pKeep >= 0.5 ? 'keep' : 'throwaway',
+      why: why ?? i.row.reason
     }
+  }
+
+  private teachKeyOf = (i: Item): PileKey => teachKey(i.row.pKeep, timeOf(i.row), i.row.hash)
+
+  /**
+   * The teach queue: screenshots he has not decided whose proposal, made under the current sorter,
+   * is doubtful; the one the sorter is least sure of first. Paged like the piles (`after` = the
+   * cursor of the page before; default 10 a page).
+   */
+  teachQueue(after: string | null = null, limit?: number): Promise<TeachQueue> {
+    return this.serial(() => {
+      const queue = this.items().filter((i) => i.view.pile === 'doubtful' && !i.row.answeredAt && i.row.sorterVersion === SORTER_VERSION)
+      const pg = keysetPage(queue, this.teachKeyOf, after, typeof limit === 'number' && Number.isFinite(limit) && limit >= 1 ? Math.min(Math.floor(limit), 500) : 10)
+      return { total: pg.total, items: this.taught(pg.items), next: pg.next }
+    })
   }
 
   private head(items: Item[]): { needALook: number; kept: number; throwaway: number; lastSortedAt: string | null } {
@@ -116,17 +146,19 @@ export class ReviewService {
     return { needALook: s.needALook, kept: s.confidentKept, throwaway: s.confidentThrowaway, lastSortedAt: last }
   }
 
-  overview(opts: { queue?: number; sample?: number } = {}): Promise<ReviewOverview> {
+  /** `order: 'teach'` lists the queue in the teaching order ("teaches most first") instead of newest first. */
+  overview(opts: { queue?: number; sample?: number; order?: unknown } = {}): Promise<ReviewOverview> {
     return this.serial(() => {
       const items = this.items()
       const h = this.head(items)
-      const queue = items.filter((i) => i.view.pile === 'doubtful').sort((a, b) => newestFirst(a.row, b.row))
+      const doubtful = items.filter((i) => i.view.pile === 'doubtful')
+      const queue = opts.order === 'teach' ? doubtful.sort((a, b) => compareKeys(this.teachKeyOf(a), this.teachKeyOf(b))) : doubtful.sort((a, b) => newestFirst(a.row, b.row))
       const confident = items.filter((i) => i.view.by === 'sorter' && i.view.pile !== 'doubtful').sort((a, b) => newestFirst(a.row, b.row))
       return {
         needALook: h.needALook,
         confident: { kept: h.kept, throwaway: h.throwaway },
         lastSortedAt: h.lastSortedAt,
-        queue: queue.slice(0, clampN(opts.queue, 50)).map((i) => this.card(i)),
+        queue: this.taught(queue.slice(0, clampN(opts.queue, 50))),
         confidentSample: confident.slice(0, clampN(opts.sample, 12)).map((i) => this.card(i)),
         canUndo: this.undoStack.length > 0
       }

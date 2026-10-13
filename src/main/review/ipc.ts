@@ -13,7 +13,12 @@ export function registerReviewIpc(svc: ReviewService, allowed: (sender: Electron
     })
   }
   const obj = (o: unknown): Record<string, unknown> => (o && typeof o === 'object' ? (o as Record<string, unknown>) : {})
-  handle('review:overview', (o?: unknown) => svc.overview(obj(o)))
+  handle('review:overview', (o?: unknown) => {
+    const opts = obj(o)
+    // the queue's order (ticket 22): newest first, or the teaching order
+    if (opts.order !== undefined && opts.order !== 'newest' && opts.order !== 'teach') throw new Error('review:overview: bad arguments')
+    return svc.overview(opts)
+  })
   handle('review:piles', (o?: unknown) => svc.piles(obj(o)))
   handle('review:act', (hash: unknown, action: unknown) => {
     if (typeof hash !== 'string' || !HASH.test(hash) || typeof action !== 'string' || !ACTIONS.has(action)) throw new Error('review:act: bad arguments')

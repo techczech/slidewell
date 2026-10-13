@@ -171,6 +171,27 @@ function byHash(rows: TriageJoinRow[]): Map<string, { row: TriageJoinRow; image:
 const TRIAGE_COLS = 'f.taken_at, f.source, f.rel_path, f.filename, f.app, f.window_title, f.ocr_text'
 
 /**
+ * His keep / throw-away decisions, each with the file rows of its picture (pictures on this Mac): one
+ * row per decision and file, decisions in table order and files in index order, and one row without
+ * file facts for a decision whose picture has no row. This is
+ *   triage_decisions d LEFT JOIN triage_fts f ON f.hash = d.hash AND f.kind = 'image' AND f.offline = '0'
+ * done in two reads: triage_fts cannot be looked up by hash (FTS5; review/store.ts), so the join in
+ * SQL scans the whole index once per decision, which took seconds on the main process for a few
+ * thousand decisions. Since ticket 22 this is read after every answer.
+ */
+function decidedWithFiles(tdb: DatabaseSync): TriageJoinRow[] {
+  const decisions = tdb.prepare("SELECT d.hash AS hash, d.state AS state, d.well_id AS well_id FROM triage_decisions d WHERE d.state IN ('included', 'excluded')").all() as Array<{ hash: string; state: string; well_id: string | null }>
+  const files = new Map<string, TriageJoinRow[]>()
+  for (const f of tdb.prepare(`SELECT f.hash AS hash, ${TRIAGE_COLS} FROM triage_fts f WHERE f.kind = 'image' AND f.offline = '0'`).all() as TriageJoinRow[]) {
+    const list = files.get(f.hash)
+    if (list) list.push(f)
+    else files.set(f.hash, [f])
+  }
+  const none = { taken_at: null, source: null, rel_path: null, filename: null, app: null, window_title: null, ocr_text: null }
+  return decisions.flatMap((d): TriageJoinRow[] => (files.get(d.hash) ?? [none]).map((f) => ({ ...f, hash: d.hash, state: d.state, well_id: d.well_id })))
+}
+
+/**
  * His labelled history. keep = every screenshot in the well (source 'screenshot') plus triage
  * `included`; throwaway = triage `excluded`. A kept screenshot is embedded from its triage original
  * when that file is still here, else from the well's copy. Binned screenshots whose file is gone
@@ -180,16 +201,7 @@ export function loadLabelled(wellRoot: string): Shot[] {
   const tdb = openRead(join(wellRoot, 'triage.db'))
   const wdb = openRead(join(wellRoot, 'well.db'))
   try {
-    const decided: TriageJoinRow[] =
-      tdb && hasTable(tdb, 'triage_decisions') && hasTable(tdb, 'triage_fts')
-        ? (tdb
-            .prepare(
-              `SELECT d.hash AS hash, d.state AS state, d.well_id AS well_id, ${TRIAGE_COLS}
-               FROM triage_decisions d LEFT JOIN triage_fts f ON f.hash = d.hash AND f.kind = 'image' AND f.offline = '0'
-               WHERE d.state IN ('included', 'excluded')`
-            )
-            .all() as TriageJoinRow[])
-        : []
+    const decided: TriageJoinRow[] = tdb && hasTable(tdb, 'triage_decisions') && hasTable(tdb, 'triage_fts') ? decidedWithFiles(tdb) : []
     const wellShots =
       wdb && hasTable(wdb, 'well_fts')
         ? (wdb.prepare("SELECT id, rel_path, ocr_text FROM well_fts WHERE source = 'screenshot' AND root = 'well'").all() as Array<{ id: string; rel_path: string; ocr_text: string | null }>)

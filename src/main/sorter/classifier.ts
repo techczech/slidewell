@@ -143,7 +143,7 @@ export function train(examples: Example[], opts: TrainOptions = {}): Classifier 
   const dim = examples[0].vector.length
   if (examples.some((e) => e.vector.length !== dim)) throw new Error('training vectors differ in length')
   const nKeep = examples.filter((e) => e.keep).length
-  if (nKeep === 0 || nKeep === examples.length) throw new Error('training needs both kept and binned screenshots')
+  if (nKeep === 0 || nKeep === examples.length) throw new Error('training needs both kept and thrown-away screenshots')
   const epochs = opts.epochs ?? 300
   const k = Math.max(2, Math.min(opts.folds ?? 5, nKeep, examples.length - nKeep))
   const parts = folds(examples, k)

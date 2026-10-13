@@ -82,7 +82,7 @@ export function reviewMock(): SwApi['review'] {
   const newest = (a: MockItem, b: MockItem): number => b.takenAt.localeCompare(a.takenAt)
   const card = (i: MockItem): ReviewCard => {
     const v = view(i)
-    return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, decidedBy: i.decidedBy, binInDays: v.binInDays, thumbUrl: null, offline: false }
+    return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, decidedBy: i.decidedBy, binInDays: v.binInDays, thumbUrl: null, offline: false, pKeep: 0.5, leans: 'keep', why: i.reason }
   }
   const head = (): { needALook: number; kept: number; throwaway: number } => {
     const s = summarise(live().map((i) => ({ view: view(i), proposal: i.proposal, decided: Boolean(i.decision) })))

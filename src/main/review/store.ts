@@ -28,6 +28,10 @@ export type ReviewRow = PileFacts & {
   hash: string
   proposal: ProposalLabel
   confidence: number
+  /** The sorter's combined p(keep), 0..1 (0.5 when the stored value cannot be read). */
+  pKeep: number
+  /** The sorter version the proposal was made under (sorter/decide.ts SORTER_VERSION). */
+  sorterVersion: string
   reason: string
   answeredAt: string | null
   answer: string | null
@@ -50,6 +54,8 @@ type ProposalJoin = {
   hash: string
   proposal: ProposalLabel
   confidence: number
+  p_keep: number | null
+  sorter_version: string | null
   reason: string
   proposed_at: string | null
   throwaway_since: string | null
@@ -64,6 +70,14 @@ type ProposalJoin = {
 
 type FileRow = { hash: string; source: string | null; rel_path: string; filename: string | null; app: string | null; window_title: string | null; taken_at: string | null; kind: string; offline: string; poster_rel: string | null; mtime: string | null }
 
+/**
+ * A stored reason as shown. Proposals written before ticket 22 say "binned"; the words on screen are
+ * "threw away" (the row itself is rewritten at the next sort or re-score).
+ */
+export function shownReason(reason: string): string {
+  return reason.replace(/\byou binned before\b/g, 'you threw away before')
+}
+
 export function readReviewRows(wellRoot: string): ReviewRow[] {
   const file = join(wellRoot, 'triage.db')
   if (!existsSync(file)) return []
@@ -77,7 +91,7 @@ export function readReviewRows(wellRoot: string): ReviewRow[] {
     const runCol = hasColumn(db, 'sorter_proposals', 'run_id')
     const rows = db
       .prepare(
-        `SELECT p.hash AS hash, p.proposal AS proposal, p.confidence AS confidence, p.reason AS reason, p.proposed_at AS proposed_at,
+        `SELECT p.hash AS hash, p.proposal AS proposal, p.confidence AS confidence, p.p_keep AS p_keep, p.sorter_version AS sorter_version, p.reason AS reason, p.proposed_at AS proposed_at,
            ${reviewCols ? 'p.throwaway_since, p.answered_at, p.answer' : "CASE WHEN p.proposal = 'throwaway' THEN p.proposed_at END AS throwaway_since, NULL AS answered_at, NULL AS answer"},
            ${byCol ? 'p.decided_by AS decided_by' : 'NULL AS decided_by'},
            ${runCol ? 'p.run_id AS run_id' : 'NULL AS run_id'},
@@ -99,7 +113,9 @@ export function readReviewRows(wellRoot: string): ReviewRow[] {
         hash: r.hash,
         proposal: r.proposal,
         confidence: Number(r.confidence),
-        reason: r.reason,
+        pKeep: probability(r.p_keep),
+        sorterVersion: r.sorter_version ?? '',
+        reason: shownReason(r.reason),
         proposedAt: r.proposed_at,
         throwawaySince: r.throwaway_since,
         answeredAt: r.answered_at,
@@ -126,6 +142,11 @@ export function readReviewRows(wellRoot: string): ReviewRow[] {
   } finally {
     db.close()
   }
+}
+
+function probability(x: unknown): number {
+  const n = Number(x)
+  return x !== null && Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.5
 }
 
 /** When the screenshot was taken: the time in the file name, else the file's modified time (0 = unknown). */

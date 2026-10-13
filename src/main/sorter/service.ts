@@ -24,6 +24,11 @@
  * there and sees the piles) but sorting unattended is refused, as with too little evidence, until he
  * trains again: status() says so in `rulesChangedSinceTest` and `canRunUnattended` is false.
  *
+ * Teaching (ticket 22): trainAndTest({ rescore: true }) also scores his undecided, already proposed
+ * screenshots again with the new model and says what moved (rescore.ts; no sort run, no decision, no
+ * cloud call), inside the same busy window so no sort can start in between. retrain.ts decides when a
+ * training runs by itself and supplies the teaching part of the status (deps.teach).
+ *
  * Sorting writes proposals only: it never moves, deletes or decides anything (binning is later
  * work), and it never writes his triage decisions. Nothing here makes a network call: the cloud step
  * (cloud/service.ts) runs after it. Each proposal records which step made the call (cloud/cascade.ts);
@@ -32,21 +37,24 @@
  */
 import { ipcMain } from 'electron'
 import type { IndexItem } from '../picture-search/vector-store'
+import type { SorterTeachStatus } from '../../preload'
 import { applyRules } from './rules'
 import { predictKeep, type Classifier, type Example } from './classifier'
 import { runJob, type Job, type JobResult } from './jobs'
 import { auc, brier, reliabilityTable, type CalibrationCheck, type ReliabilityRow } from './calibration'
 import { decide, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } from './decide'
-import { accuracyReport, enoughToMeasure, holdOutSplit, MIN_HELD_BACK, type AccuracyReport, type LabelledPrediction } from './accuracy'
+import { accuracyReport, enoughToMeasure, holdOutSplit, HOLD_OUT_FRACTION, MIN_HELD_BACK, type AccuracyReport, type LabelledPrediction } from './accuracy'
 import { loadLabelled, loadUndecided, SorterStore, type ProposalRow, type Shot } from './store'
-import { applyCloud, decidedByLocal, settledAnswer } from './cloud/cascade'
-import { answerScopes, voiceOfAnswer } from './cloud/provider'
+import { answerScopes } from './cloud/provider'
+import { scoreShot } from './score'
+import { rescoreUndecided, type Rescore } from './rescore'
+import { choicesAtTraining, teachDefaults, type Choices } from './choices'
 import { appRuleLookup, appRulesFingerprint, NO_APP_RULES, storedAppRules, type AppRule } from './app-rules'
 import { newRunId, type RunTrigger } from './runs'
 import type { AppRuleLookup } from './rules'
 import { EVERYTHING, inWindow, isSortPeriod, PERIOD_CHOICES, PERIOD_REFUSED, PERIOD_UNREADABLE, periodPhrase, periodWindow, storedPeriod, type PeriodWindow, type SortPeriod } from './period'
 
-export const HOLD_OUT_FRACTION = 0.2
+export { HOLD_OUT_FRACTION }
 
 export type SorterReport = {
   trainedAt: string
@@ -62,6 +70,8 @@ export type SorterReport = {
   grouping: { groups: number; largest: number; cosine: number; minutes: number }
   /** The held-back sample is big enough (MIN_HELD_BACK) for the sorter to run unattended. */
   enoughToMeasure: boolean
+  /** His choices with a readable picture when this was trained (choices.ts answersSince counts from it). Absent on an older report. */
+  choicesAtTraining?: number
   /** His per-app rules as they were when this was measured (app-rules.ts appRulesFingerprint). Absent on a report from before it was recorded: no rules. */
   appRulesFingerprint?: string
   /** The classifier tested on the held-back sample was trained on this many. */
@@ -111,7 +121,12 @@ export type SorterStatus = {
   undecided: { period: SortPeriod | null; inPeriod: number | null; all: number } | null
   /** His choices the sorter can learn from: kept and binned screenshots with a readable picture on this Mac. Null until first counted. */
   learnable: { kept: number; binned: number } | null
-}
+} & SorterTeachStatus
+
+/** What a training answers. `before`: the current report it replaces (null = none); `moved`: the re-score, when asked for and it ran. */
+export type TrainResult = { ok: boolean; cancelled?: boolean; report?: SorterReport; error?: string; /** Refused because the sorter was already running. */ busy?: true; before?: SorterReport | null; moved?: Rescore | null }
+
+export const SORTER_BUSY = 'the sorter is already running'
 
 /** One sort on this Mac as numbers: when it ended, the period it was limited to, how many it looked at, and of those how many got a keep or throwaway proposal and how many stayed doubtful. */
 export type LocalRunSummary = { at: string; period: SortPeriod; lookedAt: number; confident: number; needLook: number }
@@ -147,6 +162,11 @@ export type SorterDeps = {
   saveLastRun?: (r: LocalRunSummary) => void
   /** His per-app rules as stored in config (app-rules.ts storedAppRules reads them). Absent: none. */
   appRules?: () => unknown
+  /**
+   * The teaching part of the status (retrain.ts Retrainer.status), from his choices as last counted and
+   * the choices the model in use was trained with (null: no current model). Absent: teachDefaults.
+   */
+  teach?: (c: { learnable: Choices | null; trainedWith: number | null }) => SorterTeachStatus
   now?: () => Date
 }
 
@@ -231,7 +251,8 @@ export class SorterService {
     const current = rec ? isCurrent(rec) : false
     const report = current ? rec!.report : null
     const rulesChangedSinceTest = current && !testedWith(rec!.report, this.appRules())
-    return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: current && enoughToMeasure(report?.heldBack) && !rulesChangedSinceTest, retrainNeeded: Boolean(rec) && !current, rulesChangedSinceTest, minHeldBack: MIN_HELD_BACK, pending, period: this.period(), periods: PERIOD_CHOICES, lastRun: this.lastRun(), ...this.counts }
+    const teach = { learnable: this.counts.learnable, trainedWith: current ? choicesAtTraining(rec!.report) : null }
+    return { ...(this.deps.teach ? this.deps.teach(teach) : teachDefaults(teach)), ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: current && enoughToMeasure(report?.heldBack) && !rulesChangedSinceTest, retrainNeeded: Boolean(rec) && !current, rulesChangedSinceTest, minHeldBack: MIN_HELD_BACK, pending, period: this.period(), periods: PERIOD_CHOICES, lastRun: this.lastRun(), ...this.counts }
   }
 
   /**
@@ -248,6 +269,18 @@ export class SorterService {
   rulesChangedSinceTest(): boolean {
     const rec = this.withStore((s) => s.latestModel<SorterReport>())
     return Boolean(rec) && isCurrent(rec!) && !testedWith(rec!.report, this.appRules())
+  }
+
+  /** His choices counted afresh, and the choices the model in use was trained with (null: no current model). For retrain.ts. */
+  choices(): { learnable: Choices | null; trainedWith: number | null } {
+    this.count()
+    const rec = this.withStore((s) => s.latestModel<SorterReport>())
+    return { learnable: this.counts.learnable, trainedWith: rec && isCurrent(rec) ? choicesAtTraining(rec.report) : null }
+  }
+
+  /** Push the status as it is, with the counts last taken (a teaching setting or state changed). */
+  push(): void {
+    this.deps.broadcast(this.status())
   }
 
   /** The period chosen in Settings; null when what is stored is not a period. */
@@ -293,13 +326,20 @@ export class SorterService {
     return this.deps.pictures.ensureVectors(items, { signal, onEach: (done, total) => this.set({ done, total }) })
   }
 
-  /** Train on his history and report accuracy on a held-back 20%. Returns the report. */
-  async trainAndTest(): Promise<{ ok: boolean; cancelled?: boolean; report?: SorterReport; error?: string }> {
-    if (this.busy()) return { ok: false, error: 'the sorter is already running' }
+  /**
+   * Train on his history and report accuracy on a held-back 20%. Returns the report. With
+   * `rescore`, his undecided screenshots that already have a proposal are then scored again with the
+   * new model (rescore.ts) before the sorter is idle again; if that fails or is stopped the training
+   * still stands and `moved` is null.
+   */
+  async trainAndTest(opts: { rescore?: boolean } = {}): Promise<TrainResult> {
+    if (this.busy()) return { ok: false, error: SORTER_BUSY, busy: true }
     if (!this.deps.pictures.modelReady()) return { ok: false, error: 'download the picture search model first (Settings › Picture search)' }
     const ctl = new AbortController()
     this.abort = ctl
     try {
+      const prior = this.withStore((s) => s.latestModel<SorterReport>())
+      const before = prior && isCurrent(prior) ? prior.report : null
       const shots = loadLabelled(this.deps.wellRoot())
       const vectors = await this.vectorsFor(shots, 'reading pictures of your past choices', ctl.signal)
       if (ctl.signal.aborted) throw new Error('cancelled')
@@ -359,6 +399,7 @@ export class SorterService {
         keepFromWellCopy: usable.filter((s) => s.fromWellCopy).length,
         grouping: { groups: grouping.groups, largest: grouping.largest, cosine: 0.95, minutes: 5 },
         enoughToMeasure: false,
+        choicesAtTraining: shots.filter((s) => s.image).length,
         appRulesFingerprint: appRulesFingerprint(rules),
         trainedOn: held.trainedOn,
         l2: held.l2,
@@ -369,9 +410,32 @@ export class SorterService {
       }
       report.enoughToMeasure = enoughToMeasure(report.heldBack)
       if (ctl.signal.aborted) throw new Error('cancelled') // last check before anything is saved
-      this.withStore((s) => s.saveModel({ id: `model-${trainedAt}`, trainedAt, sorterVersion: SORTER_VERSION, model: final, report }))
+      const modelId = `model-${trainedAt}`
+      this.withStore((s) => s.saveModel({ id: modelId, trainedAt, sorterVersion: SORTER_VERSION, model: final, report }))
+      let moved: Rescore | null = null
+      if (opts.rescore) {
+        this.set({ message: 'checking which undecided screenshots moved', done: 0, total: 0 }, true)
+        try {
+          moved = await rescoreUndecided({
+            wellRoot: this.deps.wellRoot(),
+            model: final,
+            modelId,
+            sorterVersion: SORTER_VERSION,
+            thresholds: t,
+            rules: mine,
+            asked: this.withStore((st) => st.cloudAnswersIn(answerScopes())),
+            vectors: (items) => this.deps.pictures.ensureVectors(items, { signal: ctl.signal }),
+            keptVectors: usable.filter((s) => s.truth === 'keep').map((s) => vectors.get(s.image!.id)!),
+            job,
+            aborted: () => ctl.signal.aborted,
+            onProgress: (done, total) => this.set({ done, total })
+          })
+        } catch {
+          moved = null // the model is saved; what moved is simply not known
+        }
+      }
       this.set({ phase: 'idle', done: 0, total: 0, message: '', error: null }, true)
-      return { ok: true, report }
+      return { ok: true, report, before, moved }
     } catch (e) {
       const msg = (e as Error)?.message ?? String(e)
       this.set({ phase: ctl.signal.aborted ? 'idle' : 'error', message: '', error: ctl.signal.aborted ? null : msg }, true)
@@ -392,7 +456,7 @@ export class SorterService {
     const window = opts.window ?? EVERYTHING
     if (!isSortPeriod(window.period)) return { ok: false, error: PERIOD_REFUSED }
     const within = { period: window.period, periodPhrase: periodPhrase(window.period) }
-    if (this.busy()) return { ok: false, error: 'the sorter is already running' }
+    if (this.busy()) return { ok: false, error: SORTER_BUSY }
     const rec = this.withStore((s) => s.latestModel<SorterReport>())
     if (!rec) return { ok: false, error: 'train the sorter on your past choices first; it needs an accuracy report before it sorts' }
     if (!isCurrent(rec)) return { ok: false, error: 'retrain needed: the sorter changed since it was last trained' }
@@ -423,15 +487,14 @@ export class SorterService {
     }
     try {
       this.withStore((st) => st.startRun({ id: runId, startedAt: started.toISOString(), period: window.period, trigger: opts.trigger === 'nightly' ? 'nightly' : 'manual' }))
-      const mine: AppRuleLookup = appRuleLookup(rules)
+      const ctx = { model: rec.model, thresholds: this.thresholds(), rules: appRuleLookup(rules), asked: new Map() as ReturnType<SorterStore['cloudAnswersIn']> }
       let shots = loadUndecided(this.deps.wellRoot()).filter((s) => inWindow(s.takenAt, window))
       if (opts.limit !== undefined) shots = shots.slice(0, Math.max(0, opts.limit))
-      const t = this.thresholds()
       // pictures of everything he kept: a look-alike of one of them leans throwaway
       const keptShots = loadLabelled(this.deps.wellRoot()).filter((s) => s.truth === 'keep' && s.image)
       const keptVectors = [...(await this.vectorsFor(keptShots, 'reading pictures of what you kept', ctl.signal)).values()]
       // answers already given by either cloud provider under its current model and prompt
-      const asked = this.withStore((st) => st.cloudAnswersIn(answerScopes()))
+      ctx.asked = this.withStore((st) => st.cloudAnswersIn(answerScopes()))
       this.set({ phase: 'sorting', done: 0, total: shots.length, message: 'sorting undecided screenshots', error: null }, true)
       const CHUNK = 25
       for (let i = 0; i < shots.length && !ctl.signal.aborted; i += CHUNK) {
@@ -448,14 +511,8 @@ export class SorterService {
           if (!s.hash) continue
           const v = s.image ? vectors.get(s.image.id) : undefined
           if (s.image && !v && ctl.signal.aborted) continue // not reached before cancel: no proposal
-          const rule = applyRules(s.facts, mine)
-          const verdict = decide(rule, v ? predictKeep(rec.model, v) : null, t, v ? (tierOf.get(s) ?? null) : null)
-          const local = { proposal: verdict.proposal, confidence: verdict.confidence, pKeep: verdict.pKeep, reason: verdict.reason, decidedBy: decidedByLocal(verdict, rule, t) }
-          // more than one provider may have answered it: the answer that is a decision stands, else the one asked last
-          const answer = verdict.proposal === 'doubtful' ? settledAnswer(asked.get(s.hash) ?? [], t) : null
-          const who = answer ? voiceOfAnswer(answer.model, answer.promptVersion) : null
-          const row = answer && who ? applyCloud(local, answer, who, t) : local
-          rows.push({ hash: s.hash, ...row, rule: rule?.rule ?? null })
+          const row = scoreShot({ facts: s.facts, hash: s.hash }, v, v ? (tierOf.get(s) ?? null) : null, ctx)
+          rows.push(row)
           counts[row.proposal]++
         }
         this.withStore((st) => st.writeProposals(rows, SORTER_VERSION, rec.id, runId))
@@ -514,7 +571,13 @@ export function changePeriod(period: unknown, current: () => unknown, save: (p: 
  * and no date: the period is the stored one and the cut-off is main's. `setPeriod` is changePeriod
  * bound to the config (index.ts).
  */
-export function registerSorterIpc(svc: SorterService, allowed: (sender: Electron.WebContents) => boolean, setPeriod: (period: unknown) => { ok: boolean; period: SortPeriod | null; error?: string } = () => ({ ok: false, period: svc.period(), error: PERIOD_REFUSED })): void {
+export function registerSorterIpc(
+  svc: SorterService,
+  allowed: (sender: Electron.WebContents) => boolean,
+  setPeriod: (period: unknown) => { ok: boolean; period: SortPeriod | null; error?: string } = () => ({ ok: false, period: svc.period(), error: PERIOD_REFUSED }),
+  /** What "Train" runs: the app passes the retrain routine (retrain.ts), so a manual training also says what moved. */
+  train: () => Promise<TrainResult> = () => svc.trainAndTest()
+): void {
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
     ipcMain.handle(channel, (e, ...args) => {
       if (!allowed(e.sender)) throw new Error(`${channel}: not allowed from this window`)
@@ -522,7 +585,7 @@ export function registerSorterIpc(svc: SorterService, allowed: (sender: Electron
     })
   }
   handle('sorter:status', () => svc.status({ count: true }))
-  handle('sorter:train', () => svc.trainAndTest())
+  handle('sorter:train', () => train())
   handle('sorter:sort', (opts?: { limit?: number }) => svc.sortManual({ limit: typeof opts?.limit === 'number' ? opts.limit : undefined }))
   handle('sorter:set-period', (period: unknown) => setPeriod(period))
   handle('sorter:cancel', () => svc.cancel())
