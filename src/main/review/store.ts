@@ -34,6 +34,8 @@ export type ReviewRow = PileFacts & {
   /** Which sorter step made the call (tickets 07, 16): rules | history | luna | haiku; null for a local doubtful or an older row. */
   decidedBy: 'rules' | 'history' | 'luna' | 'haiku' | null
   decision: { state: string; decidedAt: string | null; wellId: string | null } | null
+  /** The sort run that last proposed it (ticket 20; sorter/runs.ts); null for a proposal from before runs. */
+  runId: string | null
   file: ReviewFile | null
 }
 
@@ -54,6 +56,7 @@ type ProposalJoin = {
   answered_at: string | null
   answer: string | null
   decided_by: string | null
+  run_id: string | null
   state: string | null
   decided_at: string | null
   well_id: string | null
@@ -71,11 +74,13 @@ export function readReviewRows(wellRoot: string): ReviewRow[] {
     const decisions = hasTable(db, 'triage_decisions')
     const reviewCols = hasColumn(db, 'sorter_proposals', 'throwaway_since')
     const byCol = hasColumn(db, 'sorter_proposals', 'decided_by')
+    const runCol = hasColumn(db, 'sorter_proposals', 'run_id')
     const rows = db
       .prepare(
         `SELECT p.hash AS hash, p.proposal AS proposal, p.confidence AS confidence, p.reason AS reason, p.proposed_at AS proposed_at,
            ${reviewCols ? 'p.throwaway_since, p.answered_at, p.answer' : "CASE WHEN p.proposal = 'throwaway' THEN p.proposed_at END AS throwaway_since, NULL AS answered_at, NULL AS answer"},
            ${byCol ? 'p.decided_by AS decided_by' : 'NULL AS decided_by'},
+           ${runCol ? 'p.run_id AS run_id' : 'NULL AS run_id'},
            ${decisions ? 'd.state AS state, d.decided_at AS decided_at, d.well_id AS well_id' : 'NULL AS state, NULL AS decided_at, NULL AS well_id'}
          FROM sorter_proposals p ${decisions ? 'LEFT JOIN triage_decisions d ON d.hash = p.hash' : ''}`
       )
@@ -101,6 +106,7 @@ export function readReviewRows(wellRoot: string): ReviewRow[] {
         answer: r.answer,
         decidedBy: r.decided_by === 'rules' || r.decided_by === 'history' || r.decided_by === 'luna' || r.decided_by === 'haiku' ? r.decided_by : null,
         decision: r.state ? { state: r.state, decidedAt: r.decided_at, wellId: r.well_id } : null,
+        runId: r.run_id ?? null,
         file: f
           ? {
               source: f.source ?? '',
@@ -138,28 +144,33 @@ export function newestFirst(a: ReviewRow, b: ReviewRow): number {
  * pure clock as the piles (piles.ts). Reads proposals and decisions only.
  */
 export function hiddenFromLists(wellRoot: string, now: number): Set<string> {
-  const out = new Set<string>()
   const file = join(wellRoot, 'triage.db')
-  if (!existsSync(file)) return out
+  if (!existsSync(file)) return new Set<string>()
   const db = new DatabaseSync(file, { readOnly: true })
   db.exec('PRAGMA busy_timeout=5000;')
   try {
-    if (!hasTable(db, 'sorter_proposals')) return out
-    const decisions = hasTable(db, 'triage_decisions')
-    const since = hasColumn(db, 'sorter_proposals', 'throwaway_since') ? 'p.throwaway_since' : "CASE WHEN p.proposal = 'throwaway' THEN p.proposed_at END"
-    const rows = db
-      .prepare(
-        `SELECT p.hash AS hash, p.proposal AS proposal, p.proposed_at AS proposed_at, ${since} AS throwaway_since,
-           ${decisions ? 'd.state AS state, d.decided_at AS decided_at' : 'NULL AS state, NULL AS decided_at'}
-         FROM sorter_proposals p ${decisions ? 'LEFT JOIN triage_decisions d ON d.hash = p.hash' : ''}`
-      )
-      .all() as Array<{ hash: string; proposal: ProposalLabel; proposed_at: string | null; throwaway_since: string | null; state: string | null; decided_at: string | null }>
-    for (const r of rows) {
-      const pile = pileOf({ proposal: r.proposal, proposedAt: r.proposed_at, throwawaySince: r.throwaway_since, decision: r.state ? { state: r.state, decidedAt: r.decided_at } : null }, now).pile
-      if (pile === 'bin' || pile === 'gone') out.add(r.hash)
-    }
-    return out
+    return hiddenIn(db, now)
   } finally {
     db.close()
   }
+}
+
+/** hiddenFromLists on a connection the caller holds (so a write can read it inside its own transaction). */
+export function hiddenIn(db: DatabaseSync, now: number): Set<string> {
+  const out = new Set<string>()
+  if (!hasTable(db, 'sorter_proposals')) return out
+  const decisions = hasTable(db, 'triage_decisions')
+  const since = hasColumn(db, 'sorter_proposals', 'throwaway_since') ? 'p.throwaway_since' : "CASE WHEN p.proposal = 'throwaway' THEN p.proposed_at END"
+  const rows = db
+    .prepare(
+      `SELECT p.hash AS hash, p.proposal AS proposal, p.proposed_at AS proposed_at, ${since} AS throwaway_since,
+         ${decisions ? 'd.state AS state, d.decided_at AS decided_at' : 'NULL AS state, NULL AS decided_at'}
+       FROM sorter_proposals p ${decisions ? 'LEFT JOIN triage_decisions d ON d.hash = p.hash' : ''}`
+    )
+    .all() as Array<{ hash: string; proposal: ProposalLabel; proposed_at: string | null; throwaway_since: string | null; state: string | null; decided_at: string | null }>
+  for (const r of rows) {
+    const pile = pileOf({ proposal: r.proposal, proposedAt: r.proposed_at, throwawaySince: r.throwaway_since, decision: r.state ? { state: r.state, decidedAt: r.decided_at } : null }, now).pile
+    if (pile === 'bin' || pile === 'gone') out.add(r.hash)
+  }
+  return out
 }

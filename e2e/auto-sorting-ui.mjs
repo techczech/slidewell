@@ -45,17 +45,85 @@ function installFake() {
     rulesOnly: { sample: 60, truth: { keep: 44, throwaway: 16 }, keep: { proposed: 30, correct: 24, precision: 0.8 }, throwaway: { proposed: 5, correct: 4, precision: 0.8 }, doubtful: { count: 25, share: 0.42 }, keptProposedThrowaway: 1, binnedProposedKeep: 1 }
   }
   const sorter = {
-    phase: 'idle', done: 0, total: 0, message: '', error: null, modelReady: true, report, canRunUnattended: true, retrainNeeded: false, minHeldBack: { total: 20, perLabel: 5 },
+    phase: 'idle', done: 0, total: 0, message: '', error: null, modelReady: true, report, canRunUnattended: true, retrainNeeded: false, rulesChangedSinceTest: false, minHeldBack: { total: 20, perLabel: 5 },
     pending: { keep: 331, throwaway: 240, doubtful: 41, lastProposedAt: today(2, 0) }, period: '30d', periods: PERIODS,
-    lastRun: { at: today(2, 0), period: 'all', lookedAt: 612, confident: 554, needLook: 58 }, undecided: { period: '30d', inPeriod: 630, all: 1482 }, learnable: { kept: 228, binned: 84 }
+    lastRun: { at: today(14, 19), period: 'all', lookedAt: 612, confident: 554, needLook: 58 }, undecided: { period: '30d', inPeriod: 630, all: 1482 }, learnable: { kept: 228, binned: 84 }
   }
   const cloud = {
     phase: 'idle', done: 0, total: 0, hasKey: true, encryptionAvailable: true,
     settings: { enabled: true, batchTime: '02:00', provider: 'anthropic', nightly: true, secondOpinions: true, agreedAt: { openai: null, anthropic: '2026-10-03T21:14:00' } },
     nightlyLimit: 300, leftTonight: 300, nextRunAt: new Date(Date.now() + 86400000).toISOString(), model: 'claude-haiku-5-5', name: 'Haiku', company: 'Anthropic', longEdge: 1456, providers, period: '30d', periods: PERIODS,
-    lastRun: { at: today(2, 1), trigger: 'nightly', provider: 'anthropic', local: null, asked: 58, answered: 58, keep: 10, throwaway: 7, stayedDoubtful: 41, sent: 58, settled: 17, stillUnsure: 41, skipped: null, error: null, message: 'Asked Haiku about 58 screenshots.' }
+    lastRun: { at: today(14, 21), trigger: 'manual', provider: 'anthropic', local: null, asked: 58, answered: 58, keep: 10, throwaway: 7, stayedDoubtful: 41, sent: 58, settled: 17, stillUnsure: 41, skipped: null, error: null, message: 'Asked Haiku about 58 screenshots.' }
   }
-  const calls = { sort: 0, train: 0, prepare: 0, send: [], cancel: 0, cloudCancel: 0, decide: 0, setSettings: [], setNightly: [], setSecond: [] }
+  const calls = { sort: 0, train: 0, prepare: 0, send: [], cancel: 0, cloudCancel: 0, decide: 0, setSettings: [], setNightly: [], setSecond: [], list: [], decideAll: [], setAppRule: [], runPiles: [], runPage: [] }
+  // --- ticket 20 (main) for ticket 21 (renderer): apps, per-app rules, sort runs. Invented numbers and titles. ---
+  // one row per app: his kept / thrown away / still undecided, the built-in rule for the app name, his rule ('' = app not known)
+  const apps = [
+    { app: 'Brightloom', kept: 40, thrownAway: 11, undecided: 412, builtIn: null, rule: null },
+    { app: 'Claude', kept: 2, thrownAway: 19, undecided: 60, builtIn: 'keep', rule: null },
+    { app: 'Quillpad', kept: 17, thrownAway: 9, undecided: 188, builtIn: null, rule: null },
+    { app: 'TalkWeaver', kept: 4, thrownAway: 60, undecided: 214, builtIn: 'throwaway', rule: null },
+    { app: 'Mossgrid', kept: 3, thrownAway: 47, undecided: 97, builtIn: null, rule: null },
+    { app: 'Finder', kept: 1, thrownAway: 118, undecided: 74, builtIn: 'throwaway', rule: null },
+    { app: '', kept: 28, thrownAway: 60, undecided: 305, builtIn: null, rule: null }
+  ]
+  const WORDS = { keep: { says: 'keep', did: 'kept', control: 'Usually keep' }, throwaway: { says: 'throw away', did: 'threw away', control: 'Usually throw away' } }
+  // the same rule as main (sorter/app-rules.ts suggestionFor): 20 decided, 85% one way, rule in force does not say so already
+  const suggest = (a) => {
+    const decided = a.kept + a.thrownAway
+    const way = a.kept >= a.thrownAway ? 'keep' : 'throwaway'
+    const most = Math.max(a.kept, a.thrownAway)
+    const inForce = a.rule ?? a.builtIn
+    if (decided < 20 || most * 100 < 85 * decided || inForce === way) return null
+    const share = most / decided
+    const did = `you ${WORDS[way].did} ${Math.round(share * 100)}%`
+    if (!inForce) return { kind: 'make', rule: way, share, against: null, text: `Y${did.slice(1)} — make it a rule?`, action: 'Make rule' }
+    return { kind: 'change', rule: way, share, against: a.rule ? 'yours' : 'built-in', text: `${a.rule ? 'Your rule' : 'Built-in rule'} says ${WORDS[inForce].says}, but ${did} — change to ${WORDS[way].control}?`, action: 'Change rule' }
+  }
+  const goesBy = () => ({
+    apps: apps.map((a) => ({ app: a.app, kept: a.kept, keptShare: a.kept + a.thrownAway ? a.kept / (a.kept + a.thrownAway) : null, thrownAway: a.thrownAway, undecided: a.undecided, builtIn: a.builtIn, rule: a.rule, suggestion: suggest(a) })),
+    builtIn: { keep: ['Claude or ChatGPT answer', 'Slides on screen', 'Looks like a chart'], throwaway: ['TalkWeaver, WriteFlex or SlideWell screen', 'Terminal window', 'System Settings window', 'Finder window'] }
+  })
+  const appOf = (name) => apps.find((a) => a.app.toLowerCase() === String(name).trim().toLowerCase())
+  const appCounts = (state) =>
+    apps
+      .map((a) => ({ app: a.app, count: state === 'undecided' ? a.undecided : state === 'excluded' ? a.thrownAway : state === 'selected' ? a.kept : state === 'all' ? a.undecided + a.kept + a.thrownAway : 0, kept: a.kept, thrownAway: a.thrownAway, keptShare: a.kept / (a.kept + a.thrownAway) }))
+      .filter((a) => a.count > 0)
+  // sort runs, newest first; each run's cards are made once, his later decisions kept beside them
+  const runDefs = [
+    { id: 'run-a', startedAt: today(14, 19), finishedAt: today(14, 20), period: '30d', trigger: 'manual', n: [41, 73, 12] },
+    { id: 'run-b', startedAt: today(2, 0), finishedAt: today(2, 1), period: 'all', trigger: 'nightly', n: [20, 22, 6] },
+    { id: 'run-c', startedAt: new Date(Date.now() - 2 * 86400000).toISOString(), finishedAt: new Date(Date.now() - 2 * 86400000 + 60000).toISOString(), period: '7d', trigger: 'manual', n: [50, 30, 8] }
+  ]
+  const WHO = ['rules', 'history', 'luna', 'haiku']
+  const CARD_APPS = ['Brightloom', 'Quillpad', 'TalkWeaver', 'Mossgrid', 'Finder', null]
+  const REASONS = { keep: ['Looks like a chart — usually kept', 'Looks like screenshots you kept before', 'A diagram with labels'], throwaway: ['TalkWeaver, WriteFlex or SlideWell screen — usually throwaway', 'Finder window — usually throwaway; looks like screenshots you binned before', 'Looks like screenshots you binned before'], doubtful: ['Not sure: it looks a bit like screenshots you kept, but not clearly'] }
+  const decisions = {} // hash → 'selected' | 'excluded'
+  const cardsOf = {}
+  for (const r of runDefs) {
+    cardsOf[r.id] = []
+    ;['keep', 'throwaway', 'doubtful'].forEach((proposal, pi) => {
+      for (let i = 0; i < r.n[pi]; i++) {
+        const low = i % 5 === 2
+        const confidence = proposal === 'doubtful' ? (low ? 0.55 : 0.66) : proposal === 'keep' ? (low ? 0.74 : 0.93) : low ? 0.92 : 0.97
+        cardsOf[r.id].push({ hash: `${r.id}-${proposal[0]}${i}`, filename: `Invented capture ${r.id} ${proposal} ${i}.png`, app: CARD_APPS[i % CARD_APPS.length], windowTitle: CARD_APPS[i % CARD_APPS.length] ? `Invented window ${i}` : null, takenAt: null, reason: REASONS[proposal][i % REASONS[proposal].length], confidence, lowConfidence: low, proposal, decidedBy: proposal === 'doubtful' ? null : WHO[i % WHO.length], thumbUrl: null, offline: false })
+      }
+    })
+  }
+  const pileNow = (c) => (decisions[c.hash] === 'selected' ? 'kept' : decisions[c.hash] === 'excluded' ? 'throwaway' : c.proposal === 'keep' ? 'kept' : c.proposal === 'throwaway' ? 'throwaway' : 'unsure')
+  const cardNow = (c) => ({ ...c, pile: pileNow(c), decision: decisions[c.hash] ?? null })
+  const runNow = (r) => {
+    const cs = cardsOf[r.id].map(cardNow)
+    const n = (p) => cs.filter((c) => c.pile === p).length
+    return { id: r.id, startedAt: r.startedAt, finishedAt: r.finishedAt, period: r.period, trigger: r.trigger, counts: { sorted: r.n[0] + r.n[1] + r.n[2], kept: r.n[0], thrownAway: r.n[1], unsure: r.n[2] }, now: { kept: n('kept'), thrownAway: n('throwaway'), unsure: n('unsure') } }
+  }
+  const pageOf = (runId, pile, after, limit) => {
+    const all = (cardsOf[runId] ?? []).map(cardNow).filter((c) => c.pile === pile)
+    const from = after ? Number(after) : 0
+    const size = limit ?? 60
+    return { total: all.length, items: all.slice(from, from + size), next: from + size < all.length ? String(from + size) : null }
+  }
+  const bulk = { drift: 0, skip: 0 } // set drift to make the next decideAll count differ (the refused case)
   const subs = { sorter: new Set(), cloud: new Set() }
   const snap = () => ({ ...cloud, settings: { ...cloud.settings }, providers: providers.map((p) => ({ ...p })) })
   const push = () => {
@@ -69,7 +137,7 @@ function installFake() {
     return snap()
   }
   window.__fake = {
-    sorter, cloud, calls, push,
+    sorter, cloud, calls, push, apps, decisions, runDefs, bulk,
     install(sw) {
       sw.sorter = {
         status: async () => ({ ...sorter }),
@@ -77,6 +145,21 @@ function installFake() {
         sort: async () => { calls.sort++; return { ok: true, sorted: 630, counts: { keep: 300, throwaway: 250, doubtful: 80 }, periodPhrase: ' from the last 30 days' } },
         setPeriod: async (p) => { sorter.period = p; cloud.period = p; sorter.undecided = { period: p, inPeriod: p === 'all' ? null : 100, all: 1482 }; push(); return { ok: true, period: p } },
         cancel: async () => { calls.cancel++ },
+        goesBy: async () => goesBy(),
+        setAppRule: async (app, rule) => {
+          calls.setAppRule.push([app, rule])
+          const a = appOf(app)
+          if (!a || !(rule === null || rule === 'keep' || rule === 'throwaway')) return { ok: false, error: 'That is not a rule the sorter knows.', goesBy: goesBy() }
+          a.rule = rule
+          return { ok: true, goesBy: goesBy() }
+        },
+        runs: async () => runDefs.map(runNow),
+        runPiles: async (runId, opts = {}) => {
+          calls.runPiles.push(runId)
+          const r = runDefs.find((x) => x.id === runId)
+          return { run: r ? runNow(r) : null, kept: pageOf(runId, 'kept', null, opts.kept), throwaway: pageOf(runId, 'throwaway', null, opts.throwaway), unsure: pageOf(runId, 'unsure', null, opts.unsure) }
+        },
+        runPage: async (runId, pile, after, limit) => { calls.runPage.push([runId, pile, after]); return pageOf(runId, pile, after, limit) },
         onStatus: (cb) => { subs.sorter.add(cb); return () => subs.sorter.delete(cb) }
       }
       sw.cloud = {
@@ -93,15 +176,42 @@ function installFake() {
         },
         setNightly: async (on) => { calls.setNightly.push(on); cloud.settings.nightly = on; return { ok: true, status: sync() } },
         setSecondOpinions: async (on) => { calls.setSecond.push(on); cloud.settings.secondOpinions = on; return { ok: true, status: sync() } },
-        prepare: async () => { calls.prepare++; return { local: { ok: true, message: 'Sorted 630 from the last 30 days: 300 keep, 250 throwaway, 80 need a look.' }, provider: 'anthropic', period: '30d', periodLabel: 'Last 30 days', periodPrefix: 'Last 30 days: ', periodNote: 'Only screenshots with a date in the file name are counted.', doubtful: 80, toSend: 58, secondOpinions: 0, secondNote: '', cap: 300, leftTonight: 300, estimate: { screenshots: 58, requests: 3, inputTokens: 1, outputTokens: 1, usd: 0.12 }, costLabel: 'Estimated cost', costNote: '', blocked: null, token: 'tok-1', message: 'Last 30 days: ask Haiku about 58 screenshots?' } },
+        prepare: async () => { calls.prepare++; const canLocal = sorter.modelReady && (sorter.canRunUnattended || sorter.rulesChangedSinceTest); return { local: canLocal ? { ok: true, message: 'Sorted 630 from the last 30 days: 300 keep, 250 throwaway, 80 need a look.' } : { ok: false, message: 'The sorter on this Mac is not trained enough to sort on its own yet; only screenshots it already found doubtful can be asked about.' }, provider: 'anthropic', period: '30d', periodLabel: 'Last 30 days', periodPrefix: 'Last 30 days: ', periodNote: 'Only screenshots with a date in the file name are counted.', doubtful: 80, toSend: 58, secondOpinions: 0, secondNote: '', cap: 300, leftTonight: 300, estimate: { screenshots: 58, requests: 3, inputTokens: 1, outputTokens: 1, usd: 0.12 }, costLabel: 'Estimated cost', costNote: '', blocked: null, token: 'tok-1', message: 'Last 30 days: ask Haiku about 58 screenshots?' } },
         send: async (token) => { calls.send.push(token); return { at: new Date().toISOString(), trigger: 'manual', local: null, asked: 58, answered: 58, keep: 10, throwaway: 7, stayedDoubtful: 41, sent: 58, settled: 17, stillUnsure: 41, skipped: null, error: null, message: 'Asked Haiku about 58 screenshots: 10 keep, 7 throwaway.' } },
         cancel: async () => { calls.cloudCancel++ },
         onStatus: (cb) => { subs.cloud.add(cb); return () => subs.cloud.delete(cb) }
       }
       const list = sw.triage.list
-      sw.triage.list = async (...a) => ({ ...(await list(...a)), counts: { undecided: 1530, selected: 96, included: 0, excluded: 2310, total: 3888 } })
+      // the sixth argument is the app filter (calls.list keeps every call's arguments)
+      sw.triage.list = async (...a) => { calls.list.push(a); return { ...(await list(...a)), counts: { undecided: 1530, selected: 96, included: 0, excluded: 2310, total: 3888 } } }
       const decide = sw.triage.decide
-      sw.triage.decide = async (...a) => { calls.decide++; return decide(...a) }
+      // a pile card moved across is his decision by hash; the piles read it back
+      sw.triage.decide = async (...a) => {
+        calls.decide++
+        const [hash, action] = a
+        if (action === 'reset') delete decisions[hash]
+        else decisions[hash] = action === 'exclude' ? 'excluded' : 'selected'
+        return decide(...a)
+      }
+      sw.triage.apps = async (state) => appCounts(state)
+      sw.triage.decideAll = async (names, action, expected) => {
+        calls.decideAll.push([names, action, expected])
+        const picked = names.map(appOf).filter(Boolean)
+        const count = picked.reduce((n, a) => n + a.undecided, 0) + bulk.drift
+        bulk.drift = 0
+        if (count !== expected) return { ok: false, changed: 0, skipped: 0, count, refused: 'count-changed' }
+        const skipped = Math.min(bulk.skip, count) // rows left undecided: the same picture is also under an app that is not ticked
+        bulk.skip = 0
+        let left = skipped
+        for (const a of picked) {
+          const keep = Math.min(left, a.undecided)
+          left -= keep
+          if (action === 'exclude') a.thrownAway += a.undecided - keep
+          else a.kept += a.undecided - keep
+          a.undecided = keep
+        }
+        return { ok: true, changed: count - skipped, skipped, count }
+      }
     }
   }
 }
@@ -145,6 +255,57 @@ try {
   check('the redundant toolbar Triage button is gone', (await page.locator('.titlebar-actions .tb-btn', { hasText: 'Triage' }).count()) === 0)
   await page.locator('.view-switch .scope-tab', { hasText: 'Triage' }).click()
 
+  // --- App menu and bulk bar on Undecided (locked drawing 1b) ---
+  const fakeCalls = (k) => fake((key) => window.__fake.calls[key], k)
+  check('toolbar: App button sits after search and before Sort', (await page.locator('.triage-controls .tam-btn').innerText()) === 'App ▾' && (await page.locator('.triage-controls > .search-input + .tam-wrap + .triage-sort').count()) === 1)
+  check('no bulk bar while no app is ticked', (await page.locator('[data-testid=app-bar]').count()) === 0)
+  await page.locator('.tam-btn').click()
+  await page.waitForSelector('.tam-pop .tam-app')
+  const rowsText = (await page.locator('.tam-pop .tam-app').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim())
+  check('menu rows: app, count for this tab, kept before; "App not known" last', rowsText.length === 7 && rowsText[0] === 'Brightloom 412 78%' && rowsText[3] === 'TalkWeaver 214 6%' && rowsText[6] === 'App not known 305 32%', rowsText.join(' | '))
+  await page.locator('.tam-app', { hasText: 'TalkWeaver' }).click()
+  await page.locator('.tam-app', { hasText: 'Mossgrid' }).click()
+  check('ticking labels the button "App: A, B" and the footer counts', (await page.locator('.tam-btn').innerText()).startsWith('App: TalkWeaver, Mossgrid') && (await text('.tam-foot')).includes('2 apps ticked'))
+  await shoot(page, 'new-1-app-menu.png')
+  await page.keyboard.press('Escape')
+  check('Esc closes the menu and keeps the ticks', (await page.locator('.tam-pop').count()) === 0 && (await page.locator('.tam-btn').innerText()).startsWith('App: TalkWeaver'))
+  const lastList = await fake(() => window.__fake.calls.list.at(-1))
+  check('the list is asked for the ticked apps', JSON.stringify(lastList[5]) === '["TalkWeaver","Mossgrid"]', JSON.stringify(lastList))
+  const bar = await text('[data-testid=app-bar]')
+  check('bar: "311 undecided from 2 apps", the split, kept before, both buttons', bar.includes('311 undecided from 2 apps') && bar.includes('TalkWeaver 214, Mossgrid 97.') && bar.includes('You kept 6% of both before.') && bar.includes('Exclude all 311') && bar.includes('Select all 311'), bar)
+  await page.locator('.tam-exclude').click()
+  const ask = await text('.tri-confirm')
+  check('Exclude all asks once, naming the count and the apps', ask.includes('Exclude all 311 undecided screenshots from 2 apps?') && (await fakeCalls('decideAll')).length === 0, ask)
+  await page.locator('.tri-confirm button', { hasText: 'Not now' }).click()
+  check('Not now decides nothing', (await fakeCalls('decideAll')).length === 0 && (await page.locator('.tri-confirm').count()) === 0)
+  await page.locator('.tam-exclude').click()
+  await page.locator('.tam-confirm-go').click()
+  await page.waitForSelector('.tam-result')
+  check('confirming sends the apps, the action and the shown count; the result is shown', JSON.stringify(await fakeCalls('decideAll')) === '[[["TalkWeaver","Mossgrid"],"exclude",311]]' && (await text('.tam-result')) === 'Excluded 311 screenshots from 2 apps.', await text('.tam-result'))
+  await page.locator('.tam-btn').click()
+  await page.locator('.tam-foot .tam-clear').click()
+  await page.locator('.tam-app', { hasText: 'Brightloom' }).click()
+  await page.keyboard.press('Escape')
+  const one = await text('[data-testid=app-bar]')
+  check('one app: "412 undecided from Brightloom" and the kept-before sentence', one.includes('412 undecided from Brightloom') && one.includes('You kept 78% of the Brightloom screenshots you decided on before.'), one)
+  await fake(() => { window.__fake.bulk.drift = 1 })
+  await page.locator('.tam-select').click()
+  await page.locator('.tam-confirm-go').click()
+  await page.waitForFunction(() => document.querySelector('.tam-result')?.textContent === 'The count changed. Nothing was decided.')
+  check('a refused bulk decision says so, and the apps are unchanged', (await fake(() => window.__fake.apps.find((a) => a.app === 'Brightloom').undecided)) === 412)
+  await shoot(page, 'new-1b-app-bar.png')
+  await fake(() => { window.__fake.bulk.skip = 1 })
+  await page.locator('.tam-exclude').click()
+  await page.locator('.tam-confirm-go').click()
+  await page.waitForFunction(() => document.querySelector('.tam-result')?.textContent?.startsWith('Excluded'))
+  check('a bulk result with skipped rows says how many were left and why', (await text('.tam-result')) === 'Excluded 411 screenshots from Brightloom. 1 left undecided because the same picture also appears under another app.', await text('.tam-result'))
+  await fake(() => { const b = window.__fake.apps.find((a) => a.app === 'Brightloom'); b.undecided = 412; b.thrownAway = 11 }) // back to the starting numbers for the later checks
+
+  await page.locator('.tam-btn').click()
+  await page.locator('.tam-foot .tam-clear').click()
+  await page.keyboard.press('Escape')
+  check('Clear empties the filter and the bar', (await page.locator('.tam-btn').innerText()) === 'App ▾' && (await page.locator('[data-testid=app-bar]').count()) === 0 && (await fake(() => window.__fake.calls.list.at(-1)))[5] === undefined)
+
   // --- Auto sorting, trained ---
   await page.locator('.triage-controls .scope-tab', { hasText: 'Auto sorting' }).click()
   await page.waitForSelector('.as-tab .as-sort')
@@ -165,8 +326,7 @@ try {
   await page.locator('.as-accuracy-toggle').click()
   const nightly = await text('.as-nightly')
   check('Nightly: switch on at 02:00, the text, next run', (await page.locator('.as-nightly input[type=checkbox]').isChecked()) && (await page.locator('.as-nightly .as-time').inputValue()) === '02:00' && nightly.includes('up to 300 a night (nightly sort and Sort now together)') && /Next: /.test(nightly), nightly)
-  const last = await text('.as-last')
-  check('Last run: 571 / 41 / 58 and the waiting line', last.includes('nightly sort, today 02:00 · 612 looked at') && last.includes('571') && last.includes('sorted confidently, 17 of them settled by Haiku') && last.includes('41') && last.includes('58') && last.includes('unsure ones sent to Haiku') && last.includes('Waiting for you: 331 proposed keep, 240 proposed throwaway, 41 need a look.'), last)
+  check('the old Last run block is gone; its link stays', (await page.locator('.as-last').count()) === 0 && (await page.locator('.as-review-link').count()) === 1)
   const side = await text('.as-side')
   check('side card: service state and Change in Settings', side.includes('Haiku is on') && side.includes('Second opinions on · key saved') && side.includes('Unsure screenshots go to Haiku at 02:00, up to 300 a night.') && side.includes('Change in Settings →'), side)
   await shoot(page, 'auto-sorting-1-trained.png')
@@ -180,6 +340,98 @@ try {
   await page.keyboard.press('s')
   await page.keyboard.press('Space')
   check('grid keys do nothing on Auto sorting', (await fake(() => window.__fake.calls.decide)) === 0)
+
+  // --- What the sorter goes by (locked drawing 2) ---
+  const order = await page.evaluate(() => ['.as-status', '.as-sort', '.sp', '.gb', '.as-training', '.as-nightly'].map((q) => { const e = document.querySelector(q); return e ? Math.round(e.getBoundingClientRect().top + window.scrollY + (document.querySelector('.as-main')?.scrollTop ?? 0)) : -1 }))
+  check('order: status, Sort now, piles, "What the sorter goes by", Training, Nightly', order.every((v, k) => v >= 0 && (k === 0 || v > order[k - 1])) && (await text('.gb .gb-title')) === 'What the sorter goes by', order.join(','))
+  check('Sort now button is visible without scrolling at 1440x900', await page.evaluate(() => { for (const e of document.querySelectorAll('*')) if (e.scrollTop) e.scrollTop = 0; window.scrollTo(0, 0); const r = document.querySelector('.as-sort-btn').getBoundingClientRect(); return JSON.stringify([Math.round(r.top), Math.round(r.bottom), window.innerHeight]) && r.top >= 0 && r.bottom <= window.innerHeight }))
+  const rowOf = (app) => page.locator(`.gb-table tr[data-app="${app}"]`)
+  const brightloom = (await rowOf('Brightloom').innerText()).replace(/\s+/g, ' ')
+  check('table row: kept with share, thrown away, still undecided', brightloom.startsWith('Brightloom 40 78% 11 412'), brightloom)
+  check('"App not known" is the last row', (await page.locator('.gb-table tbody tr').last().innerText()).startsWith('App not known'))
+  check('built-in rule: muted, labelled, no chip when it agrees', (await rowOf('TalkWeaver').locator('label.on.bi').innerText()) === 'Usually throw away' && (await rowOf('TalkWeaver').innerText()).includes('Built-in rule') && (await rowOf('TalkWeaver').locator('.gb-chip').count()) === 0)
+  const claude = (await rowOf('Claude').innerText()).replace(/\s+/g, ' ')
+  check('clash: built-in keep with the chip text and button from main', claude.includes('Built-in rule') && claude.includes('Built-in rule says keep, but you threw away 90% — change to Usually throw away? Change rule'), claude)
+  check('built-in rules in two groups, wording from main', (await text('.gb-side')).toLowerCase().includes('usually kept') && (await text('.gb-side')).includes('Claude or ChatGPT answer') && (await text('.gb-side')).includes('Finder window') && (await text('.gb-side')).toLowerCase().includes('how the picture looks'))
+  await page.locator('.gb-table tr[data-app="Mossgrid"] .gb-chip-btn').click()
+  await page.waitForSelector('.gb-saved')
+  check('"Make rule" saves that rule at once and says when it is used', JSON.stringify(await fakeCalls('setAppRule')) === '[["Mossgrid","throwaway"]]' && (await text('.gb-saved')).includes('Used from the next sort. Nightly sorting waits until you train again.') && (await rowOf('Mossgrid').locator('.gb-chip').count()) === 0 && (await rowOf('Mossgrid').locator('label.on:not(.bi)').innerText()) === 'Usually throw away')
+  await rowOf('Brightloom').locator('label', { hasText: 'Usually keep' }).click()
+  await page.waitForFunction(() => window.__fake.calls.setAppRule.length === 2)
+  check('the three-way control saves the choice', JSON.stringify(await fakeCalls('setAppRule')) === '[["Mossgrid","throwaway"],["Brightloom","keep"]]' && (await rowOf('Brightloom').locator('label.on').innerText()) === 'Usually keep')
+  await rowOf('Brightloom').locator('label', { hasText: 'No rule' }).click()
+  await page.waitForFunction(() => window.__fake.calls.setAppRule.length === 3)
+  await page.locator('.gb').evaluate((e) => e.scrollIntoView({ block: 'start' }))
+  await shoot(page, 'new-2-what-the-sorter-goes-by.png')
+
+  // --- piles of the latest sort (locked drawing 3a) ---
+  check('the chooser names the latest sort', /^Sort of today 14:\d\d · 126/.test(await text('.sp-chooser-btn')), await text('.sp-chooser-btn'))
+  check('result line carries the numbers the sort ended with', (await text('.sp-result')).startsWith('Sorted 126 from the last 30 days: 41 kept, 73 thrown away, 12 unsure.'), await text('.sp-result'))
+  check('latest sort: the result line adds what was sent to Haiku, settled, and waiting for him', (await text('.sp-result')).includes('12 unsure. 58 sent to Haiku, 17 settled. 41 waiting for you.'), await text('.sp-result'))
+  const heads = (await page.locator('.sp h3').allInnerTexts()).map((t) => t.replace(/\s+/g, ' '))
+  check('Kept and Thrown away side by side, Unsure below, headed with live counts', heads[0] === 'Kept 41' && heads[1] === 'Thrown away 73' && heads[2].startsWith('Unsure 12'), heads.join(' | '))
+  const sides = await page.evaluate(() => { const k = document.querySelector('.sp-pile[data-pile=kept]').getBoundingClientRect(); const t = document.querySelector('.sp-pile[data-pile=throwaway]').getBoundingClientRect(); const u = document.querySelector('.sp-unsure').getBoundingClientRect(); return k.right <= t.left && Math.abs(k.top - t.top) < 2 && u.top > k.bottom - 1 })
+  check('layout: Kept left of Thrown away, Unsure under both', sides)
+  const k0 = (await page.locator('.sp-pile[data-pile=kept] .sp-card').first().innerText()).replace(/\s+/g, ' ')
+  check('a card shows app, who decided and the reason', /^Brightloom Rules Looks like a chart/.test(k0), k0)
+  check('low-confidence cards are marked', (await page.locator('.sp-pile[data-pile=kept] .sp-card.low .sp-low').count()) > 0 && (await page.locator('.sp-pile[data-pile=kept] .sp-card.low .sp-low').first().innerText()) === 'low confidence')
+  check('hint bar', (await text('.sp-hints')).includes('move across') && (await text('.sp-hints')).includes('Moving one across counts as one of your choices.'))
+  await page.locator('.sp').evaluate((e) => e.scrollIntoView({ block: 'start' }))
+  await page.locator('.sp-pile[data-pile=kept] .sp-card').first().focus()
+  await shoot(page, 'new-3-piles.png')
+
+  // keys act only on a focused pile card
+  await page.locator('.sp-pile[data-pile=kept] .sp-card').first().blur()
+  await page.keyboard.press('ArrowRight')
+  await page.keyboard.press('u')
+  check('pile keys do nothing while no pile card has focus', (await fakeCalls('decide')) === 0)
+  const firstKept = await page.locator('.sp-pile[data-pile=kept] .sp-card').first().getAttribute('data-hash')
+  await page.locator('.sp-chooser-btn').click()
+  await page.locator('.sp-pile[data-pile=kept] .sp-card').first().focus()
+  await page.keyboard.press('ArrowRight')
+  check('pile keys do nothing while the chooser is open', (await fakeCalls('decide')) === 0)
+  await shoot(page, 'new-3-chooser-open.png')
+  const rowsC = (await page.locator('.sp-chooser-row').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim())
+  check('chooser lists the sorts newest first, current ticked, with the note', rowsC.length === 3 && rowsC[0].includes('126 sorted · 41 kept, 73 thrown away') && rowsC[1].includes('nightly, everything · 48 sorted') && (await page.locator('.sp-chooser-row.on').count()) === 1 && (await text('.sp-chooser-pop')).includes('A screenshot sorted again later appears only in its latest sort.'), rowsC.join(' | '))
+  await page.locator('.sp-chooser-row').nth(1).click()
+  await page.waitForFunction(() => document.querySelector('.sp-result')?.textContent?.startsWith('Sorted 48:'))
+  check('an earlier sort shows only its run record: no sent or waiting numbers', !(await text('.sp-result')).includes('sent to') && !(await text('.sp-result')).includes('waiting for you'))
+  check('choosing an earlier sort shows its piles', (await fakeCalls('runPiles')).at(-1) === 'run-b' && (await text('.sp-result')).startsWith('Sorted 48: 20 kept, 22 thrown away, 6 unsure.') && (await text('.sp-chooser-btn')).includes('· 48'), await text('.sp-result'))
+  await page.locator('.sp-chooser-btn').click()
+  await page.locator('.sp-chooser-row').first().click()
+  await page.waitForFunction(() => document.querySelector('.sp-result')?.textContent?.startsWith('Sorted 126'))
+
+  // arrow keys move a card; counts follow
+  const card = (pile) => page.locator(`.sp-pile[data-pile=${pile}] .sp-card`)
+  await card('kept').first().focus()
+  await page.keyboard.press('ArrowLeft')
+  check('left on a Kept card does nothing (it is already on the left)', (await fakeCalls('decide')) === 0)
+  await page.keyboard.press('ArrowRight')
+  await page.waitForFunction(() => window.__fake.calls.decide === 1)
+  await page.waitForFunction(() => document.querySelector('.sp h3')?.textContent?.includes('40'))
+  const heads2 = (await page.locator('.sp h3').allInnerTexts()).map((t) => t.replace(/\s+/g, ' '))
+  check('right moves it to Thrown away as his decision; the counts follow', heads2[0] === 'Kept 40' && heads2[1] === 'Thrown away 74' && (await fake(() => window.__fake.decisions))[firstKept] === 'excluded', heads2.join(' | '))
+  check('the result line keeps the numbers as the sort ended', (await text('.sp-result')).startsWith('Sorted 126 from the last 30 days: 41 kept, 73 thrown away, 12 unsure.'))
+  const moved = page.locator(`.sp-pile[data-pile=throwaway] [data-hash="${firstKept}"]`)
+  check('the moved card shows his decision', (await moved.innerText()).includes('You threw it away'))
+  check('focus stays in the Kept pile, on the next card', await page.evaluate(() => document.activeElement?.closest('[data-pile]')?.getAttribute('data-pile') === 'kept' && document.activeElement?.hasAttribute('data-card')))
+  await moved.focus()
+  await page.keyboard.press('ArrowLeft')
+  await page.waitForFunction(() => window.__fake.calls.decide === 2)
+  check('left on a Thrown away card selects it (Kept again)', (await fake(() => window.__fake.decisions))[firstKept] === 'selected')
+  await page.locator(`[data-hash="${firstKept}"]`).focus()
+  await page.keyboard.press('u')
+  await page.waitForFunction(() => window.__fake.calls.decide === 3)
+  check('U marks it undecided again', (await fake(() => window.__fake.decisions))[firstKept] === undefined)
+  await page.waitForFunction(() => document.querySelector('.sp h3')?.textContent?.includes('41'))
+  await page.locator('.sp-pile[data-pile=throwaway] .sp-card').first().focus()
+  await page.keyboard.press('Enter')
+  await page.waitForSelector('.sp-open')
+  check('Return opens the picture', (await page.locator('.sp-open .lb-title').count()) === 1)
+  await page.keyboard.press('Escape')
+  check('Esc closes it', (await page.locator('.sp-open').count()) === 0)
+  check('unsure cards move too: right excludes', await (async () => { await page.locator('.sp-unsure [data-card]').first().focus(); await page.keyboard.press('ArrowRight'); await page.waitForFunction(() => window.__fake.calls.decide === 4); return (await page.locator('.sp h3').nth(2).innerText()).includes('11') })())
+  await fake(() => { for (const k of Object.keys(window.__fake.decisions)) delete window.__fake.decisions[k] })
 
   // nightly switch + time go to main
   await page.locator('.as-nightly .as-switch').click()
@@ -229,6 +481,28 @@ try {
   check('nightly is disabled with the reason', (await page.locator('.as-nightly input[type=checkbox]').isDisabled()) && (await text('.as-nightly')).includes('When no service is chosen in Settings, nightly sorting is off.'))
   check('the side card says no service is chosen', (await text('.as-side')).includes('No service is chosen'))
   await fake(() => { window.__fake.cloud.settings.enabled = true; window.__fake.push() })
+
+  // --- an app rule changed since the accuracy test: Sort now still works, nightly waits ---
+  const LINE = 'You changed an app rule since the last accuracy test. Nightly sorting waits until you train again. Sort now still works.'
+  check('no rules-changed line while the test is current', (await page.locator('.as-rules-changed').count()) === 0)
+  const sortsBefore = await fake(() => window.__fake.calls.sort)
+  const preparesBefore = await fake(() => window.__fake.calls.prepare)
+  await fake(() => { window.__fake.lastRunKeep = window.__fake.cloud.lastRun })
+  await fake(() => { window.__fake.cloud.lastRun = { at: new Date().toISOString(), trigger: 'nightly', provider: 'anthropic', local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, sent: 0, settled: 0, stillUnsure: 0, skipped: 'rules-changed', error: null, message: 'Nothing was sorted or sent: your app rules changed since the sorter was last tested. Train it again and nightly sorting carries on.' }; window.__fake.push() })
+  await fake(() => { Object.assign(window.__fake.sorter, { rulesChangedSinceTest: true, canRunUnattended: false }); window.__fake.push() })
+  await page.waitForSelector('.as-status .as-rules-changed')
+  check('rules changed: the line is under the status line and in the Nightly block, Sort now stays enabled', (await text('.as-status .as-rules-changed')) === LINE && (await text('.as-nightly .as-rules-changed')) === LINE && !(await page.locator('button.as-sort-btn').isDisabled()) && (await page.locator('.as-nightly input[type=checkbox]').isDisabled()), await text('.as-nightly'))
+  await page.locator('.as-status').evaluate((e) => e.scrollIntoView({ block: 'start' }))
+  await shoot(page, 'new-3-rules-changed.png')
+  await page.locator('button', { hasText: /^Sort now$/ }).click()
+  await page.waitForSelector('.sorter-cloud-confirm')
+  const dlg2 = await text('.sorter-cloud-confirm')
+  check('rules changed: one press sorts once, in prepare, and the box shows that sort, not "not trained enough"', (await fake(() => window.__fake.calls.sort)) === sortsBefore && (await fake(() => window.__fake.calls.prepare)) === preparesBefore + 1 && dlg2.includes('Sorted 630') && !dlg2.includes('not trained enough'), dlg2)
+  await page.locator('button', { hasText: 'Not now' }).click()
+  check('a nightly run skipped for a rule change shows main\'s own sentence in the Nightly block', (await text('.as-nightly .as-last-skip')).includes('Nothing was sorted or sent: your app rules changed since the sorter was last tested. Train it again and nightly sorting carries on.'), await text('.as-nightly'))
+  await fake(() => { window.__fake.cloud.lastRun = window.__fake.lastRunKeep; window.__fake.push() })
+  await fake(() => { Object.assign(window.__fake.sorter, { rulesChangedSinceTest: false, canRunUnattended: true }); window.__fake.push() })
+  await page.waitForFunction(() => !document.querySelector('.as-rules-changed'))
 
   // --- Review what it sorted, Change in Settings ---
   await page.locator('.as-review-link').click()

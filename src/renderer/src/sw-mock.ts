@@ -53,6 +53,25 @@ function cloudMock(): SwApi['cloud'] {
   }
 }
 
+// Invented data for the sort piles and "What the sorter goes by" in the browser preview.
+const MOCK_GOES_BY = {
+  apps: [
+    { app: 'Brightloom', kept: 40, keptShare: 0.78, thrownAway: 11, undecided: 412, builtIn: null, rule: null, suggestion: null },
+    { app: 'Mossgrid', kept: 3, keptShare: 0.06, thrownAway: 47, undecided: 97, builtIn: null, rule: null, suggestion: { kind: 'make' as const, rule: 'throwaway' as const, share: 0.94, against: null, text: 'You threw away 94% — make it a rule?', action: 'Make rule' } },
+    { app: '', kept: 28, keptShare: 0.32, thrownAway: 60, undecided: 305, builtIn: null, rule: null, suggestion: null }
+  ],
+  builtIn: { keep: ['Slides on screen'], throwaway: ['Finder window'] }
+}
+const MOCK_RUN = { id: 'mock-run', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), period: 'all' as const, trigger: 'manual' as const, counts: { sorted: 8, kept: 3, thrownAway: 3, unsure: 2 }, now: { kept: 3, thrownAway: 3, unsure: 2 } }
+const mockPile = (proposal: 'keep' | 'throwaway' | 'doubtful', count: number) => ({
+  total: count,
+  next: null,
+  items: Array.from({ length: count }, (_, i) => ({
+    hash: `mock-${proposal}-${i}`, filename: `Invented capture ${i}.png`, app: i % 2 ? 'Brightloom' : null, windowTitle: null, takenAt: null, reason: 'Looks like screenshots you kept before', confidence: 0.9, lowConfidence: i === 1,
+    proposal, pile: (proposal === 'keep' ? 'kept' : proposal === 'throwaway' ? 'throwaway' : 'unsure') as 'kept' | 'throwaway' | 'unsure', decidedBy: 'rules' as const, decision: null, thumbUrl: null, offline: false
+  }))
+})
+
 // Browser/dev mock for window.sw so the renderer runs under plain Vite (no Electron).
 // Mirrors the full preload contract; returns inert values. Never used in the packaged app.
 export function installMock(): void {
@@ -84,11 +103,16 @@ export function installMock(): void {
       onStatus: () => () => undefined
     },
     sorter: {
-      status: async () => ({ phase: 'idle' as const, done: 0, total: 0, message: '', error: null, modelReady: false, report: null, canRunUnattended: false, retrainNeeded: false, minHeldBack: { total: 20, perLabel: 5 }, pending: { keep: 0, throwaway: 0, doubtful: 0, lastProposedAt: null }, period: 'all' as const, periods: PERIODS, lastRun: null, undecided: null, learnable: null }),
+      status: async () => ({ phase: 'idle' as const, done: 0, total: 0, message: '', error: null, modelReady: false, report: null, canRunUnattended: false, retrainNeeded: false, rulesChangedSinceTest: false, minHeldBack: { total: 20, perLabel: 5 }, pending: { keep: 0, throwaway: 0, doubtful: 0, lastProposedAt: null }, period: 'all' as const, periods: PERIODS, lastRun: null, undecided: null, learnable: null }),
       train: async () => ({ ok: false, error: 'not available in the browser preview' }),
       sort: async () => ({ ok: false, error: 'not available in the browser preview' }),
       setPeriod: async () => ({ ok: false, period: 'all' as const, error: 'not available in the browser preview' }),
       cancel: async () => undefined,
+      goesBy: async () => MOCK_GOES_BY,
+      setAppRule: async () => ({ ok: false, error: 'not available in the browser preview', goesBy: MOCK_GOES_BY }),
+      runs: async () => [MOCK_RUN],
+      runPiles: async () => ({ run: MOCK_RUN, kept: mockPile('keep', 3), throwaway: mockPile('throwaway', 3), unsure: mockPile('doubtful', 2) }),
+      runPage: async () => ({ total: 0, items: [], next: null }),
       onStatus: () => () => undefined
     },
     cloud: cloudMock(),
@@ -154,6 +178,12 @@ export function installMock(): void {
       scan: async () => ({ ok: false, indexed: 0, total: 0, offline: 0 }),
       list: async () => ({ items: [], counts: { undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }),
       decide: async () => ({ state: 'undecided' }),
+      apps: async () => [
+        { app: 'Brightloom', count: 412, kept: 40, thrownAway: 11, keptShare: 0.78 },
+        { app: 'Mossgrid', count: 97, kept: 3, thrownAway: 47, keptShare: 0.06 },
+        { app: '', count: 305, kept: 28, thrownAway: 60, keptShare: 0.32 }
+      ],
+      decideAll: async () => ({ ok: false, changed: 0, skipped: 0, count: 0 }),
       paste: async () => null,
       importSelected: async () => ({ imported: 0, skipped: 0, gated: 0 }),
       importStatus: async () => null,

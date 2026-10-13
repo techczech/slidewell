@@ -8,11 +8,14 @@ import type { CloudPreview, CloudStatus, SorterStatus } from '../../preload'
 import { CloudConfirm } from './CloudConfirm'
 import { SortPeriodSelect } from './SortPeriodSelect'
 import { SorterAccuracyTable } from './SorterAccuracyTable'
-import { sorterRunning, useCloudStatus, useSorterStatus } from './sorter-hooks'
+import { SorterGoesBy } from './SorterGoesBy'
+import { SortChooser, SortPiles, type SortFollowUp } from './SortPiles'
+import { sorterRunning, useCloudStatus, useSortRuns, useSorterStatus } from './sorter-hooks'
 import { day, n, plural, when, whenShort } from './sorter-format'
 import './auto-sorting.css'
 
 const lower = (s: string): string => (s ? s[0].toLowerCase() + s.slice(1) : s)
+const RULES_CHANGED = 'You changed an app rule since the last accuracy test. Nightly sorting waits until you train again. Sort now still works.'
 const upper = (s: string): string => (s ? s[0].toUpperCase() + s.slice(1) : s)
 
 /** "Trained today at 02:00" / "Trained on Tue 13 Oct, 02:00". */
@@ -71,6 +74,9 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
   const [preparing, setPreparing] = useState(false)
   const [showAccuracy, setShowAccuracy] = useState(false)
   const [nightlyError, setNightlyError] = useState<string | null>(null)
+  const [chosenRun, setChosenRun] = useState<string | null>(null) // null = the latest sort
+  // the sorts are read again whenever a sort or a service run ends or proposes something new
+  const { runs, version: runsVersion } = useSortRuns([st?.phase, cl?.phase, st?.pending.lastProposedAt, st?.lastRun?.at, cl?.lastRun?.at].join('|'))
 
   const trainNow = useCallback(async () => {
     setResult(null)
@@ -83,7 +89,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
     if (cl?.settings.enabled) {
       setPreparing(true)
       try {
-        const p = await window.sw.cloud.prepare()
+        const p = await window.sw.cloud.prepare() // sorts on this Mac first (also while a rule is newer than the test), then prepares the batch
         if (p.blocked) setResult([p.local.message, p.message].filter(Boolean).join(' '))
         else setPreview(p)
       } finally {
@@ -127,7 +133,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
   // why Sort now and the nightly switch are off, in his words; null when sorting can run
   const whyNot = !st.modelReady
     ? 'Needs the picture search model (in Settings › Picture search).'
-    : st.canRunUnattended
+    : st.canRunUnattended || st.rulesChangedSinceTest
       ? null
       : st.retrainNeeded
         ? 'Retrain needed: the sorter has changed since it last learnt from your choices. Sorting stays off until you train it again.'
@@ -138,6 +144,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
   const asking = cl.phase === 'asking'
   const run = lastRunNumbers(st, cl)
   const holdBack = Math.round(choices / 5)
+  const shownRun = runs.find((r) => r.id === chosenRun) ?? runs[0] ?? null // the latest sort unless he chose an earlier one
 
   const trainButton = (primary: boolean, label: string): JSX.Element => (
     <button className={primary ? 'pic-primary as-train' : 'copyref as-train as-train-again'} disabled={!st.modelReady || busy} onClick={() => void trainNow()}>
@@ -196,6 +203,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
         </p>
       )}
       <div className="as-row as-sort-row">
+        {runs.length > 0 && <SortChooser runs={runs} selectedId={shownRun?.id ?? ''} periods={st.periods} onSelect={setChosenRun} />}
         <SortPeriodSelect period={st.period} periods={st.periods} disabled={busy} />
         <button className="pic-primary sorter-cloud-sort as-sort-btn" disabled={busy || whyNot !== null} onClick={() => void sortNow()}>
           Sort now
@@ -216,7 +224,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
   )
 
   const nightlyOn = service && cl.settings.nightly && st.canRunUnattended // stored on, but it does not run until the sorter can sort
-  const nightlyReason = !service ? 'When no service is chosen in Settings, nightly sorting is off.' : !st.canRunUnattended ? 'Train the sorter first.' : null
+  const nightlyReason = !service ? 'When no service is chosen in Settings, nightly sorting is off.' : !st.canRunUnattended ? (st.rulesChangedSinceTest ? 'Waiting for you to train again.' : 'Train the sorter first.') : null
   const nightlyBlock = (
     <div className="as-block as-nightly" style={!st.canRunUnattended ? { opacity: 0.55 } : undefined}>
       <h2>Nightly sorting</h2>
@@ -230,8 +238,14 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
             </label>
             <input type="time" className="sorter-cloud-time as-time" value={cl.settings.batchTime} disabled={nightlyReason !== null} onChange={(e) => e.target.value && void setTime(e.target.value)} aria-label="Nightly sorting time" />
           </div>
-          <p className={nightlyReason ? 'as-why as-note' : 'as-muted as-note'}>{nightlyReason ?? 'When no service is chosen in Settings, nightly sorting is off.'}</p>
+          {st.rulesChangedSinceTest && <p className="as-why as-note as-rules-changed">{RULES_CHANGED}</p>}
+          {!(st.rulesChangedSinceTest && service) && <p className={nightlyReason ? 'as-why as-note' : 'as-muted as-note'}>{nightlyReason ?? 'When no service is chosen in Settings, nightly sorting is off.'}</p>}
           {nightlyError && <p className="pic-error">{nightlyError}</p>}
+          {cl.lastRun?.skipped === 'rules-changed' && cl.lastRun.message && (
+            <p className="as-muted as-note as-last-skip">
+              {whenShort(cl.lastRun.at)}: {cl.lastRun.message}
+            </p>
+          )}
         </div>
         <p>
           Sorts every undecided screenshot and asks {service ? name : 'the chosen service'} about the unsure ones, up to {n(cl.nightlyLimit)} a night (nightly sort and Sort now together). It runs only while SlideWell is open; if{' '}
@@ -241,8 +255,12 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
     </div>
   )
 
+  // the piles of the chosen sort (replace the old "Last run" block, whose numbers are now the result line); the old block stays for a Mac with no recorded sort yet
+  // the latest sort also carries what followed it (the numbers the old Last run block showed); an earlier sort shows what its run record has
+  const followUp: SortFollowUp | null = shownRun && shownRun.id === runs[0]?.id && run && run.needLook !== null ? { name, sent: run.sent, settled: run.settled, waiting: run.needLook } : null
+  const pilesBlock = shownRun ? <SortPiles runId={shownRun.id} reloadKey={runsVersion} periods={st.periods} onReview={onReview} followUp={followUp} /> : null
   const lastRunBlock =
-    run || st.pending.lastProposedAt ? (
+    shownRun ? null : run || st.pending.lastProposedAt ? (
       <div className="as-block as-last">
         <div className="as-row">
           <h2 className="as-inline-h">Last run</h2>
@@ -319,6 +337,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
       <span className="as-dot" />
       <div>
         <b>{trainedWhen(rep.trainedAt)}</b> on {n(trainedOnAll)} of your choices.
+        {st.rulesChangedSinceTest && <div className="as-why as-rules-changed">{RULES_CHANGED}</div>}
       </div>
     </div>
   ) : null
@@ -385,6 +404,8 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
             <div className={busy ? 'as-dim' : ''}>{trainedStatus}</div>
             {busy ? progress : sortNowBlock}
             <div className={busy ? 'as-dim as-stack' : 'as-stack'}>
+              {pilesBlock}
+              <SorterGoesBy reloadKey={runsVersion} />
               {trainingBlock}
               {nightlyBlock}
               {lastRunBlock}
@@ -394,6 +415,8 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
           <>
             {busy && running && st.phase !== 'sorting' ? progress : untrainedCard}
             {sortNowBlock}
+            {pilesBlock}
+            <SorterGoesBy reloadKey={runsVersion} />
             {nightlyBlock}
           </>
         )}

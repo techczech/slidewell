@@ -46,8 +46,8 @@ try {
   await win.waitForLoadState('domcontentloaded')
   await win.waitForTimeout(500)
 
-  // open Triage from the toolbar
-  await win.locator('.titlebar-actions .tb-btn', { hasText: 'Triage' }).click()
+  // open Triage: it is a main tab in the title bar (Search | Review | Triage)
+  await win.locator('.view-switch .scope-tab', { hasText: 'Triage' }).click()
   await win.waitForSelector('.triage-panel', { timeout: 5000 })
   result.panelOpened = (await win.locator('.triage-panel').count()) === 1
 
