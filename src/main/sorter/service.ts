@@ -167,6 +167,8 @@ export type SorterDeps = {
    * the choices the model in use was trained with (null: no current model). Absent: teachDefaults.
    */
   teach?: (c: { learnable: Choices | null; trainedWith: number | null }) => SorterTeachStatus
+  /** One warning line for the log (no screenshot content, no paths). Default: console.warn. */
+  log?: (line: string) => void
   now?: () => Date
 }
 
@@ -413,6 +415,7 @@ export class SorterService {
       const modelId = `model-${trainedAt}`
       this.withStore((s) => s.saveModel({ id: modelId, trainedAt, sorterVersion: SORTER_VERSION, model: final, report }))
       let moved: Rescore | null = null
+      const warn = this.deps.log ?? ((line: string): void => console.warn(line))
       if (opts.rescore) {
         this.set({ message: 'checking which undecided screenshots moved', done: 0, total: 0 }, true)
         try {
@@ -430,8 +433,10 @@ export class SorterService {
             aborted: () => ctl.signal.aborted,
             onProgress: (done, total) => this.set({ done, total })
           })
-        } catch {
+          if (ctl.signal.aborted) warn(`[sorter] the re-score after training was stopped after ${moved.rescored} proposals; the rest keep their earlier scores`)
+        } catch (e) {
           moved = null // the model is saved; what moved is simply not known
+          warn(ctl.signal.aborted ? '[sorter] the re-score after training was stopped; proposals keep their earlier scores' : `[sorter] the re-score after training failed (${(e as Error)?.name ?? 'error'}); proposals keep their earlier scores`)
         }
       }
       this.set({ phase: 'idle', done: 0, total: 0, message: '', error: null }, true)

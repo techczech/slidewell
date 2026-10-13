@@ -739,6 +739,8 @@ const api = {
     piles: (opts?: { kept?: number; throwaway?: number; bin?: number }): Promise<ReviewPiles> => ipcRenderer.invoke('review:piles', opts ?? {}),
     // the page after a cursor (keyset; no cap on how far)
     page: (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number): Promise<ReviewPage> => ipcRenderer.invoke('review:page', pile, after, limit),
+    // the cards of up to 200 screenshots by hash, in the order asked for; one in the Bin, emptied or no longer in review is left out
+    cards: (hashes: string[]): Promise<ReviewCard[]> => ipcRenderer.invoke('review:cards', hashes),
     act: (hash: string, action: 'keep' | 'throwaway' | 'rescue'): Promise<ReviewActResult> => ipcRenderer.invoke('review:act', hash, action),
     undo: (): Promise<ReviewUndoResult> => ipcRenderer.invoke('review:undo'),
     emptyBin: (token: string): Promise<EmptyBinResult> => ipcRenderer.invoke('review:empty-bin', token)

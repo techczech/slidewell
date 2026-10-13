@@ -5,6 +5,9 @@
  * It is not a sort:
  *   - only a row that already exists is changed, and only while he has still not decided the
  *     screenshot (no row in triage_decisions, not answered in Review). No row is created;
+ *   - only a row made under the current sorter version is read, counted or changed. A proposal from
+ *     an older version needs a real sort: it is left exactly as it is, so a re-score never brings a
+ *     screenshot into what a cloud model may be asked about (store.ts eligibleSql reads the version);
  *   - the row stays in the sort run that proposed it (run_id) and keeps its proposed_at, so no sort
  *     run is made and "last sorted" does not move;
  *   - nothing is written to triage_decisions, and no cloud model is asked: an answer one already
@@ -14,7 +17,8 @@
  * that changed it in the meantime wins and the row is left alone.
  *
  * "Moved to sure" = was doubtful before, is keep or throwaway after. Need-a-look before and after are
- * the doubtful proposals among his undecided screenshots, read from the table each time.
+ * the doubtful proposals, made under the current sorter version, among his undecided screenshots,
+ * read from the table each time.
  */
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync } from 'node:fs'
@@ -54,13 +58,13 @@ const hasTable = (db: DatabaseSync, name: string): boolean => Boolean(db.prepare
 /** "He has not decided it": no decision of his in Triage and no answer in Review (alias p). */
 const undecidedSql = (db: DatabaseSync): string => `p.answered_at IS NULL ${hasTable(db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = p.hash)' : ''}`
 
-/** The proposals of screenshots he has not decided, as they are now. */
-export function undecidedProposals(wellRoot: string): Existing[] {
+/** The proposals, made under `sorterVersion`, of screenshots he has not decided, as they are now. */
+export function undecidedProposals(wellRoot: string, sorterVersion: string): Existing[] {
   const db = open(wellRoot)
   if (!db) return []
   try {
     if (!hasTable(db, 'sorter_proposals')) return []
-    return (db.prepare(`SELECT p.hash AS hash, p.proposal AS proposal, p.proposed_at AS proposed_at FROM sorter_proposals p WHERE ${undecidedSql(db)}`).all() as Array<{ hash: string; proposal: Proposal; proposed_at: string }>).map((r) => ({
+    return (db.prepare(`SELECT p.hash AS hash, p.proposal AS proposal, p.proposed_at AS proposed_at FROM sorter_proposals p WHERE p.sorter_version = ? AND ${undecidedSql(db)}`).all(sorterVersion) as Array<{ hash: string; proposal: Proposal; proposed_at: string }>).map((r) => ({
       hash: r.hash,
       proposal: r.proposal,
       proposedAt: r.proposed_at
@@ -72,8 +76,8 @@ export function undecidedProposals(wellRoot: string): Existing[] {
 
 /**
  * Write re-scored proposals over the rows they were read from (one transaction). A row is changed
- * only if it is still undecided and still has the proposed_at it was read with. run_id and
- * proposed_at are left as they are; a throwaway keeps the 30-day clock it already had, and a row
+ * only if it is still undecided, still has the proposed_at it was read with and was made under
+ * `sorterVersion` (which is therefore not written). run_id and proposed_at are left as they are; a throwaway keeps the 30-day clock it already had, and a row
  * that becomes throwaway now starts one. Returns the hashes written.
  */
 export function writeRescored(wellRoot: string, rows: Array<ProposalRow & { proposedAt: string }>, sorterVersion: string, modelId: string, now: Date = new Date()): string[] {
@@ -82,17 +86,17 @@ export function writeRescored(wellRoot: string, rows: Array<ProposalRow & { prop
   if (!db) return []
   try {
     const put = db.prepare(
-      `UPDATE sorter_proposals AS p SET proposal = ?, confidence = ?, p_keep = ?, reason = ?, rule = ?, sorter_version = ?, model_id = ?, decided_by = ?, decided_model = ?,
+      `UPDATE sorter_proposals AS p SET proposal = ?, confidence = ?, p_keep = ?, reason = ?, rule = ?, model_id = ?, decided_by = ?, decided_model = ?,
          throwaway_since = CASE WHEN ? != 'throwaway' THEN NULL
                                 WHEN p.proposal = 'throwaway' AND p.throwaway_since IS NOT NULL THEN p.throwaway_since
                                 ELSE ? END
-       WHERE p.hash = ? AND p.proposed_at = ? AND ${undecidedSql(db)}`
+       WHERE p.hash = ? AND p.proposed_at = ? AND p.sorter_version = ? AND ${undecidedSql(db)}`
     )
     const written: string[] = []
     db.exec('BEGIN IMMEDIATE')
     try {
       for (const r of rows) {
-        const res = put.run(r.proposal, r.confidence, r.pKeep, r.reason, r.rule, sorterVersion, modelId, r.decidedBy ?? null, r.decidedModel ?? null, r.proposal, now.toISOString(), r.hash, r.proposedAt)
+        const res = put.run(r.proposal, r.confidence, r.pKeep, r.reason, r.rule, modelId, r.decidedBy ?? null, r.decidedModel ?? null, r.proposal, now.toISOString(), r.hash, r.proposedAt, sorterVersion)
         if (Number(res.changes)) written.push(r.hash)
       }
       db.exec('COMMIT')
@@ -128,7 +132,7 @@ const CHUNK = 50
 
 /** Score his undecided, already proposed screenshots again and say what moved. Stops between chunks when aborted. */
 export async function rescoreUndecided(c: RescoreContext): Promise<Rescore> {
-  const before = new Map(undecidedProposals(c.wellRoot).map((r) => [r.hash, r]))
+  const before = new Map(undecidedProposals(c.wellRoot, c.sorterVersion).map((r) => [r.hash, r]))
   const doubtful = (rows: Iterable<Existing>): number => [...rows].filter((r) => r.proposal === 'doubtful').length
   const out: Rescore = { rescored: 0, needALook: { before: doubtful(before.values()), after: 0 }, movedToSure: { keep: 0, throwaway: 0 }, movedHashes: [] }
   // a proposal whose file is no longer in the index is left as it is
@@ -155,6 +159,6 @@ export async function rescoreUndecided(c: RescoreContext): Promise<Rescore> {
     }
     c.onProgress?.(Math.min(shots.length, i + chunk.length), shots.length)
   }
-  out.needALook.after = doubtful(undecidedProposals(c.wellRoot))
+  out.needALook.after = doubtful(undecidedProposals(c.wellRoot, c.sorterVersion))
   return out
 }

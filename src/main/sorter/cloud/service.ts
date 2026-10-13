@@ -98,7 +98,7 @@ import { checkThresholds, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } 
 import { applyCloud, type CascadeRow } from './cascade'
 import { LunaResponseError, REASON_MAX, planChunks, selectForCloud, type CloudCandidate, type CostEstimate, type LunaItem } from './luna'
 import { clipRedacted, LunaHttpError, pool, postCloud, redact, type HttpPost } from './client'
-import type { LunaRequest } from './luna'
+import type { LunaAnswer, LunaRequest } from './luna'
 import { DEFAULT_PROVIDER, isProviderId, otherProviders, PROVIDER_IDS, providerOf, PROVIDERS, type CloudProvider, type ProviderId } from './provider'
 import { applySettingsPatch, isSwitch, optedIn, removeKey, serviceOn, storedProvider, storedSwitch, type CloudSettings, type StoredCloudSettings, type StoredKeys } from './settings'
 import { readVerified, type VerifyRefusal } from './images'
@@ -1075,20 +1075,32 @@ export class CloudSorter {
             const parsed = provider.parseResponse(json, req.ids)
             const askedAt = new Date().toISOString()
             const answers: CloudAnswerRow[] = []
-            const proposals: Array<CascadeRow & { hash: string }> = []
+            const said = new Map<string, LunaAnswer>()
             for (const [hash, raw] of parsed.answers) {
               // whatever the model wrote, no key reaches the database or the renderer
               const a = { ...raw, reason: clipRedacted(scrub(raw.reason), REASON_MAX) } // redact first, then shorten
               answers.push({ hash, ...a, provider: provider.id, model: provider.model, promptVersion: provider.promptVersion, askedAt })
-              const p = pending.get(hash)
-              if (!p) continue
-              const row = applyCloud({ proposal: 'doubtful', confidence: p.confidence, pKeep: p.pKeep, reason: p.reason, decidedBy: null }, a, provider, t)
-              proposals.push({ hash, ...row })
+              if (pending.has(hash)) said.set(hash, a)
             }
-            // the proposal write re-checks eligibility in SQL (store.ts saveCloudResults)
-            const written = new Set(this.withStore((s) => s.saveCloudResults(answers, proposals)))
-            for (const pr of proposals) {
-              if (!written.has(pr.hash)) continue
+            // each proposal is worked out in the saving transaction from the row as it is then, not from
+            // what this batch read before the request went out: a retrain may have re-scored the row
+            // meanwhile. The write re-checks eligibility in SQL (store.ts saveCloudResults)
+            const proposals = new Map<string, CascadeRow>()
+            const written = new Set(
+              this.withStore((s) =>
+                s.saveCloudResults(answers, {
+                  sorterVersion: SORTER_VERSION,
+                  hashes: [...said.keys()],
+                  combine: (hash, live) => {
+                    const row = applyCloud({ proposal: 'doubtful', confidence: live.confidence, pKeep: live.pKeep, reason: live.reason, decidedBy: null }, said.get(hash)!, provider, t)
+                    proposals.set(hash, row)
+                    return row
+                  }
+                })
+              )
+            )
+            for (const [hash, pr] of proposals) {
+              if (!written.has(hash)) continue
               counts.answered++
               if (pr.proposal === 'keep') counts.keep++
               else if (pr.proposal === 'throwaway') counts.throwaway++

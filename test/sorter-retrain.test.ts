@@ -269,4 +269,61 @@ describe('retrain: the switches and the stored record', () => {
       expect(storedRetrain(bad), JSON.stringify(bad).slice(0, 60)).toBeNull()
     }
   })
+
+  it('reads a stored record strictly: numbers in range, a real date, hashes shaped like hashes', () => {
+    const good = retrainRecord(new Date('2026-10-13T10:00:00.000Z'), 'round', report(312), report(322, 10), { rescored: 5, needALook: { before: 41, after: 18 }, movedToSure: { keep: 19, throwaway: 4 }, movedHashes: ['aa', 'p:0123abc'] })
+    const bads: unknown[] = [
+      { ...good, choices: { before: 312, after: Infinity } },
+      { ...good, choices: { before: 312, after: 322.5 } },
+      { ...good, needALook: { before: Number.NaN, after: 18 } },
+      { ...good, movedToSure: { keep: -1, throwaway: 4 } },
+      { ...good, movedToSure: { keep: '19', throwaway: 4 } },
+      { ...good, accuracy: { before: good.accuracy.before, after: { throwawayRight: 1.2, keepRight: 1 } } },
+      { ...good, accuracy: { before: { throwawayRight: Infinity, keepRight: 1 }, after: good.accuracy.after } },
+      { ...good, accuracy: { before: good.accuracy.before, after: { throwawayRight: Number.NaN, keepRight: 1 } } },
+      { ...good, at: 'not a date' },
+      { ...good, at: `2026-10-13T10:00:00.000Z${' '.repeat(60)}` },
+      { ...good, at: 1760349600000 },
+      { ...good, movedHashes: ['aa', 'has a space'] },
+      { ...good, movedHashes: ['a'.repeat(65)] },
+      { ...good, movedHashes: ['aa', 7] },
+      { ...good, movedHashes: 'aa' },
+      [good]
+    ]
+    for (const bad of bads) expect(storedRetrain(bad), JSON.stringify(bad).slice(0, 80)).toBeNull()
+    // 1e400 in stored JSON reads as Infinity
+    expect(storedRetrain(JSON.parse(JSON.stringify(good).replace('"after":322', '"after":1e400')))).toBeNull()
+    expect(storedRetrain({ ...good, movedHashes: Array.from({ length: 200 }, (_, i) => `h${i}`) })?.movedHashes).toHaveLength(200)
+  })
+
+  it('copies out only the fields a record has: anything stored beside them is dropped', () => {
+    const good = retrainRecord(new Date('2026-10-13T10:00:00.000Z'), 'auto', report(312), report(322, 10), { rescored: 5, needALook: { before: 41, after: 18 }, movedToSure: { keep: 19, throwaway: 4 }, movedHashes: ['aa'] })
+    const big = 'x'.repeat(1_000_000)
+    const stored = { ...good, extra: big, choices: { ...good.choices, extra: big }, needALook: { ...good.needALook, extra: big }, accuracy: { before: { ...good.accuracy.before, extra: big }, after: { ...good.accuracy.after, extra: big }, extra: big } }
+    const read = storedRetrain(stored)
+    expect(read).toEqual(good)
+    expect(JSON.stringify(read).length).toBeLessThan(600)
+    expect(read).not.toBe(stored)
+    expect(read!.movedHashes).not.toBe(stored.movedHashes)
+  })
+
+  it('logs one line when the record cannot be saved; the training stands', async () => {
+    const lines: string[] = []
+    const r = new Retrainer({
+      train: async () => ({ ok: true, report: report(100), before: null, moved: null }),
+      choices: () => ({ learnable: { kept: 60, binned: 40 }, trainedWith: 100 }),
+      changed: () => undefined,
+      power: { onBattery: () => false, onAc: () => undefined },
+      settings: () => ({}),
+      saveSettings: () => undefined,
+      lastRetrain: () => null,
+      saveLastRetrain: () => {
+        throw new Error('disk full at /Volumes/example/private')
+      },
+      log: (l) => void lines.push(l),
+      defer: () => undefined
+    })
+    expect((await r.retrain('manual')).ok).toBe(true)
+    expect(lines).toEqual(['[sorter] the last retrain could not be saved: Error'])
+  })
 })

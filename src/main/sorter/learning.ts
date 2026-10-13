@@ -23,7 +23,7 @@ import type { IndexItem } from '../picture-search/vector-store'
 import type { SorterLearning, SorterLearningPoint } from '../../preload'
 import { accuracyReport, holdOutSplit, HOLD_OUT_FRACTION, type LabelledPrediction } from './accuracy'
 import { appRuleLookup, storedAppRules } from './app-rules'
-import { MIN_CHOICES, moreChoicesNeeded } from './choices'
+import { MIN_CHOICES, moreChoicesNeeded, storedTime } from './choices'
 import { predictKeep, type Example } from './classifier'
 import { decide, DEFAULT_THRESHOLDS, type Thresholds } from './decide'
 import { runJob, type Job, type JobResult } from './jobs'
@@ -119,25 +119,37 @@ export type LearningDeps = {
 
 const UNTRAINED = 'untrained'
 
-const isPoint = (p: unknown): p is SorterLearningPoint => {
-  if (!p || typeof p !== 'object') return false
+const VERDICTS: ReadonlySet<unknown> = new Set(['not-enough', 'still-helping', 'levelling-off'])
+const count = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0
+const shareOrNull = (x: unknown): x is number | null => x === null || (typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= 1)
+
+/** One stored point, copied out; null when it is not one. */
+function storedPoint(p: unknown): SorterLearningPoint | null {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return null
   const x = p as Record<string, unknown>
-  const shareOrNull = (v: unknown): boolean => v === null || (typeof v === 'number' && v >= 0 && v <= 1)
-  return typeof x.choices === 'number' && x.choices >= 0 && shareOrNull(x.throwawayRight) && shareOrNull(x.needALook)
+  if (!count(x.choices) || !shareOrNull(x.throwawayRight) || !shareOrNull(x.needALook)) return null
+  return { choices: x.choices, throwawayRight: x.throwawayRight, needALook: x.needALook }
 }
 
-/** A stored reading for `key`; null when what is stored is for another training or is not a reading. */
+/**
+ * A stored reading for `key`, read strictly: only the fields a reading has are copied out (anything
+ * else stored beside them is dropped), every count is a whole number from 0, every share is 0..1,
+ * `trainedAt` is null or parses as a date and there are at most MAX_STEPS points. Null when what is
+ * stored is for another training or is not a reading (it is then computed again).
+ */
 export function storedLearning(raw: unknown, key: string): SorterLearning | null {
-  if (!raw || typeof raw !== 'object') return null
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const r = raw as { key?: unknown; learning?: unknown }
-  if (r.key !== key || !r.learning || typeof r.learning !== 'object') return null
+  if (r.key !== key || !r.learning || typeof r.learning !== 'object' || Array.isArray(r.learning)) return null
   const l = r.learning as Record<string, unknown>
-  const n = (x: unknown): boolean => typeof x === 'number' && Number.isFinite(x) && x >= 0
-  if (l.verdict !== 'not-enough' && l.verdict !== 'still-helping' && l.verdict !== 'levelling-off') return null
-  if (![l.more, l.minimum, l.choices, l.kept, l.thrownAway, l.heldBack].every(n)) return null
-  if (!Array.isArray(l.points) || l.points.length > MAX_STEPS || !l.points.every(isPoint)) return null
-  if (!(l.trainedAt === null || typeof l.trainedAt === 'string') || 'error' in l) return null
-  return r.learning as SorterLearning
+  if (!VERDICTS.has(l.verdict) || 'error' in l) return null
+  const { more, minimum, choices, kept, thrownAway, heldBack } = l
+  if (!count(more) || !count(minimum) || !count(choices) || !count(kept) || !count(thrownAway) || !count(heldBack)) return null
+  if (!Array.isArray(l.points) || l.points.length > MAX_STEPS) return null
+  const points = l.points.map(storedPoint)
+  if (points.some((p) => !p)) return null
+  if (!(l.trainedAt === null || storedTime(l.trainedAt))) return null
+  return { verdict: l.verdict as SorterLearning['verdict'], more, minimum, choices, kept, thrownAway, heldBack, points: points as SorterLearningPoint[], trainedAt: l.trainedAt }
 }
 
 export class LearningCurve {

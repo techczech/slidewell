@@ -100,6 +100,20 @@ export type CloudAnswerRow = LunaAnswer & { hash: string; provider: ProviderId; 
  */
 export type CloudScope = AnswerScope & { sorterVersion: string; others?: ReadonlyArray<AnswerScope>; throwawayAt: number; secondOpinions?: boolean }
 
+/** The proposal a cloud answer leads to, as saveCloudResults writes it. */
+export type CloudProposalRow = Pick<ProposalRow, 'hash' | 'proposal' | 'confidence' | 'pKeep' | 'reason' | 'decidedBy' | 'decidedModel'>
+
+/**
+ * Proposals worked out from the rows as they are when the answers are saved (saveCloudResults). For
+ * each of `hashes` whose proposal is still doubtful, undecided, unanswered and made under
+ * `sorterVersion`, `combine` gets that row's values and returns the row to write (null: leave it).
+ */
+export type LiveCombine = {
+  sorterVersion: string
+  hashes: string[]
+  combine: (hash: string, live: { confidence: number; pKeep: number; reason: string }) => Omit<CloudProposalRow, 'hash'> | null
+}
+
 /** A stored answer with who gave it, the model + prompt it was given under, and when. */
 export type StoredCloudAnswer = LunaAnswer & { provider: ProviderId; model: string; promptVersion: string; askedAt: string }
 
@@ -696,27 +710,48 @@ export class SorterStore {
    * Triage (review or Triage may have got there first). The row is updated in place: it stays in the
    * sort run that proposed it (run_id is not written here). Reasons arrive already redacted
    * (cloud/service.ts). Returns the hashes whose proposal changed.
+   *
+   * `proposals` is either rows already worked out, or (the cloud step) a LiveCombine: each proposal is
+   * then worked out inside the transaction from the row as it is now, never from what the batch read
+   * before its request went out. A row a retrain re-scored meanwhile keeps its new probability under
+   * its new model. With a LiveCombine a row is also left alone when it was not made under
+   * `sorterVersion`. Either way the answer itself is recorded, so the screenshot is not asked about again.
    */
-  saveCloudResults(answers: CloudAnswerRow[], proposals: Array<Pick<ProposalRow, 'hash' | 'proposal' | 'confidence' | 'pKeep' | 'reason' | 'decidedBy' | 'decidedModel'>>): string[] {
+  saveCloudResults(answers: CloudAnswerRow[], proposals: CloudProposalRow[] | LiveCombine): string[] {
     this.needAnswers()
-    if (!answers.length && !proposals.length) return []
+    const live = Array.isArray(proposals) ? null : proposals
+    const given = Array.isArray(proposals) ? proposals : []
+    if (!answers.length && !given.length && !live?.hashes.length) return []
     const now = new Date().toISOString()
     const putAnswer = this.db.prepare(
       `INSERT INTO sorter_cloud_answers (hash, provider, verdict, confidence, reason, model, prompt_version, asked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(hash, provider) DO UPDATE SET verdict = excluded.verdict, confidence = excluded.confidence, reason = excluded.reason,
          model = excluded.model, prompt_version = excluded.prompt_version, asked_at = excluded.asked_at`
     )
+    const open = `proposal = 'doubtful' AND answered_at IS NULL
+         ${hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = sorter_proposals.hash)' : ''}`
     const putProposal = this.db.prepare(
       `UPDATE sorter_proposals SET proposal = ?, confidence = ?, p_keep = ?, reason = ?, decided_by = ?, decided_model = ?, proposed_at = ?,
          throwaway_since = CASE WHEN ? = 'throwaway' THEN ? END
-       WHERE hash = ? AND proposal = 'doubtful' AND answered_at IS NULL
-         ${hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = sorter_proposals.hash)' : ''}`
+       WHERE hash = ? AND ${open}`
     )
+    const readLive = live ? this.db.prepare(`SELECT confidence, p_keep, reason FROM sorter_proposals WHERE hash = ? AND sorter_version = ? AND ${open}`) : null
     const changed: string[] = []
+    const put = (p: CloudProposalRow): void => {
+      if (Number(putProposal.run(p.proposal, p.confidence, p.pKeep, p.reason, p.decidedBy ?? null, p.decidedModel ?? null, now, p.proposal, now, p.hash).changes)) changed.push(p.hash)
+    }
     this.db.exec('BEGIN IMMEDIATE')
     try {
       for (const a of answers) putAnswer.run(a.hash, a.provider, a.verdict, a.confidence, a.reason, a.model, a.promptVersion, a.askedAt)
-      for (const p of proposals) if (Number(putProposal.run(p.proposal, p.confidence, p.pKeep, p.reason, p.decidedBy ?? null, p.decidedModel ?? null, now, p.proposal, now, p.hash).changes)) changed.push(p.hash)
+      for (const p of given) put(p)
+      if (live && readLive) {
+        for (const hash of live.hashes) {
+          const r = readLive.get(hash, live.sorterVersion) as { confidence: number; p_keep: number; reason: string } | undefined
+          if (!r) continue // decided, answered, no longer doubtful or from another sorter version: left alone
+          const next = live.combine(hash, { confidence: Number(r.confidence), pKeep: Number(r.p_keep), reason: r.reason })
+          if (next) put({ ...next, hash })
+        }
+      }
       this.db.exec('COMMIT')
     } catch (e) {
       this.db.exec('ROLLBACK')

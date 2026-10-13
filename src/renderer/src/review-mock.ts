@@ -126,6 +126,11 @@ export function reviewMock(): SwApi['review'] {
       }
     },
     page: async (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number): Promise<ReviewPage> => pageOf(pile, after, limit ?? 60),
+    // as main answers it: in the order asked for, at most 200, nothing that is in the Bin or gone
+    cards: async (hashes: string[]): Promise<ReviewCard[]> => {
+      const shown = new Map(live().filter((i) => view(i).pile !== 'bin').map((i) => [i.hash, i]))
+      return [...new Set(hashes)].slice(0, 200).flatMap((h) => (shown.has(h) ? [card(shown.get(h)!)] : []))
+    },
     act: async (hash: string, action: ReviewAction): Promise<ReviewActResult> => {
       const it = items.find((i) => i.hash === hash)
       if (!it) return { ok: false, hash, message: 'This screenshot is no longer in review.' }

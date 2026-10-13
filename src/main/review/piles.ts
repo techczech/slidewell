@@ -17,6 +17,11 @@
  * Throwaway with the full 30 days (when unsure, keep).
  */
 export const BIN_AFTER_DAYS = 30
+
+/** A screenshot's hash as it may arrive from the renderer or from stored config. */
+export const HASH = /^[A-Za-z0-9:_-]{1,64}$/
+/** At most this many screenshots are read by hash in one call (review/service.ts cards). */
+export const CARDS_MAX = 200
 const DAY_MS = 86_400_000
 
 export type ProposalLabel = 'keep' | 'throwaway' | 'doubtful'
@@ -159,7 +164,7 @@ export function decodeCursor(s: string | null | undefined): PileKey | null {
   if (!s) return null
   try {
     const k = JSON.parse(s)
-    return Array.isArray(k) && k.length === 3 && typeof k[0] === 'number' && typeof k[1] === 'number' && typeof k[2] === 'string' ? (k as PileKey) : null
+    return Array.isArray(k) && k.length === 3 && typeof k[0] === 'number' && Number.isFinite(k[0]) && typeof k[1] === 'number' && Number.isFinite(k[1]) && typeof k[2] === 'string' ? (k as PileKey) : null
   } catch {
     return null
   }

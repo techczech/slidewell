@@ -80,3 +80,6 @@ export const MIN_CHOICES = moreChoicesNeeded({ kept: 0, binned: 0 })
 export function teachDefaults(c: { learnable: Choices | null }): SorterTeachStatus {
   return { answersSinceTraining: 0, retrainEvery: RETRAIN_EVERY, autoRetrain: false, autoRetrainOnBattery: false, retraining: null, waitingForPower: null, choicesNeeded: moreChoicesNeeded(c.learnable), lastRetrain: null }
 }
+
+/** A time as stored in config: a short string that parses as a date. */
+export const storedTime = (x: unknown): x is string => typeof x === 'string' && x.length <= 40 && Number.isFinite(Date.parse(x))

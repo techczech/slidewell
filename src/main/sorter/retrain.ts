@@ -22,8 +22,9 @@
  */
 import type { RetrainTrigger, SorterRetrain, SorterRightShares, SorterTeachStatus } from '../../preload'
 import type { AccuracyReport } from './accuracy'
-import { answersSince, choicesAtTraining, moreChoicesNeeded, RETRAIN_EVERY, type Choices } from './choices'
+import { answersSince, choicesAtTraining, moreChoicesNeeded, RETRAIN_EVERY, storedTime, type Choices } from './choices'
 import { MOVED_HASHES_KEPT, type Rescore } from './rescore'
+import { HASH } from '../review/piles'
 
 /** Mains or battery, and a call when mains power returns. */
 export type PowerSeam = { onBattery: () => boolean; onAc: (cb: () => void) => void }
@@ -36,22 +37,43 @@ export function storedAutoRetrain(raw: { enabled?: unknown; onBattery?: unknown 
 }
 
 const TRIGGERS: ReadonlySet<unknown> = new Set(['manual', 'round', 'auto'])
-const count = (x: unknown): x is number => typeof x === 'number' && Number.isInteger(x) && x >= 0
-const share = (x: unknown): x is number | null => x === null || (typeof x === 'number' && x >= 0 && x <= 1)
-const pair = (x: unknown, a: string, b: string): boolean => Boolean(x) && typeof x === 'object' && count((x as Record<string, unknown>)[a]) && count((x as Record<string, unknown>)[b])
-const shares = (x: unknown): x is SorterRightShares => Boolean(x) && typeof x === 'object' && share((x as SorterRightShares).throwawayRight) && share((x as SorterRightShares).keepRight)
+const rec = (x: unknown): Record<string, unknown> | null => (x && typeof x === 'object' && !Array.isArray(x) ? (x as Record<string, unknown>) : null)
+const count = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0
+const share = (x: unknown): x is number | null => x === null || (typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= 1)
+/** Two counts under the names `a` and `b`, copied out; null when either is not a count. */
+function pair<A extends string, B extends string>(x: unknown, a: A, b: B): Record<A | B, number> | null {
+  const r = rec(x)
+  if (!r || !count(r[a]) || !count(r[b])) return null
+  return { [a]: r[a], [b]: r[b] } as Record<A | B, number>
+}
+function shares(x: unknown): SorterRightShares | null {
+  const r = rec(x)
+  if (!r || !share(r.throwawayRight) || !share(r.keepRight)) return null
+  return { throwawayRight: r.throwawayRight, keepRight: r.keepRight }
+}
 
-/** A stored SorterRetrain; null when what is stored is not one (nothing is guessed from it). */
+/**
+ * A stored SorterRetrain, read strictly: only the fields a record has are copied out (anything else
+ * stored beside them is dropped), every count is a whole number from 0, every share is 0..1, `at`
+ * parses as a date and there are at most MOVED_HASHES_KEPT hashes, each shaped like a hash. Null
+ * when what is stored is not one (nothing is guessed from it).
+ */
 export function storedRetrain(raw: unknown): SorterRetrain | null {
-  if (!raw || typeof raw !== 'object') return null
-  const r = raw as Record<string, unknown>
-  if (typeof r.at !== 'string' || !Number.isFinite(Date.parse(r.at)) || !TRIGGERS.has(r.trigger) || !pair(r.choices, 'before', 'after')) return null
+  const r = rec(raw)
+  if (!r || !storedTime(r.at) || !TRIGGERS.has(r.trigger)) return null
+  const choices = pair(r.choices, 'before', 'after')
+  if (!choices) return null
   const moved = r.needALook !== null || r.movedToSure !== null
-  if (moved && (!pair(r.needALook, 'before', 'after') || !pair(r.movedToSure, 'keep', 'throwaway'))) return null
-  const acc = r.accuracy as { before?: unknown; after?: unknown } | null
-  if (!acc || typeof acc !== 'object' || !(acc.before === null || shares(acc.before)) || !shares(acc.after)) return null
-  if (!Array.isArray(r.movedHashes) || r.movedHashes.length > MOVED_HASHES_KEPT || r.movedHashes.some((h) => typeof h !== 'string' || h.length > 64)) return null
-  return r as unknown as SorterRetrain
+  const needALook = moved ? pair(r.needALook, 'before', 'after') : null
+  const movedToSure = moved ? pair(r.movedToSure, 'keep', 'throwaway') : null
+  if (moved && (!needALook || !movedToSure)) return null
+  const acc = rec(r.accuracy)
+  if (!acc) return null
+  const before = acc.before === null ? null : shares(acc.before)
+  const after = shares(acc.after)
+  if (!after || (acc.before !== null && !before)) return null
+  if (!Array.isArray(r.movedHashes) || r.movedHashes.length > MOVED_HASHES_KEPT || !r.movedHashes.every((h) => typeof h === 'string' && HASH.test(h))) return null
+  return { at: r.at, trigger: r.trigger as RetrainTrigger, choices, needALook, movedToSure, accuracy: { before, after }, movedHashes: [...(r.movedHashes as string[])] }
 }
 
 const right = (a: AccuracyReport): SorterRightShares => ({ throwawayRight: a.throwaway.precision, keepRight: a.keep.precision })
@@ -87,6 +109,8 @@ export type RetrainDeps<R extends RetrainOutcome = RetrainOutcome> = {
   /** The last retrain as stored (storedRetrain reads it), and where to store one. */
   lastRetrain: () => unknown
   saveLastRetrain: (r: SorterRetrain) => void
+  /** One warning line for the log (no screenshot content, no paths). Default: console.warn. */
+  log?: (line: string) => void
   /** Run `fn` a moment later, off the current call. Default: a 400 ms timer. */
   defer?: (fn: () => void) => void
   now?: () => Date
@@ -220,8 +244,9 @@ export class Retrainer<R extends RetrainOutcome = RetrainOutcome> {
         this.settledAt = choicesAtTraining(result.report)
         try {
           this.deps.saveLastRetrain(retrainRecord(this.deps.now ? this.deps.now() : new Date(), trigger, result.before, result.report, result.moved))
-        } catch {
-          /* the training itself stands */
+        } catch (e) {
+          // the training itself stands; without the record "what moved" is gone after a restart
+          ;(this.deps.log ?? console.warn)(`[sorter] the last retrain could not be saved: ${(e as Error)?.name ?? 'error'}`)
         }
       } else if (trigger === 'auto') {
         if (result.busy) this.waitingForSorter = true

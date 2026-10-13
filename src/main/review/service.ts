@@ -19,7 +19,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ReviewActResult, ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewUndoResult, EmptyBinResult, TeachQueue } from '../../preload'
-import { binToken, compareKeys, keysetPage, pileKey, pileOf, planAction, summarise, teachKey, BIN_AFTER_DAYS, type PileKey, type PileView, type ReviewAction } from './piles'
+import { binToken, CARDS_MAX, compareKeys, HASH, keysetPage, pileKey, pileOf, planAction, summarise, teachKey, BIN_AFTER_DAYS, type PileKey, type PileView, type ReviewAction } from './piles'
 import { newestFirst, readReviewRows, timeOf, type ReviewRow } from './store'
 import { putTriageDecision, promoteTriageHashes, writeEmptiedMarkers, type PromoteResult, type TriageDecisionRow } from '../triage'
 import { SorterStore } from '../sorter/store'
@@ -198,6 +198,23 @@ export class ReviewService {
     return this.serial(() => {
       const pg = keysetPage(this.pileItems(this.items(), pile), this.key, after, pageSize(limit))
       return { total: pg.total, items: pg.items.map((i) => this.card(i)), next: pg.next }
+    })
+  }
+
+  /**
+   * The cards for these screenshots, in the order asked for (ticket 23, "See what moved"): at most
+   * CARDS_MAX of them, each once. Only what Review shows outside the Bin is answered: a screenshot
+   * that is in the Bin, was emptied from it, has no proposal or is not a valid hash is left out.
+   * Reads only.
+   */
+  cards(hashes: string[]): Promise<ReviewCard[]> {
+    return this.serial(() => {
+      const want = [...new Set(Array.isArray(hashes) ? hashes.filter((h) => typeof h === 'string' && HASH.test(h)) : [])].slice(0, CARDS_MAX)
+      if (!want.length) return []
+      const asked = new Set(want)
+      const found = new Map<string, Item>()
+      for (const i of this.items()) if (asked.has(i.row.hash) && i.view.pile !== 'bin') found.set(i.row.hash, i)
+      return want.flatMap((h) => (found.has(h) ? [this.card(found.get(h)!)] : []))
     })
   }
 

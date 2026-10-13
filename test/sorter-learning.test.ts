@@ -146,4 +146,34 @@ describe('learning curve: the reading', () => {
       expect(storedLearning(bad, 't1'), JSON.stringify(bad).slice(0, 50)).toBeNull()
     }
   })
+
+  it('reads a stored reading strictly and copies out only its own fields', () => {
+    const good: SorterLearning = { verdict: 'still-helping', more: 0, minimum: 92, choices: 312, kept: 228, thrownAway: 84, heldBack: 60, points: curve([[156, 0.87, 0.25], [312, 0.91, 0.135]]), trainedAt: '2026-10-13T09:00:00.000Z' }
+    const point = good.points[0]
+    const bads: unknown[] = [
+      { ...good, points: [{ ...point, choices: Infinity }] },
+      { ...good, points: [{ ...point, choices: 156.5 }] },
+      { ...good, points: [{ ...point, choices: '156' }] },
+      { ...good, points: [{ ...point, needALook: Number.NaN }] },
+      { ...good, points: [{ ...point, throwawayRight: -0.1 }] },
+      { ...good, points: [point, null] },
+      { ...good, points: Array(7).fill(point) },
+      { ...good, trainedAt: 'not a date' },
+      { ...good, trainedAt: 1760349600000 },
+      { ...good, heldBack: Infinity },
+      { ...good, kept: 228.4 },
+      { ...good, minimum: undefined },
+      [good]
+    ]
+    for (const bad of bads) expect(storedLearning({ key: 't1', learning: bad }, 't1'), JSON.stringify(bad).slice(0, 80)).toBeNull()
+    // 1e400 in stored JSON reads as Infinity
+    expect(storedLearning(JSON.parse(JSON.stringify({ key: 't1', learning: good }).replace('"choices":156', '"choices":1e400')), 't1')).toBeNull()
+    expect(storedLearning({ key: 't1', learning: { ...good, trainedAt: null } }, 't1')).toEqual({ ...good, trainedAt: null })
+    const big = 'x'.repeat(1_000_000)
+    const stored = { key: 't1', extra: big, learning: { ...good, extra: big, points: good.points.map((p) => ({ ...p, extra: big })) } }
+    const read = storedLearning(stored, 't1')
+    expect(read).toEqual(good)
+    expect(JSON.stringify(read).length).toBeLessThan(600)
+    expect(read).not.toBe(stored.learning)
+  })
 })

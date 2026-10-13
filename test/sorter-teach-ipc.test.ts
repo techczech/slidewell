@@ -34,10 +34,30 @@ describe('IPC: teaching the sorter', () => {
     await call('sorter:teach-queue', null, 10)
     await call('sorter:teach-queue', '[0.1,-5,"abc"]', 500)
     expect(calls).toEqual([['queue', null, undefined], ['queue', null, 10], ['queue', '[0.1,-5,"abc"]', 500]])
-    for (const bad of [[7], [{}], ['x'.repeat(401)], [null, 0], [null, 501], [null, 2.5], [null, '10'], [null, Number.NaN]]) {
+    for (const bad of [[7], [{}], ['x'.repeat(401)], [null, 0], [null, 501], [null, 2.5], [null, '10'], [null, Number.NaN], [null, null]]) {
       expect(() => call('sorter:teach-queue', ...bad), JSON.stringify(bad).slice(0, 40)).toThrow('sorter:teach-queue: bad arguments')
     }
     expect(calls).toHaveLength(3)
+  })
+
+  it('teach-queue refuses a cursor that does not decode, rather than starting again from the first page', () => {
+    for (const bad of ['not-json', '', '[]', '[0.1,-5]', '[0.1,-5,"abc",1]', '["0.1",-5,"abc"]', '[0.1,-5,7]', '{"0":0.1,"1":-5,"2":"abc"}', '[1e999,-5,"abc"]', 'null', `[0.1,-5,"${'a'.repeat(400)}"]`]) {
+      expect(() => call('sorter:teach-queue', bad, 10), bad.slice(0, 40)).toThrow('sorter:teach-queue: bad arguments')
+    }
+    expect(calls).toEqual([])
+  })
+
+  it('every handler refuses an argument it does not take', () => {
+    const cursor = '[0.1,-5,"abc"]'
+    expect(() => call('sorter:teach-queue', cursor, 10, 'more')).toThrow('sorter:teach-queue: bad arguments')
+    expect(() => call('sorter:teach-queue', null, 10, undefined)).toThrow('sorter:teach-queue: bad arguments')
+    expect(() => call('sorter:learning', 'now')).toThrow('sorter:learning: bad arguments')
+    expect(() => call('sorter:learning', undefined)).toThrow('sorter:learning: bad arguments')
+    expect(() => call('sorter:retrain-now', 'manual', 'auto')).toThrow('sorter:retrain-now: bad arguments')
+    expect(() => call('sorter:retrain-now', 'round', undefined)).toThrow('sorter:retrain-now: bad arguments')
+    expect(() => call('sorter:set-auto-retrain', { enabled: true }, { onBattery: true })).toThrow('sorter:set-auto-retrain: bad arguments')
+    expect(() => call('sorter:set-auto-retrain')).toThrow('sorter:set-auto-retrain: bad arguments')
+    expect(calls).toEqual([])
   })
 
   it('retrain-now is manual unless the round ended; a retrain by itself cannot be asked for', async () => {
@@ -45,7 +65,7 @@ describe('IPC: teaching the sorter', () => {
     await call('sorter:retrain-now', 'manual')
     await call('sorter:retrain-now', 'round')
     expect(calls).toEqual([['retrain', 'manual'], ['retrain', 'manual'], ['retrain', 'round']])
-    for (const bad of ['auto', 'nightly', 1, {}, true]) expect(() => call('sorter:retrain-now', bad), String(bad)).toThrow('sorter:retrain-now: bad arguments')
+    for (const bad of ['auto', 'nightly', 1, {}, true, null, '', ['manual']]) expect(() => call('sorter:retrain-now', bad), String(bad)).toThrow('sorter:retrain-now: bad arguments')
     expect(calls).toHaveLength(3)
   })
 

@@ -1,23 +1,14 @@
 // "See what moved" (frame B2, ticket 23): Review narrowed to the screenshots the last retrain moved to sure,
-// with a way back. Main gives the hashes (up to 200); there is no read by hash, so this pages through the Kept and
-// Throwaway piles until every hash is found or both piles end. Read-only: nothing here decides anything.
+// with a way back. Main gives the hashes (up to 200) and their cards in one read by hash (review.cards), which leaves
+// out anything in the Bin or gone. One that is no longer sure (sorted again since, back in Need a look) is not shown.
+// Read-only: nothing here decides anything.
 import { useEffect, useState } from 'react'
 import type { ReviewCard } from '../../preload'
 import { Shot } from './ReviewShot'
 
 async function findCards(hashes: string[]): Promise<ReviewCard[]> {
-  const want = new Set(hashes)
-  const found = new Map<string, ReviewCard>()
-  for (const pile of ['kept', 'throwaway'] as const) {
-    let cursor: string | null = null
-    do {
-      const pg: { items: ReviewCard[]; next: string | null } = await window.sw.review.page(pile, cursor, 500)
-      for (const c of pg.items) if (want.has(c.hash)) found.set(c.hash, c)
-      cursor = found.size >= want.size ? null : pg.next
-    } while (cursor)
-    if (found.size >= want.size) break
-  }
-  return hashes.map((h) => found.get(h)).filter((c): c is ReviewCard => Boolean(c))
+  const cards = await window.sw.review.cards(hashes.slice(0, 200))
+  return cards.filter((c) => c.pile === 'kept' || c.pile === 'throwaway')
 }
 
 export function ReviewMoved({ hashes, onBack }: { hashes: string[]; onBack: () => void }): JSX.Element {
