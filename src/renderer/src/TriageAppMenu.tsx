@@ -119,6 +119,8 @@ export function TriageAppMenu({ state, ticked, onChange, version }: { state: str
   )
 }
 
+const EXCLUDE_AFTER = 'In Excluded, U puts one back. Your files are not touched. Each counts as a thrown-away example when the sorter next trains.'
+
 /** Above the Undecided grid while apps are ticked: the count, what he kept before, Exclude all and Select all. */
 export function TriageAppBar({ ticked, version, onDecided }: { ticked: string[]; version: number; onDecided: () => void }): JSX.Element | null {
   const rows = useAppCounts('undecided', version)
@@ -168,7 +170,8 @@ export function TriageAppBar({ ticked, version, onDecided }: { ticked: string[];
     setBusy(false)
     if (r.ok) {
       const left = r.skipped > 0 ? ` ${n(r.skipped)} left undecided because the same picture also appears under another app.` : ''
-      setResult(`${action === 'exclude' ? 'Excluded' : 'Selected'} ${n(r.changed)} screenshot${r.changed === 1 ? '' : 's'} from ${from}.${left}`)
+      const after = action === 'exclude' ? ` ${EXCLUDE_AFTER}` : ''
+      setResult(`${action === 'exclude' ? 'Excluded' : 'Selected'} ${n(r.changed)} screenshot${r.changed === 1 ? '' : 's'} from ${from}.${left}${after}`)
     }
     else setResult(r.refused === 'count-changed' ? 'The count changed. Nothing was decided.' : 'Nothing was decided.')
     onDecided() // reload the grid and the counts either way
@@ -214,7 +217,9 @@ export function TriageAppBar({ ticked, version, onDecided }: { ticked: string[];
               {verb} all {n(total)} undecided screenshot{total === 1 ? '' : 's'} from {from}?
             </h3>
             <p>
-              {ask === 'exclude' ? 'They move to Excluded.' : 'They are marked Selected, ready to import.'} Each counts as one of your choices. No file is moved or deleted.
+              {ask === 'exclude'
+                ? `They move to Excluded. ${EXCLUDE_AFTER}`
+                : 'They are marked Selected, ready to import. Each counts as one of your choices. No file is moved or deleted.'}
             </p>
             <div className="sorter-cloud-confirm-btns">
               <button className="copyref" onClick={() => setAsk(null)}>

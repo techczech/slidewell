@@ -99,7 +99,7 @@ function installFake() {
   ]
   const WHO = ['rules', 'history', 'luna', 'haiku']
   const CARD_APPS = ['Brightloom', 'Quillpad', 'TalkWeaver', 'Mossgrid', 'Finder', null]
-  const REASONS = { keep: ['Looks like a chart — usually kept', 'Looks like screenshots you kept before', 'A diagram with labels'], throwaway: ['TalkWeaver, WriteFlex or SlideWell screen — usually throwaway', 'Finder window — usually throwaway; looks like screenshots you binned before', 'Looks like screenshots you binned before'], doubtful: ['Not sure: it looks a bit like screenshots you kept, but not clearly'] }
+  const REASONS = { keep: ['Looks like a chart — usually kept', 'Looks like screenshots you kept before', 'A diagram with labels'], throwaway: ['TalkWeaver, WriteFlex or SlideWell screen — usually throwaway', 'Finder window — usually throwaway; looks like screenshots you threw away before', 'Looks like screenshots you threw away before'], doubtful: ['Not sure: it looks a bit like screenshots you kept, but not clearly'] }
   const decisions = {} // hash → 'selected' | 'excluded'
   const cardsOf = {}
   for (const r of runDefs) {
@@ -144,9 +144,24 @@ function installFake() {
       sw.sorter = {
         status: async () => ({ ...sorter }),
         train: async () => { calls.train++; return { ok: true } },
-        teachQueue: async () => ({ total: 0, items: [], next: null }),
+        // the round of ten reads the review mock's unsure ones, most unsure first; calls.emptyQueue = true says there are none
+        teachQueue: async (after, limit) => {
+          if (window.__fake.calls.emptyQueue) return { total: 0, items: [], next: null }
+          const ov = await sw.review.overview({ queue: 500, sample: 0, order: 'teach' })
+          return { total: ov.queue.length, items: ov.queue.slice(0, limit ?? 10), next: null }
+        },
         learning: async () => ({ ...learning }),
-        retrainNow: async (t) => { calls.retrainNow.push(t); return { ok: true } },
+        retrainNow: async (t) => {
+          calls.retrainNow.push(t)
+          if (t === 'round') {
+            const ov = await sw.review.overview({ queue: 500, sample: 0, order: 'teach' })
+            const nl = calls.retrainNull ? null : { before: ov.needALook + 3, after: ov.needALook }
+            sorter.lastRetrain = { at: new Date().toISOString(), trigger: 'round', choices: { before: 312, after: 322 }, needALook: nl, movedToSure: nl ? { keep: 2, throwaway: 1 } : null, accuracy: { before: { throwawayRight: 0.91, keepRight: 0.95 }, after: { throwawayRight: 0.94, keepRight: 0.96 } }, movedHashes: ['m030', 'm031', 'm032'] }
+            sorter.answersSinceTraining = 0
+            push()
+          }
+          return { ok: true }
+        },
         setAutoRetrain: async (patch) => {
           calls.setAutoRetrain.push(patch)
           if (patch.enabled !== undefined) sorter.autoRetrain = patch.enabled
@@ -242,7 +257,7 @@ try {
     let real
     Object.defineProperty(window, 'sw', { configurable: true, get: () => real, set: (v) => { real = v; window.__fake.install(v) } })
   })
-  await page.goto(url)
+  await page.goto(url + '?reviewUnsure=6')
   await page.waitForSelector('.view-switch')
   const fake = (fn, arg) => page.evaluate(fn, arg)
   const tabs = () => page.locator('.view-switch .scope-tab').allInnerTexts()
@@ -288,12 +303,14 @@ try {
   await page.locator('.tam-exclude').click()
   const ask = await text('.tri-confirm')
   check('Exclude all asks once, naming the count and the apps', ask.includes('Exclude all 311 undecided screenshots from 2 apps?') && (await fakeCalls('decideAll')).length === 0, ask)
+  check('the Exclude all box says they go to Excluded, U puts one back, files are untouched, each counts as a thrown-away example', ask.includes('They move to Excluded.') && ask.includes('U puts one back') && ask.includes('Your files are not touched') && ask.includes('thrown-away example when the sorter next trains') && !/binned/i.test(ask), ask)
+  await shoot(page, 'exclude-all-confirm.png')
   await page.locator('.tri-confirm button', { hasText: 'Not now' }).click()
   check('Not now decides nothing', (await fakeCalls('decideAll')).length === 0 && (await page.locator('.tri-confirm').count()) === 0)
   await page.locator('.tam-exclude').click()
   await page.locator('.tam-confirm-go').click()
   await page.waitForSelector('.tam-result')
-  check('confirming sends the apps, the action and the shown count; the result is shown', JSON.stringify(await fakeCalls('decideAll')) === '[[["TalkWeaver","Mossgrid"],"exclude",311]]' && (await text('.tam-result')) === 'Excluded 311 screenshots from 2 apps.', await text('.tam-result'))
+  check('confirming sends the apps, the action and the shown count; the result is shown', JSON.stringify(await fakeCalls('decideAll')) === '[[["TalkWeaver","Mossgrid"],"exclude",311]]' && (await text('.tam-result')) === 'Excluded 311 screenshots from 2 apps. In Excluded, U puts one back. Your files are not touched. Each counts as a thrown-away example when the sorter next trains.', await text('.tam-result'))
   await page.locator('.tam-btn').click()
   await page.locator('.tam-foot .tam-clear').click()
   await page.locator('.tam-app', { hasText: 'Brightloom' }).click()
@@ -310,7 +327,7 @@ try {
   await page.locator('.tam-exclude').click()
   await page.locator('.tam-confirm-go').click()
   await page.waitForFunction(() => document.querySelector('.tam-result')?.textContent?.startsWith('Excluded'))
-  check('a bulk result with skipped rows says how many were left and why', (await text('.tam-result')) === 'Excluded 411 screenshots from Brightloom. 1 left undecided because the same picture also appears under another app.', await text('.tam-result'))
+  check('a bulk result with skipped rows says how many were left and why', (await text('.tam-result')) === 'Excluded 411 screenshots from Brightloom. 1 left undecided because the same picture also appears under another app. In Excluded, U puts one back. Your files are not touched. Each counts as a thrown-away example when the sorter next trains.', await text('.tam-result'))
   await fake(() => { const b = window.__fake.apps.find((a) => a.app === 'Brightloom'); b.undecided = 412; b.thrownAway = 11 }) // back to the starting numbers for the later checks
 
   await page.locator('.tam-btn').click()
@@ -319,6 +336,7 @@ try {
   check('Clear empties the filter and the bar', (await page.locator('.tam-btn').innerText()) === 'App ▾' && (await page.locator('[data-testid=app-bar]').count()) === 0 && (await fake(() => window.__fake.calls.list.at(-1)))[5] === undefined)
 
   // --- Auto sorting, trained ---
+  await fake(() => { const a = window.__fake.apps; a.splice(a.length - 1, 0, { app: 'Tinyview', kept: 1, thrownAway: 2, undecided: 5, builtIn: null, rule: null }, { app: 'Vaultnote', kept: 0, thrownAway: 4, undecided: 3, builtIn: null, rule: null }) })
   await page.locator('.triage-controls .scope-tab', { hasText: 'Auto sorting' }).click()
   await page.waitForSelector('.as-tab .as-sort')
   check('grid controls are off, with the one-line note', (await page.locator('.triage-controls .search-input, .triage-controls .triage-cols, .triage-controls .triage-sort').count()) === 0 && (await text('.triage-auto-note')) === 'Search, grid size and date grouping apply to the first four tabs only.')
@@ -379,6 +397,14 @@ try {
   const brightloom = (await rowOf('Brightloom').innerText()).replace(/\s+/g, ' ')
   check('table row: kept with share, thrown away, still undecided', brightloom.startsWith('Brightloom 40 78% 11 412'), brightloom)
   check('"App not known" is the last row', (await page.locator('.gb-table tbody tr').last().innerText()).startsWith('App not known'))
+  check('the goes-by table folds apps with fewer than 5 decided, no rule and no suggestion behind "Show all 9 apps"', (await page.locator('.gb-table tbody tr').count()) === 7 && (await rowOf('Tinyview').count()) === 0 && (await text('.gb-fold')) === 'Show all 9 apps', await text('.gb-fold'))
+  await page.locator('.gb').evaluate((e) => e.scrollIntoView({ block: 'start' }))
+  await shoot(page, 'goes-by-folded.png')
+  await page.locator('.gb-fold').click()
+  check('Show all reveals them, and a second press folds again', (await page.locator('.gb-table tbody tr').count()) === 9 && (await rowOf('Tinyview').count()) === 1 && (await text('.gb-fold')) === 'Show fewer apps')
+  await page.locator('.gb-fold').click()
+  check('Show fewer apps folds them again', (await page.locator('.gb-table tbody tr').count()) === 7)
+  await fake(() => { const a = window.__fake.apps; a.splice(a.findIndex((x) => x.app === 'Tinyview'), 2) })
   check('built-in rule: muted, labelled, no chip when it agrees', (await rowOf('TalkWeaver').locator('label.on.bi').innerText()) === 'Usually throw away' && (await rowOf('TalkWeaver').innerText()).includes('Built-in rule') && (await rowOf('TalkWeaver').locator('.gb-chip').count()) === 0)
   const claude = (await rowOf('Claude').innerText()).replace(/\s+/g, ' ')
   check('clash: built-in keep with the chip text and button from main', claude.includes('Built-in rule') && claude.includes('Built-in rule says keep, but you threw away 90% — change to Usually throw away? Change rule'), claude)
@@ -533,6 +559,82 @@ try {
   await fake(() => { window.__fake.cloud.lastRun = window.__fake.lastRunKeep; window.__fake.push() })
   await fake(() => { Object.assign(window.__fake.sorter, { rulesChangedSinceTest: false, canRunUnattended: true }); window.__fake.push() })
   await page.waitForFunction(() => !document.querySelector('.as-rules-changed'))
+
+  // --- the round of ten (ticket 24); the page has 12 unsure screenshots (?reviewUnsure=6) ---
+  const roundAnswers = () => page.locator('.tr-list li').evaluateAll((l) => l.map((e) => e.dataset.answer))
+  const needNow = () => fake(() => window.sw.review.overview({ queue: 1, sample: 0 }).then((o) => o.needALook))
+  const answer = async (key, next) => {
+    await page.keyboard.press(key)
+    await page.waitForFunction((c) => document.querySelector('[data-testid=round-count]')?.textContent === c || document.querySelector('[data-testid=round-result]'), next)
+  }
+  const needBefore = await needNow()
+  const decidesBefore = await fakeCalls('decide')
+  await page.locator('.as-training .sr-teach').click()
+  await page.waitForSelector('.tr-round[data-phase=asking]')
+  check('"Teach the sorter (10)" opens the round over Triage: 1 of 10, the guess, the list of ten, no short-round line', needBefore === 12 && (await text('[data-testid=round-count]')) === '1 of 10' && (await text('.tr-round')).includes('Leaning') && (await page.locator('.tr-list li').count()) === 10 && (await page.locator('.tr-short').count()) === 0)
+  check('the round has no "binned" or "deck" and says Throw away on its button', !/binned|\bdeck\b/i.test(await text('.tr-round')) && (await text('.tr-answer.toss')).startsWith('T') && (await text('.tr-answer.toss')).includes('Throw away'))
+  await shoot(page, 'round-1-asking.png')
+  const first = await page.locator('.tr-big').getAttribute('data-hash')
+  await answer('k', '2 of 10')
+  const afterK = await fake(() => window.sw.review.overview({ queue: 50, sample: 0 }).then((o) => ({ left: o.queue.map((c) => c.hash), need: o.needALook })))
+  check('K is a real decision: the screenshot leaves the Review queue', !afterK.left.includes(first) && afterK.need === needBefore - 1, JSON.stringify(afterK))
+  await answer('t', '3 of 10')
+  await answer('ArrowDown', '4 of 10')
+  check('K, T and the down arrow: keep, thrown away, skipped; a skip is not a decision', (await roundAnswers()).slice(0, 4).join(',') === 'keep,throwaway,skipped,' && (await needNow()) === needBefore - 2)
+  check('Triage did not also act on the keys while the round was open', (await fakeCalls('decide')) === decidesBefore)
+  await answer('k', '5 of 10')
+  await answer('t', '6 of 10')
+  await answer('k', '7 of 10')
+  await answer('t', '8 of 10')
+  await answer('k', '9 of 10')
+  await answer('t', '10 of 10')
+  await page.keyboard.press('k')
+  await page.waitForSelector('[data-testid=round-result]')
+  check('after the last answer the sorter retrains once, with trigger round', JSON.stringify(await fakeCalls('retrainNow')) === '["round"]', JSON.stringify(await fakeCalls('retrainNow')))
+  const res = await text('[data-testid=round-result]')
+  check('result: answered 9 (one skipped), what moved, accuracy, Another 10 / Done / See what moved', res.includes('You answered 9.') && res.includes('The sorter retrained.') && res.includes('Retrained on 322 choices: 5 kept and 4 thrown away this round.') && (await text('[data-testid=round-moved]')).startsWith('3') && (await text('[data-testid=round-accuracy]')).includes('91% → 94%') && res.includes('Keep right: 95% → 96%') && res.includes('Another 10') && res.includes('Done') && res.includes('See what moved') && res.includes('Next ten would be the 3 least certain of the 3 still waiting.'), res)
+  check('result: plain figures only, no "binned", no claim that targeted answers help more', !/binned|\bdeck\b|likely to help|least sure about\. Your/i.test(res))
+  await shoot(page, 'round-2-result.png')
+  await page.keyboard.press('Enter')
+  await page.waitForSelector('.tr-round[data-phase=asking]')
+  check('Return = Another 10: a fresh queue of the three left (1 of 3)', (await text('[data-testid=round-count]')) === '1 of 3' && (await text('.tr-short')).includes('Only 3 screenshots are unsure, so this round has 3.'))
+  await answer('ArrowDown', '2 of 3')
+  await answer('ArrowDown', '3 of 3')
+  await page.keyboard.press('ArrowDown')
+  await page.waitForSelector('[data-testid=round-result][data-kind=none-answered]')
+  check('if every one was skipped nothing is retrained and it says so', (await fakeCalls('retrainNow')).length === 1 && (await text('[data-testid=round-result]')).includes('Nothing was answered, so the sorter did not retrain.'))
+  await page.keyboard.press('Escape')
+  check('Esc leaves the round', (await page.locator('.tr-round').count()) === 0)
+  await fake(() => { window.__fake.calls.emptyQueue = true })
+  await page.locator('.as-training .sr-teach').click()
+  await page.waitForSelector('[data-testid=round-nothing]')
+  check('with nothing unsure it says there is nothing unsure to ask about', (await text('[data-testid=round-nothing]')).includes('There is nothing unsure to ask about.'))
+  await shoot(page, 'round-3-nothing-unsure.png')
+  await page.locator('[data-testid=round-nothing] button', { hasText: 'Done' }).click()
+  await fake(() => { window.__fake.calls.emptyQueue = false })
+  const need3 = await needNow()
+  await page.locator('.as-training .sr-teach').click()
+  await page.waitForSelector('.tr-round[data-phase=asking]')
+  await page.keyboard.press('k')
+  await page.waitForFunction(() => document.querySelector('[data-testid=round-count]')?.textContent === '2 of 3')
+  await page.keyboard.press('Escape')
+  check('Esc mid-round leaves it, and the answer already given stays', (await page.locator('.tr-round').count()) === 0 && (await needNow()) === need3 - 1)
+  await fake(() => { window.__fake.calls.retrainNull = true })
+  await page.locator('.as-training .sr-teach').click()
+  await page.waitForSelector('.tr-round[data-phase=asking]')
+  check('the round is as long as there are unsure ones, and says so', (await text('[data-testid=round-count]')) === '1 of 2' && (await text('.tr-short')).includes('Only 2 screenshots are unsure, so this round has 2.'))
+  await answer('k', '2 of 2')
+  await page.keyboard.press('k')
+  await page.waitForSelector('[data-testid=round-result]')
+  check('when what moved could not be checked: plain "retrained" with the accuracy figures', (await page.locator('[data-testid=round-moved]').count()) === 0 && (await text('[data-testid=round-accuracy]')).includes('91% → 94%') && (await text('[data-testid=round-result]')).includes('The sorter retrained.'))
+  await page.locator('[data-testid=round-result] button', { hasText: 'See what moved' }).click()
+  await page.waitForSelector('.rv-screen[data-mode=moved]')
+  check('"See what moved" closes the round and opens the moved view in Review', (await page.locator('.tr-round').count()) === 0 && (await page.locator('.view-switch .scope-tab.active').innerText()).startsWith('Review'))
+  await page.locator('.view-switch .scope-tab', { hasText: 'Triage' }).click()
+  await page.waitForSelector('.as-tab, .triage-panel')
+  await page.locator('.triage-controls .scope-tab', { hasText: 'Auto sorting' }).click()
+  await page.waitForSelector('.as-tab .as-sort')
+  await fake(() => { window.__fake.calls.retrainNull = false })
 
   // --- Review what it sorted, Change in Settings ---
   await page.locator('.as-review-link').click()

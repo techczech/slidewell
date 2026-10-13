@@ -83,6 +83,18 @@ export function retrainSummary(r: SorterRetrain): string {
   return parts.join(' ')
 }
 
+// ---------------------------------------------------------------- the round of ten
+
+/** "Retrained on 322 choices: 6 kept and 4 thrown away this round." */
+export const roundRetrainLine = (choices: number, kept: number, thrown: number): string =>
+  `Retrained on ${n(choices)} ${choices === 1 ? 'choice' : 'choices'}: ${n(kept)} kept and ${n(thrown)} thrown away this round.`
+
+/** "91% → 94%"; just "94%" when there was no earlier figure; null when the sorter proposed none of that kind. */
+export function shareChange(before: number | null | undefined, after: number | null | undefined): string | null {
+  if (after === null || after === undefined) return null
+  return before === null || before === undefined ? `${wholePct(after)}%` : `${wholePct(before)}% → ${wholePct(after)}%`
+}
+
 // ---------------------------------------------------------------- the reading
 
 /** Throwaway-right gain per extra 50 choices between neighbouring points, in percentage points ("+9, +4, +2.5"). */

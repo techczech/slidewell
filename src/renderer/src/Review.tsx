@@ -6,6 +6,7 @@ import type { ReviewCard, ReviewOverview, ReviewPiles } from '../../preload'
 import { ReviewMoved } from './ReviewMoved'
 import { Shot } from './ReviewShot'
 import { ReviewStrip } from './ReviewStrip'
+import { onMovedRequest, takePendingMoved } from './teach-round'
 import { useSorterStatus } from './sorter-hooks'
 import { certainty } from './teach-format'
 
@@ -83,6 +84,19 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
   const [movedHashes, setMovedHashes] = useState<string[]>([])
   const st = useSorterStatus()
   const busy = useRef(false)
+
+  // "See what moved" from the end of a teaching round: open the moved view, as the strip's link does
+  useEffect(() => {
+    const apply = (): void => {
+      const h = takePendingMoved()
+      if (h) {
+        setMovedHashes(h)
+        setMode('moved')
+      }
+    }
+    apply()
+    return onMovedRequest(apply)
+  }, [])
 
   const load = useCallback(async (): Promise<void> => {
     const o = await window.sw.review.overview({ queue: 50, sample: 12, order: teachFirst ? 'teach' : 'newest' })

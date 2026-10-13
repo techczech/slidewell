@@ -74,6 +74,13 @@ function seed(now: number): MockItem[] {
   // ?reviewBin=N adds N more items past 30 days (paging and Empty Bin at scale in the UI test)
   const extra = Number(new URLSearchParams(globalThis.location?.search ?? '').get('reviewBin')) || 0
   for (let i = 0; i < extra; i++) out.push(item('throwaway', 'Finder', `Old download ${i + 1}`, 'Looks like screenshots you threw away before.', 31 + (i % 60)))
+  // ?reviewUnsure=N adds N more unsure ones (a full round of ten in the browser preview and the UI tests)
+  const more = Number(new URLSearchParams(globalThis.location?.search ?? '').get('reviewUnsure')) || 0
+  const extraUnsure: Array<[string, string]> = [['Quillpad', 'Meeting notes'], ['Mossgrid', 'Board view'], ['Brightloom', 'Timeline'], ['Finder', 'Recents'], ['Claude', 'Draft reply'], ['Slack', 'Thread with a diagram'], ['Outlook', 'Calendar'], ['Google Chrome', 'Error page'], ['WriteFlex', 'Outline'], ['Terminal', 'Build output']]
+  for (let i = 0; i < more; i++) {
+    const [app, win] = extraUnsure[i % extraUnsure.length]
+    out.push(unsure(0.3 + (i % 7) * 0.05, `Few screenshots like it so far, so it has little to compare with (${app}).`, item('doubtful', app, `${win} ${i + 1}`, 'Not sure: it looks a bit like screenshots you kept, but not clearly.')))
+  }
   return out
 }
 

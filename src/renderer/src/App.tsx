@@ -8,6 +8,7 @@ import { AutoSortingTab } from './AutoSortingTab'
 import { TriageAppBar, TriageAppMenu, useTickedApps } from './TriageAppMenu'
 import { useSorterBusy } from './sorter-hooks'
 import { ReviewScreen } from './Review'
+import { TeachRoundHost } from './TeachRound'
 import { RELATED_SHOWN, relatedFold } from './match-fold'
 import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, Stats, TriageItem, TriageCounts, Dependency, FromFilter, KindFilter, FromCounts, MatchMode, MoreLikeThisResult } from '../../preload'
 
@@ -638,6 +639,7 @@ export default function App(): JSX.Element {
         </div>
       </header>
 
+      <TeachRoundHost onShowReview={() => setAppView('review')} />
       {appView === 'review' && <ReviewScreen onCount={setReviewCount} onToast={setToast} onOpenAutoSorting={() => { setTriageTab('auto'); setAppView('triage') }} />}
       {appView === 'triage' && (
         <TriagePanel tab={triageTab} onTab={setTriageTab} onReview={() => setAppView('review')} onSettings={() => setShowSettings(true)} onChanged={() => setRefreshKey((k) => k + 1)} onToast={setToast} />
@@ -1339,7 +1341,7 @@ function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToast }: {
       const el = document.activeElement as HTMLElement | null
       const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
       if (tab === 'auto') return // no grid here: the tab has its own controls
-      if (el?.closest('.tam-pop, .tri-confirm')) return // the App menu and its confirm box own the keyboard while open
+      if (el?.closest('.tam-pop, .tri-confirm, .tr-round')) return // the App menu and its confirm box own the keyboard while open
       if (e.key === 'Escape') {
         if (preview) setPreview(null)
         return
