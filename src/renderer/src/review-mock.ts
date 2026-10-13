@@ -16,6 +16,8 @@ type MockItem = {
   takenAt: string
   reason: string
   decidedBy: ReviewCard['decidedBy']
+  pKeep?: number
+  why?: string
 }
 
 const DAY = 86_400_000
@@ -41,13 +43,15 @@ function seed(now: number): MockItem[] {
       decidedBy: proposal === 'doubtful' ? null : 'history'
     }
   }
+  // p(keep) and the plain-words reason (`why`) of the doubtful ones: invented, spread both sides of 0.5 so the teaching order differs from newest first
+  const unsure = (p: number, why: string, it: MockItem): MockItem => ({ ...it, pKeep: p, why })
   const out: MockItem[] = [
-    item('doubtful', 'Google Chrome', 'ChatGPT', 'A ChatGPT window is usually slide material, but this one shows a settings page rather than an answer.'),
-    { ...item('doubtful', 'Claude', 'New chat', 'Not sure, and Luna was not sure either: a short Claude reply; could be a useful example, could be a test.'), decidedBy: 'luna' },
-    item('doubtful', 'Slack', '#sidequest-apps', 'A Slack thread, but it holds a picture of a TalkWeaver layout.'),
-    item('doubtful', 'Terminal', 'zsh', 'Terminal, but the output is a clean results table, not an error.'),
-    item('doubtful', 'WriteFlex', 'Untitled', 'No text it could read. Nothing to go on.'),
-    item('doubtful', 'Outlook', 'Inbox', 'An email about AI policy with a quotable line, inside the inbox.')
+    unsure(0.48, 'Looks like other screenshots you threw away from Google Chrome, but you kept 3 of the last 14.', item('doubtful', 'Google Chrome', 'ChatGPT', 'A ChatGPT window is usually slide material, but this one shows a settings page rather than an answer.')),
+    unsure(0.55, 'Not sure, and Luna was not sure either: a short Claude reply; could be a useful example, could be a test.', { ...item('doubtful', 'Claude', 'New chat', 'Not sure, and Luna was not sure either: a short Claude reply; could be a useful example, could be a test.'), decidedBy: 'luna' }),
+    unsure(0.42, 'Mostly chat, but a diagram sits in it.', item('doubtful', 'Slack', '#sidequest-apps', 'A Slack thread, but it holds a picture of a TalkWeaver layout.')),
+    unsure(0.35, 'Terminal windows are mostly thrown away. This output is clean.', item('doubtful', 'Terminal', 'zsh', 'Terminal, but the output is a clean results table, not an error.')),
+    unsure(0.44, 'Few like it so far. It has little to compare with.', item('doubtful', 'WriteFlex', 'Untitled', 'No text it could read. Nothing to go on.')),
+    unsure(0.62, 'You kept 4 of the last 9 emails with a quotable line.', item('doubtful', 'Outlook', 'Inbox', 'An email about AI policy with a quotable line, inside the inbox.'))
   ]
   const kept: Array<[string, string]> = [
     ['Claude', 'Slide structure options'], ['Google Chrome', 'TalkWeaver Layout Showcase'], ['Claude', 'New chat'], ['Google Chrome', 'OECD Education at a Glance'],
@@ -63,13 +67,13 @@ function seed(now: number): MockItem[] {
     ['Outlook', 'Calendar invite, Thursday', 6], ['Slack', 'DM · link pasted once', 9], ['Finder', 'Downloads · file list', 18], ['Terminal', 'zsh · git push rejected', 21],
     ['Google Chrome', 'Cookie consent banner', 26], ['Finder', 'Desktop · empty', 27], ['Slack', 'Huddle ended', 28], ['Terminal', 'zsh · permission denied', 34], ['System Settings', 'Wi-Fi', 40]
   ]
-  for (const [app, win, days] of toss) out.push(app === 'Terminal' || app === 'System Settings' ? { ...item('throwaway', app, win, `${app} window — usually throwaway`, days), decidedBy: 'rules' } : item('throwaway', app, win, 'Looks like screenshots you binned before.', days))
+  for (const [app, win, days] of toss) out.push(app === 'Terminal' || app === 'System Settings' ? { ...item('throwaway', app, win, `${app} window — usually throwaway`, days), decidedBy: 'rules' } : item('throwaway', app, win, 'Looks like screenshots you threw away before.', days))
   out[7] = { ...out[7], reason: 'A TalkWeaver layout showcase, useful slide material', decidedBy: 'luna' }
   // one he already kept from an earlier session
   out[8].decision = { state: 'included', decidedAt: new Date(now - DAY).toISOString() }
   // ?reviewBin=N adds N more items past 30 days (paging and Empty Bin at scale in the UI test)
   const extra = Number(new URLSearchParams(globalThis.location?.search ?? '').get('reviewBin')) || 0
-  for (let i = 0; i < extra; i++) out.push(item('throwaway', 'Finder', `Old download ${i + 1}`, 'Looks like screenshots you binned before.', 31 + (i % 60)))
+  for (let i = 0; i < extra; i++) out.push(item('throwaway', 'Finder', `Old download ${i + 1}`, 'Looks like screenshots you threw away before.', 31 + (i % 60)))
   return out
 }
 
@@ -80,9 +84,10 @@ export function reviewMock(): SwApi['review'] {
   const view = (i: MockItem): PileView => pileOf(i, now())
   const live = (): MockItem[] => items.filter((i) => view(i).pile !== 'gone')
   const newest = (a: MockItem, b: MockItem): number => b.takenAt.localeCompare(a.takenAt)
+  const unsureFirst = (a: MockItem, b: MockItem): number => Math.abs((a.pKeep ?? 0.5) - 0.5) - Math.abs((b.pKeep ?? 0.5) - 0.5) || newest(a, b)
   const card = (i: MockItem): ReviewCard => {
     const v = view(i)
-    return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, decidedBy: i.decidedBy, binInDays: v.binInDays, thumbUrl: null, offline: false, pKeep: 0.5, leans: 'keep', why: i.reason }
+    return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, decidedBy: i.decidedBy, binInDays: v.binInDays, thumbUrl: null, offline: false, pKeep: i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06), leans: (i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06)) >= 0.5 ? 'keep' : 'throwaway', why: i.why ?? i.reason }
   }
   const head = (): { needALook: number; kept: number; throwaway: number } => {
     const s = summarise(live().map((i) => ({ view: view(i), proposal: i.proposal, decided: Boolean(i.decision) })))
@@ -96,14 +101,14 @@ export function reviewMock(): SwApi['review'] {
   }
   const lastSortedAt = (): string | null => items.reduce<string | null>((m, i) => (!m || i.proposedAt > m ? i.proposedAt : m), null)
   return {
-    overview: async (opts?: { queue?: number; sample?: number }): Promise<ReviewOverview> => {
+    overview: async (opts?: { queue?: number; sample?: number; order?: 'newest' | 'teach' }): Promise<ReviewOverview> => {
       const h = head()
       const all = live()
       return {
         needALook: h.needALook,
         confident: { kept: h.kept, throwaway: h.throwaway },
         lastSortedAt: lastSortedAt(),
-        queue: all.filter((i) => view(i).pile === 'doubtful').sort(newest).slice(0, opts?.queue ?? 50).map(card),
+        queue: all.filter((i) => view(i).pile === 'doubtful').sort(opts?.order === 'teach' ? unsureFirst : newest).slice(0, opts?.queue ?? 50).map(card),
         confidentSample: all.filter((i) => !i.decision && i.proposal !== 'doubtful').sort(newest).slice(0, opts?.sample ?? 12).map(card),
         canUndo: undo.length > 0
       }

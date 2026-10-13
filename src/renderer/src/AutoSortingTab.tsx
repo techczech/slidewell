@@ -9,9 +9,11 @@ import { CloudConfirm } from './CloudConfirm'
 import { SortPeriodSelect } from './SortPeriodSelect'
 import { SorterAccuracyTable } from './SorterAccuracyTable'
 import { SorterGoesBy } from './SorterGoesBy'
+import { SorterReading } from './SorterReading'
+import { SorterRetrainSwitches } from './SorterRetrainSwitches'
 import { SortChooser, SortPiles, type SortFollowUp } from './SortPiles'
 import { sorterRunning, useCloudStatus, useSortRuns, useSorterStatus } from './sorter-hooks'
-import { day, n, plural, when, whenShort } from './sorter-format'
+import { day, n, when, whenShort } from './sorter-format'
 import './auto-sorting.css'
 
 const lower = (s: string): string => (s ? s[0].toLowerCase() + s.slice(1) : s)
@@ -37,7 +39,7 @@ function BalanceBar({ kept, binned }: { kept: number; binned: number }): JSX.Ele
           <b>{n(kept)}</b> kept
         </span>
         <span>
-          <b>{n(binned)}</b> binned
+          <b>{n(binned)}</b> thrown away
         </span>
       </div>
     </>
@@ -138,7 +140,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
       : st.retrainNeeded
         ? 'Retrain needed: the sorter has changed since it last learnt from your choices. Sorting stays off until you train it again.'
         : rep
-          ? `Not enough of your past choices to measure accuracy yet: it needs at least ${st.minHeldBack.total} held back, with ${st.minHeldBack.perLabel} kept and ${st.minHeldBack.perLabel} binned. Sorting stays off until then.`
+          ? `Not enough of your past choices to measure accuracy yet: it needs at least ${st.minHeldBack.total} held back, with ${st.minHeldBack.perLabel} kept and ${st.minHeldBack.perLabel} thrown away. Sorting stays off until then.`
           : 'Train the sorter first. Sorting stays off until it has been trained and tested.'
   const u = st.undecided
   const asking = cl.phase === 'asking'
@@ -353,13 +355,13 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
         {st.retrainNeeded
           ? 'Retrain needed: the sorter has changed since it last learnt from your choices. Sorting stays off until you train it again. '
           : ''}
-        It proposes keep, throwaway or “needs a look” for screenshots you have not decided yet, and learns from the ones you kept and binned before. It only records proposals and never moves or deletes a file. It runs on this Mac.
+        It proposes keep, throwaway or “needs a look” for screenshots you have not decided yet, and learns from the ones you kept and threw away before. It only records proposals and never moves or deletes a file. It runs on this Mac.
       </p>
       {st.learnable && (
         <>
           <p>
-            You have made <b>{n(choices)}</b> choices it can learn from: <b>{n(kept)}</b> kept and <b>{n(binned)}</b> binned.{' '}
-            {ready ? 'That is enough to start.' : `Measuring accuracy needs at least ${st.minHeldBack.total} held back, with ${st.minHeldBack.perLabel} kept and ${st.minHeldBack.perLabel} binned.`}
+            You have made <b>{n(choices)}</b> choices it can learn from: <b>{n(kept)}</b> kept and <b>{n(binned)}</b> thrown away.{' '}
+            {ready ? 'That is enough to start.' : `Measuring accuracy needs at least ${st.minHeldBack.total} held back, with ${st.minHeldBack.perLabel} kept and ${st.minHeldBack.perLabel} thrown away.`}
           </p>
           <div className="as-untrained-bar">
             <BalanceBar kept={kept} binned={binned} />
@@ -377,13 +379,12 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
   const trainingBlock = rep ? (
     <div className="as-block as-training">
       <h2>Training</h2>
-      <div className="as-training-head">{plural(choices, 'choice')} so far.</div>
+      <SorterReading variant="tab" />
       {sinceTraining > 0 && (
         <p className="as-muted">It last trained on {n(trainedOnAll)} of them; you have made {n(sinceTraining)} since. Train again to include them.</p>
       )}
       <div className="as-training-body">
-        <div className="as-learnt">What it has learnt from</div>
-        <BalanceBar kept={kept} binned={binned} />
+        <SorterRetrainSwitches st={st} />
         <div className="as-row as-train-row">{trainButton(false, 'Train again and test')}</div>
         <p className="as-muted">
           Accuracy table and thresholds:{' '}

@@ -1,7 +1,7 @@
 // The sorter's two status stores (local sorter, cloud step) as hooks, shared by the Auto sorting tab,
 // Settings › Screenshot sorter and the title bar's "sorting" dot. Main owns both; these only read.
 import { useEffect, useState } from 'react'
-import type { CloudStatus, SortRun, SorterStatus } from '../../preload'
+import type { CloudStatus, SortRun, SorterLearning, SorterStatus } from '../../preload'
 
 export function useSorterStatus(): SorterStatus | null {
   const [st, setSt] = useState<SorterStatus | null>(null)
@@ -52,4 +52,23 @@ export function useSortRuns(key: string): { runs: SortRun[]; version: number } {
     }
   }, [key])
   return state
+}
+
+/**
+ * "How much is enough": main works it out once per training (tens of seconds the first time), so `learning` stays null
+ * while it is being worked out and nothing waits on it. Read again when the training changes (`key`).
+ */
+export function useLearning(key: string): { learning: SorterLearning | null; working: boolean; failed: boolean } {
+  const [state, setState] = useState<{ key: string; learning: SorterLearning | null; failed: boolean }>({ key: '', learning: null, failed: false })
+  useEffect(() => {
+    let live = true
+    void window.sw.sorter
+      .learning()
+      .then((l) => live && setState({ key, learning: l, failed: false }))
+      .catch(() => live && setState({ key, learning: null, failed: true }))
+    return () => {
+      live = false
+    }
+  }, [key])
+  return { learning: state.learning, working: state.key !== key, failed: state.failed }
 }

@@ -28,7 +28,9 @@ p.as-muted .as-link { font-size: 12.5px; }
 .as-working p { margin-top: 8px; }
 /* training */
 .as-training-head { font-size: 16px; font-weight: 700; color: var(--oxford); }
-.as-training-body { max-width: 520px; padding-top: 6px; }
+.as-training-body { max-width: 760px; padding-top: 6px; }
+.as-retrain-switches { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.as-retrain-switches p { margin: 2px 0 0; }
 .as-learnt { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
 .as-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: #e9e2d2; }
 .as-bar-k { background: var(--oxford); }

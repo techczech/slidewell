@@ -47,15 +47,17 @@ function installFake() {
   const sorter = {
     phase: 'idle', done: 0, total: 0, message: '', error: null, modelReady: true, report, canRunUnattended: true, retrainNeeded: false, rulesChangedSinceTest: false, minHeldBack: { total: 20, perLabel: 5 },
     pending: { keep: 331, throwaway: 240, doubtful: 41, lastProposedAt: today(2, 0) }, period: '30d', periods: PERIODS,
-    lastRun: { at: today(14, 19), period: 'all', lookedAt: 612, confident: 554, needLook: 58 }, undecided: { period: '30d', inPeriod: 630, all: 1482 }, learnable: { kept: 228, binned: 84 }
+    lastRun: { at: today(14, 19), period: 'all', lookedAt: 612, confident: 554, needLook: 58 }, undecided: { period: '30d', inPeriod: 630, all: 1482 }, learnable: { kept: 228, binned: 84 },
+    answersSinceTraining: 4, retrainEvery: 10, autoRetrain: true, autoRetrainOnBattery: false, retraining: null, waitingForPower: null, choicesNeeded: 0, lastRetrain: null
   }
+  const learning = { verdict: 'still-helping', more: 0, minimum: 92, choices: 312, kept: 228, thrownAway: 84, heldBack: 60, trainedAt: today(2, 0), points: [{ choices: 50, throwawayRight: 0.74, needALook: 0.46 }, { choices: 100, throwawayRight: 0.83, needALook: 0.34 }, { choices: 150, throwawayRight: 0.87, needALook: 0.25 }, { choices: 200, throwawayRight: 0.895, needALook: 0.19 }, { choices: 250, throwawayRight: 0.905, needALook: 0.16 }, { choices: 312, throwawayRight: 0.91, needALook: 0.135 }] }
   const cloud = {
     phase: 'idle', done: 0, total: 0, hasKey: true, encryptionAvailable: true,
     settings: { enabled: true, batchTime: '02:00', provider: 'anthropic', nightly: true, secondOpinions: true, agreedAt: { openai: null, anthropic: '2026-10-03T21:14:00' } },
     nightlyLimit: 300, leftTonight: 300, nextRunAt: new Date(Date.now() + 86400000).toISOString(), model: 'claude-haiku-5-5', name: 'Haiku', company: 'Anthropic', longEdge: 1456, providers, period: '30d', periods: PERIODS,
     lastRun: { at: today(14, 21), trigger: 'manual', provider: 'anthropic', local: null, asked: 58, answered: 58, keep: 10, throwaway: 7, stayedDoubtful: 41, sent: 58, settled: 17, stillUnsure: 41, skipped: null, error: null, message: 'Asked Haiku about 58 screenshots.' }
   }
-  const calls = { sort: 0, train: 0, prepare: 0, send: [], cancel: 0, cloudCancel: 0, decide: 0, setSettings: [], setNightly: [], setSecond: [], list: [], decideAll: [], setAppRule: [], runPiles: [], runPage: [] }
+  const calls = { setAutoRetrain: [], retrainNow: [], sort: 0, train: 0, prepare: 0, send: [], cancel: 0, cloudCancel: 0, decide: 0, setSettings: [], setNightly: [], setSecond: [], list: [], decideAll: [], setAppRule: [], runPiles: [], runPage: [] }
   // --- ticket 20 (main) for ticket 21 (renderer): apps, per-app rules, sort runs. Invented numbers and titles. ---
   // one row per app: his kept / thrown away / still undecided, the built-in rule for the app name, his rule ('' = app not known)
   const apps = [
@@ -137,11 +139,21 @@ function installFake() {
     return snap()
   }
   window.__fake = {
-    sorter, cloud, calls, push, apps, decisions, runDefs, bulk,
+    learning, sorter, cloud, calls, push, apps, decisions, runDefs, bulk,
     install(sw) {
       sw.sorter = {
         status: async () => ({ ...sorter }),
         train: async () => { calls.train++; return { ok: true } },
+        teachQueue: async () => ({ total: 0, items: [], next: null }),
+        learning: async () => ({ ...learning }),
+        retrainNow: async (t) => { calls.retrainNow.push(t); return { ok: true } },
+        setAutoRetrain: async (patch) => {
+          calls.setAutoRetrain.push(patch)
+          if (patch.enabled !== undefined) sorter.autoRetrain = patch.enabled
+          if (patch.onBattery !== undefined) sorter.autoRetrainOnBattery = patch.onBattery
+          push()
+          return { ok: true, autoRetrain: sorter.autoRetrain, autoRetrainOnBattery: sorter.autoRetrainOnBattery }
+        },
         sort: async () => { calls.sort++; return { ok: true, sorted: 630, counts: { keep: 300, throwaway: 250, doubtful: 80 }, periodPhrase: ' from the last 30 days' } },
         setPeriod: async (p) => { sorter.period = p; cloud.period = p; sorter.undecided = { period: p, inPeriod: p === 'all' ? null : 100, all: 1482 }; push(); return { ok: true, period: p } },
         cancel: async () => { calls.cancel++ },
@@ -313,12 +325,30 @@ try {
   check('Import, Paste, Rescan and Change folder stay in the head', (await page.locator('.triage-head-actions button').count()) === 4)
   check('status line: trained on 312 choices', (await text('.as-status')).includes('on 312 of your choices.'), await text('.as-status'))
   const sortText = await text('.as-sort')
-  check('Training: no "since" sentence when nothing is new', !(await text('.as-training')).includes('you have made'))
+  check('Training: no "since" sentence when nothing is new', !/you have made \d+ since/.test(await text('.as-training')))
   check('Sort now: period count sentence', sortText.includes('630 undecided pictures from the last 30 days can be sorted (1,482 in all).'), sortText)
   check('Sort now: Triage count sentence', sortText.includes('Triage counts 1,530 undecided files; videos, files not downloaded to this Mac and extra copies of the same picture are not sorted.'), sortText)
   check('Sort now: service line with the allowance', sortText.includes('Haiku is on. Unsure ones go to Haiku, within tonight’s allowance of 300. You confirm the count and cost before anything is sent.'), sortText)
   check('one Sort now button, one Period select', (await page.locator('button', { hasText: /^Sort now$/ }).count()) === 1 && (await page.locator('select.sorter-period-select').count()) === 1)
-  check('no Teach the sorter button and no chart', (await page.getByText('Teach the sorter').count()) === 0 && (await page.locator('.as-tab svg').count()) === 0)
+  await page.waitForSelector('.as-training .lc-svg')
+  const reading = await text('.as-training .sr-reading')
+  check('Training holds the reading: verdict sentence, the chart, the balance, "Teach the sorter (10)"', reading.includes('312 choices so far. More would still help.') && (await page.locator('.as-training .lc-svg').count()) === 1 && reading.includes('228 kept') && reading.includes('84 thrown away') && (await page.locator('.as-training .sr-teach').innerText()) === 'Teach the sorter (10)', reading)
+  check('the chart marks the minimum and has its values as a table', (await page.locator('.as-training .lc-svg').evaluate((e) => e.textContent)).includes('Minimum: 92') && (await page.locator('.as-training .lc-sr tbody tr').count()) === 6)
+  check('the word "binned" appears nowhere in the Training section', !/binned/i.test(await text('.as-training')))
+  await page.locator('.as-training').scrollIntoViewIfNeeded()
+  await page.evaluate(() => document.querySelector('.as-training').scrollIntoView({ block: 'start' }))
+  await shoot(page, 'teach-8-auto-sorting-training.png')
+  check('Training switches: retrain by itself on, "Not while on battery" on', (await page.locator('.as-auto-retrain').isChecked()) && (await page.locator('.as-not-on-battery').isChecked()) && (await text('.as-retrain-switches')).includes('Retrain by itself after every ten answers') && (await text('.as-retrain-switches')).includes('Not while on battery'))
+  await page.locator('.as-not-on-battery').evaluate((e) => e.click())
+  await page.waitForFunction(() => !document.querySelector('.as-not-on-battery').checked)
+  check('turning "Not while on battery" off sends onBattery true (also retrain on battery)', JSON.stringify(await fakeCalls('setAutoRetrain')) === '[{"onBattery":true}]', JSON.stringify(await fakeCalls('setAutoRetrain')))
+  await page.locator('.as-auto-retrain').evaluate((e) => e.click())
+  await page.waitForFunction(() => document.querySelector('.as-not-on-battery').disabled)
+  check('turning the first switch off disables the battery switch', !(await page.locator('.as-auto-retrain').isChecked()) && (await page.locator('.as-not-on-battery').isDisabled()) && JSON.stringify((await fakeCalls('setAutoRetrain')).at(-1)) === '{"enabled":false}')
+  await page.locator('.as-auto-retrain').evaluate((e) => e.click())
+  await page.locator('.as-not-on-battery').evaluate((e) => e.click())
+  await page.waitForFunction(() => document.querySelector('.as-not-on-battery').checked && !document.querySelector('.as-not-on-battery').disabled)
+  check('both switches back on', (await page.locator('.as-auto-retrain').isChecked()) && (await page.locator('.as-not-on-battery').isChecked()))
   check('Training: heading, balance bar, train again', (await text('.as-training')).includes('312 choices so far.') && (await text('.as-training')).includes('228 kept') && (await page.locator('.as-train', { hasText: 'Train again and test' }).count()) === 1)
   check('the accuracy table is behind "show"', (await page.locator('.sorter-table').count()) === 0)
   await page.locator('.as-accuracy-toggle').click()
@@ -331,7 +361,7 @@ try {
   check('side card: service state and Change in Settings', side.includes('Haiku is on') && side.includes('Second opinions on · key saved') && side.includes('Unsure screenshots go to Haiku at 02:00, up to 300 a night.') && side.includes('Change in Settings →'), side)
   await shoot(page, 'auto-sorting-1-trained.png')
   await fake(() => { window.__fake.sorter.learnable = { kept: 240, binned: 90 }; window.__fake.push() })
-  await page.waitForFunction(() => document.querySelector('.as-training')?.textContent?.includes('you have made'))
+  await page.waitForFunction(() => document.querySelector('.as-training')?.textContent?.match(/you have made \d+ since/))
   check('Training: since-training sentence when new choices exist', (await text('.as-training')).includes('330 choices so far.') && (await text('.as-training')).includes('It last trained on 312 of them; you have made 18 since. Train again to include them.'), await text('.as-training'))
   await shoot(page, 'auto-sorting-1b-new-choices.png')
   await fake(() => { window.__fake.sorter.learnable = { kept: 228, binned: 84 }; window.__fake.push() })
@@ -537,7 +567,7 @@ try {
   await fake(() => { Object.assign(window.__fake.sorter, { report: null, canRunUnattended: false, lastRun: null, pending: { keep: 0, throwaway: 0, doubtful: 0, lastProposedAt: null } }); window.__fake.push() })
   await page.waitForSelector('.as-untrained')
   const un = await text('.as-untrained')
-  check('never trained: what the sorter does, the counts, the train button', un.includes('The sorter has not been trained yet.') && un.includes('You have made 312 choices it can learn from: 228 kept and 84 binned. That is enough to start.') && un.includes('Train on my past choices and test') && un.includes('Holds back about a fifth (62) of your choices'), un)
+  check('never trained: what the sorter does, the counts, the train button', un.includes('The sorter has not been trained yet.') && un.includes('You have made 312 choices it can learn from: 228 kept and 84 thrown away. That is enough to start.') && un.includes('Train on my past choices and test') && un.includes('Holds back about a fifth (62) of your choices'), un)
   check('never trained: Sort now is disabled with the reason, nightly says train first', (await page.locator('button.as-sort-btn').isDisabled()) && (await text('.as-sort')).includes('Train the sorter first. Sorting stays off until it has been trained and tested.') && (await text('.as-nightly')).includes('Train the sorter first.') && (await page.locator('.as-training, .as-last').count()) === 0)
   await shoot(page, 'auto-sorting-2-not-trained.png')
   await page.locator('.as-train').click()
