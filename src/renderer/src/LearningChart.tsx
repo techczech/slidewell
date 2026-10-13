@@ -10,22 +10,33 @@ export function LearningChart({ learning }: { learning: Pick<SorterLearning, 'po
   return (
     <figure className="lc-fig">
       <svg className="lc-svg" viewBox={`0 0 ${CHART.w} ${CHART.h}`} role="img" aria-label={label}>
-        {m.minimumX !== null && <rect className="lc-band" x={CHART.left} y={CHART.top} width={m.minimumX - CHART.left} height={CHART.bottom - CHART.top} />}
+        {m.minimumX !== null && (
+          <>
+            <rect className="lc-band" x={CHART.left} y={CHART.top} width={m.minimumX - CHART.left} height={CHART.gapY + 8 - CHART.top} />
+            <rect className="lc-band" x={CHART.left} y={CHART.lowCaptionY + 8} width={m.minimumX - CHART.left} height={CHART.bottom - CHART.lowCaptionY - 8} />
+          </>
+        )}
         {[...m.topTicks, ...m.lowTicks].map((t) => (
           <g key={`${t.y}-${t.label}`}>
             <line className="lc-grid" x1={CHART.left} x2={CHART.right} y1={t.y} y2={t.y} />
             <text className="lc-axis" x={CHART.left - 8} y={t.y + 4} textAnchor="end">{t.label}</text>
           </g>
         ))}
-        <text className="lc-title lc-title-ta" x={CHART.left} y={18}>Throwaway right</text>
-        <text className="lc-sub" x={CHART.left + 112} y={18}>of those it called throwaway, on the held-back sample</text>
-        <text className="lc-title lc-title-nl" x={CHART.left} y={m.boundary}>Needs a look</text>
-        <text className="lc-sub" x={CHART.left + 84} y={m.boundary}>share it was not sure about</text>
+        <text className="lc-cap" x={CHART.left} y={CHART.topCaptionY}>
+          <tspan className="lc-title lc-title-ta">Throwaway right</tspan>
+          <tspan className="lc-sub" dx="8">of those it called throwaway, on the held-back sample</tspan>
+        </text>
+        <text className="lc-cap" x={CHART.left} y={CHART.lowCaptionY}>
+          <tspan className="lc-title lc-title-nl">Needs a look</tspan>
+          <tspan className="lc-sub" dx="8">share it was not sure about</tspan>
+        </text>
         {m.minimumX !== null && (
           <>
-            <line className="lc-min" x1={m.minimumX} x2={m.minimumX} y1={CHART.top} y2={CHART.bottom} />
-            <text className="lc-min-t" x={CHART.left + 8} y={CHART.bottom - 8}>Too few to sort</text>
-            <text className="lc-min-t" x={m.minimumX + 8} y={44}>Minimum: {learning.minimum}</text>
+            {/* two stretches, one per panel, so the line never runs through a caption */}
+            <line className="lc-min" x1={m.minimumX} x2={m.minimumX} y1={CHART.top} y2={CHART.gapY + 8} />
+            <line className="lc-min" x1={m.minimumX} x2={m.minimumX} y1={CHART.lowCaptionY + 8} y2={CHART.bottom} />
+            {m.tooFewFits && <text className="lc-min-t lc-too-few" x={m.minimumX - 8} y={CHART.gapY} textAnchor="end">Too few to sort</text>}
+            <text className="lc-min-t lc-min-label" x={m.minimumX + 8} y={CHART.gapY}>Minimum: {learning.minimum}</text>
           </>
         )}
         {(['throwaway', 'needALook'] as const).map((k) => (
@@ -39,8 +50,8 @@ export function LearningChart({ learning }: { learning: Pick<SorterLearning, 'po
             ))}
           </g>
         ))}
-        {m.xTicks.map((t) => <text key={t.x} className="lc-x" x={t.x} y={342} textAnchor="middle">{t.label}</text>)}
-        <text className="lc-axis" x={(CHART.left + CHART.right) / 2} y={364} textAnchor="middle">Choices you have made (kept or thrown away)</text>
+        {m.xTicks.map((t) => <text key={t.x} className="lc-x" x={t.x} y={CHART.bottom + 22} textAnchor="middle">{t.label}</text>)}
+        <text className="lc-axis" x={(CHART.left + CHART.right) / 2} y={CHART.bottom + 44} textAnchor="middle">Choices you have made (kept or thrown away)</text>
       </svg>
       <table className="lc-sr">
         <caption>What the sorter gets right at each number of choices, tested on the same held-back sample</caption>

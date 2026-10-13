@@ -1,7 +1,7 @@
 // window.sw.sorter for the browser preview and the review UI test (e2e/review-ui.mjs). Invented numbers only; nothing
 // is trained or sent. `window.__sorterMock` lets a test move the strip through its states: set(patch) changes the status
 // and pushes it, preset(name) applies a named state, and `learning` / `learningDelayMs` shape the reading.
-// ?sorterState=counting|retraining|waiting|off|few|retrained picks the state the preview opens in. Never used in the packaged app.
+// ?sorterState=counting|retraining|waiting|off|few|retrained|needsTraining|neverTrained picks the state the preview opens in. Never used in the packaged app.
 import type { SorterLearning, SorterReport, SorterRetrain, SorterStatus, SwApi } from '../../preload'
 
 const PERIODS: SorterStatus['periods'] = [
@@ -59,6 +59,14 @@ const LEARNING: SorterLearning = {
   ]
 }
 
+// readings for the chart's edge cases and for the shape seen on real data (invented here, same figures): all at 100%, all at 0%, and the one that led to the new verdict copy
+const flat = (ta: number, nl: number): SorterLearning['points'] => [113, 227, 340, 453, 567, 680].map((choices) => ({ choices, throwawayRight: ta, needALook: nl }))
+const FIXTURES: Record<'all100' | 'all0' | 'real', SorterLearning> = {
+  all100: { ...LEARNING, verdict: 'levelling-off', choices: 680, kept: 284, thrownAway: 396, points: flat(1, 1) },
+  all0: { ...LEARNING, verdict: 'levelling-off', choices: 680, kept: 284, thrownAway: 396, points: flat(0, 0) },
+  real: { ...LEARNING, verdict: 'levelling-off', choices: 680, kept: 284, thrownAway: 396, points: [0.956, 0.891, 0.796, 0.708, 0.701, 0.693].map((nl, i) => ({ choices: [113, 227, 340, 453, 567, 680][i], throwawayRight: 1, needALook: nl })) }
+}
+
 const base = (): SorterStatus => ({
   phase: 'idle', done: 0, total: 0, message: '', error: null, modelReady: true, report: REPORT, canRunUnattended: true, retrainNeeded: false, rulesChangedSinceTest: false, minHeldBack: { total: 20, perLabel: 5 },
   pending: { keep: 0, throwaway: 0, doubtful: 0, lastProposedAt: null }, period: 'all', periods: PERIODS, lastRun: null, undecided: null, learnable: { kept: 228, binned: 84 },
@@ -71,13 +79,17 @@ const PRESETS: Record<string, Partial<SorterStatus>> = {
   waiting: { answersSinceTraining: 10, waitingForPower: { answers: 10 } },
   off: { autoRetrain: false, answersSinceTraining: 7 },
   few: { learnable: { kept: 30, binned: 10 }, choicesNeeded: 52, answersSinceTraining: 0 },
-  retrained: { lastRetrain: RETRAIN, answersSinceTraining: 0 }
+  retrained: { lastRetrain: RETRAIN, answersSinceTraining: 0 },
+  // no current model: the sorter changed since it last learnt (the reading is still the last one), and never trained. Main counts no answers in either.
+  needsTraining: { report: null, retrainNeeded: true, canRunUnattended: false, answersSinceTraining: 0 },
+  neverTrained: { report: null, retrainNeeded: false, canRunUnattended: false, answersSinceTraining: 0 }
 }
 
 export type SorterMockControl = {
   set: (patch: Partial<SorterStatus>) => void
   preset: (name: keyof typeof PRESETS) => void
   learning: SorterLearning
+  fixtures: typeof FIXTURES
   learningDelayMs: number
   calls: { retrainNow: Array<string | undefined>; setAutoRetrain: Array<{ enabled?: boolean; onBattery?: boolean }> }
 }
@@ -96,6 +108,7 @@ export function sorterMock(review: SwApi['review']): SwApi['sorter'] {
       push()
     },
     learning: LEARNING,
+    fixtures: FIXTURES,
     learningDelayMs: 0,
     calls: { retrainNow: [], setAutoRetrain: [] }
   }

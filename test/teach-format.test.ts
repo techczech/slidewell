@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import type { SorterLearning, SorterRetrain, SorterStatus } from '../src/preload'
-import { balanceNote, certainty, chartModel, chartPct, nextRetrain, perFifty, readingWords, retrainSummary, stripLine } from '../src/renderer/src/teach-format'
+import { balanceNote, CHART, certainty, chartModel, chartPct, gainsLine, nextRetrain, readingWords, retrainSummary, stepGains, stripLine, trainingState, untrainedSentence, TRAIN_LINK } from '../src/renderer/src/teach-format'
 
 const status = (over: Partial<SorterStatus> = {}): SorterStatus =>
-  ({ learnable: { kept: 228, binned: 84 }, report: null, answersSinceTraining: 4, retrainEvery: 10, autoRetrain: true, autoRetrainOnBattery: false, retraining: null, waitingForPower: null, choicesNeeded: 0, lastRetrain: null, ...over }) as SorterStatus
+  ({ learnable: { kept: 228, binned: 84 }, report: {}, retrainNeeded: false, answersSinceTraining: 4, retrainEvery: 10, autoRetrain: true, autoRetrainOnBattery: false, retraining: null, waitingForPower: null, choicesNeeded: 0, lastRetrain: null, ...over }) as SorterStatus
 
 const points = [
   { choices: 50, throwawayRight: 0.74, needALook: 0.46 },
@@ -38,6 +38,16 @@ describe('the strip line', () => {
     expect(stripLine(status({ retraining: 'manual', waitingForPower: { answers: 10 } }), 1).kind).toBe('retraining')
     expect(stripLine(status({ choicesNeeded: 52, autoRetrain: false }), 1).kind).toBe('few')
   })
+  it('says the sorter needs training, and beats every other state', () => {
+    const again = stripLine(status({ report: null, retrainNeeded: true, retraining: 'manual', waitingForPower: { answers: 10 }, choicesNeeded: 5 }), 41)
+    expect(again).toEqual({ kind: 'untrained', text: 'The sorter needs training again before it can learn from your answers.', action: null })
+    expect(stripLine(status({ report: null }), 41).text).toBe('The sorter has not been trained yet.')
+    expect(trainingState(status({ report: null, retrainNeeded: true }))).toBe('again')
+    expect(trainingState(status({ report: null }))).toBe('never')
+    expect(trainingState(status())).toBeNull()
+    expect(untrainedSentence('never')).toBe('The sorter has not been trained yet.')
+    expect(TRAIN_LINK).toBe('Train in Auto sorting →')
+  })
   it('never counts below zero to go', () => {
     expect(stripLine(status({ answersSinceTraining: 12 }), 3).text).toContain('retraining next')
     expect(nextRetrain(status({ answersSinceTraining: 0 }))).toBe('Next retrain after 10 more answers (10 to go)')
@@ -55,14 +65,33 @@ describe('what a retrain moved', () => {
 })
 
 describe('the reading', () => {
-  it('turns the points into the gain per extra 50 choices', () => {
-    expect(perFifty(points)).toEqual([9, 4, 2.5, 1, 0.4])
-    expect(perFifty([{ choices: 50, throwawayRight: null, needALook: 0.4 }, { choices: 100, throwawayRight: 0.8, needALook: 0.3 }])).toEqual([])
+  it('turns the points into the change at each step, with the real step size when the steps are alike', () => {
+    expect(stepGains(points).gains).toEqual([9, 4, 2.5, 1, 0.5])
+    expect(stepGains(points).step).toBeNull() // 50, 50, 50, 50, 62
+    const even = [113, 227, 340, 453].map((choices, i) => ({ choices, throwawayRight: 0.9 + i * 0.01, needALook: 0.3 }))
+    expect(stepGains(even).step).toBe(113)
+    expect(gainsLine(even)).toBe('Throwaway right per extra 113 choices: +1, +1, +1 points')
+    expect(gainsLine(points)).toBe('Throwaway right, change from one point to the next: +9, +4, +2.5, +1, +0.5 points')
+    expect(gainsLine([{ choices: 50, throwawayRight: null, needALook: 0.4 }, { choices: 100, throwawayRight: 0.8, needALook: 0.3 }])).toBeNull()
+  })
+  it('states the real span and the real sorter-unsure figure for the data that misled', () => {
+    const real = [0.956, 0.891, 0.796, 0.708, 0.701, 0.693].map((nl, i) => ({ choices: [113, 227, 340, 453, 567, 680][i], throwawayRight: 1, needALook: nl }))
+    const w = readingWords(learning({ verdict: 'levelling-off', choices: 680, points: real }))
+    expect(w.headline).toBe('680 choices so far. More answers have stopped helping.')
+    expect(w.sub).toBe('On its own the sorter is still unsure about 69 in 100 screenshots. The rules by app and window settle many of those.')
+    expect(`${w.headline} ${w.sub}`).not.toMatch(/\b50\b/)
+  })
+  it('under 30% unsure, a levelling-off verdict gives the plain figures over the real span', () => {
+    const p = [{ choices: 100, throwawayRight: 0.9, needALook: 0.2 }, { choices: 220, throwawayRight: 0.9, needALook: 0.188 }]
+    expect(readingWords(learning({ verdict: 'levelling-off', points: p })).headline).toBe('312 choices so far. More answers are unlikely to change much.')
+    expect(readingWords(learning({ verdict: 'levelling-off', points: p })).sub).toBe('Over the last 120 choices, throwaway accuracy did not change and the share it is unsure about fell by 1.2 points.')
+  })
+  it('still-helping names the real span too', () => {
+    expect(readingWords(learning()).sub).toBe('Over the last 62 choices, throwaway accuracy hardly changed but the share it is unsure about fell by 2.5 points.')
   })
   it('words the three verdicts', () => {
     expect(readingWords(learning()).headline).toBe('312 choices so far. More would still help.')
-    expect(readingWords(learning()).sub).toBe('Throwaway accuracy has levelled off, but the share it is unsure about is still falling.')
-    expect(readingWords(learning({ verdict: 'levelling-off' })).headline).toBe('312 choices so far. Another round is unlikely to change much.')
+    expect(readingWords(learning({ verdict: 'levelling-off' })).headline).toBe('312 choices so far. More answers are unlikely to change much.')
     const few = readingWords(learning({ verdict: 'not-enough', more: 52, choices: 40, points: [] }))
     expect(few.headline).toBe('40 choices so far. It needs 52 more before it can be tested.')
     expect(few.sub).toContain('92 choices, 46 kept and 46 thrown away')
@@ -79,7 +108,7 @@ describe('the reading', () => {
 describe('the chart geometry', () => {
   it('puts the points where the locked frame has them', () => {
     const m = chartModel({ points, minimum: 92 })
-    expect(m.throwaway.dots[0]).toMatchObject({ y: 160.7, label: '74%' })
+    expect(m.throwaway.dots[0]).toMatchObject({ y: 184, label: '74%' })
     expect(m.throwaway.dots[0].x).toBeCloseTo(153.2, 0)
     expect(m.needALook.dots[5]).toMatchObject({ label: '13.5%', last: true })
     expect(m.throwaway.dots[3].label).toBe('89.5%')
@@ -105,5 +134,32 @@ describe('certainty', () => {
   it('reads how sure it is of the way it leans', () => {
     expect(certainty(0.38, 'throwaway')).toEqual({ keep: 38, throwaway: 62, sure: 62, lean: 'throwaway' })
     expect(certainty(0.7, 'keep').sure).toBe(70)
+  })
+})
+
+describe('the chart never overlaps for any values', () => {
+  const flat = (v: number) => [113, 227, 340, 453, 567, 680].map((choices) => ({ choices, throwawayRight: v, needALook: v }))
+  it('keeps every point label below its caption row and inside its panel, at 0% and at 100%', () => {
+    for (const v of [0, 1]) {
+      const m = chartModel({ points: flat(v), minimum: 92 })
+      for (const d of m.throwaway.dots) {
+        expect(d.y - 12 - 10).toBeGreaterThan(CHART.topCaptionY + 4) // label top clears the caption baseline
+        expect(d.y).toBeLessThanOrEqual(m.topBottom)
+      }
+      for (const d of m.needALook.dots) {
+        expect(d.y - 12 - 10).toBeGreaterThan(CHART.lowCaptionY + 4)
+        expect(d.y).toBeLessThanOrEqual(CHART.bottom)
+      }
+    }
+  })
+  it('puts the band words in the gap row between the panels, clear of both panels', () => {
+    const m = chartModel({ points: flat(1), minimum: 92 })
+    expect(CHART.gapY - 12).toBeGreaterThan(m.topBottom + 6)
+    expect(CHART.gapY).toBeLessThan(CHART.lowCaptionY - 12)
+  })
+  it('drops "Too few to sort" when the band is narrower than the words', () => {
+    expect(chartModel({ points: flat(1), minimum: 150 }).tooFewFits).toBe(true)
+    expect(chartModel({ points: flat(1), minimum: 92 }).tooFewFits).toBe(false) // the real data's band is about 80 wide
+    expect(chartModel({ points: flat(1), minimum: 0 }).minimumX).toBeNull()
   })
 })

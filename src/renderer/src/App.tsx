@@ -639,7 +639,7 @@ export default function App(): JSX.Element {
         </div>
       </header>
 
-      <TeachRoundHost onShowReview={() => setAppView('review')} />
+      <TeachRoundHost onShowReview={() => setAppView('review')} onOpenAutoSorting={() => { setTriageTab('auto'); setAppView('triage') }} />
       {appView === 'review' && <ReviewScreen onCount={setReviewCount} onToast={setToast} onOpenAutoSorting={() => { setTriageTab('auto'); setAppView('triage') }} />}
       {appView === 'triage' && (
         <TriagePanel tab={triageTab} onTab={setTriageTab} onReview={() => setAppView('review')} onSettings={() => setShowSettings(true)} onChanged={() => setRefreshKey((k) => k + 1)} onToast={setToast} />
