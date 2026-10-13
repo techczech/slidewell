@@ -10,6 +10,7 @@ import { SortPeriodSelect } from './SortPeriodSelect'
 import { SorterAccuracyTable } from './SorterAccuracyTable'
 import { SorterGoesBy } from './SorterGoesBy'
 import { SorterReading } from './SorterReading'
+import { trainingState } from './teach-format'
 import { SorterRetrainSwitches } from './SorterRetrainSwitches'
 import { SortChooser, SortPiles, type SortFollowUp } from './SortPiles'
 import { sorterRunning, useCloudStatus, useSortRuns, useSorterStatus } from './sorter-hooks'
@@ -376,6 +377,19 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
     </div>
   )
 
+  // no current model: the switches and the last reading still belong under Training, with a line saying why they do nothing yet
+  const untrained = trainingState(st)
+  const untrainedTraining = untrained ? (
+    <div className="as-block as-training as-training-untrained">
+      <h2>Training</h2>
+      <SorterReading variant="tab" untrained={untrained} />
+      <div className="as-training-body">
+        <SorterRetrainSwitches st={st} />
+        <p className="as-muted as-starts-once">Starts once the sorter has been trained.</p>
+      </div>
+    </div>
+  ) : null
+
   const trainingBlock = rep ? (
     <div className="as-block as-training">
       <h2>Training</h2>
@@ -415,6 +429,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
         ) : (
           <>
             {busy && running && st.phase !== 'sorting' ? progress : untrainedCard}
+            {untrainedTraining}
             {sortNowBlock}
             {pilesBlock}
             <SorterGoesBy reloadKey={runsVersion} />

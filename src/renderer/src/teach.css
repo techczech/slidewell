@@ -55,7 +55,8 @@
 .sr-sub { margin: 6px 0 8px; font-size: 14px; color: var(--muted); }
 .sr-working { margin: 6px 0 8px; font-size: 13px; color: var(--muted); }
 .sr-gains { margin: 4px 0 0; font-size: 13.5px; color: var(--muted); }
-.sr-gains b { color: var(--ink); }
+.sr-from-last { margin: 0 0 6px; font-size: 13px; color: var(--muted); }
+.sr-note { margin: 8px 0 0; font-size: 13.5px; color: var(--muted); }
 .sr-balance { display: flex; gap: 20px; align-items: center; margin-top: 10px; }
 .sr-bal-bar { flex: 1; }
 .sr-bal-note { flex: 1; margin: 0; font-size: 13.5px; line-height: 1.45; }
@@ -73,13 +74,14 @@
 .lc-x { fill: var(--ink); }
 .lc-sub { fill: var(--muted); }
 .lc-title { font-weight: 700; }
+.lc-cap { font-size: 12px; }
 .lc-title-ta { fill: var(--oxford); }
 .lc-title-nl { fill: var(--accent); }
 .lc-min { stroke: var(--accent); stroke-dasharray: 5 4; stroke-width: 1.5; }
 .lc-min-t { fill: var(--accent); font-weight: 600; }
 .lc-line { fill: none; stroke-width: 2.5; stroke-linejoin: round; }
 .lc-dot { fill: var(--card); stroke-width: 2; }
-.lc-val { font-weight: 500; }
+.lc-val { font-weight: 500; paint-order: stroke; stroke: var(--card); stroke-width: 4px; stroke-linejoin: round; }
 .lc-val-last { font-weight: 700; }
 .lc-ta .lc-line, .lc-ta .lc-dot { stroke: var(--oxford); }
 .lc-ta .lc-val { fill: var(--oxford); }
@@ -92,3 +94,8 @@
 
 /* what moved */
 .mv-head .rv-back-btn { margin-left: auto; }
+
+/* the sorter has no current model: strip, round and Training card say so with a link to Auto sorting */
+.ts-strip[data-kind='untrained'] .ts-dot { background: #b8ad98; }
+.tr-popover-close { position: absolute; top: 10px; right: 12px; background: none; border: 0; font: inherit; font-size: 13.5px; color: var(--muted); cursor: pointer; }
+.tr-popover { position: relative; }

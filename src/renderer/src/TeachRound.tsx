@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReviewCard, SorterStatus } from '../../preload'
 import { Shot } from './ReviewShot'
 import { TeachRoundResult, type RoundOutcome } from './TeachRoundResult'
-import { certainty } from './teach-format'
+import { certainty, TRAIN_LINK, trainingState, untrainedSentence } from './teach-format'
 import { closeTeachingRound, showMovedInReview, useTeachingRoundOpen } from './teach-round'
 import './teach-round.css'
 
@@ -52,12 +52,12 @@ async function finish(entries: Entry[], startedAt: string): Promise<RoundOutcome
   return { kind: 'retrained', retrain: r, status: st, kept, thrown }
 }
 
-export function TeachRoundHost({ onShowReview }: { onShowReview: () => void }): JSX.Element | null {
+export function TeachRoundHost({ onShowReview, onOpenAutoSorting }: { onShowReview: () => void; onOpenAutoSorting: () => void }): JSX.Element | null {
   const open = useTeachingRoundOpen()
-  return open ? <TeachRound onShowReview={onShowReview} /> : null
+  return open ? <TeachRound onShowReview={onShowReview} onOpenAutoSorting={onOpenAutoSorting} /> : null
 }
 
-function TeachRound({ onShowReview }: { onShowReview: () => void }): JSX.Element {
+function TeachRound({ onShowReview, onOpenAutoSorting }: { onShowReview: () => void; onOpenAutoSorting: () => void }): JSX.Element {
   const [phase, setPhase] = useState<Phase>('loading')
   const [entries, setEntries] = useState<Entry[]>([])
   const [outcome, setOutcome] = useState<RoundOutcome | null>(null)
@@ -166,11 +166,20 @@ function TeachRound({ onShowReview }: { onShowReview: () => void }): JSX.Element
   const t = st?.report?.thresholds
   const need = c && t ? Math.round((c.leans === 'keep' ? t.keep : t.throwaway) * 100) : null
   const total = entries.length
+  // no current model: nothing can be learnt from answers, so the round says so instead of asking (not once answers are in)
+  const untrained = st && phase !== 'finishing' && phase !== 'result' && entries.every((e) => e.answer === null) ? trainingState(st) : null
 
   return (
     <div className="overlay tr-round-overlay">
       <div ref={dialog} className="tr-round" role="dialog" aria-modal="true" aria-label="Teaching round" tabIndex={-1} data-phase={phase} onKeyDown={onKeyDown}>
-        {phase === 'result' && outcome ? (
+        {untrained ? (
+          <div className="tr-quiet" data-testid="round-untrained">
+            <h1>Teaching round</h1>
+            <p>{untrainedSentence(untrained)}</p>
+            <button className="ts-link tr-train-link" onClick={() => { done(); onOpenAutoSorting() }}>{TRAIN_LINK}</button>
+            <p><button className="tr-sec" onClick={done}>Done <kbd>Esc</kbd></button></p>
+          </div>
+        ) : phase === 'result' && outcome ? (
           <TeachRoundResult outcome={outcome} waiting={waiting} onAnother={() => void begin()} onDone={done} onSeeMoved={seeMoved} />
         ) : phase === 'nothing' ? (
           <div className="tr-quiet" data-testid="round-nothing">

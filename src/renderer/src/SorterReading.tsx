@@ -7,11 +7,13 @@ import type { ReactNode } from 'react'
 import { LearningChart } from './LearningChart'
 import { useLearning, useSorterStatus } from './sorter-hooks'
 import { n } from './sorter-format'
-import { balanceNote, choicesOf, perFifty, readingWords, signed } from './teach-format'
+import { balanceNote, choicesOf, gainsLine, readingWords } from './teach-format'
 import { startTeachingRound } from './teach-round'
 import './teach.css'
 
-export function SorterReading({ variant, children }: { variant: 'popover' | 'tab'; children?: ReactNode }): JSX.Element | null {
+/** `untrained`: the sorter has no current model (changed since it last learnt, or never trained). The reading is the last one and says so. In the tab it is
+ *  shown only when there are points and without the balance bar (the Training card above already shows it); the Teach button stays, since the round explains. */
+export function SorterReading({ variant, children, untrained }: { variant: 'popover' | 'tab'; children?: ReactNode; untrained?: 'again' | 'never' }): JSX.Element | null {
   const st = useSorterStatus()
   const { learning, working, failed } = useLearning(`${st?.report?.trainedAt ?? ''}|${st?.lastRetrain?.at ?? ''}`)
   if (!st) return null
@@ -19,12 +21,15 @@ export function SorterReading({ variant, children }: { variant: 'popover' | 'tab
   const thrown = learning?.thrownAway ?? st.learnable?.binned ?? 0
   const choices = choicesOf(st) || (learning?.choices ?? 0)
   const words = learning ? readingWords(learning, choices) : { headline: `${n(choices)} ${choices === 1 ? 'choice' : 'choices'} so far.`, sub: '' }
-  const gains = learning ? perFifty(learning.points) : []
+  const gains = learning ? gainsLine(learning.points) : null
   const total = kept + thrown
+  const inCard = untrained !== undefined && variant === 'tab'
+  if (inCard && !(learning && learning.points.length > 0)) return null
   const H = variant === 'popover' ? 'h2' : 'h3'
   return (
     <div className={`sr-reading sr-${variant}`} data-testid="sorter-reading" data-verdict={learning?.verdict ?? 'pending'}>
       {variant === 'popover' && <div className="sr-label">Sorter training</div>}
+      {untrained === 'again' && <p className="sr-from-last">From the last training, before the sorter changed.</p>}
       <H className="sr-headline">{words.headline}</H>
       {words.sub && <p className="sr-sub">{words.sub}</p>}
       {working && (
@@ -34,11 +39,8 @@ export function SorterReading({ variant, children }: { variant: 'popover' | 'tab
       )}
       {failed && !working && <p className="sr-working">The reading could not be worked out just now.</p>}
       {learning && learning.points.length > 0 && <LearningChart learning={learning} />}
-      {gains.length > 0 && (
-        <p className="sr-gains">
-          Throwaway right per extra 50 choices: <b>{gains.map((g) => `${signed(g)}`).join(', ')}</b> points
-        </p>
-      )}
+      {gains && <p className="sr-gains">{gains}</p>}
+      {!inCard && (
       <div className="sr-balance">
         <div className="sr-bal-bar">
           <div className="as-bar" role="img" aria-label={`${n(kept)} kept, ${n(thrown)} thrown away`}>
@@ -52,6 +54,7 @@ export function SorterReading({ variant, children }: { variant: 'popover' | 'tab
         </div>
         <p className="sr-bal-note">{balanceNote(kept, thrown)}</p>
       </div>
+      )}
       <div className="sr-actions">
         <button className="pic-primary sr-teach" onClick={() => startTeachingRound()}>
           Teach the sorter (10)
