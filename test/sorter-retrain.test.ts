@@ -174,6 +174,9 @@ describe('retrain: one at a time', () => {
     t.w.trainedWith = 322
     finish({ ok: true, report: report(322), before: report(312), moved: null })
     expect(await round).toBe(await manual)
+    // the round's request got the result of the retrain that was running by itself, not a refusal
+    expect(await round).toMatchObject({ ok: true, report: { choicesAtTraining: 322 } })
+    expect((await round).busy).toBeUndefined()
     await t.settle()
     expect(t.w.trains).toBe(1) // three answers since: not due
     expect(t.status()).toMatchObject({ retraining: null, answersSinceTraining: 3 })
@@ -254,6 +257,32 @@ describe('retrain: the switches and the stored record', () => {
       expect(t.r.setAuto(bad), JSON.stringify(bad)).toMatchObject({ ok: false, autoRetrain: false, autoRetrainOnBattery: false, error: 'That is not a setting the sorter knows.' })
     }
     expect(t.w.settings).toEqual({ enabled: false, onBattery: false })
+  })
+
+  it('`at` is an ISO-8601 string from the system clock, the one the renderer\'s new Date().toISOString() reads', async () => {
+    const saved: SorterRetrain[] = []
+    const r = new Retrainer({
+      train: async () => ({ ok: true, report: report(312), before: null, moved: null }),
+      choices: () => ({ learnable: { kept: 228, binned: 84 }, trainedWith: 312 }),
+      changed: () => undefined,
+      power: { onBattery: () => false, onAc: () => undefined },
+      settings: () => ({ enabled: false }),
+      saveSettings: () => undefined,
+      lastRetrain: () => saved[saved.length - 1],
+      saveLastRetrain: (x) => void saved.push(x),
+      defer: () => undefined
+      // no `now`: the clock the app runs with
+    })
+    const from = Date.now()
+    await r.retrain('round')
+    const to = Date.now()
+    expect(saved).toHaveLength(1)
+    const at = saved[0].at
+    expect(at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+    expect(new Date(at).toISOString()).toBe(at)
+    expect(Date.parse(at)).toBeGreaterThanOrEqual(from)
+    expect(Date.parse(at)).toBeLessThanOrEqual(to)
+    expect(storedRetrain(saved[0])!.at).toBe(at)
   })
 
   it('the first training has nothing before it', () => {

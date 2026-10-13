@@ -10,10 +10,17 @@
  *                            'round', the end of a teaching round. 'auto' cannot be asked for from here
  *   sorter:set-auto-retrain  ({ enabled?, onBattery? }) the two switches, stored in config
  *
- * Every handler refuses ("<channel>: bad arguments") an argument of the wrong type and any argument
- * beyond the ones listed; nothing is guessed from a bad call. A cursor is null / absent (the first
- * page) or a string that decodes to a cursor (review/piles.ts): one that does not is refused rather
- * than read as "from the start".
+ * Every handler refuses an argument of the wrong type and any argument beyond the ones listed (and,
+ * for set-auto-retrain, a call without its one argument); nothing is guessed from a bad call and
+ * none of its arguments reaches what is behind the handler. How a handler refuses is the same for every
+ * kind of bad call:
+ *   sorter:retrain-now       answers { ok: false, error } (its result's refusal, as when a training fails)
+ *   sorter:set-auto-retrain  answers { ok: false, autoRetrain, autoRetrainOnBattery, error } with the
+ *                            switches as stored (retrain.ts setAuto: nothing is stored)
+ *   sorter:teach-queue,      reject with "<channel>: bad arguments": a page and a reading have no
+ *   sorter:learning          refusal value, and an empty one would say "nothing to teach"
+ * A cursor is null / absent (the first page) or a string that decodes to a cursor (review/piles.ts):
+ * one that does not is refused rather than read as "from the start".
  */
 import { ipcMain } from 'electron'
 import type { SorterLearning, TeachQueue } from '../../preload'
@@ -28,6 +35,10 @@ export type TeachIpcDeps = {
 }
 
 export const TEACH_PAGE_MAX = 500
+/** What sorter:retrain-now answers to a call it does not take. */
+export const RETRAIN_REFUSED = 'That is not a training the sorter knows how to start.'
+/** What setAuto is given for a call with no argument or more than one: not a patch, so it is refused and nothing is stored. */
+const NO_PATCH = null
 
 export function registerTeachIpc(d: TeachIpcDeps): void {
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -36,7 +47,7 @@ export function registerTeachIpc(d: TeachIpcDeps): void {
       return fn(...args)
     })
   }
-  /** Refuse unless there are at most `max` arguments and `ok` holds. */
+  /** Reject unless there are at most `max` arguments and `ok` holds (the two handlers whose result has no refusal value). */
   const need = (channel: string, args: unknown[], max: number, ok: boolean): void => {
     if (args.length > max || !ok) throw new Error(`${channel}: bad arguments`)
   }
@@ -53,12 +64,11 @@ export function registerTeachIpc(d: TeachIpcDeps): void {
   })
   handle('sorter:retrain-now', (...args: unknown[]) => {
     const [trigger] = args
-    need('sorter:retrain-now', args, 1, trigger === undefined || trigger === 'manual' || trigger === 'round')
+    if (args.length > 1 || (trigger !== undefined && trigger !== 'manual' && trigger !== 'round')) return { ok: false, error: RETRAIN_REFUSED }
     return d.retrain(trigger === 'round' ? 'round' : 'manual')
   })
-  // the patch itself is checked where it is stored (retrain.ts setAuto): a bad one is refused there and nothing is stored
-  handle('sorter:set-auto-retrain', (...args: unknown[]) => {
-    need('sorter:set-auto-retrain', args, 1, args.length === 1)
-    return d.setAuto(args[0])
-  })
+  // The patch is checked where it is stored (retrain.ts setAuto): a bad one is refused there, nothing
+  // is stored, and the answer carries the switches as they are. A call that is not exactly one
+  // argument gets that same answer: it is passed on as no patch at all (NO_PATCH), never as its first argument
+  handle('sorter:set-auto-retrain', (...args: unknown[]) => d.setAuto(args.length === 1 ? args[0] : NO_PATCH))
 }

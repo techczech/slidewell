@@ -24,8 +24,8 @@
  * there and sees the piles) but sorting unattended is refused, as with too little evidence, until he
  * trains again: status() says so in `rulesChangedSinceTest` and `canRunUnattended` is false.
  *
- * Teaching (ticket 22): trainAndTest({ rescore: true }) also scores his undecided, already proposed
- * screenshots again with the new model and says what moved (rescore.ts; no sort run, no decision, no
+ * Teaching (ticket 22): trainAndTest({ rescore: true }) also scores the doubtful proposals among his
+ * undecided screenshots again with the new model and says what moved (rescore.ts; no sort run, no decision, no
  * cloud call), inside the same busy window so no sort can start in between. retrain.ts decides when a
  * training runs by itself and supplies the teaching part of the status (deps.teach).
  *
@@ -123,7 +123,7 @@ export type SorterStatus = {
   learnable: { kept: number; binned: number } | null
 } & SorterTeachStatus
 
-/** What a training answers. `before`: the current report it replaces (null = none); `moved`: the re-score, when asked for and it ran. */
+/** What a training answers. `before`: the current report it replaces (null = none); `moved`: the re-score, when asked for and it ran to the end (null: it failed or was stopped, so what moved is not known). */
 export type TrainResult = { ok: boolean; cancelled?: boolean; report?: SorterReport; error?: string; /** Refused because the sorter was already running. */ busy?: true; before?: SorterReport | null; moved?: Rescore | null }
 
 export const SORTER_BUSY = 'the sorter is already running'
@@ -330,9 +330,10 @@ export class SorterService {
 
   /**
    * Train on his history and report accuracy on a held-back 20%. Returns the report. With
-   * `rescore`, his undecided screenshots that already have a proposal are then scored again with the
-   * new model (rescore.ts) before the sorter is idle again; if that fails or is stopped the training
-   * still stands and `moved` is null.
+   * `rescore`, the doubtful proposals among his undecided screenshots are then scored again with the
+   * new model (rescore.ts; a proposal the sorter was sure about is not touched) before the sorter is
+   * idle again; if that fails or is stopped part-way the training still stands and `moved` is null
+   * (rows a stopped re-score had already written stay).
    */
   async trainAndTest(opts: { rescore?: boolean } = {}): Promise<TrainResult> {
     if (this.busy()) return { ok: false, error: SORTER_BUSY, busy: true }
@@ -433,7 +434,12 @@ export class SorterService {
             aborted: () => ctl.signal.aborted,
             onProgress: (done, total) => this.set({ done, total })
           })
-          if (ctl.signal.aborted) warn(`[sorter] the re-score after training was stopped after ${moved.rescored} proposals; the rest keep their earlier scores`)
+          if (ctl.signal.aborted) {
+            // the rows written so far stay (they are valid scores from the new model), but the counts
+            // are of a part only: what moved is reported as not checked, never as a partial number
+            warn(`[sorter] the re-score after training was stopped after ${moved.rescored} proposals; the rest keep their earlier scores`)
+            moved = null
+          }
         } catch (e) {
           moved = null // the model is saved; what moved is simply not known
           warn(ctl.signal.aborted ? '[sorter] the re-score after training was stopped; proposals keep their earlier scores' : `[sorter] the re-score after training failed (${(e as Error)?.name ?? 'error'}); proposals keep their earlier scores`)

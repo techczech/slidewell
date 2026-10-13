@@ -346,8 +346,8 @@ describe('4. cleanup waits for every request of the run', () => {
     })
     const svc = new CloudSorter(d)
     const writesWhileBusy: boolean[] = []
-    const realSave = SorterStore.prototype.saveCloudResults
-    vi.spyOn(SorterStore.prototype, 'saveCloudResults').mockImplementation(function (this: InstanceType<typeof SorterStore>, ...args: Parameters<typeof realSave>) {
+    const realSave = SorterStore.prototype.saveCloudAnswers // the write the cloud step makes for each request's answers
+    vi.spyOn(SorterStore.prototype, 'saveCloudAnswers').mockImplementation(function (this: InstanceType<typeof SorterStore>, ...args: Parameters<typeof realSave>) {
       writesWhileBusy.push(svc.busy())
       return realSave.apply(this, args)
     })

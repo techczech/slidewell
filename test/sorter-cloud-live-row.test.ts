@@ -96,7 +96,7 @@ describe('a cloud answer that arrives after a re-score', () => {
     const s = await run(w, () => rescore(w, 'keep'))
     expect(row(w, 'shot')).toMatchObject({ proposal: 'keep', p_keep: 0.69, model_id: 'model-after-retrain', decided_by: null })
     expect(answers(w, 'shot')).toEqual([{ provider: 'openai', verdict: 'throwaway' }])
-    expect(s).toMatchObject({ answered: 0, keep: 0, throwaway: 0 })
+    expect(s).toMatchObject({ answered: 1, keep: 0, throwaway: 0 })
   })
 
   it('a row that is no longer at the current sorter version is left alone; the answer is still recorded', async () => {
@@ -110,6 +110,83 @@ describe('a cloud answer that arrives after a re-score', () => {
     const w = well('blurry')
     await run(w, () => undefined)
     expect(row(w, 'shot')).toMatchObject({ proposal: 'doubtful', p_keep: 0.51, confidence: 0.51, model_id: 'model-test', decided_by: 'luna' })
+  })
+})
+
+describe('the run summary when an answer is recorded without changing the proposal', () => {
+  it('sent, moved to Kept by a retrain, then answered: one answer, nothing still needing a look, and the message says so', async () => {
+    const w = well('toss-wifi')
+    const s = await run(w, () => rescore(w, 'keep'))
+    expect(s).toMatchObject({ asked: 1, answered: 1, keep: 0, throwaway: 0, stayedDoubtful: 0, sent: 1, settled: 0, skipped: null, error: null })
+    expect(s.message).toBe('Asked Luna about 1 screenshot: 0 keep, 0 throwaway.')
+    expect(s.message).not.toMatch(/need/)
+    // the answer used allowance and is stored, so the screenshot is not asked about again
+    expect(answers(w, 'shot')).toEqual([{ provider: 'openai', verdict: 'throwaway' }])
+    expect(sql(w, (db) => Number((db.prepare('SELECT COALESCE(SUM(sent), 0) AS n FROM sorter_cloud_allowance').get() as { n: number }).n))).toBe(1)
+  })
+
+  it('sent, decided by him in Triage meanwhile, then answered: counted as answered and not as needing a look', async () => {
+    const w = well('keep-chart')
+    const s = await run(w, () => sql(w, (db) => db.prepare("INSERT OR REPLACE INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, 'excluded', '2026-10-13T09:00:00.000Z', NULL)").run(hashOf('shot'))))
+    expect(row(w, 'shot')).toMatchObject({ proposal: 'doubtful', p_keep: 0.51, decided_by: null })
+    expect(s).toMatchObject({ asked: 1, answered: 1, keep: 0, throwaway: 0, stayedDoubtful: 0 })
+    expect(s.message).not.toMatch(/need/)
+  })
+
+  it('others that were waiting and were not sent still count as needing a look; an applied answer leaves the count', async () => {
+    const w = makeCloudWell([
+      { hash: 'shot', proposal: 'doubtful', window: 'keep-chart', takenAt: '2026-10-04T10:00:00' },
+      { hash: 'moved', proposal: 'doubtful', window: 'toss-wifi', takenAt: '2026-10-04T10:01:00' },
+      { hash: 'unsure', proposal: 'doubtful', window: 'blurry', takenAt: '2026-10-04T10:02:00' }
+    ])
+    wells.push(w)
+    const stub = lunaStub()
+    let first = true
+    const s = await new CloudSorter(
+      cloudDeps(w, {
+        http: async (url, init) => {
+          // a retrain's re-score moves one of them to Kept while the request is out
+          if (first) expect(writeRescored(w, [{ hash: hashOf('moved'), proposal: 'keep', confidence: 0.9, pKeep: 0.9, reason: 'Looks like screenshots you kept before', rule: null, decidedBy: 'history', proposedAt: row(w, 'moved').proposed_at }], SORTER_VERSION, 'model-after-retrain')).toEqual([hashOf('moved')])
+          first = false
+          return stub.http(url, init)
+        }
+      })
+    ).runNightly()
+    expect(row(w, 'shot').proposal).toBe('keep')
+    expect(row(w, 'moved')).toMatchObject({ proposal: 'keep', decided_by: 'history' })
+    expect(row(w, 'unsure').proposal).toBe('doubtful')
+    expect(s).toMatchObject({ asked: 3, answered: 3, keep: 1, throwaway: 0, stayedDoubtful: 1 })
+    expect(s.message).toBe('Asked Luna about 3 screenshots: 1 keep, 0 throwaway. 1 screenshot still needs a look.')
+  })
+})
+
+describe('saveCloudAnswers: what became of each answer', () => {
+  it('says which answers changed the proposal and which were only recorded, each screenshot once', () => {
+    const w = makeCloudWell([
+      { hash: 'open', proposal: 'doubtful' },
+      { hash: 'sure', proposal: 'keep' },
+      { hash: 'his', proposal: 'doubtful', decided: 'included' },
+      { hash: 'answered', proposal: 'doubtful', answered: true }
+    ])
+    wells.push(w)
+    const names = ['open', 'sure', 'his', 'answered']
+    const sureBefore = row(w, 'sure')
+    const st = new SorterStore(w)
+    try {
+      expect(st.stillDoubtful([...names, 'no-such-shot', 'open'].map(hashOf))).toBe(1)
+      const out = st.saveCloudAnswers(
+        names.map((n) => ({ hash: hashOf(n), verdict: 'keep' as const, confidence: 0.9, reason: 'x', provider: 'openai' as const, model: 'gpt-6-luna', promptVersion: 'luna-prompt-1', askedAt: '2026-10-13T09:00:00.000Z' })),
+        { sorterVersion: SORTER_VERSION, hashes: names.map(hashOf), combine: () => ({ proposal: 'keep', confidence: 0.9, pKeep: 0.9, reason: 'A chart worth keeping', decidedBy: 'luna', decidedModel: 'gpt-6-luna' }) }
+      )
+      expect(out.applied).toEqual([hashOf('open')])
+      expect([...out.recordedOnly].sort()).toEqual(['sure', 'his', 'answered'].map(hashOf).sort())
+      expect(st.stillDoubtful(names.map(hashOf))).toBe(0)
+      expect(st.stillDoubtful([])).toBe(0)
+    } finally {
+      st.close()
+    }
+    expect(sql(w, (db) => Number((db.prepare('SELECT COUNT(*) AS n FROM sorter_cloud_answers').get() as { n: number }).n))).toBe(4)
+    expect(row(w, 'sure')).toEqual(sureBefore)
   })
 })
 

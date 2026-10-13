@@ -2,8 +2,8 @@
  * Retraining the sorter as he teaches it (ticket 22): one routine for the Train button, the end of a
  * teaching round and the retrain that starts by itself, and the rule for when it starts by itself.
  *
- *   retrain(trigger): train + accuracy test + re-score of his undecided, already proposed screenshots
- *     (service.ts trainAndTest({ rescore: true })), then record what moved as `lastRetrain` (kept in
+ *   retrain(trigger): train + accuracy test + re-score of the doubtful proposals among his undecided
+ *     screenshots (service.ts trainAndTest({ rescore: true })), then record what moved as `lastRetrain` (kept in
  *     config, so it is there after a restart). One at a time: a request while one is running joins it.
  *   noteAnswer(): he decided something (Review, Triage, a teaching round). Counted a moment later, off
  *     the call that wrote the decision; several answers in a row are counted once.
@@ -14,8 +14,8 @@
  *     for the sorter to be idle. A retrain that fails is not tried again until he answers once more.
  *
  * A retrain by itself is a training like any other: it writes a model and its report (so a rule
- * change since the last test is cleared by it), updates existing proposals of undecided screenshots,
- * and nothing else. It makes no sort run, writes no decision of his, and never asks a cloud model.
+ * change since the last test is cleared by it), updates existing doubtful proposals of undecided
+ * screenshots (never one the sorter was sure about: rescore.ts), and nothing else. It makes no sort run, writes no decision of his, and never asks a cloud model.
  *
  * No Electron here: power comes through PowerSeam (index.ts binds powerMonitor), time and deferral
  * through deps.
@@ -80,7 +80,12 @@ const right = (a: AccuracyReport): SorterRightShares => ({ throwawayRight: a.thr
 
 type Report = { heldBack: AccuracyReport; choicesAtTraining?: number; usable?: { keep: number; throwaway: number } }
 
-/** What one retrain did, for the record. `moved` null: the re-score did not run to the end, so only the accuracy is known. */
+/**
+ * What one retrain did, for the record. `moved` null: the re-score failed or was stopped part-way, so
+ * only the accuracy is known: needALook and movedToSure are null and no hashes are kept (never the
+ * counts of a part). `at` is `at.toISOString()`, the format and clock of the renderer's own
+ * `new Date().toISOString()`.
+ */
 export function retrainRecord(at: Date, trigger: RetrainTrigger, before: Report | null | undefined, after: Report, moved: Rescore | null | undefined): SorterRetrain {
   return {
     at: at.toISOString(),

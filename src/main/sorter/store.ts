@@ -114,6 +114,15 @@ export type LiveCombine = {
   combine: (hash: string, live: { confidence: number; pKeep: number; reason: string }) => Omit<CloudProposalRow, 'hash'> | null
 }
 
+/**
+ * What saving a request's answers did, per screenshot (saveCloudAnswers). Every answer given is
+ * recorded; `applied` are the screenshots whose proposal the answer also changed, `recordedOnly`
+ * those whose answer was stored while the proposal was left as it is (he decided or answered it, a
+ * retrain moved it out of doubtful, or it is from another sorter version). Together they are the
+ * screenshots answered, each once.
+ */
+export type CloudSaveOutcome = { applied: string[]; recordedOnly: string[] }
+
 /** A stored answer with who gave it, the model + prompt it was given under, and when. */
 export type StoredCloudAnswer = LunaAnswer & { provider: ProviderId; model: string; promptVersion: string; askedAt: string }
 
@@ -718,6 +727,35 @@ export class SorterStore {
    * `sorterVersion`. Either way the answer itself is recorded, so the screenshot is not asked about again.
    */
   saveCloudResults(answers: CloudAnswerRow[], proposals: CloudProposalRow[] | LiveCombine): string[] {
+    return this.saveCloud(answers, proposals)
+  }
+
+  /**
+   * saveCloudResults for the cloud step, saying of each answered screenshot what became of it: the
+   * same transaction and the same rows written, and the outcome per hash instead of only the changed ones.
+   */
+  saveCloudAnswers(answers: CloudAnswerRow[], live: LiveCombine): CloudSaveOutcome {
+    const applied = this.saveCloud(answers, live)
+    const changed = new Set(applied)
+    return { applied, recordedOnly: [...new Set(answers.map((a) => a.hash))].filter((h) => !changed.has(h)) }
+  }
+
+  /**
+   * Of these screenshots, how many still need a look now: the proposal is doubtful, he has not
+   * answered it in review and has no decision on it in Triage. Reads only.
+   */
+  stillDoubtful(hashes: string[]): number {
+    if (!hashes.length) return 0
+    const open = this.db.prepare(
+      `SELECT 1 FROM sorter_proposals p WHERE p.hash = ? AND p.proposal = 'doubtful' AND p.answered_at IS NULL
+       ${hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = p.hash)' : ''}`
+    )
+    let n = 0
+    for (const h of new Set(hashes)) if (open.get(h)) n++
+    return n
+  }
+
+  private saveCloud(answers: CloudAnswerRow[], proposals: CloudProposalRow[] | LiveCombine): string[] {
     this.needAnswers()
     const live = Array.isArray(proposals) ? null : proposals
     const given = Array.isArray(proposals) ? proposals : []

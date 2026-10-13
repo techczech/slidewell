@@ -402,10 +402,10 @@ export type SorterRetrain = {
   at: string
   trigger: RetrainTrigger
   choices: { before: number; after: number } // his choices the model before / the new model was trained with (before 0 = there was none)
-  needALook: { before: number; after: number } | null // doubtful proposals among his undecided screenshots, just before and after the re-score; null = what moved could not be checked
+  needALook: { before: number; after: number } | null // before: the doubtful proposals among his undecided screenshots that the re-score read (it reads no others; one the sorter was sure about is never re-scored); after: those of them still doubtful; null = what moved could not be checked, or the re-score was stopped part-way
   movedToSure: { keep: number; throwaway: number } | null // were doubtful, now keep / throwaway; null with needALook
   accuracy: { before: SorterRightShares | null; after: SorterRightShares } // held-back accuracy of the model before (null = none) and after
-  movedHashes: string[] // up to 200 screenshots that moved to sure
+  movedHashes: string[] // up to 200 screenshots that moved to sure (none when what moved could not be checked)
 }
 export type SorterTeachStatus = {
   answersSinceTraining: number // his choices now minus those the model in use was trained with (0 without a current model or before the first count)
