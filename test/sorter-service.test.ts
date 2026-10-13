@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 vi.mock('electron', () => ({ ipcMain: { handle: () => undefined } }))
-const { SorterService } = await import('../src/main/sorter/service')
+const { SorterService, cloudGates } = await import('../src/main/sorter/service')
 const { runJob } = await import('../src/main/sorter/jobs')
 const { SorterStore } = await import('../src/main/sorter/store')
 const { SORTER_VERSION } = await import('../src/main/sorter/decide')
@@ -421,6 +421,32 @@ describe('sorter service: the accuracy report is for the app rules it was tested
     expect((await svc.trainAndTest()).ok).toBe(true)
     expect(svc.status()).toMatchObject({ canRunUnattended: true, rulesChangedSinceTest: false })
     expect((await svc.sortUndecided({ trigger: 'nightly' })).ok).toBe(true)
+  })
+
+  it('what the cloud step is told: a rule change is its own answer, apart from "trained enough to sort"', async () => {
+    const w = well(70, 30)
+    let rules: unknown = []
+    let pictureModel = true
+    const svc = new SorterService(deps(w, { appRules: () => rules, pictures: { modelReady: () => pictureModel, ensureVectors: async (items) => new Map(items.map((it) => [it.id, vectorFor(it.id)])) } }))
+    const gates = cloudGates(svc)
+    // nothing trained: not ready, and no rule change to speak of
+    expect([gates.canSortLocal(), gates.rulesChangedSinceTest()]).toEqual([false, false])
+    expect((await svc.trainAndTest()).ok).toBe(true)
+    expect([gates.canSortLocal(), gates.rulesChangedSinceTest()]).toEqual([true, false])
+    rules = [{ app: 'Brightloom', rule: 'throwaway' }]
+    // a sort he starts is still possible; the mismatch is said separately
+    expect([gates.canSortLocal(), gates.rulesChangedSinceTest()]).toEqual([true, true])
+    expect(svc.status().canRunUnattended).toBe(false)
+    pictureModel = false
+    expect(gates.canSortLocal()).toBe(false)
+    pictureModel = true
+    // too little evidence stays "not trained enough", rules or no rules
+    const small = new SorterService(deps(well(24, 12), { appRules: () => rules }))
+    rules = []
+    expect((await small.trainAndTest()).ok).toBe(true)
+    expect([cloudGates(small).canSortLocal(), cloudGates(small).rulesChangedSinceTest()]).toEqual([false, false])
+    rules = [{ app: 'Brightloom', rule: 'throwaway' }]
+    expect([cloudGates(small).canSortLocal(), cloudGates(small).rulesChangedSinceTest()]).toEqual([false, true])
   })
 
   it('a report saved before rules were recorded counts as tested with no rules', async () => {

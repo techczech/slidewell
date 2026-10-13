@@ -182,6 +182,7 @@ export function cloudDeps(
       return { ok: true, sorted: 0 }
     },
     canSortLocal: () => true,
+    rulesChangedSinceTest: () => false,
     keys: { openai: openaiAccess ?? access(() => key), anthropic: anthropicKey ?? access(() => antKey) },
     online: () => true,
     http: bothStubs().http,

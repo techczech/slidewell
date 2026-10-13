@@ -124,7 +124,10 @@ function Open({ card, onClose }: { card: SortRunCard; onClose: () => void }): JS
   )
 }
 
-export function SortPiles({ runId, reloadKey, periods, onReview }: { runId: string; reloadKey: number; periods: Periods; onReview: () => void }): JSX.Element | null {
+/** What followed the latest sort, from the status the old Last run block used: unsure ones sent to a service, those it settled, those still waiting for him. */
+export type SortFollowUp = { name: string; sent: number; settled: number; waiting: number | null }
+
+export function SortPiles({ runId, reloadKey, periods, onReview, followUp }: { runId: string; reloadKey: number; periods: Periods; onReview: () => void; followUp?: SortFollowUp | null }): JSX.Element | null {
   const [run, setRun] = useState<SortRun | null>(null)
   const [piles, setPiles] = useState<Record<SortRunPile, PileState>>({ kept: EMPTY, throwaway: EMPTY, unsure: EMPTY })
   const [loaded, setLoaded] = useState(false)
@@ -270,6 +273,8 @@ export function SortPiles({ runId, reloadKey, periods, onReview }: { runId: stri
       <div className="sp-result">
         <span>
           <b>{lead}:</b> {n(run.counts.kept)} kept, {n(run.counts.thrownAway)} thrown away, {n(run.counts.unsure)} unsure.
+          {followUp && followUp.sent > 0 && ` ${n(followUp.sent)} sent to ${followUp.name}, ${n(followUp.settled)} settled.`}
+          {followUp && followUp.waiting !== null && ` ${n(followUp.waiting)} waiting for you.`}
         </span>
         <button className="as-link as-review-link" onClick={onReview}>
           Review what it sorted →

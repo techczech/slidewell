@@ -234,6 +234,22 @@ export class SorterService {
     return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: current && enoughToMeasure(report?.heldBack) && !rulesChangedSinceTest, retrainNeeded: Boolean(rec) && !current, rulesChangedSinceTest, minHeldBack: MIN_HELD_BACK, pending, period: this.period(), periods: PERIOD_CHOICES, lastRun: this.lastRun(), ...this.counts }
   }
 
+  /**
+   * A sort can run at all: a current model with enough held-back evidence, and the picture model on
+   * this Mac. His app rules are not part of this (rulesChangedSinceTest); a sort he starts himself
+   * needs only this.
+   */
+  canSort(): boolean {
+    const rec = this.withStore((s) => s.latestModel<SorterReport>())
+    return Boolean(rec) && isCurrent(rec!) && enoughToMeasure(rec!.report.heldBack) && this.deps.pictures.modelReady()
+  }
+
+  /** A current model exists and his app rules are not the ones its report was measured with (status() gives the same). */
+  rulesChangedSinceTest(): boolean {
+    const rec = this.withStore((s) => s.latestModel<SorterReport>())
+    return Boolean(rec) && isCurrent(rec!) && !testedWith(rec!.report, this.appRules())
+  }
+
   /** The period chosen in Settings; null when what is stored is not a period. */
   period(): SortPeriod | null {
     return storedPeriod(this.deps.period ? this.deps.period() : undefined)
@@ -469,6 +485,15 @@ export class SorterService {
       this.abort = null
     }
   }
+}
+
+/**
+ * What the cloud step (cloud/service.ts CloudDeps) is told about the local sorter, as two separate
+ * answers: whether a sort can run at all, and whether his app rules have changed since the report.
+ * The nightly batch needs the first and refuses on the second; Sort now needs only the first.
+ */
+export function cloudGates(svc: SorterService): { canSortLocal: () => boolean; rulesChangedSinceTest: () => boolean } {
+  return { canSortLocal: () => svc.canSort(), rulesChangedSinceTest: () => svc.rulesChangedSinceTest() }
 }
 
 /**

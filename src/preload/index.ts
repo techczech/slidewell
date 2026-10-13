@@ -419,7 +419,7 @@ export type CloudRunSummary = {
   sent: number // the run as three numbers: screenshots sent,
   settled: number // those the provider settled (keep or throwaway),
   stillUnsure: number // and those sent that it left unsure
-  skipped: 'unavailable' | 'off' | 'nightly-off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | 'period-changed' | 'batch-changed' | 'date-changed' | null
+  skipped: 'unavailable' | 'off' | 'nightly-off' | 'rules-changed' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | 'period-changed' | 'batch-changed' | 'date-changed' | null
   error: string | null
   message: string
 }

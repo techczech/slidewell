@@ -103,7 +103,7 @@ export function installMock(): void {
       onStatus: () => () => undefined
     },
     sorter: {
-      status: async () => ({ phase: 'idle' as const, done: 0, total: 0, message: '', error: null, modelReady: false, report: null, canRunUnattended: false, retrainNeeded: false, minHeldBack: { total: 20, perLabel: 5 }, pending: { keep: 0, throwaway: 0, doubtful: 0, lastProposedAt: null }, period: 'all' as const, periods: PERIODS, lastRun: null, undecided: null, learnable: null }),
+      status: async () => ({ phase: 'idle' as const, done: 0, total: 0, message: '', error: null, modelReady: false, report: null, canRunUnattended: false, retrainNeeded: false, rulesChangedSinceTest: false, minHeldBack: { total: 20, perLabel: 5 }, pending: { keep: 0, throwaway: 0, doubtful: 0, lastProposedAt: null }, period: 'all' as const, periods: PERIODS, lastRun: null, undecided: null, learnable: null }),
       train: async () => ({ ok: false, error: 'not available in the browser preview' }),
       sort: async () => ({ ok: false, error: 'not available in the browser preview' }),
       setPeriod: async () => ({ ok: false, period: 'all' as const, error: 'not available in the browser preview' }),
@@ -183,7 +183,7 @@ export function installMock(): void {
         { app: 'Mossgrid', count: 97, kept: 3, thrownAway: 47, keptShare: 0.06 },
         { app: '', count: 305, kept: 28, thrownAway: 60, keptShare: 0.32 }
       ],
-      decideAll: async () => ({ ok: false, changed: 0, count: 0 }),
+      decideAll: async () => ({ ok: false, changed: 0, skipped: 0, count: 0 }),
       paste: async () => null,
       importSelected: async () => ({ imported: 0, skipped: 0, gated: 0 }),
       importStatus: async () => null,

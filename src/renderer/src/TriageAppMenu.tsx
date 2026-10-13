@@ -163,10 +163,13 @@ export function TriageAppBar({ ticked, version, onDecided }: { ticked: string[];
         total
       )
     } catch {
-      r = { ok: false, changed: 0, count: total, refused: 'bad-arguments' }
+      r = { ok: false, changed: 0, skipped: 0, count: total, refused: 'bad-arguments' }
     }
     setBusy(false)
-    if (r.ok) setResult(`${action === 'exclude' ? 'Excluded' : 'Selected'} ${n(r.changed)} screenshot${r.changed === 1 ? '' : 's'} from ${from}.`)
+    if (r.ok) {
+      const left = r.skipped > 0 ? ` ${n(r.skipped)} left undecided because the same picture also appears under another app.` : ''
+      setResult(`${action === 'exclude' ? 'Excluded' : 'Selected'} ${n(r.changed)} screenshot${r.changed === 1 ? '' : 's'} from ${from}.${left}`)
+    }
     else setResult(r.refused === 'count-changed' ? 'The count changed. Nothing was decided.' : 'Nothing was decided.')
     onDecided() // reload the grid and the counts either way
   }

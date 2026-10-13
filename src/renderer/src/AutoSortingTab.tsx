@@ -9,12 +9,13 @@ import { CloudConfirm } from './CloudConfirm'
 import { SortPeriodSelect } from './SortPeriodSelect'
 import { SorterAccuracyTable } from './SorterAccuracyTable'
 import { SorterGoesBy } from './SorterGoesBy'
-import { SortChooser, SortPiles } from './SortPiles'
+import { SortChooser, SortPiles, type SortFollowUp } from './SortPiles'
 import { sorterRunning, useCloudStatus, useSortRuns, useSorterStatus } from './sorter-hooks'
 import { day, n, plural, when, whenShort } from './sorter-format'
 import './auto-sorting.css'
 
 const lower = (s: string): string => (s ? s[0].toLowerCase() + s.slice(1) : s)
+const RULES_CHANGED = 'You changed an app rule since the last accuracy test. Nightly sorting waits until you train again. Sort now still works.'
 const upper = (s: string): string => (s ? s[0].toUpperCase() + s.slice(1) : s)
 
 /** "Trained today at 02:00" / "Trained on Tue 13 Oct, 02:00". */
@@ -83,22 +84,30 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
     if (!r.ok && r.error && !r.cancelled) setResult(r.error) // on success the pushed status carries the new report
   }, [])
   // one button: with a service on, main sorts on this Mac and prepares the batch (shown in the confirm box); with none, only the local sort
+  const rulesChanged = st?.rulesChangedSinceTest === true
   const sortNow = useCallback(async () => {
     setResult(null)
+    const alone = async (): Promise<string | null> => {
+      const r = await window.sw.sorter.sort()
+      return r.ok && r.counts ? `Sorted ${n(r.sorted ?? 0)}${r.periodPhrase ?? ''}: ${n(r.counts.keep)} keep, ${n(r.counts.throwaway)} throwaway, ${n(r.counts.doubtful)} need a look.` : (r.error ?? null)
+    }
     if (cl?.settings.enabled) {
       setPreparing(true)
       try {
+        // While an app rule is newer than the accuracy test, main's cloud.prepare cannot sort on this Mac (it answers "not trained enough"),
+        // so the sorter's own sort runs first, which main still allows; prepare then only builds the batch from the unsure ones.
+        const sorted = rulesChanged ? await alone() : null
         const p = await window.sw.cloud.prepare()
-        if (p.blocked) setResult([p.local.message, p.message].filter(Boolean).join(' '))
-        else setPreview(p)
+        const local = rulesChanged ? sorted : p.local.message
+        if (p.blocked) setResult([local, p.message].filter(Boolean).join(' '))
+        else setPreview(rulesChanged ? { ...p, local: { ok: true, message: sorted ?? '' } } : p)
       } finally {
         setPreparing(false)
       }
       return
     }
-    const r = await window.sw.sorter.sort()
-    setResult(r.ok && r.counts ? `Sorted ${n(r.sorted ?? 0)}${r.periodPhrase ?? ''}: ${n(r.counts.keep)} keep, ${n(r.counts.throwaway)} throwaway, ${n(r.counts.doubtful)} need a look.` : (r.error ?? null))
-  }, [cl?.settings.enabled])
+    setResult(await alone())
+  }, [cl?.settings.enabled, rulesChanged])
   const send = useCallback(async () => {
     if (!preview?.token) return
     const token = preview.token
@@ -132,7 +141,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
   // why Sort now and the nightly switch are off, in his words; null when sorting can run
   const whyNot = !st.modelReady
     ? 'Needs the picture search model (in Settings › Picture search).'
-    : st.canRunUnattended
+    : st.canRunUnattended || st.rulesChangedSinceTest
       ? null
       : st.retrainNeeded
         ? 'Retrain needed: the sorter has changed since it last learnt from your choices. Sorting stays off until you train it again.'
@@ -223,7 +232,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
   )
 
   const nightlyOn = service && cl.settings.nightly && st.canRunUnattended // stored on, but it does not run until the sorter can sort
-  const nightlyReason = !service ? 'When no service is chosen in Settings, nightly sorting is off.' : !st.canRunUnattended ? 'Train the sorter first.' : null
+  const nightlyReason = !service ? 'When no service is chosen in Settings, nightly sorting is off.' : !st.canRunUnattended ? (st.rulesChangedSinceTest ? 'Waiting for you to train again.' : 'Train the sorter first.') : null
   const nightlyBlock = (
     <div className="as-block as-nightly" style={!st.canRunUnattended ? { opacity: 0.55 } : undefined}>
       <h2>Nightly sorting</h2>
@@ -237,7 +246,8 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
             </label>
             <input type="time" className="sorter-cloud-time as-time" value={cl.settings.batchTime} disabled={nightlyReason !== null} onChange={(e) => e.target.value && void setTime(e.target.value)} aria-label="Nightly sorting time" />
           </div>
-          <p className={nightlyReason ? 'as-why as-note' : 'as-muted as-note'}>{nightlyReason ?? 'When no service is chosen in Settings, nightly sorting is off.'}</p>
+          {st.rulesChangedSinceTest && <p className="as-why as-note as-rules-changed">{RULES_CHANGED}</p>}
+          {!(st.rulesChangedSinceTest && service) && <p className={nightlyReason ? 'as-why as-note' : 'as-muted as-note'}>{nightlyReason ?? 'When no service is chosen in Settings, nightly sorting is off.'}</p>}
           {nightlyError && <p className="pic-error">{nightlyError}</p>}
         </div>
         <p>
@@ -249,7 +259,9 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
   )
 
   // the piles of the chosen sort (replace the old "Last run" block, whose numbers are now the result line); the old block stays for a Mac with no recorded sort yet
-  const pilesBlock = shownRun ? <SortPiles runId={shownRun.id} reloadKey={runsVersion} periods={st.periods} onReview={onReview} /> : null
+  // the latest sort also carries what followed it (the numbers the old Last run block showed); an earlier sort shows what its run record has
+  const followUp: SortFollowUp | null = shownRun && shownRun.id === runs[0]?.id && run && run.needLook !== null ? { name, sent: run.sent, settled: run.settled, waiting: run.needLook } : null
+  const pilesBlock = shownRun ? <SortPiles runId={shownRun.id} reloadKey={runsVersion} periods={st.periods} onReview={onReview} followUp={followUp} /> : null
   const lastRunBlock =
     shownRun ? null : run || st.pending.lastProposedAt ? (
       <div className="as-block as-last">
@@ -328,6 +340,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
       <span className="as-dot" />
       <div>
         <b>{trainedWhen(rep.trainedAt)}</b> on {n(trainedOnAll)} of your choices.
+        {st.rulesChangedSinceTest && <div className="as-why as-rules-changed">{RULES_CHANGED}</div>}
       </div>
     </div>
   ) : null

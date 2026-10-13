@@ -111,7 +111,7 @@ export function SorterGoesBy({ reloadKey }: { reloadKey: number }): JSX.Element 
           )}
           {saved && !error && (
             <p className="gb-saved" role="status">
-              Rule saved. Used from the next sort.
+              Rule saved. Used from the next sort. Nightly sorting waits until you train again.
             </p>
           )}
           {error && <p className="pic-error">{error}</p>}

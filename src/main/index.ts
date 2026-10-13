@@ -38,7 +38,7 @@ import { startPictureQueryServer, PICTURE_QUERY_SOCKET, type QueryServer } from 
 import { WebGpuEmbedder } from './picture-search/webgpu-embedder'
 import { electronEmbedHost, registerEmbedProtocol, EMBED_SCHEME } from './picture-search/electron-embed-host'
 import { modelDir as pictureModelDir } from './picture-search/model-store'
-import { SorterService, changePeriod, registerSorterIpc, type LocalRunSummary } from './sorter/service'
+import { SorterService, changePeriod, cloudGates, registerSorterIpc, type LocalRunSummary } from './sorter/service'
 import createTrainWorker from './sorter/train-worker?nodeWorker'
 import type { Job, JobResult } from './sorter/jobs'
 import type { FetchLike } from './picture-search/model-store'
@@ -481,10 +481,7 @@ app.whenReady().then(() => {
     wellRoot: wellRootResolved,
     sortLocal: (window, trigger) => sorter.sortUndecided({ window, trigger }),
     period: () => readConfig().sorterPeriod,
-    canSortLocal: () => {
-      const st = sorter.status()
-      return st.canRunUnattended && st.modelReady
-    },
+    ...cloudGates(sorter),
     keys: cloudKeys,
     online: () => net.isOnline(),
     http: cloudHttp,

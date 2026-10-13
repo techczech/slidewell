@@ -112,7 +112,7 @@ export const PREPARED_TTL_MS = 10 * 60 * 1000
 
 export { agreedAt, applySettingsPatch, isSwitch, KEY_FIELD, normaliseCloudSettings, optedIn, removeKey, serviceOn, storedProvider, storedSwitch, withdrawAgreement, type CloudSettings, type StoredCloudSettings, type StoredKeys } from './settings'
 
-export type CloudSkip = 'unavailable' | 'off' | 'nightly-off' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | 'period-changed' | 'batch-changed' | 'date-changed'
+export type CloudSkip = 'unavailable' | 'off' | 'nightly-off' | 'rules-changed' | 'no-key' | 'revoked' | 'provider-changed' | 'offline' | 'nothing-doubtful' | 'key-rejected' | 'cancelled' | 'limit-reached' | 'not-prepared' | 'not-confirmed' | 'period-changed' | 'batch-changed' | 'date-changed'
 
 /**
  * What main's native confirm dialog shows (index.ts raises it with dialog.showMessageBox on the main
@@ -227,8 +227,17 @@ export type CloudDeps = {
   sortLocal: (window: PeriodWindow, trigger: 'manual' | 'nightly') => Promise<{ ok: boolean; sorted?: number; error?: string }>
   /** The period stored in config, as stored (period.ts storedPeriod reads it). Absent: everything. */
   period?: () => unknown
-  /** The local sorter has a current model with enough held-back evidence to run unattended. */
+  /**
+   * The local sorter has a current model with enough held-back evidence to sort (whoever starts it).
+   * It says nothing about his app rules: that is rulesChangedSinceTest.
+   */
   canSortLocal: () => boolean
+  /**
+   * His app rules are not the ones the local sorter's accuracy report was measured with (sorter/service.ts).
+   * While true nothing runs unattended: the nightly batch sorts nothing, claims nothing and sends
+   * nothing, and one already running stops before its next request. Sort now is not held back by it.
+   */
+  rulesChangedSinceTest: () => boolean
   /** Each provider's own key store. A request to a provider only ever carries the key from its entry. */
   keys: Record<ProviderId, KeyAccess>
   online: () => boolean
@@ -339,7 +348,7 @@ function scopeOf(p: CloudProvider, t: Thresholds, secondOpinions: boolean): Clou
 }
 
 /** Why a run stops before its next request. */
-type Revoked = 'off' | 'nightly-off' | 'no-key' | 'revoked' | 'provider-changed'
+type Revoked = 'off' | 'nightly-off' | 'rules-changed' | 'no-key' | 'revoked' | 'provider-changed'
 
 export class CloudSorter {
   private phase: CloudStatus['phase'] = 'idle'
@@ -608,6 +617,8 @@ export class CloudSorter {
     if (settings.enabled !== true) return { revoked: 'off' }
     // the nightly batch also needs its own switch; Sort now does not
     if (trigger === 'nightly' && settings.nightly !== true) return { revoked: 'nightly-off' }
+    // nor does anything go unattended while his app rules are not the tested ones
+    if (trigger === 'nightly' && this.rulesChanged()) return { revoked: 'rules-changed' }
     const key = this.safeKey(provider.id)
     if (!key) return { revoked: 'no-key' }
     return key === runKey ? { ok: true } : { revoked: 'revoked' }
@@ -638,6 +649,15 @@ export class CloudSorter {
     } catch (e) {
       if (e instanceof CloudAnswersUnavailable) return null
       throw e
+    }
+  }
+
+  /** His app rules differ from the tested ones; a reading that fails counts as differing (nothing then runs unattended). */
+  private rulesChanged(): boolean {
+    try {
+      return this.deps.rulesChangedSinceTest() !== false
+    } catch {
+      return true
     }
   }
 
@@ -765,7 +785,8 @@ export class CloudSorter {
   /**
    * The nightly batch: local sorter, then the selected provider's model for what it left doubtful
    * (within tonight's limit). It ignores the period chosen in Settings: both steps take everything.
-   * It runs only while the cloud step and the nightly switch are both on.
+   * It runs only while the cloud step and the nightly switch are both on, and his app rules are the
+   * ones the local sorter was tested with (deps.rulesChangedSinceTest): otherwise it does nothing.
    */
   async runNightly(): Promise<CloudRunSummary> {
     // the nightly switch is off: nothing is sorted, nothing is asked and nothing is recorded
@@ -775,6 +796,16 @@ export class CloudSorter {
       return s
     }
     this.deps.saveState({ lastRunAt: this.now().toISOString() }) // first, so a crash mid-run is not retried every minute
+    // his app rules are not the ones the sorter was tested with: nothing is sorted, claimed or sent
+    // unattended. The night is recorded as skipped, so the tab can say why, and tried again tomorrow.
+    if (this.rulesChanged()) {
+      const s: CloudRunSummary = { at: this.now().toISOString(), trigger: 'nightly', provider: this.selected().id, local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, sent: 0, settled: 0, stillUnsure: 0, skipped: 'rules-changed', error: null, message: '' }
+      s.message = describe(s)
+      this.log('nightly run skipped: the app rules changed since the sorter was last tested')
+      this.deps.saveState({ lastRun: s })
+      this.push()
+      return s
+    }
     let local: { ok: boolean; message: string }
     try {
       local = await this.runLocal(EVERYTHING, 'nightly')
@@ -851,6 +882,8 @@ export class CloudSorter {
     if (settings.provider !== provider.id) return finish({ skipped: 'provider-changed', stayedDoubtful: list.length })
     if (settings.enabled !== true) return finish({ skipped: 'off', stayedDoubtful: list.length })
     if (trigger === 'nightly' && settings.nightly !== true) return finish({ skipped: 'nightly-off', stayedDoubtful: list.length })
+    // read again here (a rule may have changed during the local sort), before anything is claimed
+    if (trigger === 'nightly' && this.rulesChanged()) return finish({ skipped: 'rules-changed', stayedDoubtful: list.length })
     const key = this.deps.keys[provider.id].get()
     // a key that is not this provider's kind is no key: it is never put into a request to this provider
     if (!key || provider.keyRule(key) !== null) return finish({ skipped: 'no-key', stayedDoubtful: list.length })
@@ -1133,6 +1166,7 @@ export class CloudSorter {
 const REVOKED_WORDS: Record<Revoked, (p: CloudProvider) => string> = {
   off: (p) => `Asking ${p.name} was turned off`,
   'nightly-off': () => 'Nightly sorting was turned off',
+  'rules-changed': () => 'The app rules changed since the sorter was last tested',
   'no-key': (p) => `The ${p.company} key was removed`,
   revoked: (p) => `The ${p.company} key was changed`,
   'provider-changed': () => 'Another provider was selected'
@@ -1184,6 +1218,8 @@ export function describe(s: CloudRunSummary): string {
         : `${name} was not asked: asking ${name} is turned off.${waiting}`
     case 'nightly-off':
       return s.asked ? `Stopped after asking ${name} about ${plural(s.asked, 'screenshot')}: nightly sorting was turned off.${waiting}` : `${name} was not asked: nightly sorting is turned off.${waiting}`
+    case 'rules-changed':
+      return `${s.asked ? `Stopped after asking ${name} about ${plural(s.asked, 'screenshot')}` : 'Nothing was sorted or sent'}: your app rules changed since the sorter was last tested. Train it again and nightly sorting carries on.${waiting}`
     case 'limit-reached':
       return `${name} was not asked: ${NIGHTLY_LIMIT.toLocaleString('en-GB')} screenshots have been sent tonight, the most per night.${waiting}`
     case 'period-changed':
