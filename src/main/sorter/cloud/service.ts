@@ -98,7 +98,7 @@ import { checkThresholds, DEFAULT_THRESHOLDS, SORTER_VERSION, type Thresholds } 
 import { applyCloud, type CascadeRow } from './cascade'
 import { LunaResponseError, REASON_MAX, planChunks, selectForCloud, type CloudCandidate, type CostEstimate, type LunaItem } from './luna'
 import { clipRedacted, LunaHttpError, pool, postCloud, redact, type HttpPost } from './client'
-import type { LunaRequest } from './luna'
+import type { LunaAnswer, LunaRequest } from './luna'
 import { DEFAULT_PROVIDER, isProviderId, otherProviders, PROVIDER_IDS, providerOf, PROVIDERS, type CloudProvider, type ProviderId } from './provider'
 import { applySettingsPatch, isSwitch, optedIn, removeKey, serviceOn, storedProvider, storedSwitch, type CloudSettings, type StoredCloudSettings, type StoredKeys } from './settings'
 import { readVerified, type VerifyRefusal } from './images'
@@ -132,9 +132,12 @@ export type CloudRunSummary = {
   /** The local step of this run (null when a manual send only ran the cloud step). */
   local: { ok: boolean; message: string } | null
   asked: number
+  /** Answers received and recorded (each used allowance), whether or not the proposal was still open to change. */
   answered: number
+  /** Proposals this run's answers changed to keep / throwaway. */
   keep: number
   throwaway: number
+  /** Of the doubtful screenshots waiting for this provider when the run began, those still doubtful and undecided when it ended (a run that sent nothing: all of them). */
   stayedDoubtful: number
   /** The run as three numbers: screenshots sent, those the provider settled (keep or throwaway), and those sent that it left unsure. */
   sent: number
@@ -1075,23 +1078,36 @@ export class CloudSorter {
             const parsed = provider.parseResponse(json, req.ids)
             const askedAt = new Date().toISOString()
             const answers: CloudAnswerRow[] = []
-            const proposals: Array<CascadeRow & { hash: string }> = []
+            const said = new Map<string, LunaAnswer>()
             for (const [hash, raw] of parsed.answers) {
               // whatever the model wrote, no key reaches the database or the renderer
               const a = { ...raw, reason: clipRedacted(scrub(raw.reason), REASON_MAX) } // redact first, then shorten
               answers.push({ hash, ...a, provider: provider.id, model: provider.model, promptVersion: provider.promptVersion, askedAt })
-              const p = pending.get(hash)
-              if (!p) continue
-              const row = applyCloud({ proposal: 'doubtful', confidence: p.confidence, pKeep: p.pKeep, reason: p.reason, decidedBy: null }, a, provider, t)
-              proposals.push({ hash, ...row })
+              if (pending.has(hash)) said.set(hash, a)
             }
-            // the proposal write re-checks eligibility in SQL (store.ts saveCloudResults)
-            const written = new Set(this.withStore((s) => s.saveCloudResults(answers, proposals)))
-            for (const pr of proposals) {
-              if (!written.has(pr.hash)) continue
-              counts.answered++
-              if (pr.proposal === 'keep') counts.keep++
-              else if (pr.proposal === 'throwaway') counts.throwaway++
+            // each proposal is worked out in the saving transaction from the row as it is then, not from
+            // what this batch read before the request went out: a retrain may have re-scored the row
+            // meanwhile. The write re-checks eligibility in SQL (store.ts saveCloudResults)
+            const proposals = new Map<string, CascadeRow>()
+            const saved = this.withStore((s) =>
+              s.saveCloudAnswers(answers, {
+                sorterVersion: SORTER_VERSION,
+                hashes: [...said.keys()],
+                combine: (hash, live) => {
+                  const row = applyCloud({ proposal: 'doubtful', confidence: live.confidence, pKeep: live.pKeep, reason: live.reason, decidedBy: null }, said.get(hash)!, provider, t)
+                  proposals.set(hash, row)
+                  return row
+                }
+              })
+            )
+            // an answer that came back and was recorded is an answer (it used allowance), whether or not
+            // it changed the proposal: he may have decided the screenshot, or a retrain moved it to sure,
+            // while the request was out. Keep and throwaway count only the proposals this run changed
+            counts.answered += saved.applied.length + saved.recordedOnly.length
+            for (const hash of saved.applied) {
+              const pr = proposals.get(hash)
+              if (pr?.proposal === 'keep') counts.keep++
+              else if (pr?.proposal === 'throwaway') counts.throwaway++
             }
             if (parsed.missing.length) this.log(`${parsed.missing.length} screenshot(s) in a request got no usable answer; they stay doubtful`)
           } catch (e) {
@@ -1114,7 +1130,10 @@ export class CloudSorter {
         () => ctl.abort()
       )
       for (const [why, n] of refused) this.log(`${n} screenshot(s) not sent: ${REFUSAL_WORDS[why]}`)
-      const stayedDoubtful = list.length - counts.keep - counts.throwaway
+      // how many of what was waiting when the run began still need a look, read now that the answers
+      // are saved: not that list minus this run's changes, which would still count a screenshot he
+      // decided, or a retrain moved to sure, while the run was out
+      const stayedDoubtful = this.withStore((s) => s.stillDoubtful(list.map((c) => c.hash)))
       const r = revoked as Revoked | null
       if (r) return finish({ ...counts, stayedDoubtful, skipped: r })
       if (dateChanged) return finish({ ...counts, stayedDoubtful, skipped: 'date-changed' })

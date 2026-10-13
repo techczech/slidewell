@@ -63,13 +63,13 @@ describe('sorter verdict: reasons in plain words', () => {
 
   it('says what it learnt when no rule fits', () => {
     expect(decide(null, 0.95).reason).toBe('Looks like screenshots you kept before')
-    expect(decide(null, 0.01).reason).toBe('Looks like screenshots you binned before')
+    expect(decide(null, 0.01).reason).toBe('Looks like screenshots you threw away before')
   })
 
   it('doubtful reasons say why it is unsure', () => {
     expect(decide(rule('throwaway', 0.8), 0.7).reason).toBe('Not sure: Terminal window, but it looks like screenshots you kept before')
     expect(decide(null, 0.5).reason).toMatch(/^Not sure/)
-    expect(decide(rule('keep', 0.65), 0.3).reason).toBe('Not sure: looks like a chart, but it looks like screenshots you binned before')
+    expect(decide(rule('keep', 0.65), 0.3).reason).toBe('Not sure: looks like a chart, but it looks like screenshots you threw away before')
   })
 })
 

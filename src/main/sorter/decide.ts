@@ -71,7 +71,7 @@ function reasonFor(proposal: Proposal, rule: RuleVerdict | null, pKeepModel: num
 
 function reasonBase(proposal: Proposal, rule: RuleVerdict | null, pKeepModel: number | null): string {
   const model = pKeepModel === null ? null : pKeepModel >= 0.5 ? 'keep' : 'throwaway'
-  const modelWords = model === 'keep' ? 'looks like screenshots you kept before' : 'looks like screenshots you binned before'
+  const modelWords = model === 'keep' ? 'looks like screenshots you kept before' : 'looks like screenshots you threw away before'
   const cap = (s: string): string => s[0].toUpperCase() + s.slice(1)
   if (proposal === 'throwaway') {
     if (rule?.lean === 'throwaway') return model === 'throwaway' ? `${rule.reason}; ${modelWords}` : rule.reason
@@ -84,7 +84,7 @@ function reasonBase(proposal: Proposal, rule: RuleVerdict | null, pKeepModel: nu
   // doubtful
   if (rule && model && rule.lean !== model) return `Not sure: ${bare(rule.reason)}, but it ${modelWords}`
   if (rule) return `Not sure: ${bare(rule.reason)}, but not sure enough to ${rule.lean === 'keep' ? 'keep without a look' : 'throw away'}`
-  if (model === 'throwaway') return 'Not sure: it looks like screenshots you binned before, but not sure enough to throw away'
+  if (model === 'throwaway') return 'Not sure: it looks like screenshots you threw away before, but not sure enough to throw away'
   if (model === 'keep') return 'Not sure: it looks a bit like screenshots you kept, but not clearly'
   return 'Not sure: no rule fits and there is nothing learnt to compare it with'
 }

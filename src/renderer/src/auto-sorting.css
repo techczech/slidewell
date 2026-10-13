@@ -28,7 +28,9 @@ p.as-muted .as-link { font-size: 12.5px; }
 .as-working p { margin-top: 8px; }
 /* training */
 .as-training-head { font-size: 16px; font-weight: 700; color: var(--oxford); }
-.as-training-body { max-width: 520px; padding-top: 6px; }
+.as-training-body { max-width: 760px; padding-top: 6px; }
+.as-retrain-switches { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.as-retrain-switches p { margin: 2px 0 0; }
 .as-learnt { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
 .as-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: #e9e2d2; }
 .as-bar-k { background: var(--oxford); }
@@ -122,3 +124,6 @@ p.as-muted .as-link { font-size: 12.5px; }
 .gb-sub { font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.08em; margin: 6px 0 3px; }
 .gb-rules { margin: 0; padding-left: 18px; font-size: 13.5px; line-height: 1.5; }
 @media (max-width: 1150px) { .gb-cols { grid-template-columns: 1fr; } }
+
+.gb-fold { margin-top: 10px; display: inline-block; }
+.gb-fold-note { margin: 6px 0 0; font-size: 12.5px; }

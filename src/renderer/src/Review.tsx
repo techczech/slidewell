@@ -3,6 +3,12 @@
 // column. Every write goes through window.sw.review; skipping writes nothing (the item stays kept).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReviewCard, ReviewOverview, ReviewPiles } from '../../preload'
+import { ReviewMoved } from './ReviewMoved'
+import { Shot } from './ReviewShot'
+import { ReviewStrip } from './ReviewStrip'
+import { onMovedRequest, takePendingMoved } from './teach-round'
+import { useSorterStatus } from './sorter-hooks'
+import { certainty } from './teach-format'
 
 type PileName = 'kept' | 'throwaway' | 'bin'
 const PAGE = 60
@@ -23,8 +29,10 @@ async function fetchUpTo(pile: PileName, first: ReviewCard[], next: string | nul
   return items
 }
 import './review.css'
+import './teach.css'
 
-type Mode = 'doubtful' | 'piles'
+type Mode = 'doubtful' | 'piles' | 'moved'
+const TEACH_KEY = 'sw.review.teachFirst' // remembered in this profile's own storage; on unless he switched it off
 type Column = 'kept' | 'right'
 const KEPT_COLS = 4
 
@@ -50,29 +58,6 @@ function takenLabel(c: ReviewCard): string {
   return `${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}, ${d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`
 }
 
-function tone(hash: string): string {
-  let h = 0
-  for (let i = 0; i < hash.length; i++) h = (h * 31 + hash.charCodeAt(i)) >>> 0
-  return `g${(h % 6) + 1}`
-}
-
-/** The picture, or a quiet placeholder window when there is none (not downloaded, or the preview). */
-function Shot({ card, caption, className = '' }: { card: ReviewCard; caption?: string; className?: string }): JSX.Element {
-  const [failed, setFailed] = useState(false)
-  const dark = card.app === 'Terminal'
-  return (
-    <div className={`rv-shot ${dark ? 't2' : tone(card.hash)} ${className}`}>
-      {card.thumbUrl && !failed ? (
-        <img src={card.thumbUrl} alt="" loading="lazy" onError={() => setFailed(true)} />
-      ) : (
-        <div className={`rv-win ${dark ? 't2' : tone(card.hash + 'w')}`} />
-      )}
-      {card.offline && <span className="rv-what">not downloaded</span>}
-      {!card.offline && caption && <span className="rv-what">{caption}</span>}
-    </div>
-  )
-}
-
 // Which sorter step made the call (tickets 07, 16), in the words the card shows.
 const STEP_WORDS: Record<NonNullable<ReviewCard['decidedBy']>, string> = { rules: 'by rules', history: 'by your history', luna: 'asked Luna', haiku: 'asked Haiku' }
 const ASKED: Partial<Record<NonNullable<ReviewCard['decidedBy']>, string>> = { luna: 'asked Luna', haiku: 'asked Haiku' }
@@ -84,7 +69,7 @@ function Step({ card }: { card: ReviewCard }): JSX.Element | null {
 }
 const title = (c: ReviewCard): string => [c.app, c.windowTitle].filter(Boolean).join(' · ') || c.filename
 
-export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => void; onToast: (m: string) => void }): JSX.Element {
+export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount: (n: number) => void; onToast: (m: string) => void; onOpenAutoSorting: () => void }): JSX.Element {
   const [mode, setMode] = useState<Mode>('doubtful')
   const [ov, setOv] = useState<ReviewOverview | null>(null)
   const [piles, setPiles] = useState<ReviewPiles | null>(null)
@@ -95,10 +80,26 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
   const [focus, setFocus] = useState<{ col: Column; index: number }>({ col: 'kept', index: 0 })
   const [shown, setShown] = useState<Record<PileName, number>>({ kept: PAGE, throwaway: PAGE, bin: PAGE })
   const [confirmEmpty, setConfirmEmpty] = useState(false)
+  const [teachFirst, setTeachFirst] = useState(() => localStorage.getItem(TEACH_KEY) !== 'off')
+  const [movedHashes, setMovedHashes] = useState<string[]>([])
+  const st = useSorterStatus()
   const busy = useRef(false)
 
+  // "See what moved" from the end of a teaching round: open the moved view, as the strip's link does
+  useEffect(() => {
+    const apply = (): void => {
+      const h = takePendingMoved()
+      if (h) {
+        setMovedHashes(h)
+        setMode('moved')
+      }
+    }
+    apply()
+    return onMovedRequest(apply)
+  }, [])
+
   const load = useCallback(async (): Promise<void> => {
-    const o = await window.sw.review.overview({ queue: 50, sample: 12 })
+    const o = await window.sw.review.overview({ queue: 50, sample: 12, order: teachFirst ? 'teach' : 'newest' })
     setOv(o)
     onCount(o.needALook)
     if (mode === 'piles') {
@@ -108,7 +109,7 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
       )
       setPiles({ ...p, kept: { ...p.kept, items: kept }, throwaway: { ...p.throwaway, items: throwaway }, bin: { ...p.bin, items: bin } })
     }
-  }, [mode, shown, onCount])
+  }, [mode, shown, onCount, teachFirst])
 
   useEffect(() => {
     void load()
@@ -117,9 +118,16 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
   // a finished sort brings new proposals
   useEffect(() => {
     let last = ''
-    return window.sw.sorter.onStatus((st) => {
-      if (last && last !== 'idle' && st.phase === 'idle') void load()
-      last = st.phase
+    let lastRetrain: string | null | undefined
+    let retraining: string | null = null
+    return window.sw.sorter.onStatus((s) => {
+      if (last && last !== 'idle' && s.phase === 'idle') void load()
+      // a retrain that has just ended re-scores the queue: read it again
+      else if (retraining && !s.retraining) void load()
+      else if (lastRetrain !== undefined && (s.lastRetrain?.at ?? null) !== lastRetrain) void load()
+      last = s.phase
+      lastRetrain = s.lastRetrain?.at ?? null
+      retraining = s.retraining
     })
   }, [load])
 
@@ -225,6 +233,7 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
       }
       if (cmd || e.altKey) return
       const k = e.key.toLowerCase()
+      if (mode === 'moved') return
       if (mode === 'doubtful') {
         if (k === 'k') void act(current, 'keep')
         else if (k === 't') void act(current, 'throwaway')
@@ -261,6 +270,8 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
 
   const when = sortedWhen(ov.lastSortedAt)
   const confidentTotal = ov.confident.kept + ov.confident.throwaway
+
+  if (mode === 'moved') return <ReviewMoved hashes={movedHashes} onBack={() => setMode('doubtful')} />
 
   if (mode === 'piles') {
     return (
@@ -398,10 +409,24 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
 
   return (
     <div className="rv-screen" data-mode="doubtful">
+      <ReviewStrip needALook={ov.needALook} onSeeMoved={(h) => { setMovedHashes(h); setMode('moved') }} onOpenAutoSorting={onOpenAutoSorting} onToast={onToast} />
       <div className="rv-head">
         <h1>{ov.needALook} need a look</h1>
         <span className="rv-sub">{confidentTotal} sorted confidently</span>
         {when && <span className="rv-when">· sorted {when}</span>}
+        <button
+          className="rv-teach-switch"
+          role="switch"
+          aria-checked={teachFirst}
+          onClick={() => {
+            const on = !teachFirst
+            localStorage.setItem(TEACH_KEY, on ? 'on' : 'off')
+            setTeachFirst(on)
+          }}
+        >
+          <span className="rv-tg" />
+          Teaches most first
+        </button>
         <button className="rv-pile-btn" onClick={openPiles}>
           <span className="rv-icon"><i /><i /></span>Show both piles
         </button>
@@ -425,9 +450,32 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
               </div>
               <div className="rv-why-l">Why it is asking</div>
               <p className="rv-why">
-                {current.reason}
+                {current.why || current.reason}
                 {asked(current.decidedBy) && <span className="rv-why-step"> · {asked(current.decidedBy)}</span>}
               </p>
+              {(() => {
+                const c = certainty(current.pKeep, current.leans)
+                const t = st?.report?.thresholds
+                const need = t ? Math.round((current.leans === 'keep' ? t.keep : t.throwaway) * 100) : null
+                return (
+                  <div className="rv-cert" data-testid="certainty">
+                    <div className="rv-cert-head">
+                      Leaning {c.lean}, <b>{c.sure}% sure</b>
+                    </div>
+                    <div className="rv-cbar" role="img" aria-label={`Keep ${c.keep}%, throwaway ${c.throwaway}%`}>
+                      <div className="k" style={{ width: `${c.keep}%` }} />
+                      <div className="t" style={{ width: `${c.throwaway}%` }} />
+                    </div>
+                    <div className="rv-cbar-lab">
+                      <span><b>Keep</b> {c.keep}%</span>
+                      <span><b>Throwaway</b> {c.throwaway}%</span>
+                    </div>
+                    <p className="rv-cert-note">
+                      {need !== null ? `It counts as sure at ${need}%. ` : ''}Question 1 of {ov.needALook}{teachFirst ? ', most unsure first' : ''}.
+                    </p>
+                  </div>
+                )
+              })()}
               <p className="rv-lean">
                 If you skip it, it stays <b>kept</b>. Only sure throwaways go to the Throwaway pile.
               </p>
@@ -454,15 +502,19 @@ export function ReviewScreen({ onCount, onToast }: { onCount: (n: number) => voi
           </div>
         )}
         <aside className="rv-next">
-          <h3>Up next · {Math.max(0, ov.needALook - 1)}</h3>
+          <h3>{teachFirst ? `Up next · ${Math.min(5, Math.max(0, queue.length - 1))} of ${Math.max(0, ov.needALook - 1)}, most unsure first` : `Up next · ${Math.max(0, ov.needALook - 1)}`}</h3>
           {queue.slice(1, 6).map((c, i) => (
             <div className="rv-up" key={c.hash} data-hash={c.hash}>
               <Shot card={c} />
-              <div>
+              <div className="rv-up-t">
                 <div className="rv-un">{title(c)}</div>
                 <div className="rv-ur">
-                  {c.reason}
+                  {c.why || c.reason}
                   {asked(c.decidedBy) ? ` · ${asked(c.decidedBy)}` : ''}
+                </div>
+                <div className="rv-mini" role="img" aria-label={`Keep ${Math.round(c.pKeep * 100)}%, throwaway ${100 - Math.round(c.pKeep * 100)}%`}>
+                  <div className="k" style={{ width: `${Math.round(c.pKeep * 100)}%` }} />
+                  <div className="t" style={{ width: `${100 - Math.round(c.pKeep * 100)}%` }} />
                 </div>
               </div>
               <span className="rv-num">{i + 2}</span>

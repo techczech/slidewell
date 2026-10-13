@@ -35,11 +35,17 @@ function RuleControl({ row, onSet, disabled }: { row: SorterAppReading; onSet: (
   )
 }
 
+// An app is always shown when it has a rule (his or built-in), a suggestion, or at least this many decided choices.
+const ALWAYS_DECIDED = 5
+const alwaysShown = (a: SorterAppReading): boolean => a.rule !== null || a.builtIn !== null || a.suggestion !== null || a.kept + a.thrownAway >= ALWAYS_DECIDED
+
 export function SorterGoesBy({ reloadKey }: { reloadKey: number }): JSX.Element | null {
   const [data, setData] = useState<GoesBy | null>(null)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [showAll, setShowAll] = useState(false)
+  const [touched, setTouched] = useState<string[]>([]) // apps he has just set a rule on stay in view
 
   useEffect(() => {
     let live = true
@@ -50,6 +56,7 @@ export function SorterGoesBy({ reloadKey }: { reloadKey: number }): JSX.Element 
   }, [reloadKey])
 
   const set = useCallback(async (app: string, rule: AppLean | null) => {
+    setTouched((t) => (t.includes(app) ? t : [...t, app]))
     setBusy(true)
     setError(null)
     try {
@@ -65,6 +72,9 @@ export function SorterGoesBy({ reloadKey }: { reloadKey: number }): JSX.Element 
   }, [])
 
   if (!data) return null
+  const rows = showAll ? data.apps : data.apps.filter((a) => alwaysShown(a) || touched.includes(a.app))
+  const folded = data.apps.length - rows.length
+  const canFold = data.apps.some((a) => !alwaysShown(a))
   return (
     <section className="gb" aria-label="What the sorter goes by">
       <h2 className="gb-title">What the sorter goes by</h2>
@@ -85,7 +95,7 @@ export function SorterGoesBy({ reloadKey }: { reloadKey: number }): JSX.Element 
                 </tr>
               </thead>
               <tbody>
-                {data.apps.map((a) => (
+                {rows.map((a) => (
                   <tr key={a.app || '\u0000none'} data-app={a.app}>
                     <td className="gb-app">{appLabel(a.app)}</td>
                     <td className="n">
@@ -109,6 +119,12 @@ export function SorterGoesBy({ reloadKey }: { reloadKey: number }): JSX.Element 
               </tbody>
             </table>
           )}
+          {data.apps.length > 0 && canFold && (
+            <button className="ts-link gb-fold" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
+              {showAll ? 'Show fewer apps' : `Show all ${n(data.apps.length)} apps`}
+            </button>
+          )}
+          {!showAll && folded > 0 && <p className="as-muted gb-fold-note">{n(folded)} {folded === 1 ? 'app is' : 'apps are'} hidden: fewer than {ALWAYS_DECIDED} choices, no rule and no suggestion.</p>}
           {saved && !error && (
             <p className="gb-saved" role="status">
               Rule saved. Used from the next sort. Nightly sorting waits until you train again.

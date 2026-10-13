@@ -17,6 +17,11 @@
  * Throwaway with the full 30 days (when unsure, keep).
  */
 export const BIN_AFTER_DAYS = 30
+
+/** A screenshot's hash as it may arrive from the renderer or from stored config. */
+export const HASH = /^[A-Za-z0-9:_-]{1,64}$/
+/** At most this many screenshots are read by hash in one call (review/service.ts cards). */
+export const CARDS_MAX = 200
 const DAY_MS = 86_400_000
 
 export type ProposalLabel = 'keep' | 'throwaway' | 'doubtful'
@@ -138,6 +143,15 @@ export function pileKey(pile: Pile, binInDays: number | null, timeMs: number, ha
   return [pile === 'throwaway' ? -(binInDays ?? 0) : 0, -(Number.isFinite(timeMs) ? timeMs : 0), hash]
 }
 
+/**
+ * The teaching order (ticket 22) as a key for the same paging: the screenshot the sorter is least sure
+ * of first (p(keep) nearest 0.5), then newest first, then by hash.
+ */
+export function teachKey(pKeep: number, timeMs: number, hash: string): PileKey {
+  const p = Number.isFinite(pKeep) ? pKeep : 0.5
+  return [Math.abs(p - 0.5), -(Number.isFinite(timeMs) ? timeMs : 0), hash]
+}
+
 export function compareKeys(a: PileKey, b: PileKey): number {
   return a[0] - b[0] || a[1] - b[1] || (a[2] < b[2] ? -1 : a[2] > b[2] ? 1 : 0)
 }
@@ -150,7 +164,7 @@ export function decodeCursor(s: string | null | undefined): PileKey | null {
   if (!s) return null
   try {
     const k = JSON.parse(s)
-    return Array.isArray(k) && k.length === 3 && typeof k[0] === 'number' && typeof k[1] === 'number' && typeof k[2] === 'string' ? (k as PileKey) : null
+    return Array.isArray(k) && k.length === 3 && typeof k[0] === 'number' && Number.isFinite(k[0]) && typeof k[1] === 'number' && Number.isFinite(k[1]) && typeof k[2] === 'string' ? (k as PileKey) : null
   } catch {
     return null
   }

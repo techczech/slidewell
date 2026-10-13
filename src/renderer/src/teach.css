@@ -1,0 +1,94 @@
+/* Teach the sorter (ticket 23): Review strip, the reading and its chart. Frames B1-B3, A3. Theme colours only. */
+
+/* the strip at the top of Review */
+.ts-strip { flex: none; border-bottom: 1px solid var(--line); background: #f1ece0; padding: 9px 40px; display: flex; align-items: center; gap: 14px; font-size: 13.5px; }
+.ts-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--keep, #2f7d4f); flex: none; }
+.ts-strip[data-kind='retraining'] .ts-dot { animation: ts-pulse 1.2s ease-in-out infinite; }
+.ts-strip[data-kind='waiting'] .ts-dot, .ts-strip[data-kind='off'] .ts-dot { background: #b8ad98; }
+@keyframes ts-pulse { 50% { opacity: .3; } }
+.ts-text b { font-weight: 700; }
+.ts-sp { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+.ts-link { background: none; border: 0; padding: 0; font: inherit; font-weight: 600; color: var(--oxford); cursor: pointer; }
+.ts-btn { font: 600 13px -apple-system, system-ui, sans-serif; border: 1.5px solid var(--oxford); color: var(--oxford); background: var(--card); border-radius: 7px; padding: 4px 11px; cursor: pointer; }
+.ts-strip.ts-open { align-items: flex-start; padding: 12px 40px; background: #eef3e9; border-bottom-color: #c9d9c0; }
+.ts-strip.ts-open .ts-dot { margin-top: 6px; }
+.ts-body { flex: 1; min-width: 0; }
+.ts-summary { font-size: 15px; line-height: 1.5; }
+.ts-next { margin-top: 6px; display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+.ts-next span { color: var(--muted); font-size: 12.5px; }
+.ts-dismiss { background: none; border: 0; color: var(--muted); font: inherit; font-size: 13.5px; cursor: pointer; margin-top: 2px; }
+
+/* Teaches most first */
+.rv-teach-switch { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font: 600 13.5px -apple-system, system-ui, sans-serif; color: var(--oxford); border: 1.5px solid var(--oxford); border-radius: 8px; padding: 7px 12px; background: var(--card); cursor: pointer; }
+.rv-teach-switch .rv-tg { width: 30px; height: 17px; border-radius: 9px; background: #b8ad98; position: relative; flex: none; }
+.rv-teach-switch .rv-tg::after { content: ''; position: absolute; left: 2px; top: 2px; width: 13px; height: 13px; border-radius: 50%; background: #fff; }
+.rv-teach-switch[aria-checked='true'] .rv-tg { background: var(--oxford); }
+.rv-teach-switch[aria-checked='true'] .rv-tg::after { left: auto; right: 2px; }
+.rv-teach-switch:focus-visible { outline: 2px solid var(--oxford); outline-offset: 2px; }
+.rv-head .rv-teach-switch + .rv-pile-btn { margin-left: 12px; }
+
+/* certainty on the main card and the up-next cards */
+.rv-cert { margin: 18px 0 4px; }
+.rv-cert-head { font-size: 16px; font-weight: 700; }
+.rv-cert-head b { font-weight: 700; }
+.rv-cbar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: #e9e2d2; margin-top: 10px; }
+.rv-cbar .k { background: var(--oxford); }
+.rv-cbar .t { background: #b8ad98; }
+.rv-cbar-lab { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--muted); margin-top: 5px; }
+.rv-cbar-lab b { color: var(--ink); }
+.rv-cert-note { margin: 8px 0 0; font-size: 13.5px; color: var(--muted); }
+.rv-mini { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: #e9e2d2; margin-top: 5px; width: 150px; }
+.rv-mini .k { background: var(--oxford); }
+.rv-mini .t { background: #b8ad98; }
+.rv-up-t { flex: 1; min-width: 0; }
+
+/* the popover (B3) */
+.overlay.tr-pop-overlay { align-items: flex-start; justify-content: flex-start; padding: 96px 30px 0; background: rgba(20, 18, 14, 0.38); }
+.tr-popover { width: 760px; max-width: 100%; max-height: calc(100vh - 120px); overflow: auto; background: var(--card); border: 1px solid #cfc5ae; border-radius: 12px; box-shadow: 0 18px 50px #0004; padding: 22px 26px; outline: none; }
+.tr-popover-foot { margin-left: auto; }
+
+/* the reading */
+.sr-reading { color: var(--ink); }
+.sr-label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .09em; color: var(--accent); font-weight: 700; margin-bottom: 6px; }
+.sr-headline { margin: 0; font-size: 30px; letter-spacing: -.02em; color: var(--oxford); line-height: 1.15; }
+.sr-tab .sr-headline { font-size: 22px; }
+.sr-sub { margin: 6px 0 8px; font-size: 14px; color: var(--muted); }
+.sr-working { margin: 6px 0 8px; font-size: 13px; color: var(--muted); }
+.sr-gains { margin: 4px 0 0; font-size: 13.5px; color: var(--muted); }
+.sr-gains b { color: var(--ink); }
+.sr-balance { display: flex; gap: 20px; align-items: center; margin-top: 10px; }
+.sr-bal-bar { flex: 1; }
+.sr-bal-note { flex: 1; margin: 0; font-size: 13.5px; line-height: 1.45; }
+.sr-actions { margin-top: 12px; display: flex; gap: 10px; align-items: center; }
+.sr-teach { padding: 10px 18px; font-weight: 600; }
+.sr-tab .sr-balance { max-width: 760px; }
+.sr-tab .lc-fig { max-width: 760px; }
+
+/* the chart */
+.lc-fig { margin: 0; }
+.lc-svg { width: 100%; height: auto; display: block; font: 12px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+.lc-band { fill: var(--accent); opacity: .06; }
+.lc-grid { stroke: var(--line); }
+.lc-axis { fill: var(--muted); }
+.lc-x { fill: var(--ink); }
+.lc-sub { fill: var(--muted); }
+.lc-title { font-weight: 700; }
+.lc-title-ta { fill: var(--oxford); }
+.lc-title-nl { fill: var(--accent); }
+.lc-min { stroke: var(--accent); stroke-dasharray: 5 4; stroke-width: 1.5; }
+.lc-min-t { fill: var(--accent); font-weight: 600; }
+.lc-line { fill: none; stroke-width: 2.5; stroke-linejoin: round; }
+.lc-dot { fill: var(--card); stroke-width: 2; }
+.lc-val { font-weight: 500; }
+.lc-val-last { font-weight: 700; }
+.lc-ta .lc-line, .lc-ta .lc-dot { stroke: var(--oxford); }
+.lc-ta .lc-val { fill: var(--oxford); }
+.lc-ta .lc-last { fill: var(--oxford); }
+.lc-nl .lc-line, .lc-nl .lc-dot { stroke: var(--accent); }
+.lc-nl .lc-val { fill: var(--accent); }
+.lc-nl .lc-last { fill: var(--accent); }
+.lc-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.lc-fig { position: relative; }
+
+/* what moved */
+.mv-head .rv-back-btn { margin-left: auto; }

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage, safeStorage } from 'electron'
+import { app, BrowserWindow, Menu, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage, safeStorage, powerMonitor } from 'electron'
 import sharp from 'sharp'
 import { join, basename } from 'path'
 import { homedir, tmpdir } from 'os'
@@ -38,12 +38,17 @@ import { startPictureQueryServer, PICTURE_QUERY_SOCKET, type QueryServer } from 
 import { WebGpuEmbedder } from './picture-search/webgpu-embedder'
 import { electronEmbedHost, registerEmbedProtocol, EMBED_SCHEME } from './picture-search/electron-embed-host'
 import { modelDir as pictureModelDir } from './picture-search/model-store'
-import { SorterService, changePeriod, cloudGates, registerSorterIpc, type LocalRunSummary } from './sorter/service'
+import { SorterService, changePeriod, cloudGates, registerSorterIpc, type LocalRunSummary, type TrainResult } from './sorter/service'
 import createTrainWorker from './sorter/train-worker?nodeWorker'
 import type { Job, JobResult } from './sorter/jobs'
 import type { FetchLike } from './picture-search/model-store'
 import { registerGoesByAndRunsIpc } from './sorter/goes-by-and-runs-ipc'
 import { SortRuns } from './sorter/runs'
+import { Retrainer } from './sorter/retrain'
+import { LearningCurve } from './sorter/learning'
+import { registerTeachIpc } from './sorter/teach-ipc'
+import { whyReader } from './sorter/why'
+import type { SorterLearning, SorterRetrain } from '../preload'
 import type { AppRule } from './sorter/app-rules'
 import { appCounts, cleanAppList, decideAllFromApps } from './triage-apps'
 import { ReviewService } from './review/service'
@@ -108,6 +113,14 @@ type Config = {
   // his per-app rules for the sorter: usually keep / usually throw away, by app name (sorter/app-rules.ts
   // storedAppRules reads them; anything else = no rule). Kept here, never in the rebuildable triage index
   sorterAppRules?: AppRule[]
+  // teaching the sorter (ticket 22; sorter/retrain.ts): retrain by itself after every ten answers (absent = on;
+  // only false = off), and also while on battery (absent = no; only true = yes)
+  sorterAutoRetrain?: boolean
+  sorterAutoRetrainOnBattery?: boolean
+  // the last retrain and what it moved (retrain.ts storedRetrain reads it; anything else = none)
+  sorterLastRetrain?: SorterRetrain
+  // the "how much is enough" reading for one training (learning.ts storedLearning reads it; anything else = none)
+  sorterLearning?: { key: string; learning: SorterLearning }
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -424,11 +437,8 @@ app.whenReady().then(() => {
 
   // --- screenshot sorter, local part (sorter/service.ts): proposals only, never decisions or moves ---
   const pics = pictureSearch
-  const sorter = new SorterService({
-    wellRoot: wellRootResolved,
-    pictures: { modelReady: () => pics.modelReady(), ensureVectors: (items, opts) => pics.ensureVectors(items, opts) },
-    // grouping and fitting run in a worker thread (sorter/train-worker.ts); the main process stays responsive
-    runJob: <J extends Job>(job: J, signal: AbortSignal) =>
+  // grouping and fitting run in a worker thread (sorter/train-worker.ts); the main process stays responsive
+  const runTrainJob = <J extends Job>(job: J, signal: AbortSignal): Promise<JobResult<J>> =>
       new Promise<JobResult<J>>((resolve, reject) => {
         if (signal.aborted) return reject(new Error('cancelled'))
         const w = createTrainWorker({ workerData: job })
@@ -446,21 +456,60 @@ app.whenReady().then(() => {
         w.once('message', (m: { result?: JobResult<J>; error?: string }) => finish(() => (m.result ? resolve(m.result) : reject(new Error(m.error ?? 'training failed')))))
         w.once('error', (e) => finish(() => reject(e)))
         w.once('exit', (code) => finish(() => reject(new Error(`training worker stopped (${code})`))))
-      }),
+      })
+  const sorter: SorterService = new SorterService({
+    wellRoot: wellRootResolved,
+    pictures: { modelReady: () => pics.modelReady(), ensureVectors: (items, opts) => pics.ensureVectors(items, opts) },
+    runJob: runTrainJob,
     broadcast: (st) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('sorter:status', st)
+      retrainer.sorterStatus(st.phase) // a retrain that waited for a sort to end
     },
     period: () => readConfig().sorterPeriod,
     lastRun: () => readConfig().sorterLastRun,
     saveLastRun: (r) => writeConfig({ sorterLastRun: r }),
-    appRules: () => readConfig().sorterAppRules
+    appRules: () => readConfig().sorterAppRules,
+    teach: (c) => retrainer.status(c)
+  })
+  // --- teaching the sorter (ticket 22; sorter/retrain.ts): one retrain routine for Train, the end of a round and
+  // the retrain by itself after ten answers. It trains, tests and re-scores existing proposals of undecided
+  // screenshots; it makes no sort run, writes no decision and asks no cloud model ---
+  const retrainer: Retrainer<TrainResult> = new Retrainer<TrainResult>({
+    train: () => sorter.trainAndTest({ rescore: true }),
+    choices: () => sorter.choices(),
+    changed: () => sorter.push(),
+    power: { onBattery: () => powerMonitor.isOnBatteryPower(), onAc: (cb) => void powerMonitor.on('on-ac', cb) },
+    settings: () => ({ enabled: readConfig().sorterAutoRetrain, onBattery: readConfig().sorterAutoRetrainOnBattery }),
+    saveSettings: (s) => writeConfig({ sorterAutoRetrain: s.enabled, sorterAutoRetrainOnBattery: s.onBattery }),
+    lastRetrain: () => readConfig().sorterLastRetrain,
+    saveLastRetrain: (r) => writeConfig({ sorterLastRetrain: r })
+  })
+  // "how much is enough": several trainings in the same worker, only when asked for, kept per training
+  const learning = new LearningCurve({
+    wellRoot: wellRootResolved,
+    pictures: { modelReady: () => pics.modelReady(), ensureVectors: (items, opts) => pics.ensureVectors(items, opts) },
+    runJob: runTrainJob,
+    appRules: () => readConfig().sorterAppRules,
+    training: () => {
+      const r = sorter.status().report
+      return r ? { id: r.trainedAt, trainedAt: r.trainedAt } : null
+    },
+    stored: () => readConfig().sorterLearning,
+    save: (r) => writeConfig({ sorterLearning: r })
+  })
+  // answers that were already waiting when the app was last quit (say, on battery) are counted once, shortly after launch
+  const retrainFirst = setTimeout(() => retrainer.noteAnswer(), 45_000)
+  app.on('will-quit', () => {
+    clearTimeout(retrainFirst)
+    learning.cancel()
   })
   // the period is one setting for both sort buttons: a change drops the cloud step's prepared batch and both sections are told
   registerSorterIpc(sorter, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents), (period) =>
     changePeriod(period, () => readConfig().sorterPeriod, (p) => writeConfig({ sorterPeriod: p }), () => {
       cloud.periodChanged()
       sorter.notify()
-    })
+    }),
+    () => retrainer.retrain('manual')
   )
   app.on('will-quit', () => sorter.cancel())
 
@@ -523,9 +572,19 @@ app.whenReady().then(() => {
     changed: () => {
       pictureSearch?.poke()
       mainWindow?.webContents.send('triage:changed')
-    }
+      retrainer.noteAnswer() // a Review or teaching answer is one more choice to learn from
+    },
+    // stored embeddings only (the look-alike seam reads the index and embeds nothing)
+    why: whyReader({ wellRoot: wellRootResolved, storedVectors: (ids) => pics.lookAlikeInputs(ids).vectors })
   })
   registerReviewIpc(review, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+  registerTeachIpc({
+    allowed: (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents),
+    teachQueue: (after, limit) => review.teachQueue(after, limit),
+    learning: () => learning.read(),
+    retrain: (trigger) => retrainer.retrain(trigger),
+    setAuto: (patch) => retrainer.setAuto(patch)
+  })
 
   // --- what the sorter goes by (his per-app rules, in config) and the piles of each sort (sorter/runs.ts): reads, plus the one config write ---
   registerGoesByAndRunsIpc({
@@ -1182,7 +1241,9 @@ app.whenReady().then(() => {
     const src = triageSources()[0]?.path ?? null
     if (!src) return { state: 'undecided' }
     try {
-      return await setTriageDecision(archiveRoot(), wellRootResolved(), src, hash, action, Boolean(force))
+      const r = await setTriageDecision(archiveRoot(), wellRootResolved(), src, hash, action, Boolean(force))
+      retrainer.noteAnswer() // a throw-away in Triage is a choice the sorter learns from (a keep counts once imported)
+      return r
     } catch {
       return { state: 'undecided' }
     }
@@ -1202,7 +1263,9 @@ app.whenReady().then(() => {
     const list = cleanAppList(apps)
     if (!list || !list.length || (action !== 'select' && action !== 'exclude') || typeof expected !== 'number' || !Number.isSafeInteger(expected) || expected < 0) return { ok: false, changed: 0, count: 0, refused: 'bad-arguments' }
     if (!triageSources()[0]) return { ok: false, changed: 0, count: 0, refused: 'count-changed' }
-    return decideAllFromApps(wellRootResolved(), list, action, expected)
+    const r = await decideAllFromApps(wellRootResolved(), list, action, expected)
+    retrainer.noteAnswer()
+    return r
   })
   // One Triage import run at a time; a second click (or a reopened panel) joins the run that is going.
   const triageImport = createImportRunner({
@@ -1220,6 +1283,7 @@ app.whenReady().then(() => {
   guardedHandle(ipcMain, fromMainWindow, 'triage:import-selected', async (_e, forceHashes?: string[]) => {
     const r = await triageImport.start(Array.isArray(forceHashes) ? forceHashes : [])
     if (!r.error) mainWindow?.webContents.send('triage:changed')
+    retrainer.noteAnswer() // imported keeps are now choices the sorter learns from
     return r
   })
   guardedHandle(ipcMain, fromMainWindow, 'triage:import-status', async () => triageImport.status())

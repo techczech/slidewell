@@ -25,7 +25,7 @@ export function SorterAccuracyTable({ report }: { report: SorterReport }): JSX.E
   return (
     <div className="sorter-report">
       <div className="sorter-report-head">
-        Accuracy measured on a held-back fifth of your past choices ({n(a.sample)}: {n(a.truth.keep)} kept, {n(a.truth.throwaway)} binned); the model in use was then retrained on all your choices · {day(report.trainedAt)}
+        Accuracy measured on a held-back fifth of your past choices ({n(a.sample)}: {n(a.truth.keep)} kept, {n(a.truth.throwaway)} thrown away); the model in use was then retrained on all your choices · {day(report.trainedAt)}
       </div>
       <table className="sorter-table">
         <thead>

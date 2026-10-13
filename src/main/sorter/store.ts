@@ -100,6 +100,29 @@ export type CloudAnswerRow = LunaAnswer & { hash: string; provider: ProviderId; 
  */
 export type CloudScope = AnswerScope & { sorterVersion: string; others?: ReadonlyArray<AnswerScope>; throwawayAt: number; secondOpinions?: boolean }
 
+/** The proposal a cloud answer leads to, as saveCloudResults writes it. */
+export type CloudProposalRow = Pick<ProposalRow, 'hash' | 'proposal' | 'confidence' | 'pKeep' | 'reason' | 'decidedBy' | 'decidedModel'>
+
+/**
+ * Proposals worked out from the rows as they are when the answers are saved (saveCloudResults). For
+ * each of `hashes` whose proposal is still doubtful, undecided, unanswered and made under
+ * `sorterVersion`, `combine` gets that row's values and returns the row to write (null: leave it).
+ */
+export type LiveCombine = {
+  sorterVersion: string
+  hashes: string[]
+  combine: (hash: string, live: { confidence: number; pKeep: number; reason: string }) => Omit<CloudProposalRow, 'hash'> | null
+}
+
+/**
+ * What saving a request's answers did, per screenshot (saveCloudAnswers). Every answer given is
+ * recorded; `applied` are the screenshots whose proposal the answer also changed, `recordedOnly`
+ * those whose answer was stored while the proposal was left as it is (he decided or answered it, a
+ * retrain moved it out of doubtful, or it is from another sorter version). Together they are the
+ * screenshots answered, each once.
+ */
+export type CloudSaveOutcome = { applied: string[]; recordedOnly: string[] }
+
 /** A stored answer with who gave it, the model + prompt it was given under, and when. */
 export type StoredCloudAnswer = LunaAnswer & { provider: ProviderId; model: string; promptVersion: string; askedAt: string }
 
@@ -171,6 +194,27 @@ function byHash(rows: TriageJoinRow[]): Map<string, { row: TriageJoinRow; image:
 const TRIAGE_COLS = 'f.taken_at, f.source, f.rel_path, f.filename, f.app, f.window_title, f.ocr_text'
 
 /**
+ * His keep / throw-away decisions, each with the file rows of its picture (pictures on this Mac): one
+ * row per decision and file, decisions in table order and files in index order, and one row without
+ * file facts for a decision whose picture has no row. This is
+ *   triage_decisions d LEFT JOIN triage_fts f ON f.hash = d.hash AND f.kind = 'image' AND f.offline = '0'
+ * done in two reads: triage_fts cannot be looked up by hash (FTS5; review/store.ts), so the join in
+ * SQL scans the whole index once per decision, which took seconds on the main process for a few
+ * thousand decisions. Since ticket 22 this is read after every answer.
+ */
+function decidedWithFiles(tdb: DatabaseSync): TriageJoinRow[] {
+  const decisions = tdb.prepare("SELECT d.hash AS hash, d.state AS state, d.well_id AS well_id FROM triage_decisions d WHERE d.state IN ('included', 'excluded')").all() as Array<{ hash: string; state: string; well_id: string | null }>
+  const files = new Map<string, TriageJoinRow[]>()
+  for (const f of tdb.prepare(`SELECT f.hash AS hash, ${TRIAGE_COLS} FROM triage_fts f WHERE f.kind = 'image' AND f.offline = '0'`).all() as TriageJoinRow[]) {
+    const list = files.get(f.hash)
+    if (list) list.push(f)
+    else files.set(f.hash, [f])
+  }
+  const none = { taken_at: null, source: null, rel_path: null, filename: null, app: null, window_title: null, ocr_text: null }
+  return decisions.flatMap((d): TriageJoinRow[] => (files.get(d.hash) ?? [none]).map((f) => ({ ...f, hash: d.hash, state: d.state, well_id: d.well_id })))
+}
+
+/**
  * His labelled history. keep = every screenshot in the well (source 'screenshot') plus triage
  * `included`; throwaway = triage `excluded`. A kept screenshot is embedded from its triage original
  * when that file is still here, else from the well's copy. Binned screenshots whose file is gone
@@ -180,16 +224,7 @@ export function loadLabelled(wellRoot: string): Shot[] {
   const tdb = openRead(join(wellRoot, 'triage.db'))
   const wdb = openRead(join(wellRoot, 'well.db'))
   try {
-    const decided: TriageJoinRow[] =
-      tdb && hasTable(tdb, 'triage_decisions') && hasTable(tdb, 'triage_fts')
-        ? (tdb
-            .prepare(
-              `SELECT d.hash AS hash, d.state AS state, d.well_id AS well_id, ${TRIAGE_COLS}
-               FROM triage_decisions d LEFT JOIN triage_fts f ON f.hash = d.hash AND f.kind = 'image' AND f.offline = '0'
-               WHERE d.state IN ('included', 'excluded')`
-            )
-            .all() as TriageJoinRow[])
-        : []
+    const decided: TriageJoinRow[] = tdb && hasTable(tdb, 'triage_decisions') && hasTable(tdb, 'triage_fts') ? decidedWithFiles(tdb) : []
     const wellShots =
       wdb && hasTable(wdb, 'well_fts')
         ? (wdb.prepare("SELECT id, rel_path, ocr_text FROM well_fts WHERE source = 'screenshot' AND root = 'well'").all() as Array<{ id: string; rel_path: string; ocr_text: string | null }>)
@@ -684,27 +719,77 @@ export class SorterStore {
    * Triage (review or Triage may have got there first). The row is updated in place: it stays in the
    * sort run that proposed it (run_id is not written here). Reasons arrive already redacted
    * (cloud/service.ts). Returns the hashes whose proposal changed.
+   *
+   * `proposals` is either rows already worked out, or (the cloud step) a LiveCombine: each proposal is
+   * then worked out inside the transaction from the row as it is now, never from what the batch read
+   * before its request went out. A row a retrain re-scored meanwhile keeps its new probability under
+   * its new model. With a LiveCombine a row is also left alone when it was not made under
+   * `sorterVersion`. Either way the answer itself is recorded, so the screenshot is not asked about again.
    */
-  saveCloudResults(answers: CloudAnswerRow[], proposals: Array<Pick<ProposalRow, 'hash' | 'proposal' | 'confidence' | 'pKeep' | 'reason' | 'decidedBy' | 'decidedModel'>>): string[] {
+  saveCloudResults(answers: CloudAnswerRow[], proposals: CloudProposalRow[] | LiveCombine): string[] {
+    return this.saveCloud(answers, proposals)
+  }
+
+  /**
+   * saveCloudResults for the cloud step, saying of each answered screenshot what became of it: the
+   * same transaction and the same rows written, and the outcome per hash instead of only the changed ones.
+   */
+  saveCloudAnswers(answers: CloudAnswerRow[], live: LiveCombine): CloudSaveOutcome {
+    const applied = this.saveCloud(answers, live)
+    const changed = new Set(applied)
+    return { applied, recordedOnly: [...new Set(answers.map((a) => a.hash))].filter((h) => !changed.has(h)) }
+  }
+
+  /**
+   * Of these screenshots, how many still need a look now: the proposal is doubtful, he has not
+   * answered it in review and has no decision on it in Triage. Reads only.
+   */
+  stillDoubtful(hashes: string[]): number {
+    if (!hashes.length) return 0
+    const open = this.db.prepare(
+      `SELECT 1 FROM sorter_proposals p WHERE p.hash = ? AND p.proposal = 'doubtful' AND p.answered_at IS NULL
+       ${hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = p.hash)' : ''}`
+    )
+    let n = 0
+    for (const h of new Set(hashes)) if (open.get(h)) n++
+    return n
+  }
+
+  private saveCloud(answers: CloudAnswerRow[], proposals: CloudProposalRow[] | LiveCombine): string[] {
     this.needAnswers()
-    if (!answers.length && !proposals.length) return []
+    const live = Array.isArray(proposals) ? null : proposals
+    const given = Array.isArray(proposals) ? proposals : []
+    if (!answers.length && !given.length && !live?.hashes.length) return []
     const now = new Date().toISOString()
     const putAnswer = this.db.prepare(
       `INSERT INTO sorter_cloud_answers (hash, provider, verdict, confidence, reason, model, prompt_version, asked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(hash, provider) DO UPDATE SET verdict = excluded.verdict, confidence = excluded.confidence, reason = excluded.reason,
          model = excluded.model, prompt_version = excluded.prompt_version, asked_at = excluded.asked_at`
     )
+    const open = `proposal = 'doubtful' AND answered_at IS NULL
+         ${hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = sorter_proposals.hash)' : ''}`
     const putProposal = this.db.prepare(
       `UPDATE sorter_proposals SET proposal = ?, confidence = ?, p_keep = ?, reason = ?, decided_by = ?, decided_model = ?, proposed_at = ?,
          throwaway_since = CASE WHEN ? = 'throwaway' THEN ? END
-       WHERE hash = ? AND proposal = 'doubtful' AND answered_at IS NULL
-         ${hasTable(this.db, 'triage_decisions') ? 'AND NOT EXISTS (SELECT 1 FROM triage_decisions d WHERE d.hash = sorter_proposals.hash)' : ''}`
+       WHERE hash = ? AND ${open}`
     )
+    const readLive = live ? this.db.prepare(`SELECT confidence, p_keep, reason FROM sorter_proposals WHERE hash = ? AND sorter_version = ? AND ${open}`) : null
     const changed: string[] = []
+    const put = (p: CloudProposalRow): void => {
+      if (Number(putProposal.run(p.proposal, p.confidence, p.pKeep, p.reason, p.decidedBy ?? null, p.decidedModel ?? null, now, p.proposal, now, p.hash).changes)) changed.push(p.hash)
+    }
     this.db.exec('BEGIN IMMEDIATE')
     try {
       for (const a of answers) putAnswer.run(a.hash, a.provider, a.verdict, a.confidence, a.reason, a.model, a.promptVersion, a.askedAt)
-      for (const p of proposals) if (Number(putProposal.run(p.proposal, p.confidence, p.pKeep, p.reason, p.decidedBy ?? null, p.decidedModel ?? null, now, p.proposal, now, p.hash).changes)) changed.push(p.hash)
+      for (const p of given) put(p)
+      if (live && readLive) {
+        for (const hash of live.hashes) {
+          const r = readLive.get(hash, live.sorterVersion) as { confidence: number; p_keep: number; reason: string } | undefined
+          if (!r) continue // decided, answered, no longer doubtful or from another sorter version: left alone
+          const next = live.combine(hash, { confidence: Number(r.confidence), pKeep: Number(r.p_keep), reason: r.reason })
+          if (next) put({ ...next, hash })
+        }
+      }
       this.db.exec('COMMIT')
     } catch (e) {
       this.db.exec('ROLLBACK')
