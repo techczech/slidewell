@@ -8,7 +8,9 @@ import type { CloudPreview, CloudStatus, SorterStatus } from '../../preload'
 import { CloudConfirm } from './CloudConfirm'
 import { SortPeriodSelect } from './SortPeriodSelect'
 import { SorterAccuracyTable } from './SorterAccuracyTable'
-import { sorterRunning, useCloudStatus, useSorterStatus } from './sorter-hooks'
+import { SorterGoesBy } from './SorterGoesBy'
+import { SortChooser, SortPiles } from './SortPiles'
+import { sorterRunning, useCloudStatus, useSortRuns, useSorterStatus } from './sorter-hooks'
 import { day, n, plural, when, whenShort } from './sorter-format'
 import './auto-sorting.css'
 
@@ -71,6 +73,9 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
   const [preparing, setPreparing] = useState(false)
   const [showAccuracy, setShowAccuracy] = useState(false)
   const [nightlyError, setNightlyError] = useState<string | null>(null)
+  const [chosenRun, setChosenRun] = useState<string | null>(null) // null = the latest sort
+  // the sorts are read again whenever a sort or a service run ends or proposes something new
+  const { runs, version: runsVersion } = useSortRuns([st?.phase, cl?.phase, st?.pending.lastProposedAt, st?.lastRun?.at, cl?.lastRun?.at].join('|'))
 
   const trainNow = useCallback(async () => {
     setResult(null)
@@ -138,6 +143,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
   const asking = cl.phase === 'asking'
   const run = lastRunNumbers(st, cl)
   const holdBack = Math.round(choices / 5)
+  const shownRun = runs.find((r) => r.id === chosenRun) ?? runs[0] ?? null // the latest sort unless he chose an earlier one
 
   const trainButton = (primary: boolean, label: string): JSX.Element => (
     <button className={primary ? 'pic-primary as-train' : 'copyref as-train as-train-again'} disabled={!st.modelReady || busy} onClick={() => void trainNow()}>
@@ -196,6 +202,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
         </p>
       )}
       <div className="as-row as-sort-row">
+        {runs.length > 0 && <SortChooser runs={runs} selectedId={shownRun?.id ?? ''} periods={st.periods} onSelect={setChosenRun} />}
         <SortPeriodSelect period={st.period} periods={st.periods} disabled={busy} />
         <button className="pic-primary sorter-cloud-sort as-sort-btn" disabled={busy || whyNot !== null} onClick={() => void sortNow()}>
           Sort now
@@ -241,8 +248,10 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
     </div>
   )
 
+  // the piles of the chosen sort (replace the old "Last run" block, whose numbers are now the result line); the old block stays for a Mac with no recorded sort yet
+  const pilesBlock = shownRun ? <SortPiles runId={shownRun.id} reloadKey={runsVersion} periods={st.periods} onReview={onReview} /> : null
   const lastRunBlock =
-    run || st.pending.lastProposedAt ? (
+    shownRun ? null : run || st.pending.lastProposedAt ? (
       <div className="as-block as-last">
         <div className="as-row">
           <h2 className="as-inline-h">Last run</h2>
@@ -383,8 +392,10 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
         {rep ? (
           <>
             <div className={busy ? 'as-dim' : ''}>{trainedStatus}</div>
+            <SorterGoesBy reloadKey={runsVersion} />
             {busy ? progress : sortNowBlock}
             <div className={busy ? 'as-dim as-stack' : 'as-stack'}>
+              {pilesBlock}
               {trainingBlock}
               {nightlyBlock}
               {lastRunBlock}
@@ -393,7 +404,9 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
         ) : (
           <>
             {busy && running && st.phase !== 'sorting' ? progress : untrainedCard}
+            <SorterGoesBy reloadKey={runsVersion} />
             {sortNowBlock}
+            {pilesBlock}
             {nightlyBlock}
           </>
         )}

@@ -115,6 +115,30 @@ describe('sort runs: the record', () => {
     expect(runs().piles('run-001')).toMatchObject({ run: null, kept: { total: 0, items: [] } })
   })
 
+  it(`runs that never finished are capped too: starting a run drops all but the newest ${RUNS_KEPT}`, () => {
+    const count = (): number => {
+      const d = new DatabaseSync(join(well, 'triage.db'), { readOnly: true })
+      try {
+        return Number((d.prepare('SELECT COUNT(*) AS n FROM sorter_runs').get() as { n: number }).n)
+      } finally {
+        d.close()
+      }
+    }
+    // the app was quit before each sort ended: no finishRun
+    store((s) => {
+      for (let n = 1; n <= RUNS_KEPT + 1; n++) s.startRun(run(n))
+    })
+    expect(count()).toBe(RUNS_KEPT)
+    expect(listRuns(well).map((r) => r.id)).not.toContain('run-001')
+    // a run started with a clock behind the others is still recorded, and the cap holds
+    store((s) => s.startRun({ ...run(0), id: 'run-behind' }))
+    expect(count()).toBe(RUNS_KEPT)
+    expect(listRuns(well).map((r) => r.id)).toContain('run-behind')
+    // a start that fails leaves the table as it was
+    expect(() => store((s) => s.startRun({ ...run(99), id: 'run-behind' }))).toThrow()
+    expect(count()).toBe(RUNS_KEPT)
+  })
+
   it('a database from before runs: the column is added, old proposals have no run and still show in Review and in Triage', async () => {
     const t = new DatabaseSync(join(well, 'triage.db'))
     t.exec(`CREATE TABLE sorter_proposals (hash TEXT PRIMARY KEY, proposal TEXT NOT NULL CHECK (proposal IN ('keep', 'throwaway', 'doubtful')), confidence REAL NOT NULL, p_keep REAL NOT NULL, reason TEXT NOT NULL, rule TEXT,

@@ -71,6 +71,15 @@ const models = (well: string): number => {
   }
 }
 
+const runCount = (well: string): number => {
+  const db = new DatabaseSync(join(well, 'triage.db'), { readOnly: true })
+  try {
+    return Number((db.prepare('SELECT COUNT(*) AS n FROM sorter_runs').get() as { n: number }).n)
+  } finally {
+    db.close()
+  }
+}
+
 let wells: string[] = []
 beforeEach(() => {
   wells = []
@@ -378,6 +387,74 @@ describe('sorter service: numbers for the Auto sorting tab (ticket 18)', () => {
       box.run = bad
       expect(again.status().lastRun).toBeNull()
     }
+  })
+})
+
+describe('sorter service: the accuracy report is for the app rules it was tested with', () => {
+  it('changing a rule keeps Sort now, refuses unattended sorting and says so; training again clears it', async () => {
+    const w = well(70, 30)
+    let rules: unknown = [{ app: 'Quillpad', rule: 'keep' }, { app: 'Mossgrid', rule: 'throwaway' }]
+    const svc = new SorterService(deps(w, { appRules: () => rules }))
+    expect((await svc.trainAndTest()).ok).toBe(true)
+    expect(svc.status()).toMatchObject({ canRunUnattended: true, rulesChangedSinceTest: false, retrainNeeded: false })
+    // the same rules written another way are the same rules
+    rules = [{ app: 'mossgrid ', rule: 'throwaway' }, { app: '  QUILLPAD ', rule: 'throwaway' }, { app: 'quillpad', rule: 'keep' }, { app: 'Fernwick', rule: 'sometimes' }]
+    expect(svc.status()).toMatchObject({ canRunUnattended: true, rulesChangedSinceTest: false })
+    expect((await svc.sortUndecided({ trigger: 'nightly' })).ok).toBe(true)
+
+    const mossgrid = { app: 'Mossgrid', rule: 'throwaway' }
+    for (const changed of [[{ app: 'Quillpad', rule: 'keep' }, mossgrid, { app: 'Brightloom', rule: 'throwaway' }], [{ app: 'Quillpad', rule: 'throwaway' }, mossgrid], [{ app: 'Quillpad', rule: 'keep' }], []]) {
+      rules = changed
+      const st = svc.status()
+      expect(st).toMatchObject({ canRunUnattended: false, rulesChangedSinceTest: true, retrainNeeded: false })
+      expect(st.report).not.toBeNull() // the report is still shown
+    }
+    rules = [{ app: 'Brightloom', rule: 'throwaway' }]
+    const runsBefore = runCount(w)
+    const nightly = await svc.sortUndecided({ trigger: 'nightly' })
+    expect(nightly.ok).toBe(false)
+    expect(nightly.error).toMatch(/app rules changed/)
+    expect(runCount(w)).toBe(runsBefore) // refused before a run is recorded
+    expect(await svc.sortUndecided()).toMatchObject({ ok: true, sorted: 3 }) // he is watching: Sort now still works
+    expect(await svc.sortManual()).toMatchObject({ ok: true })
+
+    expect((await svc.trainAndTest()).ok).toBe(true)
+    expect(svc.status()).toMatchObject({ canRunUnattended: true, rulesChangedSinceTest: false })
+    expect((await svc.sortUndecided({ trigger: 'nightly' })).ok).toBe(true)
+  })
+
+  it('a report saved before rules were recorded counts as tested with no rules', async () => {
+    const w = well(70, 30)
+    let rules: unknown = []
+    const svc = new SorterService(deps(w, { appRules: () => rules }))
+    expect((await svc.trainAndTest()).ok).toBe(true)
+    const st = new SorterStore(w)
+    const rec = st.latestModel<Record<string, unknown>>()!
+    expect(typeof rec.report.appRulesFingerprint).toBe('string')
+    const { appRulesFingerprint: _gone, ...older } = rec.report
+    st.saveModel({ ...rec, id: 'before-fingerprint', trainedAt: '2099-01-01T00:00:00Z', report: older })
+    st.close()
+    expect(svc.status()).toMatchObject({ canRunUnattended: true, rulesChangedSinceTest: false, retrainNeeded: false })
+    rules = [{ app: 'Brightloom', rule: 'keep' }]
+    expect(svc.status()).toMatchObject({ canRunUnattended: false, rulesChangedSinceTest: true })
+    expect((await svc.sortUndecided({ trigger: 'nightly' })).ok).toBe(false)
+  })
+
+  it('no model, or one from an older sorter version: the flag stays off and the version gate answers', async () => {
+    const w = well(70, 30)
+    let rules: unknown = []
+    const svc = new SorterService(deps(w, { appRules: () => rules }))
+    rules = [{ app: 'Brightloom', rule: 'keep' }]
+    expect(svc.status()).toMatchObject({ rulesChangedSinceTest: false, canRunUnattended: false, retrainNeeded: false })
+    rules = []
+    expect((await svc.trainAndTest()).ok).toBe(true)
+    const st = new SorterStore(w)
+    const rec = st.latestModel<Record<string, unknown>>()!
+    st.saveModel({ ...rec, id: 'old', trainedAt: '2099-01-01T00:00:00Z', sorterVersion: 'sorter-local-1', report: { ...rec.report, sorterVersion: 'sorter-local-1' } })
+    st.close()
+    rules = [{ app: 'Brightloom', rule: 'keep' }]
+    expect(svc.status()).toMatchObject({ retrainNeeded: true, rulesChangedSinceTest: false, canRunUnattended: false })
+    expect((await svc.sortUndecided({ trigger: 'nightly' })).error).toMatch(/^retrain needed/)
   })
 })
 

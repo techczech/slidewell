@@ -97,3 +97,26 @@ p.as-muted .as-link { font-size: 12.5px; }
 .seg3 input:focus-visible + * , .seg3 label:focus-within { outline: 2px solid var(--oxford); outline-offset: -2px; }
 .sorter-pointer { margin-top: 6px; background: #eef3e9; border: 1px solid #c9d9c0; border-radius: 12px; padding: 10px 14px; display: flex; align-items: center; gap: 12px; font-size: 14.5px; }
 .sorter-pointer .as-link { margin-left: auto; white-space: nowrap; }
+/* What the sorter goes by (locked drawing 2) */
+.gb { margin-top: 4px; }
+.gb-title { margin: 6px 0 8px; font-size: 24px; color: var(--oxford); letter-spacing: -0.01em; }
+.gb-cols { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; align-items: start; }
+.gb-side { display: flex; flex-direction: column; gap: 10px; }
+.as-block h3.gb-h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.gb-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.gb-table th { text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); padding: 6px 10px; border-bottom: 1px solid var(--line); font-weight: 700; }
+.gb-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.gb-table .n { text-align: right; white-space: nowrap; }
+.gb-app { font-weight: 700; }
+.gb-pc { color: var(--muted); font-size: 12px; }
+.gb-rule-cell { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gb-table .seg3 label { padding: 5px 11px; font-size: 12.5px; }
+.seg3 label.on.bi { background: #6b6356; }
+.gb-bi { font-size: 11px; color: var(--muted); }
+.gb-chip { display: inline-block; margin-top: 5px; font-size: 12px; background: #fbeed8; border: 1px solid #e3c48f; color: #6b4a0b; border-radius: 12px; padding: 2px 10px; }
+.gb-chip-btn { border: 0; background: none; font: inherit; font-weight: 600; color: var(--oxford); cursor: pointer; padding: 0; }
+.gb-chip-btn:disabled { opacity: 0.5; cursor: default; }
+.as-block .gb-saved { margin-top: 10px; font-size: 13px; color: var(--oxford); font-weight: 600; }
+.gb-sub { font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.08em; margin: 6px 0 3px; }
+.gb-rules { margin: 0; padding-left: 18px; font-size: 13.5px; line-height: 1.5; }
+@media (max-width: 1150px) { .gb-cols { grid-template-columns: 1fr; } }

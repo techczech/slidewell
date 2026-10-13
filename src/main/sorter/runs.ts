@@ -8,7 +8,8 @@
  *
  * in triage.db beside sorter_proposals, whose run_id names the run that last proposed each screenshot
  * (store.ts writes it). A screenshot sorted again later is in its latest run only; a cloud answer
- * changes its row in place and leaves it in its run. The newest RUNS_KEPT runs are kept; an older
+ * changes its row in place and leaves it in its run. The newest RUNS_KEPT runs are kept (the cap is
+ * applied when a run starts and again when it ends); an older
  * run's record is dropped and its id stays on its rows, where nothing reads it.
  *
  * The piles are derived, never stored: kept, thrown away and unsure. A card sits where his own
@@ -54,8 +55,25 @@ export function ensureRunsTable(db: DatabaseSync): void {
     )`)
 }
 
+/**
+ * A run starts: its record goes in and the cap is applied in the same transaction, so runs that never
+ * finish (the app was quit mid-sort) cannot pile up. The run just started always stays, with the
+ * newest RUNS_KEPT - 1 others (it is the newest unless the clock went back).
+ */
 export function startRun(db: DatabaseSync, r: RunStart): void {
-  db.prepare('INSERT INTO sorter_runs (id, started_at, period, trigger) VALUES (?, ?, ?, ?)').run(r.id, r.startedAt, r.period, r.trigger)
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    db.prepare('INSERT INTO sorter_runs (id, started_at, period, trigger) VALUES (?, ?, ?, ?)').run(r.id, r.startedAt, r.period, r.trigger)
+    db.prepare('DELETE FROM sorter_runs WHERE id != ? AND id NOT IN (SELECT id FROM sorter_runs WHERE id != ? ORDER BY started_at DESC, id DESC LIMIT ?)').run(r.id, r.id, RUNS_KEPT - 1)
+    db.exec('COMMIT')
+  } catch (e) {
+    try {
+      db.exec('ROLLBACK')
+    } catch {
+      /* the failed statement already ended the transaction */
+    }
+    throw e
+  }
 }
 
 /** The run's numbers as it ended, and the cap: all but the newest RUNS_KEPT records go (one transaction). */

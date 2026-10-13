@@ -9,6 +9,7 @@
  * rule that fires on the app name, his rule, and a suggestion when his choices are lopsided), and the
  * built-in rules in words. Everything but goesBy() is pure.
  */
+import { createHash } from 'node:crypto'
 import type { SorterAppReading, SorterAppSuggestion, SorterGoesBy } from '../../preload'
 import { appKey } from '../triage-logic'
 import { byAppName, readAppTallies, type AppTally } from '../triage-apps'
@@ -51,6 +52,21 @@ export function appRuleLookup(rules: AppRule[]): AppRuleLookup {
   const by = new Map(rules.map((r) => [appKey(r.app), r]))
   return (app) => by.get(appKey(app)) ?? null
 }
+
+/**
+ * The rule set as one short string, for the accuracy report (service.ts): the same for the same rules
+ * however they are spelt or ordered (names as appKey compares them), different when a rule is added,
+ * removed or turned round. The report measured rules + model; with other rules it measures something
+ * the sorter no longer does.
+ */
+export function appRulesFingerprint(rules: AppRule[]): string {
+  const by = new Map(rules.map((r) => [appKey(r.app), r.rule]))
+  const canon = [...by].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  return createHash('sha256').update(JSON.stringify(canon)).digest('hex')
+}
+
+/** What a report saved before fingerprints were recorded counts as: tested with no rules. */
+export const NO_APP_RULES = appRulesFingerprint([])
 
 /**
  * A rule set from the renderer. Only an app name with keep, throwaway or null (none) is stored;

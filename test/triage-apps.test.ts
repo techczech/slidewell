@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { listTriage } from '../src/main/triage'
 import { appCounts, cleanAppList, decideAllFromApps, readAppTallies } from '../src/main/triage-apps'
 import { appKey } from '../src/main/triage-logic'
+import { goesBy } from '../src/main/sorter/app-rules'
 
 const DAY = 86_400_000
 const NOW = Date.parse('2026-10-13T09:00:00Z')
@@ -128,6 +129,36 @@ describe('apps for the menu and the table', () => {
     expect(t.mossgrid).toMatchObject({ kept: 0, thrownAway: 0, rows: { undecided: 0 } })
   })
 
+  it('his decisions count for an app whatever the Bin shows: thrown-away history does not vanish after 30 days', () => {
+    // 20 Fernwick screenshots the sorter proposed on, all excluded by him on one day
+    const decidedAt = NOW - 10 * DAY
+    const t = db()
+    const row = t.prepare("INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, poster_rel, offline, ocr_text, scanned_at, source, taken_at, app, window_title) VALUES (?, 'image', ?, ?, 'png', '64', '1', '', '0', '', '', ?, '', 'Fernwick', 'Pane')")
+    const dec = t.prepare("INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, 'excluded', ?, NULL)")
+    const prop = t.prepare("INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, sorter_version, proposed_at, throwaway_since) VALUES (?, 'doubtful', 0.5, 0.5, 'r', 'test', ?, NULL)")
+    for (let i = 0; i < 20; i++) {
+      row.run(`f${i}`, `f${i}.png`, `f${i}.png`, src)
+      dec.run(`f${i}`, new Date(decidedAt).toISOString())
+      prop.run(`f${i}`, new Date(decidedAt - DAY).toISOString())
+    }
+    t.close()
+    const fernwick = (now: number) => readAppTallies(well, now).find((x) => x.key === 'fernwick')!
+    const day29 = decidedAt + 29 * DAY
+    const day31 = decidedAt + 31 * DAY
+    expect(fernwick(day29)).toMatchObject({ kept: 0, thrownAway: 20, rows: { excluded: 20 } })
+    // in the Bin now: no list shows them, but he still threw 20 away
+    expect(fernwick(day31)).toMatchObject({ kept: 0, thrownAway: 20, rows: { undecided: 0, excluded: 0 } })
+    for (const now of [day29, day31]) {
+      const reading = goesBy(well, [], now).apps.find((a) => a.app === 'Fernwick')!
+      expect(reading).toMatchObject({ kept: 0, thrownAway: 20, keptShare: 0, undecided: 0 })
+      expect(reading.suggestion).toMatchObject({ kind: 'make', rule: 'throwaway' })
+    }
+    // the menu counts file rows, so the app leaves it; an emptied picture stays out of both
+    expect(appCounts(well, 'all', day31).map((a) => a.app)).not.toContain('Fernwick')
+    expect(fernwick(day31).rows).toEqual({ undecided: 0, selected: 0, included: 0, excluded: 0 })
+    expect(readAppTallies(well, day31).find((x) => x.key === 'mossgrid')).toMatchObject({ kept: 0, thrownAway: 0 })
+  })
+
   it('no index yet: nothing', () => {
     const empty = mkdtempSync(join(tmpdir(), 'sw-triage-apps-empty-'))
     try {
@@ -144,7 +175,7 @@ describe('bulk decide from an app filter', () => {
     const before = decisions()
     const files = readdirSync(src).map((f) => `${f}:${statSync(join(src, f)).mtimeMs}`)
     const r = decideAllFromApps(well, ['brightloom'], 'exclude', 4, NOW)
-    expect(r).toEqual({ ok: true, changed: 4, count: 4 })
+    expect(r).toEqual({ ok: true, changed: 4, skipped: 0, count: 4 })
     expect(decisions()).toEqual({ ...before, b1: 'excluded', b2: 'excluded', b3: 'excluded' })
     expect(readdirSync(src).map((f) => `${f}:${statSync(join(src, f)).mtimeMs}`)).toEqual(files) // no file touched
     const d = db()
@@ -154,13 +185,13 @@ describe('bulk decide from an app filter', () => {
   })
 
   it('select all, several apps with the unknown bucket', () => {
-    expect(decideAllFromApps(well, ['Quillpad', ''], 'select', 2, NOW)).toEqual({ ok: true, changed: 2, count: 2 })
+    expect(decideAllFromApps(well, ['Quillpad', ''], 'select', 2, NOW)).toEqual({ ok: true, changed: 2, skipped: 0, count: 2 })
     expect(decisions()).toMatchObject({ q1: 'selected', u1: 'selected', q2: 'selected', u2: 'excluded' })
   })
 
   it('a count that differs from the one he was shown refuses and changes nothing', () => {
     const before = decisions()
-    expect(decideAllFromApps(well, ['Brightloom'], 'exclude', 5, NOW)).toEqual({ ok: false, changed: 0, count: 4, refused: 'count-changed' })
+    expect(decideAllFromApps(well, ['Brightloom'], 'exclude', 5, NOW)).toEqual({ ok: false, changed: 0, skipped: 0, count: 4, refused: 'count-changed' })
     expect(decideAllFromApps(well, ['Brightloom'], 'exclude', 3, NOW)).toMatchObject({ ok: false, changed: 0 })
     expect(decisions()).toEqual(before)
   })
@@ -178,6 +209,44 @@ describe('bulk decide from an app filter', () => {
     const before = decisions()
     expect(() => decideAllFromApps(well, ['Brightloom'], 'exclude', 4, NOW)).toThrow()
     expect(decisions()).toEqual(before)
+  })
+
+  describe('a picture that also sits undecided under an app outside the ticked ones', () => {
+    // the same content (hash b2) saved from Quillpad as well: deciding it would decide the Quillpad row too
+    beforeEach(() => {
+      const t = db()
+      t.prepare("INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, poster_rel, offline, ocr_text, scanned_at, source, taken_at, app, window_title) VALUES ('b2', 'image', 'quill/b2.png', 'b2 quill.png', 'png', '64', '1', '', '0', 'plain page', '', ?, '', 'Quillpad', 'Draft')").run(src)
+      t.close()
+    })
+
+    it('is skipped, not decided; the count confirmed is still the count of rows', async () => {
+      const before = decisions()
+      expect(appCounts(well, 'undecided', NOW).map((a) => [a.app, a.count])).toEqual([['Brightloom', 4], ['Quillpad', 2], ['', 1]])
+      const r = decideAllFromApps(well, ['Brightloom'], 'exclude', 4, NOW)
+      expect(r).toEqual({ ok: true, changed: 3, skipped: 1, count: 4 })
+      expect(decisions()).toEqual({ ...before, b1: 'excluded', b3: 'excluded' })
+      // nothing from Quillpad changed state
+      expect((await listTriage(well, '', 'undecided', 'scanned', 50, 0, NOW, ['Quillpad'])).map((r) => r.hash).sort()).toEqual(['b2', 'q1'])
+      expect(appCounts(well, 'undecided', NOW).map((a) => [a.app, a.count])).toEqual([['Quillpad', 2], ['Brightloom', 1], ['', 1]])
+    })
+
+    it('a wrong count still refuses and changes nothing', () => {
+      const before = decisions()
+      expect(decideAllFromApps(well, ['Brightloom'], 'exclude', 3, NOW)).toEqual({ ok: false, changed: 0, skipped: 0, count: 4, refused: 'count-changed' })
+      expect(decisions()).toEqual(before)
+    })
+
+    it('is decided when every app it sits under is ticked', () => {
+      expect(decideAllFromApps(well, ['Brightloom', 'Quillpad'], 'select', 6, NOW)).toEqual({ ok: true, changed: 6, skipped: 0, count: 6 })
+      expect(decisions()).toMatchObject({ b1: 'selected', b2: 'selected', b3: 'selected', q1: 'selected' })
+    })
+
+    it('when every row is such a picture nothing is written', () => {
+      expect(decideAllFromApps(well, ['Brightloom'], 'exclude', 4, NOW).ok).toBe(true)
+      const before = decisions()
+      expect(decideAllFromApps(well, ['Brightloom'], 'exclude', 1, NOW)).toEqual({ ok: true, changed: 0, skipped: 1, count: 1 })
+      expect(decisions()).toEqual(before)
+    })
   })
 
   it('bad arguments are refused: no apps, an action that is not select or exclude, a count that is not a whole number', () => {

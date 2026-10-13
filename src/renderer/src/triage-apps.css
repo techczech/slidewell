@@ -1,0 +1,33 @@
+/* Triage by source app (locked drawing 1b): the App menu and the bulk bar */
+.tam-wrap { position: relative; display: inline-block; }
+.tam-btn { border: 1px solid #b8ad98; background: var(--card); border-radius: 7px; padding: 6px 11px; font-size: 13px; color: var(--ink); cursor: pointer; max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tam-btn.on { border-color: var(--oxford); color: var(--oxford); font-weight: 600; background: #eaf0f8; }
+.tam-caret { font-size: 10px; }
+.tam-pop { position: absolute; z-index: 30; top: calc(100% + 6px); left: 0; width: 460px; background: var(--card); border: 1px solid #cfc5ae; border-radius: 12px; box-shadow: 0 18px 50px #0004; padding: 10px; font-weight: 400; color: var(--ink); max-height: 70vh; overflow-y: auto; }
+.tam-row { display: grid; grid-template-columns: 22px 1fr 80px 140px; gap: 8px; align-items: center; padding: 7px 8px; border-radius: 7px; font-size: 13.5px; }
+.tam-head { padding: 2px 8px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 700; }
+.tam-app { cursor: pointer; }
+.tam-app.on { background: #eaf0f8; }
+.tam-app input { width: 16px; height: 16px; margin: 0; accent-color: var(--oxford); }
+.tam-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tam-n { text-align: right; }
+.tam-kept { display: flex; align-items: center; gap: 6px; }
+.tam-bar { display: flex; height: 6px; width: 70px; border-radius: 3px; overflow: hidden; background: #e9e2d2; flex: none; }
+.tam-bar .k { background: var(--oxford); }
+.tam-bar .t { background: #b8ad98; }
+.tam-pc { font-size: 11.5px; color: var(--muted); }
+.tam-empty { padding: 10px 8px; font-size: 13px; color: var(--muted); }
+.tam-foot { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--line); margin-top: 6px; padding: 9px 8px 2px; font-size: 13px; }
+.tam-clear { border: 0; background: none; font: inherit; font-weight: 600; color: var(--oxford); cursor: pointer; padding: 0; }
+.tam-clear:disabled { opacity: 0.4; cursor: default; }
+.tam-done { padding: 5px 14px; font-size: 13px; }
+.tam-muted { color: var(--muted); font-size: 12.5px; }
+/* the bulk bar above the grid */
+.tam-bulk { display: flex; align-items: center; gap: 14px; margin: 12px 1rem 0; padding: 9px 16px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+.tam-bulk-text { min-width: 0; }
+.tam-bulk-title { font-size: 15px; font-weight: 700; }
+.tam-result { margin-top: 3px; font-size: 13px; font-weight: 600; color: var(--oxford); }
+.tam-bulk-btns { margin-left: auto; display: flex; gap: 8px; flex: none; }
+.tam-bulk-btns .copyref { padding: 9px 16px; font-size: 14px; border: 1px solid #b8ad98; background: var(--card); border-radius: 8px; color: var(--ink); cursor: pointer; }
+.tam-bulk-btns .pic-primary { padding: 9px 16px; font-size: 14px; }
+.tam-bulk-btns button:disabled { opacity: 0.45; cursor: default; }

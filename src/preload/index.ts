@@ -133,7 +133,9 @@ export type TriageAppCount = {
   keptShare: number | null // kept / (kept + thrownAway); null when he has decided none
 }
 // Bulk decide: `count` is what main counted; refused 'count-changed' = it differs from the count shown, nothing was decided
-export type TriageBulkResult = { ok: boolean; changed: number; count: number; refused?: 'count-changed' | 'bad-arguments' }
+// changed: file rows from the ticked apps now decided; skipped: rows left undecided because the same picture also sits undecided
+// under an app that was not ticked (a decision is per picture); count: the undecided rows matched (changed + skipped when ok)
+export type TriageBulkResult = { ok: boolean; changed: number; skipped: number; count: number; refused?: 'count-changed' | 'bad-arguments' }
 // "What the sorter goes by" (ticket 20). Same shapes as src/main/sorter/app-rules.ts.
 export type AppLean = 'keep' | 'throwaway'
 export type SorterAppSuggestion = {
@@ -351,6 +353,7 @@ export type SorterReport = {
   keepFromWellCopy: number
   grouping: { groups: number; largest: number; cosine: number; minutes: number }
   enoughToMeasure: boolean
+  appRulesFingerprint?: string // his per-app rules as they were when this was measured (absent on an older report: no rules)
   trainedOn: { keep: number; throwaway: number }
   l2: number
   calibration: {
@@ -370,8 +373,9 @@ export type SorterStatus = {
   error: string | null
   modelReady: boolean
   report: SorterReport | null
-  canRunUnattended: boolean
+  canRunUnattended: boolean // false also while rulesChangedSinceTest
   retrainNeeded: boolean
+  rulesChangedSinceTest: boolean // his app rules differ from those the report was measured with: Sort now works, unattended sorting waits for Train again
   minHeldBack: { total: number; perLabel: number }
   pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
   period: SortPeriod | null // the period both sort buttons are limited to; null when the stored one cannot be read (main then sorts nothing)

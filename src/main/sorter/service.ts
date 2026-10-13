@@ -19,7 +19,10 @@
  *
  * Every sort that starts gets a run record (runs.ts) and its proposals carry the run's id, so the tab
  * can show what one sort did. His per-app rules (app-rules.ts, kept in config) join the built-in rules
- * in training's test and in sorting; changing one sorts nothing.
+ * in training's test and in sorting; changing one sorts nothing. The report records which rules it was
+ * measured with (a fingerprint). While his rules differ from those, "Sort now" still works (he is
+ * there and sees the piles) but sorting unattended is refused, as with too little evidence, until he
+ * trains again: status() says so in `rulesChangedSinceTest` and `canRunUnattended` is false.
  *
  * Sorting writes proposals only: it never moves, deletes or decides anything (binning is later
  * work), and it never writes his triage decisions. Nothing here makes a network call: the cloud step
@@ -38,7 +41,7 @@ import { accuracyReport, enoughToMeasure, holdOutSplit, MIN_HELD_BACK, type Accu
 import { loadLabelled, loadUndecided, SorterStore, type ProposalRow, type Shot } from './store'
 import { applyCloud, decidedByLocal, settledAnswer } from './cloud/cascade'
 import { answerScopes, voiceOfAnswer } from './cloud/provider'
-import { appRuleLookup, storedAppRules } from './app-rules'
+import { appRuleLookup, appRulesFingerprint, NO_APP_RULES, storedAppRules, type AppRule } from './app-rules'
 import { newRunId, type RunTrigger } from './runs'
 import type { AppRuleLookup } from './rules'
 import { EVERYTHING, inWindow, isSortPeriod, PERIOD_CHOICES, PERIOD_REFUSED, PERIOD_UNREADABLE, periodPhrase, periodWindow, storedPeriod, type PeriodWindow, type SortPeriod } from './period'
@@ -59,6 +62,8 @@ export type SorterReport = {
   grouping: { groups: number; largest: number; cosine: number; minutes: number }
   /** The held-back sample is big enough (MIN_HELD_BACK) for the sorter to run unattended. */
   enoughToMeasure: boolean
+  /** His per-app rules as they were when this was measured (app-rules.ts appRulesFingerprint). Absent on a report from before it was recorded: no rules. */
+  appRulesFingerprint?: string
   /** The classifier tested on the held-back sample was trained on this many. */
   trainedOn: { keep: number; throwaway: number }
   l2: number
@@ -80,10 +85,16 @@ export type SorterStatus = {
   error: string | null
   modelReady: boolean
   report: SorterReport | null
-  /** A held-back report with enough items of each label exists, so sorting may run without him watching. */
+  /** A held-back report with enough items of each label exists, measured with his app rules as they are now, so sorting may run without him watching. */
   canRunUnattended: boolean
   /** A model exists but was trained under an older sorter version: sorting is refused until retrained. */
   retrainNeeded: boolean
+  /**
+   * A current model and report exist, but his app rules have changed since the report was measured: it
+   * no longer describes what a sort does. "Sort now" still works; unattended sorting is refused until
+   * he trains again. False when there is no current model (retrainNeeded or nothing trained says that).
+   */
+  rulesChangedSinceTest: boolean
   /** The least held-back evidence needed (shown in Settings when there is not enough yet). */
   minHeldBack: { total: number; perLabel: number }
   pending: { keep: number; throwaway: number; doubtful: number; lastProposedAt: string | null }
@@ -144,6 +155,14 @@ function isCurrent(rec: { sorterVersion: string; report: { sorterVersion?: strin
   return rec.sorterVersion === SORTER_VERSION && rec.report?.sorterVersion === SORTER_VERSION
 }
 
+/** The app rules the report was measured with are the ones in force now. */
+function testedWith(report: { appRulesFingerprint?: unknown }, rules: AppRule[]): boolean {
+  const then = typeof report?.appRulesFingerprint === 'string' ? report.appRulesFingerprint : NO_APP_RULES
+  return then === appRulesFingerprint(rules)
+}
+
+export const RULES_CHANGED = 'the app rules changed since the sorter was last tested; train it again before it sorts on its own'
+
 type Run = Pick<SorterStatus, 'phase' | 'done' | 'total' | 'message' | 'error'>
 
 export class SorterService {
@@ -187,9 +206,9 @@ export class SorterService {
     }
   }
 
-  /** His per-app rules as they are now (read once per training or sort). */
-  private mine(): AppRuleLookup {
-    return appRuleLookup(storedAppRules(this.deps.appRules?.()))
+  /** His per-app rules as they are now (read once per training or sort, so the fingerprint and the lookup are of the same rules). */
+  private appRules(): AppRule[] {
+    return storedAppRules(this.deps.appRules?.())
   }
 
   private thresholds(): Thresholds {
@@ -211,7 +230,8 @@ export class SorterService {
     const { rec, pending } = this.withStore((s) => ({ rec: s.latestModel<SorterReport>(), pending: s.pendingCounts() }))
     const current = rec ? isCurrent(rec) : false
     const report = current ? rec!.report : null
-    return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: current && enoughToMeasure(report?.heldBack), retrainNeeded: Boolean(rec) && !current, minHeldBack: MIN_HELD_BACK, pending, period: this.period(), periods: PERIOD_CHOICES, lastRun: this.lastRun(), ...this.counts }
+    const rulesChangedSinceTest = current && !testedWith(rec!.report, this.appRules())
+    return { ...this.run, modelReady: this.deps.pictures.modelReady(), report, canRunUnattended: current && enoughToMeasure(report?.heldBack) && !rulesChangedSinceTest, retrainNeeded: Boolean(rec) && !current, rulesChangedSinceTest, minHeldBack: MIN_HELD_BACK, pending, period: this.period(), periods: PERIOD_CHOICES, lastRun: this.lastRun(), ...this.counts }
   }
 
   /** The period chosen in Settings; null when what is stored is not a period. */
@@ -297,7 +317,8 @@ export class SorterService {
       const trainKept = trainSet.filter((s) => s.truth === 'keep').map((s) => vectors.get(s.image!.id)!)
       const testTiers = await job({ kind: 'kept-tiers', vectors: test.map((s) => vectors.get(s.image!.id)!), kept: trainKept }) // in the worker
       if (ctl.signal.aborted) throw new Error('cancelled')
-      const mine = this.mine()
+      const rules = this.appRules()
+      const mine: AppRuleLookup = appRuleLookup(rules)
       for (const [ti, s] of test.entries()) {
         const rule = applyRules(s.facts, mine)
         const v = vectors.get(s.image!.id)!
@@ -322,6 +343,7 @@ export class SorterService {
         keepFromWellCopy: usable.filter((s) => s.fromWellCopy).length,
         grouping: { groups: grouping.groups, largest: grouping.largest, cosine: 0.95, minutes: 5 },
         enoughToMeasure: false,
+        appRulesFingerprint: appRulesFingerprint(rules),
         trainedOn: held.trainedOn,
         l2: held.l2,
         calibration: held.calibrationCheck ?? null,
@@ -347,7 +369,8 @@ export class SorterService {
    * Propose keep / throwaway / doubtful for every undecided screenshot, or, given a period window,
    * for those taken inside it (period.ts inWindow; one with no date in its name is inside Everything
    * only). Writes proposals only, and none for a screenshot outside the window. `trigger` says who
-   * started it, for the run record (the nightly batch passes 'nightly').
+   * started it, for the run record (the nightly batch passes 'nightly'). A nightly sort is refused when
+   * his app rules are not the ones the report was measured with; one he started himself is not.
    */
   async sortUndecided(opts: { limit?: number; window?: PeriodWindow; trigger?: RunTrigger } = {}): Promise<SortResult> {
     const window = opts.window ?? EVERYTHING
@@ -358,6 +381,9 @@ export class SorterService {
     if (!rec) return { ok: false, error: 'train the sorter on your past choices first; it needs an accuracy report before it sorts' }
     if (!isCurrent(rec)) return { ok: false, error: 'retrain needed: the sorter changed since it was last trained' }
     if (!enoughToMeasure(rec.report.heldBack)) return { ok: false, error: 'not enough of your past choices to measure accuracy yet' }
+    // read once: the rules checked against the report are the rules this sort then uses
+    const rules = this.appRules()
+    if (opts.trigger === 'nightly' && !testedWith(rec.report, rules)) return { ok: false, error: RULES_CHANGED }
     if (!this.deps.pictures.modelReady()) return { ok: false, error: 'download the picture search model first (Settings › Picture search)' }
     const ctl = new AbortController()
     this.abort = ctl
@@ -381,7 +407,7 @@ export class SorterService {
     }
     try {
       this.withStore((st) => st.startRun({ id: runId, startedAt: started.toISOString(), period: window.period, trigger: opts.trigger === 'nightly' ? 'nightly' : 'manual' }))
-      const mine = this.mine()
+      const mine: AppRuleLookup = appRuleLookup(rules)
       let shots = loadUndecided(this.deps.wellRoot()).filter((s) => inWindow(s.takenAt, window))
       if (opts.limit !== undefined) shots = shots.slice(0, Math.max(0, opts.limit))
       const t = this.thresholds()

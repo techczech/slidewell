@@ -5,6 +5,7 @@ import { PictureSearchSettings, PictureSearchStatusBar, usePictureStatus } from 
 import { BacklogImportSettings } from './BacklogImport'
 import { SorterServiceSettings } from './SorterServiceSettings'
 import { AutoSortingTab } from './AutoSortingTab'
+import { TriageAppBar, TriageAppMenu, useTickedApps } from './TriageAppMenu'
 import { useSorterBusy } from './sorter-hooks'
 import { ReviewScreen } from './Review'
 import { RELATED_SHOWN, relatedFold } from './match-fold'
@@ -1162,6 +1163,8 @@ function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToast }: {
   const [debq, setDebq] = useState('')
   const stateFilter = tab === 'auto' ? 'undecided' : tab // the grid behind the counts; Auto sorting lists nothing
   const [sort, setSort] = useState<'scanned' | 'date-desc' | 'date-asc'>('scanned')
+  const [apps, setApps] = useTickedApps() // the source apps ticked in the App menu (kept for the session)
+  const appsKey = apps.join('\u0000')
   const [groupByDate, setGroupByDate] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [progress, setProgress] = useState('')
@@ -1188,7 +1191,7 @@ function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToast }: {
   const listSort = groupByDate && !sort.startsWith('date') ? 'date-desc' : sort
   const refresh = useCallback(async () => {
     try {
-      const r = await window.sw.triage.list(debq, stateFilter, listSort, PAGE, page * PAGE)
+      const r = await window.sw.triage.list(debq, stateFilter, listSort, PAGE, page * PAGE, apps.length ? apps : undefined)
       setItems(r.items)
       setCounts(r.counts)
       setHasMore(r.hasMore)
@@ -1196,10 +1199,10 @@ function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToast }: {
     } catch {
       /* a mid-scan read may briefly lose to a write; the next tick retries */
     }
-  }, [debq, stateFilter, listSort, page])
+  }, [debq, stateFilter, listSort, page, appsKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // a filter/search/sort change resets to the first page
-  useEffect(() => setPage(0), [debq, stateFilter, listSort])
+  useEffect(() => setPage(0), [debq, stateFilter, listSort, appsKey])
   // jump to the top of the grid when the page changes
   useEffect(() => {
     document.querySelector('.triage-scroll')?.scrollTo(0, 0)
@@ -1336,6 +1339,7 @@ function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToast }: {
       const el = document.activeElement as HTMLElement | null
       const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
       if (tab === 'auto') return // no grid here: the tab has its own controls
+      if (el?.closest('.tam-pop, .tri-confirm')) return // the App menu and its confirm box own the keyboard while open
       if (e.key === 'Escape') {
         if (preview) setPreview(null)
         return
@@ -1469,10 +1473,11 @@ function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToast }: {
                 <input
                   ref={searchRef}
                   className="search-input"
-                  placeholder="Search text in screenshots…  / focus · S select · X exclude"
+                  placeholder="Search text…  / focus · S select · X exclude"
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
                 />
+                <TriageAppMenu state={stateFilter} ticked={apps} onChange={setApps} version={counts.undecided + counts.selected + counts.excluded} />
                 <select className="triage-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)} aria-label="Sort">
                   <option value="scanned">Recently scanned</option>
                   <option value="date-desc">Date — newest</option>
@@ -1504,6 +1509,7 @@ function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToast }: {
             </div>
           ) : (
             <>
+              {stateFilter === 'undecided' && <TriageAppBar ticked={apps} version={counts.undecided} onDecided={() => { void refresh(); onChanged() }} />}
               {items.length === 0 ? (
                 <div className="triage-empty">
                   <p>{scanning ? 'Scanning…' : counts.total === 0 ? 'Nothing scanned yet.' : `No ${stateFilter} items.`}</p>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { appRuleLookup, appReadings, changeAppRule, storedAppRules, suggestionFor, withAppRule, MAX_APP_RULES } from '../src/main/sorter/app-rules'
+import { appRuleLookup, appRulesFingerprint, NO_APP_RULES, appReadings, changeAppRule, storedAppRules, suggestionFor, withAppRule, MAX_APP_RULES } from '../src/main/sorter/app-rules'
 import type { AppTally } from '../src/main/triage-apps'
 
 const tally = (app: string, kept: number, thrownAway: number, undecided = 0): AppTally => ({ key: app.trim().toLowerCase(), app, kept, thrownAway, rows: { undecided, selected: 0, included: kept, excluded: thrownAway } })
@@ -12,6 +12,18 @@ describe('his per-app rules: what is stored', () => {
       { app: 'brightLOOM', rule: 'throwaway' },
       { app: '', rule: 'throwaway' }
     ])
+  })
+
+  it('a fingerprint of the rule set: the same for the same rules however spelt or ordered, different for any change', () => {
+    const f = appRulesFingerprint
+    const base = f([{ app: 'Brightloom', rule: 'throwaway' }, { app: 'Quillpad', rule: 'keep' }])
+    expect(base).toMatch(/^[0-9a-f]{64}$/)
+    expect(f([{ app: ' quillpad', rule: 'keep' }, { app: 'BRIGHTLOOM ', rule: 'throwaway' }])).toBe(base)
+    expect(f([{ app: 'Brightloom', rule: 'keep' }, { app: 'Quillpad', rule: 'keep' }])).not.toBe(base)
+    expect(f([{ app: 'Brightloom', rule: 'throwaway' }])).not.toBe(base)
+    expect(f([{ app: 'Brightloom', rule: 'throwaway' }, { app: 'Quillpad', rule: 'keep' }, { app: '', rule: 'keep' }])).not.toBe(base)
+    expect(f([])).toBe(NO_APP_RULES)
+    expect(f(storedAppRules(undefined))).toBe(NO_APP_RULES)
   })
 
   it('set, change and remove a rule', () => {
