@@ -119,6 +119,18 @@ describe('nightly batch: app rules changed since the sorter was tested', () => {
     expect(count(w, 'sorter_cloud_claims')).toBe(0)
   })
 
+  it('a rule changed during a local sort that leaves nothing doubtful: still recorded as rules changed, and it says only that nothing was sent', async () => {
+    const w = well([{ hash: 'k1', proposal: 'keep', window: 'keep-chart', takenAt: '2026-10-04T10:00:00' }])
+    const net = bothStubs()
+    let changed = false
+    const d = cloudDeps(w, { http: net.http, rulesChangedSinceTest: () => changed, sortLocal: async () => ((changed = true), { ok: true, sorted: 1 }) })
+    const s = await new CloudSorter(d).runNightly()
+    expect(s).toMatchObject({ skipped: 'rules-changed', asked: 0, local: { ok: true } })
+    expect(s.message).toBe('Nothing was sent: your app rules changed since the sorter was last tested. Train it again and nightly sorting carries on.')
+    expect(d.stateBox.lastRun).toMatchObject({ skipped: 'rules-changed' })
+    expect(net.urls).toEqual([])
+  })
+
   it('not trained enough and no rule change: as before, the local step is left out and doubtful ones are still asked about', async () => {
     const w = four()
     const net = bothStubs()
@@ -133,6 +145,10 @@ describe('nightly batch: app rules changed since the sorter was tested', () => {
   it('the reason in words, whether or not some had gone', () => {
     const base = { at: '2026-10-11T02:00:00.000Z', trigger: 'nightly' as const, provider: 'openai' as const, local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, sent: 0, settled: 0, stillUnsure: 0, skipped: 'rules-changed' as const, error: null, message: '' }
     expect(inWords(base)).toBe('Nothing was sorted or sent: your app rules changed since the sorter was last tested. Train it again and nightly sorting carries on.')
+    // a local step ran before the change was seen: something was sorted, so only "sent" is denied
+    expect(inWords({ ...base, local: { ok: true, message: 'Sorted 3 screenshots on this Mac.' }, stayedDoubtful: 1 })).toBe('Nothing was sent: your app rules changed since the sorter was last tested. Train it again and nightly sorting carries on. 1 screenshot still needs a look.')
+    // a local step that was refused sorted nothing
+    expect(inWords({ ...base, local: { ok: false, message: 'not trained enough' } })).toMatch(/^Nothing was sorted or sent: /)
     expect(inWords({ ...base, asked: 15, stayedDoubtful: 2 })).toBe('Stopped after asking Luna about 15 screenshots: your app rules changed since the sorter was last tested. Train it again and nightly sorting carries on. 2 screenshots still need a look.')
   })
 })

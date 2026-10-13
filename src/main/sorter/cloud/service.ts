@@ -868,6 +868,9 @@ export class CloudSorter {
     }
     if (this.busy()) return finish({ error: 'The sorter is already running.' })
     const found = this.waiting(provider)
+    // the nightly rules gate, read again straight after the local step (a rule may have changed while it
+    // ran) and before any return that depends on what is waiting: that outcome is the one recorded
+    if (trigger === 'nightly' && this.rulesChanged()) return finish({ skipped: 'rules-changed', stayedDoubtful: found?.list.length ?? 0 })
     if (!found) return finish({ skipped: 'unavailable' })
     const { list, pending } = found
     // `list` stays everything doubtful (the summary says how many still need a look); the run draws only on the period
@@ -882,8 +885,6 @@ export class CloudSorter {
     if (settings.provider !== provider.id) return finish({ skipped: 'provider-changed', stayedDoubtful: list.length })
     if (settings.enabled !== true) return finish({ skipped: 'off', stayedDoubtful: list.length })
     if (trigger === 'nightly' && settings.nightly !== true) return finish({ skipped: 'nightly-off', stayedDoubtful: list.length })
-    // read again here (a rule may have changed during the local sort), before anything is claimed
-    if (trigger === 'nightly' && this.rulesChanged()) return finish({ skipped: 'rules-changed', stayedDoubtful: list.length })
     const key = this.deps.keys[provider.id].get()
     // a key that is not this provider's kind is no key: it is never put into a request to this provider
     if (!key || provider.keyRule(key) !== null) return finish({ skipped: 'no-key', stayedDoubtful: list.length })
@@ -1219,7 +1220,7 @@ export function describe(s: CloudRunSummary): string {
     case 'nightly-off':
       return s.asked ? `Stopped after asking ${name} about ${plural(s.asked, 'screenshot')}: nightly sorting was turned off.${waiting}` : `${name} was not asked: nightly sorting is turned off.${waiting}`
     case 'rules-changed':
-      return `${s.asked ? `Stopped after asking ${name} about ${plural(s.asked, 'screenshot')}` : 'Nothing was sorted or sent'}: your app rules changed since the sorter was last tested. Train it again and nightly sorting carries on.${waiting}`
+      return `${s.asked ? `Stopped after asking ${name} about ${plural(s.asked, 'screenshot')}` : s.local?.ok ? 'Nothing was sent' : 'Nothing was sorted or sent'}: your app rules changed since the sorter was last tested. Train it again and nightly sorting carries on.${waiting}`
     case 'limit-reached':
       return `${name} was not asked: ${NIGHTLY_LIMIT.toLocaleString('en-GB')} screenshots have been sent tonight, the most per night.${waiting}`
     case 'period-changed':

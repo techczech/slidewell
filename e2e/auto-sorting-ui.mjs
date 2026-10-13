@@ -176,7 +176,7 @@ function installFake() {
         },
         setNightly: async (on) => { calls.setNightly.push(on); cloud.settings.nightly = on; return { ok: true, status: sync() } },
         setSecondOpinions: async (on) => { calls.setSecond.push(on); cloud.settings.secondOpinions = on; return { ok: true, status: sync() } },
-        prepare: async () => { calls.prepare++; return { local: { ok: true, message: 'Sorted 630 from the last 30 days: 300 keep, 250 throwaway, 80 need a look.' }, provider: 'anthropic', period: '30d', periodLabel: 'Last 30 days', periodPrefix: 'Last 30 days: ', periodNote: 'Only screenshots with a date in the file name are counted.', doubtful: 80, toSend: 58, secondOpinions: 0, secondNote: '', cap: 300, leftTonight: 300, estimate: { screenshots: 58, requests: 3, inputTokens: 1, outputTokens: 1, usd: 0.12 }, costLabel: 'Estimated cost', costNote: '', blocked: null, token: 'tok-1', message: 'Last 30 days: ask Haiku about 58 screenshots?' } },
+        prepare: async () => { calls.prepare++; const canLocal = sorter.modelReady && (sorter.canRunUnattended || sorter.rulesChangedSinceTest); return { local: canLocal ? { ok: true, message: 'Sorted 630 from the last 30 days: 300 keep, 250 throwaway, 80 need a look.' } : { ok: false, message: 'The sorter on this Mac is not trained enough to sort on its own yet; only screenshots it already found doubtful can be asked about.' }, provider: 'anthropic', period: '30d', periodLabel: 'Last 30 days', periodPrefix: 'Last 30 days: ', periodNote: 'Only screenshots with a date in the file name are counted.', doubtful: 80, toSend: 58, secondOpinions: 0, secondNote: '', cap: 300, leftTonight: 300, estimate: { screenshots: 58, requests: 3, inputTokens: 1, outputTokens: 1, usd: 0.12 }, costLabel: 'Estimated cost', costNote: '', blocked: null, token: 'tok-1', message: 'Last 30 days: ask Haiku about 58 screenshots?' } },
         send: async (token) => { calls.send.push(token); return { at: new Date().toISOString(), trigger: 'manual', local: null, asked: 58, answered: 58, keep: 10, throwaway: 7, stayedDoubtful: 41, sent: 58, settled: 17, stillUnsure: 41, skipped: null, error: null, message: 'Asked Haiku about 58 screenshots: 10 keep, 7 throwaway.' } },
         cancel: async () => { calls.cloudCancel++ },
         onStatus: (cb) => { subs.cloud.add(cb); return () => subs.cloud.delete(cb) }
@@ -449,23 +449,6 @@ try {
   await page.waitForSelector('.sorter-cloud-result')
   check('Send passes main only the one-time token', JSON.stringify(await fake(() => window.__fake.calls.send)) === '["tok-1"]')
   check('the result line follows', (await text('.sorter-cloud-result')).startsWith('Asked Haiku about 58 screenshots'))
-  // --- an app rule changed since the accuracy test: Sort now still works, nightly waits ---
-  const LINE = 'You changed an app rule since the last accuracy test. Nightly sorting waits until you train again. Sort now still works.'
-  check('no rules-changed line while the test is current', (await page.locator('.as-rules-changed').count()) === 0)
-  const sortsBefore = await fake(() => window.__fake.calls.sort)
-  const preparesBefore = await fake(() => window.__fake.calls.prepare)
-  await fake(() => { Object.assign(window.__fake.sorter, { rulesChangedSinceTest: true, canRunUnattended: false }); window.__fake.push() })
-  await page.waitForSelector('.as-status .as-rules-changed')
-  check('rules changed: the line is under the status line and in the Nightly block, Sort now stays enabled', (await text('.as-status .as-rules-changed')) === LINE && (await text('.as-nightly .as-rules-changed')) === LINE && !(await page.locator('button.as-sort-btn').isDisabled()) && (await page.locator('.as-nightly input[type=checkbox]').isDisabled()), await text('.as-nightly'))
-  await page.locator('.as-status').evaluate((e) => e.scrollIntoView({ block: 'start' }))
-  await shoot(page, 'new-3-rules-changed.png')
-  await page.locator('button', { hasText: /^Sort now$/ }).click()
-  await page.waitForSelector('.sorter-cloud-confirm')
-  const dlg2 = await text('.sorter-cloud-confirm')
-  check('rules changed: Sort now runs the sorter\'s own sort, then prepares; the box does not say "not trained enough"', (await fake(() => window.__fake.calls.sort)) === sortsBefore + 1 && (await fake(() => window.__fake.calls.prepare)) === preparesBefore + 1 && !dlg2.includes('not trained enough'), dlg2)
-  await page.locator('button', { hasText: 'Not now' }).click()
-  await fake(() => { Object.assign(window.__fake.sorter, { rulesChangedSinceTest: false, canRunUnattended: true }); window.__fake.push() })
-  await page.waitForFunction(() => !document.querySelector('.as-rules-changed'))
   await page.locator('.sorter-period-select').selectOption('7d')
   check('Period select goes to setPeriod', (await fake(() => window.__fake.sorter.period)) === '7d')
   await page.locator('.sorter-period-select').selectOption('30d')
@@ -492,10 +475,32 @@ try {
   await page.waitForFunction(() => /No service is chosen in Settings/.test(document.querySelector('.as-sort')?.textContent ?? ''))
   await page.locator('button', { hasText: /^Sort now$/ }).click()
   await page.waitForSelector('.sorter-cloud-result')
-  check('with no service, Sort now runs only the local sort', (await fake(() => window.__fake.calls.sort)) === sortsBefore + 2 && (await fake(() => window.__fake.calls.prepare)) === preparesBefore + 1 && (await text('.sorter-cloud-result')) === 'Sorted 630 from the last 30 days: 300 keep, 250 throwaway, 80 need a look.', await text('.sorter-cloud-result'))
+  check('with no service, Sort now runs only the local sort', (await fake(() => window.__fake.calls.sort)) === 1 && (await fake(() => window.__fake.calls.prepare)) === 2 && (await text('.sorter-cloud-result')) === 'Sorted 630 from the last 30 days: 300 keep, 250 throwaway, 80 need a look.', await text('.sorter-cloud-result'))
   check('nightly is disabled with the reason', (await page.locator('.as-nightly input[type=checkbox]').isDisabled()) && (await text('.as-nightly')).includes('When no service is chosen in Settings, nightly sorting is off.'))
   check('the side card says no service is chosen', (await text('.as-side')).includes('No service is chosen'))
   await fake(() => { window.__fake.cloud.settings.enabled = true; window.__fake.push() })
+
+  // --- an app rule changed since the accuracy test: Sort now still works, nightly waits ---
+  const LINE = 'You changed an app rule since the last accuracy test. Nightly sorting waits until you train again. Sort now still works.'
+  check('no rules-changed line while the test is current', (await page.locator('.as-rules-changed').count()) === 0)
+  const sortsBefore = await fake(() => window.__fake.calls.sort)
+  const preparesBefore = await fake(() => window.__fake.calls.prepare)
+  await fake(() => { window.__fake.lastRunKeep = window.__fake.cloud.lastRun })
+  await fake(() => { window.__fake.cloud.lastRun = { at: new Date().toISOString(), trigger: 'nightly', provider: 'anthropic', local: null, asked: 0, answered: 0, keep: 0, throwaway: 0, stayedDoubtful: 0, sent: 0, settled: 0, stillUnsure: 0, skipped: 'rules-changed', error: null, message: 'Nothing was sorted or sent: your app rules changed since the sorter was last tested. Train it again and nightly sorting carries on.' }; window.__fake.push() })
+  await fake(() => { Object.assign(window.__fake.sorter, { rulesChangedSinceTest: true, canRunUnattended: false }); window.__fake.push() })
+  await page.waitForSelector('.as-status .as-rules-changed')
+  check('rules changed: the line is under the status line and in the Nightly block, Sort now stays enabled', (await text('.as-status .as-rules-changed')) === LINE && (await text('.as-nightly .as-rules-changed')) === LINE && !(await page.locator('button.as-sort-btn').isDisabled()) && (await page.locator('.as-nightly input[type=checkbox]').isDisabled()), await text('.as-nightly'))
+  await page.locator('.as-status').evaluate((e) => e.scrollIntoView({ block: 'start' }))
+  await shoot(page, 'new-3-rules-changed.png')
+  await page.locator('button', { hasText: /^Sort now$/ }).click()
+  await page.waitForSelector('.sorter-cloud-confirm')
+  const dlg2 = await text('.sorter-cloud-confirm')
+  check('rules changed: one press sorts once, in prepare, and the box shows that sort, not "not trained enough"', (await fake(() => window.__fake.calls.sort)) === sortsBefore && (await fake(() => window.__fake.calls.prepare)) === preparesBefore + 1 && dlg2.includes('Sorted 630') && !dlg2.includes('not trained enough'), dlg2)
+  await page.locator('button', { hasText: 'Not now' }).click()
+  check('a nightly run skipped for a rule change shows main\'s own sentence in the Nightly block', (await text('.as-nightly .as-last-skip')).includes('Nothing was sorted or sent: your app rules changed since the sorter was last tested. Train it again and nightly sorting carries on.'), await text('.as-nightly'))
+  await fake(() => { window.__fake.cloud.lastRun = window.__fake.lastRunKeep; window.__fake.push() })
+  await fake(() => { Object.assign(window.__fake.sorter, { rulesChangedSinceTest: false, canRunUnattended: true }); window.__fake.push() })
+  await page.waitForFunction(() => !document.querySelector('.as-rules-changed'))
 
   // --- Review what it sorted, Change in Settings ---
   await page.locator('.as-review-link').click()

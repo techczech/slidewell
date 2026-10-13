@@ -84,30 +84,22 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
     if (!r.ok && r.error && !r.cancelled) setResult(r.error) // on success the pushed status carries the new report
   }, [])
   // one button: with a service on, main sorts on this Mac and prepares the batch (shown in the confirm box); with none, only the local sort
-  const rulesChanged = st?.rulesChangedSinceTest === true
   const sortNow = useCallback(async () => {
     setResult(null)
-    const alone = async (): Promise<string | null> => {
-      const r = await window.sw.sorter.sort()
-      return r.ok && r.counts ? `Sorted ${n(r.sorted ?? 0)}${r.periodPhrase ?? ''}: ${n(r.counts.keep)} keep, ${n(r.counts.throwaway)} throwaway, ${n(r.counts.doubtful)} need a look.` : (r.error ?? null)
-    }
     if (cl?.settings.enabled) {
       setPreparing(true)
       try {
-        // While an app rule is newer than the accuracy test, main's cloud.prepare cannot sort on this Mac (it answers "not trained enough"),
-        // so the sorter's own sort runs first, which main still allows; prepare then only builds the batch from the unsure ones.
-        const sorted = rulesChanged ? await alone() : null
-        const p = await window.sw.cloud.prepare()
-        const local = rulesChanged ? sorted : p.local.message
-        if (p.blocked) setResult([local, p.message].filter(Boolean).join(' '))
-        else setPreview(rulesChanged ? { ...p, local: { ok: true, message: sorted ?? '' } } : p)
+        const p = await window.sw.cloud.prepare() // sorts on this Mac first (also while a rule is newer than the test), then prepares the batch
+        if (p.blocked) setResult([p.local.message, p.message].filter(Boolean).join(' '))
+        else setPreview(p)
       } finally {
         setPreparing(false)
       }
       return
     }
-    setResult(await alone())
-  }, [cl?.settings.enabled, rulesChanged])
+    const r = await window.sw.sorter.sort()
+    setResult(r.ok && r.counts ? `Sorted ${n(r.sorted ?? 0)}${r.periodPhrase ?? ''}: ${n(r.counts.keep)} keep, ${n(r.counts.throwaway)} throwaway, ${n(r.counts.doubtful)} need a look.` : (r.error ?? null))
+  }, [cl?.settings.enabled])
   const send = useCallback(async () => {
     if (!preview?.token) return
     const token = preview.token
@@ -249,6 +241,11 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
           {st.rulesChangedSinceTest && <p className="as-why as-note as-rules-changed">{RULES_CHANGED}</p>}
           {!(st.rulesChangedSinceTest && service) && <p className={nightlyReason ? 'as-why as-note' : 'as-muted as-note'}>{nightlyReason ?? 'When no service is chosen in Settings, nightly sorting is off.'}</p>}
           {nightlyError && <p className="pic-error">{nightlyError}</p>}
+          {cl.lastRun?.skipped === 'rules-changed' && cl.lastRun.message && (
+            <p className="as-muted as-note as-last-skip">
+              {whenShort(cl.lastRun.at)}: {cl.lastRun.message}
+            </p>
+          )}
         </div>
         <p>
           Sorts every undecided screenshot and asks {service ? name : 'the chosen service'} about the unsure ones, up to {n(cl.nightlyLimit)} a night (nightly sort and Sort now together). It runs only while SlideWell is open; if{' '}
