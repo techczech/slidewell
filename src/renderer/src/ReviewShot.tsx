@@ -8,14 +8,19 @@ function tone(hash: string): string {
   return `g${(h % 6) + 1}`
 }
 
-/** The picture, or a quiet placeholder window when there is none (not downloaded, or the preview). */
+/**
+ * The picture, or a quiet placeholder window when there is none (not downloaded, or the preview) or it would not load.
+ * A failed load is remembered for that picture only: the large card reuses one Shot for every card in turn, so a
+ * plain "failed" flag would leave every later card on the placeholder too.
+ */
 export function Shot({ card, caption, className = '' }: { card: ReviewCard; caption?: string; className?: string }): JSX.Element {
-  const [failed, setFailed] = useState(false)
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
+  const failed = card.thumbUrl !== null && failedUrl === card.thumbUrl
   const dark = card.app === 'Terminal'
   return (
     <div className={`rv-shot ${dark ? 't2' : tone(card.hash)} ${className}`}>
       {card.thumbUrl && !failed ? (
-        <img src={card.thumbUrl} alt="" loading="lazy" onError={() => setFailed(true)} />
+        <img key={card.thumbUrl} src={card.thumbUrl} alt="" loading="lazy" onError={() => setFailedUrl(card.thumbUrl)} />
       ) : (
         <div className={`rv-win ${dark ? 't2' : tone(card.hash + 'w')}`} />
       )}

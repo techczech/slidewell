@@ -136,6 +136,18 @@ function TeachRound({ onShowReview, onOpenAutoSorting }: { onShowReview: () => v
   }
 
   const done = (): void => closeTeachingRound()
+  // Esc leaves the round in every state, wherever the focus is: heard on the window in the capture phase (before any
+  // document or element listener), so a panel under the round cannot take it first
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape' || e.metaKey || e.ctrlKey || e.altKey) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      closeTeachingRound()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
   const seeMoved = (hashes: string[]): void => {
     onShowReview()
     showMovedInReview(hashes)
@@ -206,7 +218,7 @@ function TeachRound({ onShowReview, onOpenAutoSorting }: { onShowReview: () => v
               <div className="tr-big" data-hash={c?.hash}>
                 {c && cert ? (
                   <>
-                    <Shot card={c} caption={titleOf(c)} className="tr-shot" />
+                    <Shot key={c.hash} card={c} caption={titleOf(c)} className="tr-shot" />
                     <div className="tr-body">
                       <div className="tr-rl">The sorter&apos;s guess</div>
                       <div className="tr-cert">

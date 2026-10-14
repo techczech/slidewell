@@ -20,6 +20,16 @@ export function closeTeachingRound(): void {
   open = false
   emit(openSubs)
 }
+/** Calls `cb` each time the round opens, in the same call that opens it (so a panel can close in the same click). Returns the unsubscribe. */
+export function onTeachingRoundOpen(cb: () => void): () => void {
+  const f = (): void => {
+    if (open) cb()
+  }
+  openSubs.add(f)
+  return () => {
+    openSubs.delete(f)
+  }
+}
 export function useTeachingRoundOpen(): boolean {
   return useSyncExternalStore(
     (cb) => {

@@ -99,3 +99,24 @@
 .ts-strip[data-kind='untrained'] .ts-dot { background: #b8ad98; }
 .tr-popover-close { position: absolute; top: 10px; right: 12px; background: none; border: 0; font: inherit; font-size: 13.5px; color: var(--muted); cursor: pointer; }
 .tr-popover { position: relative; }
+
+/* About the sorter: the round "i" button and its panel (SorterAbout.tsx) */
+.sa-info { width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid var(--oxford); background: var(--card); color: var(--oxford); font: italic 700 12px Georgia, 'Times New Roman', serif; line-height: 1; padding: 0; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; flex: none; }
+.sa-info:focus-visible { outline: 2px solid var(--oxford); outline-offset: 2px; }
+.sa-panel { width: 640px; }
+.sa-title { margin: 0 0 6px; font-size: 18px; }
+.sa-intro { margin: 0 0 12px; color: var(--muted); }
+.sa-section { margin-top: 14px; }
+.sa-section h3 { margin: 0 0 4px; font-size: 14px; }
+.sa-section p { margin: 0 0 6px; line-height: 1.5; }
+.sa-live { margin: 6px 0 0; display: grid; gap: 3px; font-size: 13px; }
+.sa-live-row { display: flex; gap: 10px; }
+.sa-live-row dt { color: var(--muted); min-width: 150px; }
+.sa-live-row dd { margin: 0; font-weight: 600; }
+.as-training-h { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; }
+.as-training-h h2 { margin: 0; }
+
+/* the notice after a retrain: one line of slots, the countdown apart from it */
+.ts-notice [data-slot='when'], .ts-notice [data-slot='learnedFrom'] { font-weight: 700; }
+.ts-notice .ts-moved { margin-left: 10px; }
+.ts-countdown { color: var(--muted); font-size: 12.5px; }
