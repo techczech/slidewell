@@ -3,6 +3,7 @@
 // frames were invented, everything below works from the real status and learning reading.
 import type { SorterLearning, SorterLearningPoint, SorterRetrain, SorterStatus } from '../../preload'
 import { n } from './sorter-format'
+import { fillCopy, RETRAIN_NOTICE, SORTER_ABOUT, type AboutLiveSlot } from './sorter-about-copy'
 
 /** 0..1 as a whole percent; "89.5" style when the half matters (chart labels). */
 export const wholePct = (x: number): number => Math.round(x * 100)
@@ -22,6 +23,18 @@ export function certainty(pKeep: number, leans: 'keep' | 'throwaway'): { keep: n
   const keep = wholePct(pKeep)
   const throwaway = 100 - keep
   return { keep, throwaway, sure: leans === 'keep' ? keep : throwaway, lean: leans === 'keep' ? 'keep' : 'throwaway' }
+}
+
+// ---------------------------------------------------------------- Review's queue
+
+/**
+ * "Up next · 2–6 of 69, most unsure first": the places of the cards listed, counted the way the big card's
+ * "Question 1 of 69" and the title's "69 need a look" count, so the three numbers always agree.
+ */
+export function upNextHeading(listed: number, needALook: number, teachFirst: boolean): string {
+  const order = teachFirst ? ', most unsure first' : ''
+  if (listed <= 0) return 'Up next · nothing else'
+  return `Up next · ${listed === 1 ? '2' : `2–${listed + 1}`} of ${needALook}${order}`
 }
 
 // ---------------------------------------------------------------- the strip
@@ -71,7 +84,55 @@ export function nextRetrain(st: SorterStatus): string {
   if (!st.autoRetrain) return 'Retraining by itself is off. Retrain when you want to.'
   if (st.choicesNeeded > 0) return `It needs ${n(st.choicesNeeded)} more choices before it can retrain by itself.`
   const toGo = Math.max(0, st.retrainEvery - st.answersSinceTraining)
-  return toGo > 0 ? `Next retrain after ${st.retrainEvery} more answers (${toGo} to go)` : 'Retraining next.'
+  return toGo > 0 ? `Next retrain after ${n(toGo)} more ${toGo === 1 ? 'answer' : 'answers'}` : 'Retraining next.'
+}
+
+/** "today at 02:00", "yesterday at 21:10", "last night at 02:00", "on 7 Oct at 02:00"; '' when the time cannot be read. */
+export function whenWords(iso: string | null | undefined, now = new Date()): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const hm = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+  const startOfDay = (x: Date): number => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const diff = Math.round((startOfDay(now) - startOfDay(d)) / 86_400_000)
+  if (diff === 0) return `today at ${hm}`
+  if (diff === 1) return d.getHours() < 6 ? `last night at ${hm}` : `yesterday at ${hm}`
+  return `on ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} at ${hm}`
+}
+
+export type NoticeSlot = 'when' | 'learnedFrom' | 'moved' | 'nothingMoved' | 'notChecked' | 'stillNeed'
+
+/**
+ * The notice after a retrain, as slots in order: when, the choices it learned from, what moved to sure (split keep /
+ * throwaway; or that nothing moved; or that it could not be checked), and how many still need a look (`needALook`, the
+ * count Review's title shows). Words from sorter-about-copy.ts RETRAIN_NOTICE.
+ */
+export function retrainNotice(r: SorterRetrain, needALook: number, now = new Date()): Array<{ slot: NoticeSlot; text: string }> {
+  const out: Array<{ slot: NoticeSlot; text: string }> = [
+    { slot: 'when', text: fillCopy(RETRAIN_NOTICE.when, { when: whenWords(r.at, now) }) },
+    { slot: 'learnedFrom', text: fillCopy(RETRAIN_NOTICE.learnedFrom, { choices: n(r.choices.after) }) }
+  ]
+  if (!r.movedToSure) out.push({ slot: 'notChecked', text: RETRAIN_NOTICE.notChecked })
+  else {
+    const moved = r.movedToSure.keep + r.movedToSure.throwaway
+    if (moved === 0) out.push({ slot: 'nothingMoved', text: RETRAIN_NOTICE.nothingMoved })
+    else out.push({ slot: 'moved', text: fillCopy(RETRAIN_NOTICE.moved, { moved: n(moved), keep: n(r.movedToSure.keep), throwaway: n(r.movedToSure.throwaway) }) })
+  }
+  out.push({ slot: 'stillNeed', text: fillCopy(RETRAIN_NOTICE.stillNeed, { needALook: n(needALook) }) })
+  return out
+}
+
+/** The live values of "About the sorter", read from the sorter status only (no other call). Words from SORTER_ABOUT.values. */
+export function aboutValues(st: SorterStatus | null, now = new Date()): Record<AboutLiveSlot, string> {
+  const v = SORTER_ABOUT.values
+  const l = st?.learnable ?? null
+  const choices = l ? fillCopy(v.choices, { choices: n(l.kept + l.binned), kept: n(l.kept), thrownAway: n(l.binned) }) : v.noChoices
+  const trained = st?.report?.trainedAt ? whenWords(st.report.trainedAt, now) : ''
+  const t = st?.report?.thresholds
+  const pc = (x: number): number => Math.round(x * 100)
+  const sureAt = !t ? v.sureUnknown : pc(t.keep) === pc(t.throwaway) ? fillCopy(v.sureAt, { sure: pc(t.keep) }) : fillCopy(v.sureAtSplit, { keep: pc(t.keep), throwaway: pc(t.throwaway) })
+  const retrain = !st ? '' : st.autoRetrain ? `${fillCopy(v.retrainOn, { every: n(st.retrainEvery) })}, ${st.autoRetrainOnBattery ? v.onBattery : v.notOnBattery}` : v.retrainOff
+  return { choices, lastTrained: trained ? fillCopy(v.lastTrained, { when: trained }) : v.notTrained, sureAt, retrain }
 }
 
 const shareLine = (label: string, before: number | null | undefined, after: number | null | undefined): string | null =>

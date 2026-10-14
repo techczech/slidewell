@@ -50,7 +50,10 @@ describe('the strip line', () => {
   })
   it('never counts below zero to go', () => {
     expect(stripLine(status({ answersSinceTraining: 12 }), 3).text).toContain('retraining next')
-    expect(nextRetrain(status({ answersSinceTraining: 0 }))).toBe('Next retrain after 10 more answers (10 to go)')
+    expect(nextRetrain(status({ answersSinceTraining: 0 }))).toBe('Next retrain after 10 more answers')
+    // counts down: the number is what is left, not the fixed ten
+    expect(nextRetrain(status({ answersSinceTraining: 7 }))).toBe('Next retrain after 3 more answers')
+    expect(nextRetrain(status({ answersSinceTraining: 9 }))).toBe('Next retrain after 1 more answer')
   })
 })
 

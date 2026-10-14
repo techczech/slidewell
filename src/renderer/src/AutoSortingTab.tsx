@@ -10,6 +10,7 @@ import { SortPeriodSelect } from './SortPeriodSelect'
 import { SorterAccuracyTable } from './SorterAccuracyTable'
 import { SorterGoesBy } from './SorterGoesBy'
 import { SorterReading } from './SorterReading'
+import { AboutSorterButton } from './SorterAbout'
 import { trainingState } from './teach-format'
 import { SorterRetrainSwitches } from './SorterRetrainSwitches'
 import { SortChooser, SortPiles, type SortFollowUp } from './SortPiles'
@@ -381,7 +382,10 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
   const untrained = trainingState(st)
   const untrainedTraining = untrained ? (
     <div className="as-block as-training as-training-untrained">
-      <h2>Training</h2>
+      <div className="as-training-h">
+        <h2>Training</h2>
+        <AboutSorterButton />
+      </div>
       <SorterReading variant="tab" untrained={untrained} />
       <div className="as-training-body">
         <SorterRetrainSwitches st={st} />
@@ -392,7 +396,10 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
 
   const trainingBlock = rep ? (
     <div className="as-block as-training">
-      <h2>Training</h2>
+      <div className="as-training-h">
+        <h2>Training</h2>
+        <AboutSorterButton />
+      </div>
       <SorterReading variant="tab" />
       {sinceTraining > 0 && (
         <p className="as-muted">It last trained on {n(trainedOnAll)} of them; you have made {n(sinceTraining)} since. Train again to include them.</p>

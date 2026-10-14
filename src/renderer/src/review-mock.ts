@@ -92,9 +92,14 @@ export function reviewMock(): SwApi['review'] {
   const live = (): MockItem[] => items.filter((i) => view(i).pile !== 'gone')
   const newest = (a: MockItem, b: MockItem): number => b.takenAt.localeCompare(a.takenAt)
   const unsureFirst = (a: MockItem, b: MockItem): number => Math.abs((a.pKeep ?? 0.5) - 0.5) - Math.abs((b.pKeep ?? 0.5) - 0.5) || newest(a, b)
+  // ?reviewThumbs=1 gives every screenshot a picture (a small drawn one), except the first, whose picture does not load:
+  // the UI test checks that one picture that fails to load leaves the later cards' pictures alone
+  const thumbs = new URLSearchParams(globalThis.location?.search ?? '').get('reviewThumbs') === '1'
+  const thumbOf = (hash: string): string | null =>
+    !thumbs ? null : hash === 'm001' ? 'data:image/png;base64,AAAA' : `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="160" height="100"><rect width="160" height="100" fill="#cdd"/><text x="10" y="55">${hash}</text></svg>`)}`
   const card = (i: MockItem): ReviewCard => {
     const v = view(i)
-    return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, decidedBy: i.decidedBy, binInDays: v.binInDays, thumbUrl: null, offline: false, pKeep: i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06), leans: (i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06)) >= 0.5 ? 'keep' : 'throwaway', why: i.why ?? i.reason }
+    return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, decidedBy: i.decidedBy, binInDays: v.binInDays, thumbUrl: thumbOf(i.hash), offline: false, pKeep: i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06), leans: (i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06)) >= 0.5 ? 'keep' : 'throwaway', why: i.why ?? i.reason }
   }
   const head = (): { needALook: number; kept: number; throwaway: number } => {
     const s = summarise(live().map((i) => ({ view: view(i), proposal: i.proposal, decided: Boolean(i.decision) })))

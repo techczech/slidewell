@@ -173,8 +173,11 @@ try {
   await page.waitForSelector('.ts-strip[data-kind=retraining]')
   check('Retrain now asks for a manual retrain, and the strip shows it running', JSON.stringify(await mockDo(() => window.__sorterMock.calls.retrainNow)) === '["manual"]' && (await stripText()).includes('retraining now'))
   await page.waitForSelector('.ts-strip.ts-open')
-  const open = (await page.locator('.ts-strip.ts-open').innerText()).replace(/\s+/g, ' ')
-  check('after a retrain the strip opens: choices, what left the queue, need a look before → after, accuracy before → after', open.includes('Retrained on 322 choices.') && open.includes('23 screenshots left the need-a-look queue (19 keep, 4 throwaway).') && open.includes('Need a look: 41 → 18.') && open.includes('Throwaway right: 91% → 94%.') && open.includes('Next retrain after 10 more answers (10 to go)') && open.includes('See what moved') && open.includes('Dismiss'), open)
+  const slot = (name) => page.locator(`[data-testid=retrain-notice] [data-slot=${name}]`)
+  const slots = () => page.locator('[data-testid=retrain-notice] [data-slot]').evaluateAll((els) => els.map((e) => e.getAttribute('data-slot')))
+  const needAtRetrain = (await page.evaluate(() => window.sw.review.overview())).needALook
+  check('after a retrain the strip shows one notice made of slots: when, choices learned from, unsure ones now sure (keep / throwaway), still need a look', JSON.stringify(await slots()) === '["when","learnedFrom","moved","stillNeed"]' && (await slot('when').innerText()).startsWith('Retrained today at') && (await slot('learnedFrom').innerText()) === 'using 322 of your choices.' && (await slot('moved').innerText()) === 'Of the screenshots it was unsure about, 23 are now sure: 19 to keep, 4 to throw away.' && (await slot('stillNeed').innerText()) === `Screenshots still needing a look: ${needAtRetrain}.`, JSON.stringify(await slots()))
+  check('"Show them" and Dismiss are on the notice; the countdown is a separate quieter piece, not in the notice', (await page.locator('[data-testid=retrain-notice] .ts-moved').innerText()) === 'Show them' && (await page.locator('.ts-dismiss').count()) === 1 && (await page.locator('[data-testid=retrain-countdown]').innerText()) === 'Next retrain after 10 more answers' && !(await page.locator('[data-testid=retrain-notice]').innerText()).includes('Next retrain'))
   await shoot(page, 'teach-4-strip-after-retrain.png')
   await page.locator('.ts-moved').click()
   await page.waitForSelector('.mv-head')
@@ -194,11 +197,42 @@ try {
   await retrainWith({ at: seenAt })
   await page.waitForTimeout(100)
   check('a retrain he has already dismissed does not reopen the strip', (await page.locator('.ts-strip.ts-open').count()) === 0)
-  await retrainWith({ at: new Date(Date.now() + 1000).toISOString(), needALook: null, movedToSure: null })
+  await retrainWith({ at: new Date(Date.now() + 1000).toISOString(), needALook: null, movedToSure: null, movedHashes: [] })
   await page.waitForSelector('.ts-strip.ts-open')
-  const unchecked = (await page.locator('.ts-strip.ts-open').innerText()).replace(/\s+/g, ' ')
-  check('when what moved could not be checked it says it retrained and gives the accuracy only', unchecked.includes('Retrained on 322 choices. Throwaway right: 91% → 94%.') && !unchecked.includes('left the need-a-look queue'), unchecked)
+  check('when what moved could not be checked, its own slot says so, and there is nothing to show', JSON.stringify(await slots()) === '["when","learnedFrom","notChecked","stillNeed"]' && (await page.locator('[data-testid=retrain-notice] .ts-moved').count()) === 0, JSON.stringify(await slots()))
   await page.locator('.ts-dismiss').click()
+  await retrainWith({ at: new Date(Date.now() + 2000).toISOString(), movedToSure: { keep: 0, throwaway: 0 }, needALook: { before: 41, after: 41 }, movedHashes: [] })
+  await page.waitForSelector('.ts-strip.ts-open')
+  check('when nothing moved, the notice says so through its own slot', JSON.stringify(await slots()) === '["when","learnedFrom","nothingMoved","stillNeed"]' && (await slot('nothingMoved').innerText()).length > 0 && (await page.locator('[data-testid=retrain-notice] .ts-moved').count()) === 0, JSON.stringify(await slots()))
+  await shoot(page, 'teach-4b-strip-nothing-moved.png')
+  await page.locator('.ts-dismiss').click()
+
+  // About the sorter: the round "i" in the strip opens one panel; Esc, its close button and a click outside close it; focus goes back to the button
+  const info = page.locator('.ts-strip button[aria-label="About the sorter"]')
+  check('a round "i" button named "About the sorter" sits in the strip beside "How many is enough?"', (await info.count()) === 1 && (await info.innerText()) === 'i' && (await page.locator('.ts-strip .ts-enough + .sa-info').count()) === 1)
+  await info.click()
+  const about = page.locator('[role=dialog][aria-label="About the sorter"]')
+  await about.waitFor()
+  const heads = await about.locator('h3').allInnerTexts()
+  check('the panel has the six sections in order', JSON.stringify(heads) === JSON.stringify(['What it looks at', 'Where it learns from', 'How training works', 'How the rules by app and window are made', 'Where it is stored', 'What leaves your Mac']), JSON.stringify(heads))
+  const live = (k) => about.locator(`[data-slot=${k}] dd`).innerText()
+  check('live numbers: choices kept / thrown away, when it last trained, when it counts as sure, the retrain setting', (await live('choices')) === '312 (228 kept, 84 thrown away)' && (await live('lastTrained')).startsWith('today at') && (await live('sureAt')) === 'keep 80%, throwaway 90%' && (await live('retrain')) === 'on, after every 10 answers, not on battery', [await live('choices'), await live('lastTrained'), await live('sureAt'), await live('retrain')].join(' | '))
+  check('opening it moves focus inside the panel', await page.evaluate(() => !!document.activeElement?.closest('[aria-label="About the sorter"][role=dialog]')))
+  await shoot(page, 'about-1-panel-from-review.png')
+  const beforeAbout = await current()
+  await page.keyboard.press('k')
+  await page.waitForTimeout(100)
+  check('K does nothing while the panel is open', (await current()) === beforeAbout && (await about.count()) === 1)
+  await page.keyboard.press('Escape')
+  check('Esc closes it and focus returns to the "i" button', (await about.count()) === 0 && (await page.evaluate(() => document.activeElement?.getAttribute('aria-label'))) === 'About the sorter')
+  await info.click()
+  await about.waitFor()
+  await about.locator('.tr-popover-close').click()
+  check('its close button closes it and focus returns to the button', (await about.count()) === 0 && (await page.evaluate(() => document.activeElement?.getAttribute('aria-label'))) === 'About the sorter')
+  await info.click()
+  await about.waitFor()
+  await page.locator('.sa-overlay').click({ position: { x: 5, y: 5 } })
+  check('a click outside closes it and focus returns to the button', (await about.count()) === 0 && (await page.evaluate(() => document.activeElement?.getAttribute('aria-label'))) === 'About the sorter')
 
   // the reading as a popover
   await mockDo(() => { window.__sorterMock.preset('counting'); window.__sorterMock.learningDelayMs = 1200 })
@@ -281,7 +315,19 @@ try {
   const ru = (await page.locator('[data-testid=round-untrained]').innerText()).replace(/\s+/g, ' ')
   check('round in this state: the same sentence and link, not "nothing unsure"', ru.includes('The sorter needs training again before it can learn from your answers.') && ru.includes('Train in Auto sorting →') && !ru.includes('nothing unsure'), ru)
   check('round: focus is inside the dialog on open', await page.evaluate(() => !!document.activeElement?.closest('.tr-round')))
+  check('the popover the round was opened from is closed under it', (await page.locator('.tr-popover').count()) === 0)
   await shoot(page, 'fix-round-needs-training.png')
+  await page.keyboard.press('Escape')
+  check('Esc closes the round while the sorter needs training', (await page.locator('.tr-round').count()) === 0)
+  await page.locator('.ts-enough').click()
+  await page.locator('.tr-popover .sr-teach').click()
+  await page.waitForSelector('[data-testid=round-untrained]')
+  await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined))
+  await page.keyboard.press('Escape')
+  check('Esc closes it with the focus outside the dialog too', (await page.locator('.tr-round').count()) === 0)
+  await page.locator('.ts-enough').click()
+  await page.locator('.tr-popover .sr-teach').click()
+  await page.waitForSelector('[data-testid=round-untrained]')
   await page.locator('.tr-train-link').click()
   await page.waitForSelector('.as-tab')
   check('the round link goes to Triage › Auto sorting and closes the round', (await page.locator('.triage-controls .scope-tab.active', { hasText: 'Auto sorting' }).count()) === 1 && (await page.locator('.tr-round').count()) === 0)
@@ -309,7 +355,73 @@ try {
   check('"Open in Auto sorting" goes to Triage › Auto sorting', (await page.locator('.triage-controls .scope-tab.active', { hasText: 'Auto sorting' }).count()) === 1 && (await page.locator('.tr-popover').count()) === 0)
   await page.locator('.view-switch .scope-tab', { hasText: 'Review' }).click()
   await page.waitForSelector('.rv-big')
+  // Esc closes the round opened from the popover in the asking state as well, and answers nothing
+  await page.locator('.ts-enough').click()
+  await page.waitForSelector('.tr-popover .sr-teach')
+  const needBeforeRound = (await page.evaluate(() => window.sw.review.overview())).needALook
+  await page.locator('.tr-popover .sr-teach').click()
+  await page.waitForSelector('.tr-round[data-phase=asking]')
+  await page.keyboard.press('Escape')
+  check('Esc closes the round while asking, opened from the popover, and writes nothing', (await page.locator('.tr-round').count()) === 0 && (await page.locator('.tr-popover').count()) === 0 && (await page.evaluate(() => window.sw.review.overview())).needALook === needBeforeRound, `${await page.locator('.tr-round').count()} ${await page.locator('.tr-popover').count()} ${(await page.evaluate(() => window.sw.review.overview())).needALook} ${needBeforeRound}`)
   check('no page errors', errors.length === 0, errors.join(' | '))
+
+  // Review moves to the right next card, with its picture, in both orders (the stuck-picture defect): every screenshot has a
+  // picture except the first, whose picture does not load. Keep, throwaway, skip and ⌘Z each land on the right card, and the
+  // title, "Question 1 of N" and "Up next · 2–6 of N" agree after every step.
+  for (const order of ['teach', 'newest']) {
+    const tp = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+    tp.on('pageerror', (e) => errors.push(e.message))
+    await tp.goto(`${url}?reviewThumbs=1`)
+    await tp.locator('.view-switch .scope-tab', { hasText: 'Review' }).click()
+    await tp.waitForSelector('.rv-big')
+    if (order === 'newest') {
+      await tp.locator('.rv-teach-switch').click()
+      await tp.waitForTimeout(150)
+    }
+    const cur = () => tp.locator('.rv-big').getAttribute('data-hash')
+    const press = async (k) => {
+      await tp.keyboard.press(k)
+      await tp.waitForTimeout(200)
+    }
+    const bigPicture = () => tp.locator('.rv-big .rv-shot img').evaluateAll((els) => els.map((e) => e.complete && e.naturalWidth > 0))
+    const agree = async () => {
+      const h = Number((await tp.locator('.rv-head h1').innerText()).match(/^(\d+) need a look/)?.[1])
+      const q = Number((await tp.locator('.rv-cert-note').innerText()).match(/Question 1 of (\d+)/)?.[1])
+      const u = (await tp.locator('.rv-next h3').innerText()).match(/^Up next · 2–(\d+) of (\d+)/i)
+      const live = (await tp.evaluate(() => window.sw.review.overview())).needALook
+      return h === live && q === live && u !== null && Number(u[2]) === live && Number(u[1]) === Math.min(6, live) ? live : `title ${h}, question of ${q}, up next ${u?.[0]}, live ${live}`
+    }
+    const q = (await tp.evaluate((o) => window.sw.review.overview({ order: o }), order)).queue.map((c) => c.hash)
+    const n0 = q.length
+    check(`${order}: the first card is first in the queue, its picture failed to load and shows the placeholder`, (await cur()) === q[0] && (await tp.locator('.rv-big .rv-shot img').count()) === 0 && (await tp.locator('.rv-big .rv-win').count()) === 1)
+    check(`${order}: Up next shows items 2 to 6 with their pictures`, JSON.stringify(await tp.locator('.rv-up').evaluateAll((els) => els.map((e) => e.getAttribute('data-hash')))) === JSON.stringify(q.slice(1, 6)) && (await tp.locator('.rv-up .rv-shot img').count()) === 5)
+    check(`${order}: title, "Question 1 of N" and "Up next · 2–6 of N" agree`, (await agree()) === n0, String(await agree()))
+    await press('k')
+    check(`${order}: K moves to item 2 of Up next, which shows its picture (one failed picture does not stick)`, (await cur()) === q[1] && JSON.stringify(await bigPicture()) === '[true]', `${await cur()} ${JSON.stringify(await bigPicture())}`)
+    check(`${order}: one answer, one decision: the count drops by one and the card is kept by you`, (await agree()) === n0 - 1 && (await tp.evaluate((h) => window.sw.review.cards([h]), q[0]))[0]?.pile === 'kept', String(await agree()))
+    await press('t')
+    check(`${order}: T moves to the next card, with its picture`, (await cur()) === q[2] && JSON.stringify(await bigPicture()) === '[true]' && (await agree()) === n0 - 2 && (await tp.evaluate((h) => window.sw.review.cards([h]), q[1]))[0]?.pile === 'throwaway')
+    await press('ArrowDown')
+    check(`${order}: ↓ skips to the next card and writes nothing`, (await cur()) === q[3] && (await agree()) === n0 - 2 && JSON.stringify(await bigPicture()) === '[true]')
+    await press('Meta+z')
+    check(`${order}: ⌘Z brings back the card thrown away last`, (await cur()) === q[1] && (await agree()) === n0 - 1)
+    await press('Meta+z')
+    check(`${order}: ⌘Z again brings back the kept one, its picture still the placeholder`, (await cur()) === q[0] && (await agree()) === n0 && (await tp.locator('.rv-big .rv-shot img').count()) === 0)
+    // an answer that is written but answered with an error still moves on: the queue is read again either way
+    await tp.evaluate(() => {
+      const orig = window.sw.review.act
+      window.sw.review.act = async (...a) => {
+        await orig(...a)
+        window.sw.review.act = orig
+        throw new Error('reply lost')
+      }
+    })
+    await press('k')
+    check(`${order}: an answer whose reply is lost still moves to the next card`, (await cur()) !== q[0] && (await agree()) === n0 - 1 && (await tp.evaluate((h) => window.sw.review.cards([h]), q[0]))[0]?.pile === 'kept', String(await agree()))
+    if (order === 'teach') await shoot(tp, 'fix-review-next-card-picture.png')
+    await tp.close()
+  }
+  check('no page errors in the next-card pass', errors.length === 0, errors.join(' | '))
 
   // a Bin of 602: paged, no cap, and Empty Bin hides exactly what the confirm says
   const big = await browser.newPage({ viewport: { width: 1440, height: 900 } })

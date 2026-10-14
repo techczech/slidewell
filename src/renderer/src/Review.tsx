@@ -8,7 +8,7 @@ import { Shot } from './ReviewShot'
 import { ReviewStrip } from './ReviewStrip'
 import { onMovedRequest, takePendingMoved } from './teach-round'
 import { useSorterStatus } from './sorter-hooks'
-import { certainty } from './teach-format'
+import { certainty, upNextHeading, whenWords } from './teach-format'
 
 type PileName = 'kept' | 'throwaway' | 'bin'
 const PAGE = 60
@@ -38,18 +38,8 @@ const KEPT_COLS = 4
 
 const days = (n: number | null): string => (n === 1 ? 'bin in 1 day' : `bin in ${n ?? 30} days`)
 
-/** "today at 02:00", "yesterday at 21:10", "on 7 Oct at 02:00". */
-export function sortedWhen(iso: string | null, now = new Date()): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  const hm = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-  const startOfDay = (x: Date): number => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
-  const diff = Math.round((startOfDay(now) - startOfDay(d)) / 86_400_000)
-  if (diff === 0) return `today at ${hm}`
-  if (diff === 1) return d.getHours() < 6 ? `last night at ${hm}` : `yesterday at ${hm}`
-  return `on ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} at ${hm}`
-}
+/** "today at 02:00", "yesterday at 21:10", "on 7 Oct at 02:00" (teach-format.ts whenWords). */
+export const sortedWhen = (iso: string | null, now = new Date()): string => whenWords(iso, now)
 
 function takenLabel(c: ReviewCard): string {
   if (!c.takenAt) return ''
@@ -154,8 +144,11 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
           setSkipped((s) => s.filter((h) => h !== card.hash))
           if (front === card.hash) setFront(null)
         }
-        await load()
+      } catch {
+        onToast('That answer did not go through. Press the key again to try once more.')
       } finally {
+        // read the queue again whatever happened: an answer that was written but answered with an error must not leave its card on screen
+        await load().catch(() => undefined)
         busy.current = false
       }
     },
@@ -172,8 +165,10 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
         setSkipped((s) => s.filter((h) => h !== r.hash))
         setFront(r.hash)
       }
-      await load()
+    } catch {
+      onToast('Undo did not go through; press ⌘Z to try again.')
     } finally {
+      await load().catch(() => undefined)
       busy.current = false
     }
   }, [load, onToast])
@@ -434,7 +429,7 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
       <div className="rv-main">
         {current ? (
           <div className="rv-big" data-hash={current.hash}>
-            <Shot card={current} caption={takenLabel(current)} className="rv-big-shot" />
+            <Shot key={current.hash} card={current} caption={takenLabel(current)} className="rv-big-shot" />
             <div className="rv-body">
               <div className="rv-fn">{current.filename}</div>
               <div className="rv-am">
@@ -502,7 +497,7 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
           </div>
         )}
         <aside className="rv-next">
-          <h3>{teachFirst ? `Up next · ${Math.min(5, Math.max(0, queue.length - 1))} of ${Math.max(0, ov.needALook - 1)}, most unsure first` : `Up next · ${Math.max(0, ov.needALook - 1)}`}</h3>
+          <h3>{upNextHeading(Math.min(5, Math.max(0, queue.length - 1)), ov.needALook, teachFirst)}</h3>
           {queue.slice(1, 6).map((c, i) => (
             <div className="rv-up" key={c.hash} data-hash={c.hash}>
               <Shot card={c} />
