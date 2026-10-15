@@ -3,8 +3,9 @@
 // column. Every write goes through window.sw.review; skipping writes nothing (the item stays kept).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReviewCard, ReviewOverview, ReviewPiles, ReviewSure } from '../../preload'
+import { ReviewBlind } from './ReviewBlind'
 import { ReviewMoved } from './ReviewMoved'
-import { Shot } from './ReviewShot'
+import { Shot, shownPicture } from './ReviewShot'
 import { ReviewStrip } from './ReviewStrip'
 import { SureFilter, sureWords, pctOf } from './ReviewSure'
 import { onMovedRequest, takePendingMoved } from './teach-round'
@@ -160,7 +161,7 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
       if (!card || busy.current) return
       busy.current = true
       try {
-        const r = await window.sw.review.act(card.hash, action)
+        const r = await window.sw.review.act(card.hash, action, shownPicture(card)) // the picture as he saw it
         onToast(r.message)
         if (r.ok) {
           setSkipped((s) => s.filter((h) => h !== card.hash))
@@ -438,6 +439,7 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
   return (
     <div className="rv-screen" data-mode="doubtful">
       <ReviewStrip needALook={ov.all.needALook} onSeeMoved={(h) => { setMovedHashes(h); setMode('moved') }} onOpenAutoSorting={onOpenAutoSorting} onToast={onToast} />
+      <ReviewBlind refreshKey={ov} onChanged={() => void loadRef.current().catch(() => undefined)} />
       <div className="rv-head">
         <h1>{ov.needALook} need a look{sureTag}</h1>
         <span className="rv-sub">{confidentTotal} sorted confidently</span>

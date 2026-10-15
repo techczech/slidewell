@@ -208,6 +208,11 @@ export type ReviewCard = {
   binInDays: number | null // Throwaway only: whole days before it moves to the Bin
   thumbUrl: string | null
   offline: boolean
+  // why there is, or is not, a picture: ok = thumbUrl works; not-downloaded = only a cloud placeholder exists here;
+  // missing = no copy at any recorded path (or outside the folders SlideWell may read); none = no file record, or a video with no poster
+  picture: 'ok' | 'not-downloaded' | 'missing' | 'none'
+  revealUrl: string | null // swarchive URL of the original, for "Open in Finder" (set when a copy exists here)
+  expectedDir: string | null // missing only: the folder the file was recorded in
   // teach the sorter (ticket 22)
   pKeep: number // the sorter's p(keep) for it, 0..1 (rule, your history and look-alike combined); throwaway = 1 - pKeep
   leans: 'keep' | 'throwaway' // the way it leans: keep when pKeep is at least 0.5
@@ -241,6 +246,16 @@ export type ReviewActResult = { ok: boolean; hash: string; message: string; pile
 export type ReviewUndoResult = { ok: boolean; hash?: string; message: string }
 // changed: Bin items that changed between his confirm and the write (rescued, re-decided) and were left alone
 export type EmptyBinResult = { ok: boolean; emptied: number; changed: number; message: string }
+// Review answers given on cards that had no picture (review/rescue.ts): kept = keptImported + keptNotImported.
+// Put back: thrownAway and keptNotImported. Left alone: keptImported (in the well) and emptied (emptying is permanent).
+// items: every one found, newest answer first, from the same read as the counts and the token; putBack = the confirm puts it back.
+// picture: why the card had no picture; recorded: true = as recorded when he answered, false = an older answer, as it is on this Mac now
+export type ReviewBlindItem = { hash: string; filename: string; answer: 'keep' | 'throwaway'; picture: 'not-downloaded' | 'missing' | 'none'; recorded: boolean; putBack: boolean }
+export type ReviewBlindAnswers = { thrownAway: number; kept: number; keptImported: number; keptNotImported: number; emptied: number; items: ReviewBlindItem[]; token: string }
+/** `retrain`: an id for the retrain asked for after the answers went back (pass it to review.rescueRetrain). */
+export type ReviewRescueResult = { ok: boolean; reset: number; error?: string; retrain?: number }
+/** How that retrain ended: ok, or the reason it did not finish. */
+export type ReviewRescueRetrain = { ok: boolean; error?: string }
 // keyset paging: `next` is an opaque cursor (null = no more); pass it to review.page
 export type ReviewPage = { total: number; items: ReviewCard[]; next: string | null }
 export type TriageCounts = { undecided: number; selected: number; included: number; excluded: number; total: number }
@@ -745,9 +760,16 @@ const api = {
     page: (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number, sure?: ReviewSure): Promise<ReviewPage> => ipcRenderer.invoke('review:page', pile, after, limit, sure),
     // the cards of up to 200 screenshots by hash, in the order asked for; one in the Bin, emptied or no longer in review is left out
     cards: (hashes: string[]): Promise<ReviewCard[]> => ipcRenderer.invoke('review:cards', hashes),
-    act: (hash: string, action: 'keep' | 'throwaway' | 'rescue'): Promise<ReviewActResult> => ipcRenderer.invoke('review:act', hash, action),
+    // shownPicture: the picture state the card was shown with (ReviewShot shownPicture); main records the worse of it and its own check
+    act: (hash: string, action: 'keep' | 'throwaway' | 'rescue', shownPicture?: ReviewCard['picture']): Promise<ReviewActResult> =>
+      ipcRenderer.invoke('review:act', hash, action, ...(shownPicture === undefined ? [] : [shownPicture])),
     undo: (): Promise<ReviewUndoResult> => ipcRenderer.invoke('review:undo'),
-    emptyBin: (token: string): Promise<EmptyBinResult> => ipcRenderer.invoke('review:empty-bin', token)
+    emptyBin: (token: string): Promise<EmptyBinResult> => ipcRenderer.invoke('review:empty-bin', token),
+    // answers given on cards with no picture since `since` (an ISO date-time), and putting exactly that set back to undecided
+    blindAnswers: (since?: string): Promise<ReviewBlindAnswers> => ipcRenderer.invoke('review:blind-answers', ...(since === undefined ? [] : [since])),
+    rescueBlind: (token: string, since?: string): Promise<ReviewRescueResult> => ipcRenderer.invoke('review:rescue-blind', token, ...(since === undefined ? [] : [since])),
+    // answers when the retrain rescueBlind asked for (its `retrain` id) has ended; null for an id it does not know
+    rescueRetrain: (id: number): Promise<ReviewRescueRetrain | null> => ipcRenderer.invoke('review:rescue-retrain', id)
   },
   // One-off backlog import (ticket 13). dryRun writes nothing; run needs the id of the plan just shown.
   backlog: {

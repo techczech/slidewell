@@ -393,7 +393,7 @@ try {
     }
     const q = (await tp.evaluate((o) => window.sw.review.overview({ order: o }), order)).queue.map((c) => c.hash)
     const n0 = q.length
-    check(`${order}: the first card is first in the queue, its picture failed to load and shows the placeholder`, (await cur()) === q[0] && (await tp.locator('.rv-big .rv-shot img').count()) === 0 && (await tp.locator('.rv-big .rv-win').count()) === 1)
+    check(`${order}: the first card is first in the queue, its picture failed to load and shows the placeholder`, (await cur()) === q[0] && (await tp.locator('.rv-big .rv-shot img').count()) === 0 && (await tp.locator('.rv-big .rv-shot[data-picture=missing]').count()) === 1)
     check(`${order}: Up next shows items 2 to 6 with their pictures`, JSON.stringify(await tp.locator('.rv-up').evaluateAll((els) => els.map((e) => e.getAttribute('data-hash')))) === JSON.stringify(q.slice(1, 6)) && (await tp.locator('.rv-up .rv-shot img').count()) === 5)
     check(`${order}: title, "Question 1 of N" and "Up next · 2–6 of N" agree`, (await agree()) === n0, String(await agree()))
     await press('k')
@@ -401,6 +401,8 @@ try {
     check(`${order}: one answer, one decision: the count drops by one and the card is kept by you`, (await agree()) === n0 - 1 && (await tp.evaluate((h) => window.sw.review.cards([h]), q[0]))[0]?.pile === 'kept', String(await agree()))
     await press('t')
     check(`${order}: T moves to the next card, with its picture`, (await cur()) === q[2] && JSON.stringify(await bigPicture()) === '[true]' && (await agree()) === n0 - 2 && (await tp.evaluate((h) => window.sw.review.cards([h]), q[1]))[0]?.pile === 'throwaway')
+    const shown = await tp.evaluate(() => window.__reviewShown ?? [])
+    check(`${order}: each answer sends the picture as shown: missing for the one that would not load, ok for a real picture`, JSON.stringify(shown.slice(-2)) === JSON.stringify([[q[0], 'missing'], [q[1], 'ok']]), JSON.stringify(shown))
     await press('ArrowDown')
     check(`${order}: ↓ skips to the next card and writes nothing`, (await cur()) === q[3] && (await agree()) === n0 - 2 && JSON.stringify(await bigPicture()) === '[true]')
     await press('Meta+z')
@@ -420,6 +422,33 @@ try {
     check(`${order}: an answer whose reply is lost still moves to the next card`, (await cur()) !== q[0] && (await agree()) === n0 - 1 && (await tp.evaluate((h) => window.sw.review.cards([h]), q[0]))[0]?.pile === 'kept', String(await agree()))
     if (order === 'teach') await shoot(tp, 'fix-review-next-card-picture.png')
     await tp.close()
+  }
+  // a picture that is not there says why, in a flat panel that does not look like a screenshot (m001 not found, m002 not downloaded, m003 no picture)
+  {
+    const pp = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+    pp.on('pageerror', (e) => errors.push(e.message))
+    await pp.goto(`${url}?reviewThumbs=1&reviewPictures=1`)
+    await pp.locator('.view-switch .scope-tab', { hasText: 'Review' }).click()
+    await pp.waitForSelector('.rv-big')
+    const big = () => pp.locator('.rv-big .rv-shot').innerText()
+    const upText = (h) => pp.locator(`.rv-up[data-hash=${h}] .rv-shot`).innerText()
+    const first = await pp.locator('.rv-big').getAttribute('data-hash')
+    const bigNow = await big()
+    check('no picture: the big card for a file that is gone says "File not found" and where it was expected (home shown as ~ in display only)', first === 'm001' && bigNow.includes('File not found') && bigNow.includes('Expected in /Volumes/example/Screenshots/2026-10'), `${first} ${bigNow}`)
+    check('no picture: Up next shows a small label per state and a real picture for the rest', (await upText('m002')) === 'Not downloaded' && (await upText('m003')) === 'No picture' && (await pp.locator('.rv-up[data-hash=m005] .rv-shot img').count()) === 1)
+    await pp.keyboard.press('k')
+    await pp.waitForTimeout(250)
+    const b2 = await big()
+    check('no picture: the big card for a cloud placeholder says so, explains, and offers Open in Finder', (await pp.locator('.rv-big').getAttribute('data-hash')) === 'm002' && b2.includes('Not downloaded on this Mac') && b2.includes('open it in Finder to download it') && (await pp.getByRole('button', { name: 'Open in Finder' }).count()) === 1, b2)
+    check('no picture: the panel is flat and dashed, with no lines, no window shape and no gradient', await pp.locator('.rv-big .rv-shot').evaluate((el) => { const c = getComputedStyle(el); return c.borderStyle === 'dashed' && c.backgroundImage === 'none' && el.querySelectorAll('img, svg, canvas').length === 0 }))
+    await pp.keyboard.press('ArrowDown')
+    await pp.keyboard.press('ArrowDown')
+    await pp.waitForTimeout(250)
+    check('no picture: a card without a record says "No picture" and can still be answered', (await pp.locator('.rv-big').getAttribute('data-hash')) === 'm003' && (await big()).includes('No picture') && (await pp.locator('.rv-big .rv-shot').evaluate((el) => !el.querySelector('img'))))
+    await pp.locator('.rv-pile-btn').click()
+    await pp.waitForTimeout(300)
+    check('the old drawn window is gone everywhere', (await pp.locator('.rv-win').count()) === 0)
+    await pp.close()
   }
   check('no page errors in the next-card pass', errors.length === 0, errors.join(' | '))
 
@@ -575,6 +604,123 @@ try {
   check('Empty Bin hid exactly the count the confirm named', (await bp.evaluate(() => window.sw.review.piles())).bin.total === 0)
   check('no page errors in the Bin-and-range pass', errors.length === 0, errors.join(' | '))
   await bp.close()
+
+  // answers given on cards that had no picture (ReviewBlind.tsx, main review/rescue.ts): banner, confirm, Not now, put back
+  const bl = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+  bl.on('pageerror', (e) => errors.push(e.message))
+  await bl.goto(`${url}?reviewBlind=1`)
+  await bl.locator('.view-switch .scope-tab', { hasText: 'Review' }).click()
+  await bl.waitForSelector('[data-testid=blind-banner]')
+  check('the banner names the blind answers: all of them, thrown away and kept',
+    (await bl.locator('[data-testid=blind-banner] .rv-blind-text').innerText()) === '6 answers may have been given without a picture (3 thrown away, 3 kept). Put them back to undecided and retrain?',
+    await bl.locator('[data-testid=blind-banner] .rv-blind-text').innerText())
+  check('the banner sits under the sorter strip', await bl.evaluate(() => document.querySelector('.ts-strip')?.nextElementSibling?.classList.contains('rv-blind') === true))
+  await bl.locator('.rv-blind-go').click()
+  const blindConfirm = await bl.locator('.rv-confirm').innerText()
+  check('the confirm says exactly what will happen',
+    blindConfirm.includes('Put 5 answers back to undecided?') &&
+    blindConfirm.includes('3 thrown away and 2 kept go back to undecided.') &&
+    blindConfirm.includes('1 kept one already imported stays kept.') &&
+    blindConfirm.includes('No files are moved or deleted. The sorter then retrains.') &&
+    blindConfirm.includes('6 answers may have been given without a picture (3 thrown away, 3 kept).'), blindConfirm)
+  // the list: every one put back, with its file name, his answer and why there was no picture, from the same read as the counts
+  const listed = await bl.evaluate(() => [...document.querySelectorAll('[data-testid=blind-list] .rv-blind-item')].map((li) => [...li.children].map((c) => c.textContent)))
+  const fromMain = await bl.evaluate(() => window.sw.review.blindAnswers())
+  const want = fromMain.items.filter((i) => i.putBack).map((i) => [i.filename, i.answer === 'throwaway' ? 'thrown away' : 'kept', `${{ 'not-downloaded': 'not downloaded', missing: 'not found', none: 'no picture' }[i.picture]} ${i.recorded ? 'when you answered' : 'now'}`])
+  check('the confirm lists every one put back: file name, answer, picture state', listed.length === 5 && JSON.stringify(listed) === JSON.stringify(want), JSON.stringify(listed))
+  check('the list names all three picture states, recorded ones "when you answered" and older ones "now"', ['not found', 'not downloaded', 'no picture'].every((w) => listed.some((r) => r[2].startsWith(w))) && listed.some((r) => r[2] === 'not found when you answered') && listed.some((r) => r[2].endsWith(' now')), JSON.stringify(listed))
+  check('the list scrolls rather than growing the dialog', await bl.evaluate(() => { const l = getComputedStyle(document.querySelector('[data-testid=blind-list]')); return l.overflowY === 'auto' && l.maxHeight !== 'none' }))
+  const queueBefore = await bl.locator('.rv-big').getAttribute('data-hash')
+  await bl.keyboard.press('k')
+  await bl.waitForTimeout(150)
+  check('Review keys do nothing while the confirm is open', (await bl.locator('.rv-big').getAttribute('data-hash')) === queueBefore && (await bl.locator('.rv-confirm').count()) === 1)
+  await bl.keyboard.press('Escape')
+  check('Esc closes the confirm and writes nothing', (await bl.locator('.rv-confirm').count()) === 0 && (await bl.evaluate(() => window.sw.review.blindAnswers())).thrownAway === 3)
+  await bl.locator('.rv-blind-go').click()
+  await bl.locator('.rv-blind-confirm').click()
+  await bl.waitForSelector('[data-testid=blind-done]')
+  check('after putting back: "Put back N. Retraining…"', (await bl.locator('[data-testid=blind-done]').innerText()) === 'Put back 5. Retraining…')
+  check('a manual retrain was asked for', (await bl.evaluate(() => window.__sorterMock.calls.retrainNow)).includes('manual'))
+  await bl.waitForSelector('[data-testid=retrain-notice]', { timeout: 5000 })
+  await bl.waitForTimeout(200)
+  check('then the normal retrain notice, and the banner is gone', (await bl.locator('[data-testid=blind-done]').count()) === 0 && (await bl.locator('[data-testid=blind-banner]').count()) === 0)
+  const after = await bl.evaluate(() => window.sw.review.blindAnswers())
+  check('only the imported keep is left; the put-back ones are undecided', after.thrownAway === 0 && after.keptNotImported === 0 && after.keptImported === 1)
+  await bl.close()
+
+  // the set changed between his look and his confirm: refused, said plainly, and the list read again
+  const ch = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+  ch.on('pageerror', (e) => errors.push(e.message))
+  await ch.goto(`${url}?reviewBlind=1`)
+  await ch.locator('.view-switch .scope-tab', { hasText: 'Review' }).click()
+  await ch.waitForSelector('[data-testid=blind-banner]')
+  await ch.locator('.rv-blind-go').click()
+  await ch.evaluate(async () => {
+    const b = await window.sw.review.blindAnswers()
+    await window.sw.review.act(b.items.find((i) => i.answer === 'throwaway').hash, 'keep') // answered again elsewhere
+  })
+  await ch.locator('.rv-blind-confirm').click()
+  await ch.waitForSelector('.rv-blind-err')
+  check('a changed set is refused with "Something changed since you looked; check the list again."', (await ch.locator('.rv-blind-err').innerText()).trim() === 'Something changed since you looked; check the list again.', await ch.locator('.rv-blind-err').innerText())
+  await ch.waitForTimeout(150)
+  check('… and the banner shows the list as it is now', (await ch.locator('[data-testid=blind-banner] .rv-blind-text').innerText()).startsWith('5 answers may have been given') && (await ch.locator('[data-testid=blind-done]').count()) === 0, await ch.locator('[data-testid=blind-banner] .rv-blind-text').innerText())
+  await ch.close()
+
+  // the retrain after a put-back fails: the line says why and where to retrain, and does not wait for ever
+  const fl = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+  fl.on('pageerror', (e) => errors.push(e.message))
+  await fl.goto(`${url}?reviewBlind=1`)
+  await fl.locator('.view-switch .scope-tab', { hasText: 'Review' }).click()
+  await fl.waitForSelector('[data-testid=blind-banner]')
+  await fl.evaluate(() => {
+    window.__sorterMock.retrainFails = 'download the picture search model first (Settings › Picture search)'
+    window.__sorterMock.retrainMs = 50
+  })
+  await fl.locator('.rv-blind-go').click()
+  await fl.locator('.rv-blind-confirm').click()
+  await fl.waitForSelector('[data-testid=blind-done][data-failed=true]', { timeout: 5000 }).catch(() => undefined)
+  const failedLine = (await fl.locator('[data-testid=blind-done]').count()) ? await fl.locator('[data-testid=blind-done]').innerText() : '(no line)'
+  check('a retrain that fails after a put-back: "Put back N. Retraining did not finish: <why>. Retrain from Auto sorting."', failedLine === 'Put back 5. Retraining did not finish: download the picture search model first (Settings › Picture search). Retrain from Auto sorting.', failedLine)
+  await fl.close()
+
+  // the retrain fails before the put-back's reply arrives: the line does not stay on "Retraining…"
+  const qk = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+  qk.on('pageerror', (e) => errors.push(e.message))
+  await qk.goto(`${url}?reviewBlind=1`)
+  await qk.locator('.view-switch .scope-tab', { hasText: 'Review' }).click()
+  await qk.waitForSelector('[data-testid=blind-banner]')
+  await qk.evaluate(() => {
+    window.__sorterMock.retrainMs = 0
+    window.__sorterMock.retrainFails = 'the sorter is already running'
+    const orig = window.sw.review.rescueBlind
+    window.sw.review.rescueBlind = async (...a) => {
+      const r = await orig(...a)
+      await new Promise((res) => setTimeout(res, 300)) // the reply is late: the retrain has already finished
+      return r
+    }
+  })
+  await qk.locator('.rv-blind-go').click()
+  await qk.locator('.rv-blind-confirm').click()
+  await qk.waitForTimeout(1200)
+  const quickLine = (await qk.locator('[data-testid=blind-done]').count()) ? await qk.locator('[data-testid=blind-done]').innerText() : '(no line)'
+  check('a retrain that fails before the reply: says so, never stays on "Retraining…"', quickLine === 'Put back 5. Retraining did not finish: the sorter is already running. Retrain from Auto sorting.', quickLine)
+  await qk.close()
+
+  const nn = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+  nn.on('pageerror', (e) => errors.push(e.message))
+  await nn.goto(`${url}?reviewBlind=1`)
+  await nn.locator('.view-switch .scope-tab', { hasText: 'Review' }).click()
+  await nn.waitForSelector('[data-testid=blind-banner]')
+  await nn.locator('.rv-blind-later').click()
+  check('"Not now" hides the banner', (await nn.locator('[data-testid=blind-banner]').count()) === 0)
+  await nn.locator('.rv-pile-btn').click()
+  await nn.waitForSelector('.rv-pl-left')
+  await nn.locator('.rv-back-btn').click()
+  await nn.waitForSelector('.rv-big')
+  await nn.waitForTimeout(200)
+  check('… for the rest of the session, and nothing was written', (await nn.locator('[data-testid=blind-banner]').count()) === 0 && (await nn.evaluate(() => window.sw.review.blindAnswers())).thrownAway === 3)
+  check('no page errors in the blind-answers pass', errors.length === 0, errors.join(' | '))
+  await nn.close()
 
   // a Bin of 602: paged, no cap, and Empty Bin hides exactly what the confirm says
   const big = await browser.newPage({ viewport: { width: 1440, height: 900 } })

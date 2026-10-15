@@ -18,7 +18,11 @@
  */
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import type { ReviewActResult, ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewUndoResult, EmptyBinResult, TeachQueue } from '../../preload'
+import { pictureChooser, type PictureChoice, type PictureState } from './picture'
+
+const SHOWN: ReadonlySet<string> = new Set<PictureState>(['ok', 'not-downloaded', 'missing', 'none'])
+import type { ReviewActResult, ReviewBlindAnswers, ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewRescueResult, ReviewRescueRetrain, ReviewUndoResult, EmptyBinResult, TeachQueue } from '../../preload'
+import { blindRescue, BLIND_SINCE_DEFAULT } from './rescue'
 import { binToken, CARDS_MAX, compareKeys, HASH, inSure, keysetPage, parseSure, pileKey, pileOf, planAction, summarise, teachKey, BIN_AFTER_DAYS, type PileKey, type SureRange, type PileView, type ReviewAction } from './piles'
 import { newestFirst, readReviewRows, timeOf, type ReviewRow } from './store'
 import { putTriageDecision, promoteTriageHashes, writeEmptiedMarkers, type PromoteResult, type TriageDecisionRow } from '../triage'
@@ -31,6 +35,8 @@ export type ReviewDeps = {
   /** Fallback root for triage rows that carry no source (older scans). */
   sourceRoot: () => string | null
   thumbUrl: (abs: string | null) => string | null
+  /** The roots pictures may be served from (index.ts allowedRoots). Absent: any path counts. */
+  allowedRoots?: () => string[]
   now?: () => number
   /** Keep's promotion into the well; defaults to triage.ts promoteTriageHashes for these hashes. */
   promote?: (hashes: string[]) => Promise<PromoteResult>
@@ -38,21 +44,37 @@ export type ReviewDeps = {
   changed?: () => void
   /** `why` in plain words for these cards, by hash (sorter/why.ts whyReader). Absent: the sorter's reason. */
   why?: (items: Array<{ hash: string; app: string | null; reason: string }>) => Map<string, string>
+  /** Start a retrain (Retrainer.retrain('manual')): asked once after blind answers were put back (rescue.ts). */
+  retrain?: () => unknown
 }
 
 type Item = { row: ReviewRow; view: PileView }
 type UndoEntry = {
   hash: string
   prior: TriageDecisionRow | null
-  priorAnswer: { answer: string; answeredAt: string } | null
+  priorAnswer: { answer: string; answeredAt: string; picture: string | null } | null
 }
 
 const UNDO_DEPTH = 50
 
+/** The words for a retrain that broke without saying why (as the teaching round says it). */
+const RETRAIN_FAILED = 'The sorter could not retrain just now.'
+/** A training's outcome (Retrainer's result) as the banner reports it: ok, or the reason it did not finish. */
+function retrainEnd(o: unknown): ReviewRescueRetrain {
+  const r = o && typeof o === 'object' ? (o as { ok?: unknown; error?: unknown }) : {}
+  if (r.ok === true) return { ok: true }
+  return { ok: false, error: typeof r.error === 'string' && r.error ? r.error : RETRAIN_FAILED }
+}
+
 export class ReviewService {
   private undoStack: UndoEntry[] = []
   private chain: Promise<unknown> = Promise.resolve()
+  /** An operation of the queue (serial) is running: rescue() checks it, since its set check depends on it. */
+  private inQueue = false
   private migrated = new Set<string>()
+  /** The retrain asked for by the last rescue that put anything back, by id (rescueBlind's `retrain`). */
+  private rescueTraining: { id: number; end: Promise<ReviewRescueRetrain> } | null = null
+  private rescueSeq = 0
 
   constructor(private deps: ReviewDeps) {}
 
@@ -62,7 +84,14 @@ export class ReviewService {
 
   /** One operation at a time: an action never interleaves with another or with a read. */
   private serial<T>(fn: () => Promise<T> | T): Promise<T> {
-    const next = this.chain.then(fn)
+    const next = this.chain.then(async () => {
+      this.inQueue = true
+      try {
+        return await fn()
+      } finally {
+        this.inQueue = false
+      }
+    })
     this.chain = next.catch(() => undefined)
     return next
   }
@@ -103,14 +132,18 @@ export class ReviewService {
   /** Cards for a list he teaches from: each with its `why` (one read for all of them). */
   private taught(items: Item[]): ReviewCard[] {
     const why = this.deps.why?.(items.map((i) => ({ hash: i.row.hash, app: i.row.file?.app || null, reason: i.row.reason })))
-    return items.map((i) => this.card(i, why?.get(i.row.hash)))
+    const choose = this.chooser()
+    return items.map((i) => this.card(i, why?.get(i.row.hash), choose))
   }
 
-  private card(i: Item, why?: string): ReviewCard {
+  /** One chooser per read: each hash is looked at on disk once, however many cards show it. */
+  private chooser(): (hash: string, copies: ReviewRow['copies']) => PictureChoice {
+    return pictureChooser({ wellRoot: this.deps.wellRoot, sourceRoot: this.deps.sourceRoot, allowedRoots: this.deps.allowedRoots })
+  }
+
+  private card(i: Item, why?: string, choose: (hash: string, copies: ReviewRow['copies']) => PictureChoice = this.chooser()): ReviewCard {
     const f = i.row.file
-    const root = this.deps.wellRoot()
-    let abs: string | null = null
-    if (f && !f.offline) abs = f.kind === 'video' ? (f.posterRel ? join(root, f.posterRel) : null) : join(f.source || this.deps.sourceRoot() || '', f.relPath)
+    const pic = choose(i.row.hash, i.row.copies)
     return {
       hash: i.row.hash,
       filename: f?.filename ?? i.row.hash,
@@ -124,8 +157,11 @@ export class ReviewService {
       by: i.view.by,
       decidedBy: i.row.decidedBy,
       binInDays: i.view.binInDays,
-      thumbUrl: abs ? this.deps.thumbUrl(abs) : null,
-      offline: Boolean(f?.offline),
+      thumbUrl: pic.abs ? this.deps.thumbUrl(pic.abs) : null,
+      offline: pic.state === 'not-downloaded' || Boolean(f?.offline),
+      picture: pic.state,
+      revealUrl: pic.originalAbs ? this.deps.thumbUrl(pic.originalAbs) : null,
+      expectedDir: pic.expectedDir,
       pKeep: i.row.pKeep,
       leans: i.row.pKeep >= 0.5 ? 'keep' : 'throwaway',
       why: why ?? i.row.reason
@@ -238,7 +274,12 @@ export class ReviewService {
     return promoteTriageHashes(this.deps.archiveRoot(), this.deps.wellRoot(), this.deps.sourceRoot() ?? '', hashes)
   }
 
-  act(hash: string, action: ReviewAction): Promise<ReviewActResult> {
+  /**
+   * `shown`: the picture state the card was shown with (the renderer's ReviewShot shownPicture). Recorded with the answer
+   * is the worse of it and main's own file check: a file that is there but would not load was seen as missing.
+   * Absent: main's own check.
+   */
+  act(hash: string, action: ReviewAction, shown?: PictureState): Promise<ReviewActResult> {
     return this.serial(async () => {
       const it = this.items().find((i) => i.row.hash === hash)
       if (!it) return { ok: false, hash, message: 'This screenshot is no longer in review.' }
@@ -247,7 +288,10 @@ export class ReviewService {
       const root = this.deps.wellRoot()
       const d = it.row.decision
       const prior: TriageDecisionRow | null = d ? { state: d.state, decidedAt: d.decidedAt, wellId: d.wellId } : null
-      const priorAnswer = it.row.answer ? { answer: it.row.answer, answeredAt: it.row.answeredAt ?? '' } : null
+      const priorAnswer = it.row.answer ? { answer: it.row.answer, answeredAt: it.row.answeredAt ?? '', picture: it.row.answeredPicture } : null
+      // the picture he was shown, as the card had it (the same chooser as card()), recorded with the answer (rescue.ts)
+      const own = this.chooser()(hash, it.row.copies).state
+      const picture: PictureState = own !== 'ok' ? own : shown && SHOWN.has(shown) && shown !== 'ok' ? shown : own
       // his decision first (the well id of an earlier keep is carried, so Empty Bin can find its copy)
       await putTriageDecision(root, hash, { state: plan.state, decidedAt: plan.decidedAt, wellId: prior?.wellId ?? null })
       let message = `Moved to Throwaway — bin in ${BIN_AFTER_DAYS} days. Your original file is not touched.`
@@ -261,7 +305,7 @@ export class ReviewService {
           message = r.gated ? 'Kept — a large video; add it with Import in Triage.' : 'Kept — the file is not on this Mac yet; it joins the well when Triage imports it.'
         }
       }
-      this.withSorterStore((s) => s.setAnswer(hash, { answer: plan.answer, answeredAt: plan.decidedAt }))
+      this.withSorterStore((s) => s.setAnswer(hash, { answer: plan.answer, answeredAt: plan.decidedAt, picture }))
       this.undoStack.push({ hash, prior, priorAnswer })
       if (this.undoStack.length > UNDO_DEPTH) this.undoStack.shift()
       this.deps.changed?.()
@@ -285,6 +329,54 @@ export class ReviewService {
       this.deps.changed?.()
       return { ok: true, hash: e.hash, message: 'Undone.' }
     })
+  }
+
+  private rescuer(): ReturnType<typeof blindRescue> {
+    return blindRescue({ wellRoot: this.deps.wellRoot, sourceRoot: this.deps.sourceRoot, allowedRoots: this.deps.allowedRoots, retrain: this.deps.retrain, inQueue: () => this.inQueue })
+  }
+
+  /** Review answers given on cards with no picture since `since` (rescue.ts findBlind): counts and the token rescueBlind() takes. Reads only. */
+  blindAnswers(since: string = BLIND_SINCE_DEFAULT): Promise<ReviewBlindAnswers> {
+    return this.serial(() => {
+      this.migrate()
+      const f = this.rescuer().findBlind(since)
+      // the list and the counts come from the same read as the token
+      const items = f.items.map((i) => ({ hash: i.hash, filename: i.filename, answer: i.answer, picture: i.picture, recorded: i.recorded, putBack: i.putBack }))
+      return { thrownAway: f.thrownAway, kept: f.keptImported + f.keptNotImported, keptImported: f.keptImported, keptNotImported: f.keptNotImported, emptied: f.emptied, items, token: f.token }
+    })
+  }
+
+  /**
+   * Put the blind answers he confirmed (same token) back to undecided and ask for a retrain (rescue.ts rescue).
+   * Their undo entries go: undo would bring the blind answer back.
+   */
+  rescueBlind(token: string, since: string = BLIND_SINCE_DEFAULT): Promise<ReviewRescueResult> {
+    return this.serial(() => {
+      this.migrate()
+      const r = this.rescuer().rescue(token, since)
+      if (r.ok && r.reset) {
+        const back = new Set(r.hashes)
+        this.undoStack = this.undoStack.filter((u) => !back.has(u.hash))
+        this.deps.changed?.()
+      }
+      if (r.retrain) {
+        // held from the moment of the reset, so a training that ends before the renderer asks is still reported
+        const id = ++this.rescueSeq
+        this.rescueTraining = { id, end: r.retrain.then(retrainEnd, () => ({ ok: false, error: RETRAIN_FAILED })) }
+        return { ok: r.ok, reset: r.reset, retrain: id }
+      }
+      return r.error ? { ok: r.ok, reset: r.reset, error: r.error } : { ok: r.ok, reset: r.reset }
+    })
+  }
+
+  /**
+   * How the retrain asked for by rescueBlind (its `retrain` id) ended: answers once that training has run or failed,
+   * at once if it already has. Null for an id that is not the last rescue's (nothing to report). Not queued: it waits
+   * on the training, not on the well.
+   */
+  rescueRetrain(id: number): Promise<ReviewRescueRetrain | null> {
+    const t = this.rescueTraining
+    return t && t.id === id ? t.end : Promise.resolve(null)
   }
 
   emptyBin(token: string): Promise<EmptyBinResult> {

@@ -35,12 +35,16 @@ export type ReviewRow = PileFacts & {
   reason: string
   answeredAt: string | null
   answer: string | null
+  /** The card's picture state recorded when he answered in Review; null = not recorded (older answers). */
+  answeredPicture: string | null
   /** Which sorter step made the call (tickets 07, 16): rules | history | luna | haiku; null for a local doubtful or an older row. */
   decidedBy: 'rules' | 'history' | 'luna' | 'haiku' | null
   decision: { state: string; decidedAt: string | null; wellId: string | null } | null
   /** The sort run that last proposed it (ticket 20; sorter/runs.ts); null for a proposal from before runs. */
   runId: string | null
   file: ReviewFile | null
+  /** Every file row that shares this hash (the same picture at other paths), the shown one among them. */
+  copies: ReviewFile[]
 }
 
 function hasTable(db: DatabaseSync, name: string): boolean {
@@ -61,6 +65,7 @@ type ProposalJoin = {
   throwaway_since: string | null
   answered_at: string | null
   answer: string | null
+  answered_picture: string | null
   decided_by: string | null
   run_id: string | null
   state: string | null
@@ -89,24 +94,42 @@ export function readReviewRows(wellRoot: string): ReviewRow[] {
     const reviewCols = hasColumn(db, 'sorter_proposals', 'throwaway_since')
     const byCol = hasColumn(db, 'sorter_proposals', 'decided_by')
     const runCol = hasColumn(db, 'sorter_proposals', 'run_id')
+    const picCol = hasColumn(db, 'sorter_proposals', 'answered_picture')
     const rows = db
       .prepare(
         `SELECT p.hash AS hash, p.proposal AS proposal, p.confidence AS confidence, p.p_keep AS p_keep, p.sorter_version AS sorter_version, p.reason AS reason, p.proposed_at AS proposed_at,
            ${reviewCols ? 'p.throwaway_since, p.answered_at, p.answer' : "CASE WHEN p.proposal = 'throwaway' THEN p.proposed_at END AS throwaway_since, NULL AS answered_at, NULL AS answer"},
            ${byCol ? 'p.decided_by AS decided_by' : 'NULL AS decided_by'},
            ${runCol ? 'p.run_id AS run_id' : 'NULL AS run_id'},
+           ${picCol ? 'p.answered_picture AS answered_picture' : 'NULL AS answered_picture'},
            ${decisions ? 'd.state AS state, d.decided_at AS decided_at, d.well_id AS well_id' : 'NULL AS state, NULL AS decided_at, NULL AS well_id'}
          FROM sorter_proposals p ${decisions ? 'LEFT JOIN triage_decisions d ON d.hash = p.hash' : ''}`
       )
       .all() as ProposalJoin[]
     const files = new Map<string, FileRow>()
+    const all2 = new Map<string, FileRow[]>()
     if (hasTable(db, 'triage_fts')) {
       const all = db.prepare('SELECT hash, source, rel_path, filename, app, window_title, taken_at, kind, offline, poster_rel, mtime FROM triage_fts').all() as FileRow[]
       for (const f of all) {
+        const l = all2.get(f.hash)
+        if (l) l.push(f)
+        else all2.set(f.hash, [f])
         const cur = files.get(f.hash)
         if (!cur || (cur.offline === '1' && f.offline !== '1')) files.set(f.hash, f) // a downloaded copy wins
       }
     }
+    const fileOf = (f: FileRow): ReviewFile => ({
+      source: f.source ?? '',
+      relPath: f.rel_path,
+      filename: f.filename ?? f.rel_path,
+      app: f.app ?? '',
+      windowTitle: f.window_title ?? '',
+      takenAt: f.taken_at ?? '',
+      kind: f.kind,
+      offline: f.offline === '1',
+      posterRel: f.poster_rel ?? '',
+      mtime: Number(f.mtime) || 0
+    })
     return rows.map((r) => {
       const f = files.get(r.hash)
       return {
@@ -120,23 +143,12 @@ export function readReviewRows(wellRoot: string): ReviewRow[] {
         throwawaySince: r.throwaway_since,
         answeredAt: r.answered_at,
         answer: r.answer,
+        answeredPicture: r.answered_picture ?? null,
         decidedBy: r.decided_by === 'rules' || r.decided_by === 'history' || r.decided_by === 'luna' || r.decided_by === 'haiku' ? r.decided_by : null,
         decision: r.state ? { state: r.state, decidedAt: r.decided_at, wellId: r.well_id } : null,
         runId: r.run_id ?? null,
-        file: f
-          ? {
-              source: f.source ?? '',
-              relPath: f.rel_path,
-              filename: f.filename ?? f.rel_path,
-              app: f.app ?? '',
-              windowTitle: f.window_title ?? '',
-              takenAt: f.taken_at ?? '',
-              kind: f.kind,
-              offline: f.offline === '1',
-              posterRel: f.poster_rel ?? '',
-              mtime: Number(f.mtime) || 0
-            }
-          : null
+        file: f ? fileOf(f) : null,
+        copies: (all2.get(r.hash) ?? []).map(fileOf)
       }
     })
   } finally {

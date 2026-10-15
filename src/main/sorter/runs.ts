@@ -24,6 +24,7 @@ import { join } from 'node:path'
 import type { SortPeriod, SortRun, SortRunCard, SortRunPage, SortRunPile, SortRunPiles } from '../../preload'
 import { keysetPage, pileKey, type PileKey, type ProposalLabel } from '../review/piles'
 import { readReviewRows, timeOf, type ReviewRow } from '../review/store'
+import { pictureChooser } from '../review/picture'
 import { isSortPeriod } from './period'
 
 /** How many runs are kept, newest first. */
@@ -162,6 +163,8 @@ export type SortRunsDeps = {
   /** Fallback root for triage rows that carry no source (older scans). */
   sourceRoot: () => string | null
   thumbUrl: (abs: string | null) => string | null
+  /** The roots pictures may be served from; absent: any path counts. */
+  allowedRoots?: () => string[]
 }
 
 /** The runs and their piles for the renderer. Cards and paging as the review piles have them (review/service.ts). */
@@ -174,8 +177,7 @@ export class SortRuns {
 
   private card(i: Item): SortRunCard {
     const f = i.row.file
-    let abs: string | null = null
-    if (f && !f.offline) abs = f.kind === 'video' ? (f.posterRel ? join(this.deps.wellRoot(), f.posterRel) : null) : join(f.source || this.deps.sourceRoot() || '', f.relPath)
+    const abs = pictureChooser(this.deps)(i.row.hash, i.row.copies).abs // a usable copy, not just the first row's
     const state = i.row.decision?.state
     return {
       hash: i.row.hash,

@@ -92,6 +92,9 @@ export type SorterMockControl = {
   fixtures: typeof FIXTURES
   learningDelayMs: number
   calls: { retrainNow: Array<string | undefined>; setAutoRetrain: Array<{ enabled?: boolean; onBattery?: boolean }> }
+  /** Set to make the next Retrain now fail with these words (no new lastRetrain), then cleared; and how long it takes. */
+  retrainFails: string | null
+  retrainMs: number
 }
 
 export function sorterMock(review: SwApi['review']): SwApi['sorter'] {
@@ -110,7 +113,9 @@ export function sorterMock(review: SwApi['review']): SwApi['sorter'] {
     learning: LEARNING,
     fixtures: FIXTURES,
     learningDelayMs: 0,
-    calls: { retrainNow: [], setAutoRetrain: [] }
+    calls: { retrainNow: [], setAutoRetrain: [] },
+    retrainFails: null,
+    retrainMs: 700
   }
   const wanted = new URLSearchParams(globalThis.location?.search ?? '').get('sorterState')
   if (wanted && PRESETS[wanted]) Object.assign(st, PRESETS[wanted])
@@ -133,7 +138,14 @@ export function sorterMock(review: SwApi['review']): SwApi['sorter'] {
       st.retraining = trigger ?? 'manual'
       st.waitingForPower = null
       push()
-      await new Promise((r) => setTimeout(r, 700))
+      await new Promise((r) => setTimeout(r, ctl.retrainMs))
+      const fails = ctl.retrainFails
+      if (fails !== null) {
+        ctl.retrainFails = null
+        Object.assign(st, { retraining: null })
+        push()
+        return { ok: false, error: fails }
+      }
       Object.assign(st, { retraining: null, answersSinceTraining: 0, lastRetrain: { ...RETRAIN, at: new Date().toISOString(), trigger: trigger ?? 'manual' } })
       push()
       return { ok: true }

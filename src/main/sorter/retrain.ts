@@ -5,6 +5,9 @@
  *   retrain(trigger): train + accuracy test + re-score of the doubtful proposals among his undecided
  *     screenshots (service.ts trainAndTest({ rescore: true })), then record what moved as `lastRetrain` (kept in
  *     config, so it is there after a restart). One at a time: a request while one is running joins it.
+ *   retrainAfterChange(trigger): one training that starts after his choices changed, always: a request
+ *     while one is running starts one more when it ends; a sorter busy with other work starts it when
+ *     the sorter is idle; the switches do not matter.
  *   noteAnswer(): he decided something (Review, Triage, a teaching round). Counted a moment later, off
  *     the call that wrote the decision; several answers in a row are counted once.
  *   By itself: when the answers since the last training reach RETRAIN_EVERY, the switch is on, there
@@ -121,12 +124,28 @@ export type RetrainDeps<R extends RetrainOutcome = RetrainOutcome> = {
   now?: () => Date
 }
 
+type Owed<R> = { trigger: RetrainTrigger; done: Promise<R>; resolve: (r: R) => void; reject: (e: unknown) => void }
+
 export class Retrainer<R extends RetrainOutcome = RetrainOutcome> {
   private running: { trigger: RetrainTrigger; done: Promise<R> } | null = null
   /** A count is already scheduled. */
   private scheduled = false
   /** Something asked for a check while a retrain was running: check again when it ends. */
   private again = false
+  /**
+   * A training owed after a change to his choices (retrainAfterChange): started as soon as no retrain is
+   * running, and again when the sorter is idle if the sorter was busy (a sort, a cloud batch). Held whatever
+   * the switches say. Every caller waiting meanwhile gets that one training's result.
+   */
+  private owed: Owed<R> | null = null
+  /**
+   * The owed training while its attempt is in flight: it is still owed until train() answers with anything
+   * but `busy` (a training that actually ran). An idle sorter status meanwhile is remembered (`idleSeen`), so a
+   * refusal that crosses it is tried again at once instead of waiting for an idle that has already gone out.
+   */
+  private attempt: { o: Owed<R>; idleSeen: boolean } | null = null
+  /** The owed training was refused because the sorter was busy: start it when the sorter is idle. */
+  private owedWaitsForSorter = false
   /** A retrain by itself was refused because the sorter was busy: try when it is idle. */
   private waitingForSorter = false
   /**
@@ -192,6 +211,11 @@ export class Retrainer<R extends RetrainOutcome = RetrainOutcome> {
 
   /** The sorter's status went out: when it is idle again, a retrain that was waiting for it is looked at again. */
   sorterStatus(phase: string): void {
+    if (this.attempt && (phase === 'idle' || phase === 'error')) this.attempt.idleSeen = true
+    if (this.owed && this.owedWaitsForSorter && !this.running && (phase === 'idle' || phase === 'error')) {
+      this.owedWaitsForSorter = false
+      this.startOwed()
+    }
     if (!this.waitingForSorter || this.running || (phase !== 'idle' && phase !== 'error')) return
     this.waitingForSorter = false
     this.schedule()
@@ -233,16 +257,59 @@ export class Retrainer<R extends RetrainOutcome = RetrainOutcome> {
    * result rather than starting a second.
    */
   retrain(trigger: RetrainTrigger): Promise<R> {
+    return this.begin(trigger, null)
+  }
+
+  /** retrain(), or the attempt at the owed training (`a`), which run() settles or puts back. */
+  private begin(trigger: RetrainTrigger, a: { o: Owed<R>; idleSeen: boolean } | null): Promise<R> {
     if (this.running) return this.running.done
-    const done = this.run(trigger)
+    const done = this.run(trigger, a)
     this.running = { trigger, done }
     this.deps.changed()
     return done
   }
 
-  private async run(trigger: RetrainTrigger): Promise<R> {
+  /**
+   * A retrain after his choices were changed outside the answer flow (review/rescue.ts put answers back):
+   * one training that starts after the change always runs, with the switches on or off. None running: it
+   * starts now. One running: it is not joined, since it may have read the choices before the change; the
+   * owed one starts when it ends. The sorter busy with other work (its answer is `busy`): the owed one
+   * starts when the sorter's status says idle (sorterStatus). Resolves with that training's result.
+   * Nothing is cancelled.
+   */
+  retrainAfterChange(trigger: RetrainTrigger): Promise<R> {
+    if (!this.owed) {
+      let resolve!: (r: R) => void
+      let reject!: (e: unknown) => void
+      const done = new Promise<R>((res, rej) => {
+        resolve = res
+        reject = rej
+      })
+      this.owed = { trigger, done, resolve, reject }
+    }
+    const done = this.owed.done
+    if (!this.running && !this.owedWaitsForSorter) this.startOwed()
+    return done
+  }
+
+  /**
+   * Attempt the owed training. It moves to `attempt` and stays owed there until run() ends: a training that ran
+   * settles it; a busy sorter puts it back (run's finally, in the same step as `running` is cleared).
+   */
+  private startOwed(): void {
+    const o = this.owed
+    if (!o || this.running || this.attempt) return
+    const a = { o, idleSeen: false }
+    this.attempt = a
+    this.owed = null
+    this.owedWaitsForSorter = false
+    void this.begin(o.trigger, a).catch(() => undefined) // its callers get the outcome through o.done
+  }
+
+  private async run(trigger: RetrainTrigger, a: { o: Owed<R>; idleSeen: boolean } | null): Promise<R> {
     await Promise.resolve() // `running` is set before the training starts and pushes its first status
     let result: R | null = null
+    let failure: unknown = null
     try {
       result = await this.deps.train()
       if (result.ok && result.report) {
@@ -259,15 +326,35 @@ export class Retrainer<R extends RetrainOutcome = RetrainOutcome> {
       }
       return result
     } catch (e) {
+      failure = e
       if (trigger === 'auto') this.settledAt = this.total()
       throw e
     } finally {
       this.running = null
-      // answers given while it ran are counted now (and the status goes out with `retraining` cleared)
-      const recheck = this.again || Boolean(result?.ok)
-      this.again = false
-      if (recheck) this.check()
-      else this.deps.changed()
+      if (a) {
+        this.attempt = null
+        if (result?.busy) {
+          // refused before it started: owed again (merged with any asked for meanwhile); tried again now if the
+          // sorter said idle while it was being refused, else when it next says idle
+          if (this.owed) this.owed.done.then(a.o.resolve, a.o.reject)
+          else this.owed = a.o
+          this.owedWaitsForSorter = !a.idleSeen
+        } else if (result) a.o.resolve(result)
+        else a.o.reject(failure)
+      } else if (this.owed) {
+        // one owed is waiting for the sorter, whose idle status may have gone out while this one still counted as running
+        this.owedWaitsForSorter = false
+      }
+      if (this.owed && !this.owedWaitsForSorter) {
+        // a change came in while this one ran, or the owed one is due a try: a busy sorter puts it back to wait for idle
+        this.startOwed()
+      } else {
+        // answers given while it ran are counted now (and the status goes out with `retraining` cleared)
+        const recheck = this.again || Boolean(result?.ok)
+        this.again = false
+        if (recheck) this.check()
+        else this.deps.changed()
+      }
     }
   }
 

@@ -9,12 +9,20 @@
  *   `sure` is { min, max }, nothing else: numbers, 0.5 <= min <= max <= 1 (piles.ts parseSure); a bad one refuses, it is never clamped
  *   review:cards     (hashes) one array of at most 200 hashes; the cards of those still shown in
  *                    Need a look, Kept or Throwaway (service.ts cards)
+ *   review:act       (hash, action, shownPicture?) shownPicture, when sent, is one of ok | not-downloaded | missing | none:
+ *                    the picture state the card was shown with; anything else refuses
+ *   review:blind-answers  (since?) answers given on cards with no picture (rescue.ts); since = an ISO date-time string
+ *   review:rescue-blind   (token, since?) put exactly the set behind that token back to undecided; a bad token is answered { ok: false }
+ *   review:rescue-retrain (id) how the retrain that rescue asked for ended (answers when it has); null for an unknown id
  */
 import { ipcMain } from 'electron'
 import type { ReviewService } from './service'
 import { CARDS_MAX, HASH, parseSure } from './piles'
+import type { PictureState } from './picture'
 
 const ACTIONS = new Set(['keep', 'throwaway', 'rescue'])
+// the picture state the card was shown with (review:act's optional third argument)
+const PICTURES: ReadonlySet<string> = new Set<PictureState>(['ok', 'not-downloaded', 'missing', 'none'])
 
 export function registerReviewIpc(svc: ReviewService, allowed: (sender: Electron.WebContents) => boolean): void {
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -50,14 +58,30 @@ export function registerReviewIpc(svc: ReviewService, allowed: (sender: Electron
     if (!sureOk(obj(o).sure)) throw new Error('review:piles: bad arguments')
     return svc.piles(obj(o))
   })
-  handle('review:act', (hash: unknown, action: unknown) => {
+  handle('review:act', (hash: unknown, action: unknown, shown: unknown) => {
     if (typeof hash !== 'string' || !HASH.test(hash) || typeof action !== 'string' || !ACTIONS.has(action)) throw new Error('review:act: bad arguments')
-    return svc.act(hash, action as 'keep' | 'throwaway' | 'rescue')
+    if (shown !== undefined && (typeof shown !== 'string' || !PICTURES.has(shown))) throw new Error('review:act: bad arguments')
+    return svc.act(hash, action as 'keep' | 'throwaway' | 'rescue', shown as PictureState | undefined)
   })
   handle('review:page', (pile: unknown, after: unknown, limit: unknown, sure: unknown) => {
     if (pile !== 'kept' && pile !== 'throwaway' && pile !== 'bin') throw new Error('review:page: bad pile')
     if (!sureOk(sure)) throw new Error('review:page: bad arguments')
     return svc.page(pile, typeof after === 'string' && after.length < 400 ? after : null, typeof limit === 'number' ? limit : undefined, sure)
+  })
+  // an ISO-like date-time Date.parse reads; nothing else reaches the service
+  const sinceOk = (x: unknown): boolean => x === undefined || (typeof x === 'string' && x.length <= 40 && /^\d{4}-\d{2}-\d{2}(T[\d:.]+(Z|[+-]\d{2}:\d{2})?)?$/.test(x) && Number.isFinite(Date.parse(x)))
+  handle('review:blind-answers', (...args: unknown[]) => {
+    if (args.length > 1 || !sinceOk(args[0])) throw new Error('review:blind-answers: bad arguments')
+    return svc.blindAnswers(args[0] as string | undefined)
+  })
+  handle('review:rescue-blind', (...args: unknown[]) => {
+    const [token, since] = args
+    if (args.length < 1 || args.length > 2 || typeof token !== 'string' || token.length > 100 || !sinceOk(since)) throw new Error('review:rescue-blind: bad arguments')
+    return svc.rescueBlind(token, since as string | undefined)
+  })
+  handle('review:rescue-retrain', (id: unknown) => {
+    if (typeof id !== 'number' || !Number.isSafeInteger(id) || id < 1) throw new Error('review:rescue-retrain: bad arguments')
+    return svc.rescueRetrain(id)
   })
   handle('review:undo', () => svc.undo())
   handle('review:empty-bin', (token: unknown) => svc.emptyBin(typeof token === 'string' ? token : ''))
