@@ -1,8 +1,8 @@
 // In-memory review data for the browser preview and the review UI test (e2e/review-ui.mjs). Uses the
 // real pile state machine (src/main/review/piles.ts), so the piles, the 30-day clock, rescue, undo and
 // Empty Bin behave as in the app; only storage and the well are pretend. Never used in the packaged app.
-import { binToken, keysetPage, pileKey, pileOf, planAction, summarise, type PileView, type ProposalLabel, type ReviewAction } from '../../main/review/piles'
-import type { ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewActResult, ReviewUndoResult, EmptyBinResult, SwApi } from '../../preload'
+import { binToken, inSure, keysetPage, parseSure, pileKey, pileOf, planAction, summarise, type PileView, type ProposalLabel, type ReviewAction } from '../../main/review/piles'
+import type { ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewSure, ReviewActResult, ReviewUndoResult, EmptyBinResult, SwApi } from '../../preload'
 
 type MockItem = {
   hash: string
@@ -73,7 +73,8 @@ function seed(now: number): MockItem[] {
   out[8].decision = { state: 'included', decidedAt: new Date(now - DAY).toISOString() }
   // ?reviewBin=N adds N more items past 30 days (paging and Empty Bin at scale in the UI test)
   const extra = Number(new URLSearchParams(globalThis.location?.search ?? '').get('reviewBin')) || 0
-  for (let i = 0; i < extra; i++) out.push(item('throwaway', 'Finder', `Old download ${i + 1}`, 'Looks like screenshots you threw away before.', 31 + (i % 60)))
+  // every other one the sorter was less sure of (70% instead of 94%), so a how-sure range splits the Bin
+  for (let i = 0; i < extra; i++) out.push({ ...item('throwaway', 'Finder', `Old download ${i + 1}`, 'Looks like screenshots you threw away before.', 31 + (i % 60)), ...(i % 2 ? { pKeep: 0.3 } : {}) })
   // ?reviewUnsure=N adds N more unsure ones (a full round of ten in the browser preview and the UI tests)
   const more = Number(new URLSearchParams(globalThis.location?.search ?? '').get('reviewUnsure')) || 0
   const extraUnsure: Array<[string, string]> = [['Quillpad', 'Meeting notes'], ['Mossgrid', 'Board view'], ['Brightloom', 'Timeline'], ['Finder', 'Recents'], ['Claude', 'Draft reply'], ['Slack', 'Thread with a diagram'], ['Outlook', 'Calendar'], ['Google Chrome', 'Error page'], ['WriteFlex', 'Outline'], ['Terminal', 'Build output']]
@@ -101,11 +102,25 @@ export function reviewMock(): SwApi['review'] {
     const v = view(i)
     return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, decidedBy: i.decidedBy, binInDays: v.binInDays, thumbUrl: thumbOf(i.hash), offline: false, pKeep: i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06), leans: (i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06)) >= 0.5 ? 'keep' : 'throwaway', why: i.why ?? i.reason }
   }
-  const head = (): { needALook: number; kept: number; throwaway: number } => {
-    const s = summarise(live().map((i) => ({ view: view(i), proposal: i.proposal, decided: Boolean(i.decision) })))
+  const pOf = (i: MockItem): number => i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06)
+  // a bad range is refused as main does, never clamped
+  const okSure = (sure?: ReviewSure): ReviewSure | undefined => {
+    if (sure !== undefined && !parseSure(sure)) throw new Error('review: bad how-sure range')
+    return sure
+  }
+  const head = (sure?: ReviewSure): { needALook: number; kept: number; throwaway: number } => {
+    const s = summarise(live().filter((i) => inSure(pOf(i), sure)).map((i) => ({ view: view(i), proposal: i.proposal, decided: Boolean(i.decision) })))
     return { needALook: s.needALook, kept: s.confidentKept, throwaway: s.confidentThrowaway }
   }
-  const of = (p: 'kept' | 'throwaway' | 'bin'): MockItem[] => live().filter((i) => view(i).pile === p)
+  let sureNow: ReviewSure | undefined
+  // The UI test slows answers down to check that a late one never overwrites a newer one: window.__reviewMockDelay(sure) gives
+  // the milliseconds to hold an overview, piles, page, act or undo answer back (worked out first, delivered late). Unset: answered at once.
+  const late = async <T,>(sure: ReviewSure | undefined, answer: T): Promise<T> => {
+    const ms = (globalThis as { __reviewMockDelay?: (sure: ReviewSure | null) => number }).__reviewMockDelay?.(sure ?? null) ?? 0
+    if (ms > 0) await new Promise((r) => setTimeout(r, ms))
+    return answer
+  }
+  const of = (p: 'kept' | 'throwaway' | 'bin'): MockItem[] => live().filter((i) => view(i).pile === p && inSure(pOf(i), sureNow))
   const keyOf = (i: MockItem) => pileKey(view(i).pile, view(i).binInDays, Date.parse(i.takenAt) || 0, i.hash)
   const pageOf = (p: 'kept' | 'throwaway' | 'bin', after: string | null, limit: number) => {
     const pg = keysetPage(of(p), keyOf, after, Math.min(limit, 500))
@@ -113,31 +128,38 @@ export function reviewMock(): SwApi['review'] {
   }
   const lastSortedAt = (): string | null => items.reduce<string | null>((m, i) => (!m || i.proposedAt > m ? i.proposedAt : m), null)
   return {
-    overview: async (opts?: { queue?: number; sample?: number; order?: 'newest' | 'teach' }): Promise<ReviewOverview> => {
-      const h = head()
-      const all = live()
-      return {
+    overview: async (opts?: { queue?: number; sample?: number; order?: 'newest' | 'teach'; sure?: ReviewSure }): Promise<ReviewOverview> => {
+      const sure = okSure(opts?.sure)
+      const h = head(sure)
+      const a = head()
+      const all = live().filter((i) => inSure(pOf(i), sure))
+      return late(opts?.sure, {
         needALook: h.needALook,
         confident: { kept: h.kept, throwaway: h.throwaway },
+        all: { needALook: a.needALook, confident: a.kept + a.throwaway },
         lastSortedAt: lastSortedAt(),
         queue: all.filter((i) => view(i).pile === 'doubtful').sort(opts?.order === 'teach' ? unsureFirst : newest).slice(0, opts?.queue ?? 50).map(card),
         confidentSample: all.filter((i) => !i.decision && i.proposal !== 'doubtful').sort(newest).slice(0, opts?.sample ?? 12).map(card),
         canUndo: undo.length > 0
-      }
+      })
     },
-    piles: async (opts?: { kept?: number; throwaway?: number; bin?: number }): Promise<ReviewPiles> => {
-      const h = head()
-      return {
+    piles: async (opts?: { kept?: number; throwaway?: number; bin?: number; sure?: ReviewSure }): Promise<ReviewPiles> => {
+      sureNow = okSure(opts?.sure)
+      const h = head(sureNow)
+      return late(sureNow, {
         needALook: h.needALook,
         confidentTotal: h.kept + h.throwaway,
         lastSortedAt: lastSortedAt(),
         kept: pageOf('kept', null, opts?.kept ?? 60),
         throwaway: pageOf('throwaway', null, opts?.throwaway ?? 60),
-        bin: { ...pageOf('bin', null, opts?.bin ?? 60), token: binToken(of('bin').map((i) => i.hash)) },
+        bin: { ...pageOf('bin', null, opts?.bin ?? 60), token: sureNow ? null : binToken(live().filter((i) => view(i).pile === 'bin').map((i) => i.hash)) },
         canUndo: undo.length > 0
-      }
+      })
     },
-    page: async (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number): Promise<ReviewPage> => pageOf(pile, after, limit ?? 60),
+    page: async (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number, sure?: ReviewSure): Promise<ReviewPage> => {
+      sureNow = okSure(sure)
+      return late(sureNow, pageOf(pile, after, limit ?? 60))
+    },
     // as main answers it: in the order asked for, at most 200, nothing that is in the Bin or gone
     cards: async (hashes: string[]): Promise<ReviewCard[]> => {
       const shown = new Map(live().filter((i) => view(i).pile !== 'bin').map((i) => [i.hash, i]))
@@ -151,14 +173,14 @@ export function reviewMock(): SwApi['review'] {
       undo.push({ hash, prior: it.decision })
       it.decision = { state: plan.state === 'selected' ? 'included' : 'excluded', decidedAt: plan.decidedAt }
       const message = plan.state === 'selected' ? (action === 'rescue' ? 'Rescued — kept and added to the well.' : 'Kept — added to the well.') : 'Moved to Throwaway — bin in 30 days. Your original file is not touched.'
-      return { ok: true, hash, message, pile: plan.state === 'selected' ? 'kept' : 'throwaway' }
+      return late(sureNow, { ok: true, hash, message, pile: plan.state === 'selected' ? 'kept' : 'throwaway' })
     },
     undo: async (): Promise<ReviewUndoResult> => {
       const e = undo.pop()
       if (!e) return { ok: false, message: 'Nothing to undo.' }
       const it = items.find((i) => i.hash === e.hash)
       if (it) it.decision = e.prior
-      return { ok: true, hash: e.hash, message: 'Undone.' }
+      return late(sureNow, { ok: true, hash: e.hash, message: 'Undone.' })
     },
     emptyBin: async (token: string): Promise<EmptyBinResult> => {
       const bin = live().filter((i) => view(i).pile === 'bin')

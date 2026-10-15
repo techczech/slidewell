@@ -120,3 +120,17 @@
 .ts-notice [data-slot='when'], .ts-notice [data-slot='learnedFrom'] { font-weight: 700; }
 .ts-notice .ts-moved { margin-left: 10px; }
 .ts-countdown { color: var(--muted); font-size: 12.5px; }
+
+/* the "How sure" filter (ReviewSure.tsx) */
+.rv-sure { position: relative; margin-left: auto; }
+.rv-sure + .rv-teach-switch { margin-left: 0; }
+.rv-sure-btn { font: 600 13.5px -apple-system, system-ui, sans-serif; color: var(--oxford); border: 1.5px solid var(--oxford); border-radius: 8px; padding: 7px 12px; background: var(--card); cursor: pointer; }
+.rv-sure-btn.on { background: var(--oxford); color: #fff; }
+.rv-sure-pop { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; width: 280px; padding: 14px 16px; background: var(--card); border: 1.5px solid var(--oxford); border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, .18); display: flex; flex-direction: column; gap: 10px; }
+.rv-sure-pop label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--oxford); }
+.rv-sure-pop label span { display: flex; justify-content: space-between; }
+.rv-sure-count { margin: 0; font-size: 13px; color: var(--muted); }
+.rv-sure-all { margin-left: 0; text-align: left; }
+.rv-sure-all:disabled { opacity: .45; cursor: default; }
+.rv-sure-empty-btn { margin-top: 12px; }
+.rv-sure + .rv-back-btn { margin-left: 0; }

@@ -3,13 +3,16 @@
  *
  * review:overview and review:cards refuse ("<channel>: bad arguments") anything but what they list:
  *   review:overview  (opts?) nothing, or a plain object with only `queue` and `sample` (whole numbers
- *                    0..500) and `order` ('newest' | 'teach'); no further argument
+ *                    0..500), `order` ('newest' | 'teach') and `sure` (a how-sure range, below); no further argument
+ *   review:piles     (opts?) as before, and `sure`
+ *   review:page      (pile, after, limit?, sure?)
+ *   `sure` is { min, max }, nothing else: numbers, 0.5 <= min <= max <= 1 (piles.ts parseSure); a bad one refuses, it is never clamped
  *   review:cards     (hashes) one array of at most 200 hashes; the cards of those still shown in
  *                    Need a look, Kept or Throwaway (service.ts cards)
  */
 import { ipcMain } from 'electron'
 import type { ReviewService } from './service'
-import { CARDS_MAX, HASH } from './piles'
+import { CARDS_MAX, HASH, parseSure } from './piles'
 
 const ACTIONS = new Set(['keep', 'throwaway', 'rescue'])
 
@@ -27,29 +30,34 @@ export function registerReviewIpc(svc: ReviewService, allowed: (sender: Electron
     return proto === Object.prototype || proto === null
   }
   const upTo500 = (x: unknown): boolean => x === undefined || (typeof x === 'number' && Number.isInteger(x) && x >= 0 && x <= 500)
+  const sureOk = (x: unknown): boolean => x === undefined || parseSure(x) !== null
   handle('review:overview', (...args: unknown[]) => {
     const bad = new Error('review:overview: bad arguments')
     if (args.length > 1) throw bad
     const o = args[0]
     if (o === undefined) return svc.overview({})
-    if (!plain(o) || !Object.keys(o).every((k) => k === 'queue' || k === 'sample' || k === 'order')) throw bad
+    if (!plain(o) || !Object.keys(o).every((k) => k === 'queue' || k === 'sample' || k === 'order' || k === 'sure')) throw bad
     // the queue's order (ticket 22): newest first, or the teaching order
-    if (!upTo500(o.queue) || !upTo500(o.sample) || (o.order !== undefined && o.order !== 'newest' && o.order !== 'teach')) throw bad
-    return svc.overview({ queue: o.queue as number | undefined, sample: o.sample as number | undefined, order: o.order })
+    if (!upTo500(o.queue) || !upTo500(o.sample) || (o.order !== undefined && o.order !== 'newest' && o.order !== 'teach') || !sureOk(o.sure)) throw bad
+    return svc.overview({ queue: o.queue as number | undefined, sample: o.sample as number | undefined, order: o.order, sure: o.sure })
   })
   handle('review:cards', (...args: unknown[]) => {
     const [hashes] = args
     if (args.length !== 1 || !Array.isArray(hashes) || hashes.length > CARDS_MAX || !hashes.every((h) => typeof h === 'string' && HASH.test(h))) throw new Error('review:cards: bad arguments')
     return svc.cards(hashes as string[])
   })
-  handle('review:piles', (o?: unknown) => svc.piles(obj(o)))
+  handle('review:piles', (o?: unknown) => {
+    if (!sureOk(obj(o).sure)) throw new Error('review:piles: bad arguments')
+    return svc.piles(obj(o))
+  })
   handle('review:act', (hash: unknown, action: unknown) => {
     if (typeof hash !== 'string' || !HASH.test(hash) || typeof action !== 'string' || !ACTIONS.has(action)) throw new Error('review:act: bad arguments')
     return svc.act(hash, action as 'keep' | 'throwaway' | 'rescue')
   })
-  handle('review:page', (pile: unknown, after: unknown, limit: unknown) => {
+  handle('review:page', (pile: unknown, after: unknown, limit: unknown, sure: unknown) => {
     if (pile !== 'kept' && pile !== 'throwaway' && pile !== 'bin') throw new Error('review:page: bad pile')
-    return svc.page(pile, typeof after === 'string' && after.length < 400 ? after : null, typeof limit === 'number' ? limit : undefined)
+    if (!sureOk(sure)) throw new Error('review:page: bad arguments')
+    return svc.page(pile, typeof after === 'string' && after.length < 400 ? after : null, typeof limit === 'number' ? limit : undefined, sure)
   })
   handle('review:undo', () => svc.undo())
   handle('review:empty-bin', (token: unknown) => svc.emptyBin(typeof token === 'string' ? token : ''))
