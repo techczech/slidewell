@@ -24,6 +24,41 @@ export const HASH = /^[A-Za-z0-9:_-]{1,64}$/
 export const CARDS_MAX = 200
 const DAY_MS = 86_400_000
 
+/** A "how sure" range as fractions of 1, both ends inclusive (the Review filter). */
+export type SureRange = { min: number; max: number }
+
+/**
+ * p(keep) as the whole percent the card shows for keep (Review's certainty line, teach-format.ts certainty). The one rounding
+ * both the card and the how-sure filter use: the throwaway side is always 100 minus this, never rounded on its own.
+ */
+export const keepPercent = (pKeep: number): number => Math.round(pKeep * 100)
+
+/**
+ * How sure the sorter is of the side it leans to (keep when pKeep >= 0.5, as service.ts card sets `leans`), as the whole
+ * percent the card shows. pKeep 0.345 leans throwaway and shows 65 (100 - 35), so it filters as 65 too.
+ */
+export const surePercent = (pKeep: number): number => (pKeep >= 0.5 ? keepPercent(pKeep) : 100 - keepPercent(pKeep))
+
+/** A valid range: exactly `min` and `max`, finite numbers, 0.5 <= min <= max <= 1. Anything else is null (refused, never clamped). */
+export function parseSure(x: unknown): SureRange | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null
+  const proto: unknown = Object.getPrototypeOf(x)
+  if (proto !== Object.prototype && proto !== null) return null
+  const o = x as Record<string, unknown>
+  if (Object.keys(o).length !== 2 || !('min' in o) || !('max' in o)) return null
+  const { min, max } = o
+  if (typeof min !== 'number' || typeof max !== 'number' || !Number.isFinite(min) || !Number.isFinite(max)) return null
+  if (min < 0.5 || max > 1 || min > max) return null
+  return { min, max }
+}
+
+/** Whether an item with this p(keep) lies in the range, comparing whole percents as the card shows them. */
+export function inSure(pKeep: number, r: SureRange | undefined): boolean {
+  if (!r) return true
+  const s = surePercent(pKeep)
+  return s >= Math.round(r.min * 100) && s <= Math.round(r.max * 100)
+}
+
 export type ProposalLabel = 'keep' | 'throwaway' | 'doubtful'
 export type Pile = 'doubtful' | 'kept' | 'throwaway' | 'bin' | 'gone'
 export type ReviewAction = 'keep' | 'throwaway' | 'rescue'

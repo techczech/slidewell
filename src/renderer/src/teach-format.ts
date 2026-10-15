@@ -3,6 +3,7 @@
 // frames were invented, everything below works from the real status and learning reading.
 import type { SorterLearning, SorterLearningPoint, SorterRetrain, SorterStatus } from '../../preload'
 import { n } from './sorter-format'
+import { keepPercent } from '../../main/review/piles'
 import { fillCopy, RETRAIN_NOTICE, SORTER_ABOUT, type AboutLiveSlot } from './sorter-about-copy'
 
 /** 0..1 as a whole percent; "89.5" style when the half matters (chart labels). */
@@ -20,7 +21,8 @@ export function choicesOf(st: SorterStatus): number {
 
 /** "Leaning throwaway, 62% sure": how sure the sorter is of the way it leans. */
 export function certainty(pKeep: number, leans: 'keep' | 'throwaway'): { keep: number; throwaway: number; sure: number; lean: string } {
-  const keep = wholePct(pKeep)
+  // the same rounding the how-sure filter uses (piles.ts keepPercent/surePercent), so what the card shows is what it filters on
+  const keep = keepPercent(pKeep)
   const throwaway = 100 - keep
   return { keep, throwaway, sure: leans === 'keep' ? keep : throwaway, lean: leans === 'keep' ? 'keep' : 'throwaway' }
 }

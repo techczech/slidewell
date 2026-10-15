@@ -222,15 +222,19 @@ export type ReviewOverview = {
   lastSortedAt: string | null
   queue: ReviewCard[] // the doubtful queue, newest first; with order 'teach', the one the sorter is least sure of first
   confidentSample: ReviewCard[]
+  /** Counts with no "how sure" range applied (the same as needALook and confident when none is set). */
+  all: { needALook: number; confident: number }
   canUndo: boolean
 }
+/** A "how sure" range, fractions 0.5..1, both ends inclusive (compared as the whole percents the card shows). */
+export type ReviewSure = { min: number; max: number }
 export type ReviewPiles = {
   needALook: number
   confidentTotal: number
   lastSortedAt: string | null
   kept: { total: number; items: ReviewCard[]; next: string | null } // next: cursor for review.page
   throwaway: { total: number; items: ReviewCard[]; next: string | null }
-  bin: { total: number; items: ReviewCard[]; next: string | null; token: string } // token: Empty Bin acts only on this set
+  bin: { total: number; items: ReviewCard[]; next: string | null; token: string | null } // token: Empty Bin acts only on this set; null when the piles were read under a how-sure range (never a token for part of the Bin)
   canUndo: boolean
 }
 export type ReviewActResult = { ok: boolean; hash: string; message: string; pile?: ReviewPile }
@@ -735,10 +739,10 @@ const api = {
   // Review screen (ticket 08). act/undo/emptyBin write his decisions; nothing here deletes or moves any
   // file. emptyBin needs the token of the Bin he confirmed and only hides those items for good.
   review: {
-    overview: (opts?: { queue?: number; sample?: number; order?: 'newest' | 'teach' }): Promise<ReviewOverview> => ipcRenderer.invoke('review:overview', opts ?? {}),
-    piles: (opts?: { kept?: number; throwaway?: number; bin?: number }): Promise<ReviewPiles> => ipcRenderer.invoke('review:piles', opts ?? {}),
+    overview: (opts?: { queue?: number; sample?: number; order?: 'newest' | 'teach'; sure?: ReviewSure }): Promise<ReviewOverview> => ipcRenderer.invoke('review:overview', opts ?? {}),
+    piles: (opts?: { kept?: number; throwaway?: number; bin?: number; sure?: ReviewSure }): Promise<ReviewPiles> => ipcRenderer.invoke('review:piles', opts ?? {}),
     // the page after a cursor (keyset; no cap on how far)
-    page: (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number): Promise<ReviewPage> => ipcRenderer.invoke('review:page', pile, after, limit),
+    page: (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number, sure?: ReviewSure): Promise<ReviewPage> => ipcRenderer.invoke('review:page', pile, after, limit, sure),
     // the cards of up to 200 screenshots by hash, in the order asked for; one in the Bin, emptied or no longer in review is left out
     cards: (hashes: string[]): Promise<ReviewCard[]> => ipcRenderer.invoke('review:cards', hashes),
     act: (hash: string, action: 'keep' | 'throwaway' | 'rescue'): Promise<ReviewActResult> => ipcRenderer.invoke('review:act', hash, action),

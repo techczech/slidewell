@@ -19,7 +19,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ReviewActResult, ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewUndoResult, EmptyBinResult, TeachQueue } from '../../preload'
-import { binToken, CARDS_MAX, compareKeys, HASH, keysetPage, pileKey, pileOf, planAction, summarise, teachKey, BIN_AFTER_DAYS, type PileKey, type PileView, type ReviewAction } from './piles'
+import { binToken, CARDS_MAX, compareKeys, HASH, inSure, keysetPage, parseSure, pileKey, pileOf, planAction, summarise, teachKey, BIN_AFTER_DAYS, type PileKey, type SureRange, type PileView, type ReviewAction } from './piles'
 import { newestFirst, readReviewRows, timeOf, type ReviewRow } from './store'
 import { putTriageDecision, promoteTriageHashes, writeEmptiedMarkers, type PromoteResult, type TriageDecisionRow } from '../triage'
 import { SorterStore } from '../sorter/store'
@@ -84,12 +84,20 @@ export class ReviewService {
     this.migrated.add(root)
   }
 
-  private items(): Item[] {
+  private items(sure?: SureRange): Item[] {
     this.migrate()
     const now = this.now()
     return readReviewRows(this.deps.wellRoot())
       .map((row) => ({ row, view: pileOf(row, now) }))
-      .filter((i) => i.view.pile !== 'gone')
+      .filter((i) => i.view.pile !== 'gone' && inSure(i.row.pKeep, sure))
+  }
+
+  /** A `sure` that reached the service unvalidated is refused, never clamped (ipc.ts refuses it first). */
+  private sureOf(x: unknown): SureRange | undefined {
+    if (x === undefined) return undefined
+    const r = parseSure(x)
+    if (!r) throw new Error('review: bad how-sure range')
+    return r
   }
 
   /** Cards for a list he teaches from: each with its `why` (one read for all of them). */
@@ -147,16 +155,20 @@ export class ReviewService {
   }
 
   /** `order: 'teach'` lists the queue in the teaching order ("teaches most first") instead of newest first. */
-  overview(opts: { queue?: number; sample?: number; order?: unknown } = {}): Promise<ReviewOverview> {
+  overview(opts: { queue?: number; sample?: number; order?: unknown; sure?: unknown } = {}): Promise<ReviewOverview> {
     return this.serial(() => {
-      const items = this.items()
+      const sure = this.sureOf(opts.sure)
+      const everything = this.items()
+      const items = sure ? everything.filter((i) => inSure(i.row.pKeep, sure)) : everything
       const h = this.head(items)
+      const all = sure ? this.head(everything) : h
       const doubtful = items.filter((i) => i.view.pile === 'doubtful')
       const queue = opts.order === 'teach' ? doubtful.sort((a, b) => compareKeys(this.teachKeyOf(a), this.teachKeyOf(b))) : doubtful.sort((a, b) => newestFirst(a.row, b.row))
       const confident = items.filter((i) => i.view.by === 'sorter' && i.view.pile !== 'doubtful').sort((a, b) => newestFirst(a.row, b.row))
       return {
         needALook: h.needALook,
         confident: { kept: h.kept, throwaway: h.throwaway },
+        all: { needALook: all.needALook, confident: all.kept + all.throwaway },
         lastSortedAt: h.lastSortedAt,
         queue: this.taught(queue.slice(0, clampN(opts.queue, 50))),
         confidentSample: confident.slice(0, clampN(opts.sample, 12)).map((i) => this.card(i)),
@@ -172,31 +184,34 @@ export class ReviewService {
   private key = (i: Item): PileKey => pileKey(i.view.pile, i.view.binInDays, timeOf(i.row), i.row.hash)
 
   /** First page of each pile plus totals and the cursor for the next page. More pages: page(). */
-  piles(opts: { kept?: number; throwaway?: number; bin?: number } = {}): Promise<ReviewPiles> {
+  piles(opts: { kept?: number; throwaway?: number; bin?: number; sure?: unknown } = {}): Promise<ReviewPiles> {
     return this.serial(() => {
-      const items = this.items()
+      const sure = this.sureOf(opts.sure)
+      const items = this.items(sure)
       const h = this.head(items)
       const first = (p: 'kept' | 'throwaway' | 'bin', n?: number): { total: number; items: ReviewCard[]; next: string | null } => {
         const pg = keysetPage(this.pileItems(items, p), this.key, null, pageSize(n))
         return { total: pg.total, items: pg.items.map((i) => this.card(i)), next: pg.next }
       }
-      const bin = this.pileItems(items, 'bin')
+      // Empty Bin acts on the whole Bin. Only an unfiltered answer carries its token, so the count the confirm shows (bin.total)
+      // and the token emptyBin() accepts always come from the same read of the whole Bin; an answer under a range carries none.
+      const token = sure ? null : binToken(this.pileItems(items, 'bin').map((i) => i.row.hash))
       return {
         needALook: h.needALook,
         confidentTotal: h.kept + h.throwaway,
         lastSortedAt: h.lastSortedAt,
         kept: first('kept', opts.kept),
         throwaway: first('throwaway', opts.throwaway),
-        bin: { ...first('bin', opts.bin), token: binToken(bin.map((i) => i.row.hash)) },
+        bin: { ...first('bin', opts.bin), token },
         canUndo: this.undoStack.length > 0
       }
     })
   }
 
   /** The page after `after` (a cursor from piles() or an earlier page): keyset, no cap on how far. */
-  page(pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number): Promise<ReviewPage> {
+  page(pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number, sure?: unknown): Promise<ReviewPage> {
     return this.serial(() => {
-      const pg = keysetPage(this.pileItems(this.items(), pile), this.key, after, pageSize(limit))
+      const pg = keysetPage(this.pileItems(this.items(this.sureOf(sure)), pile), this.key, after, pageSize(limit))
       return { total: pg.total, items: pg.items.map((i) => this.card(i)), next: pg.next }
     })
   }

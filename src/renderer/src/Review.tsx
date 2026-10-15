@@ -2,10 +2,11 @@
 // "Show both piles" switches to slide material + throwaway, with the 30-day Bin behind the throwaway
 // column. Every write goes through window.sw.review; skipping writes nothing (the item stays kept).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReviewCard, ReviewOverview, ReviewPiles } from '../../preload'
+import type { ReviewCard, ReviewOverview, ReviewPiles, ReviewSure } from '../../preload'
 import { ReviewMoved } from './ReviewMoved'
 import { Shot } from './ReviewShot'
 import { ReviewStrip } from './ReviewStrip'
+import { SureFilter, sureWords, pctOf } from './ReviewSure'
 import { onMovedRequest, takePendingMoved } from './teach-round'
 import { useSorterStatus } from './sorter-hooks'
 import { certainty, upNextHeading, whenWords } from './teach-format'
@@ -17,12 +18,12 @@ const PAGE = 60
  * Page through one pile (keyset cursors) until `want` items are in hand or the pile ends. No cap.
  * Pages are joined by hash, so an item that moved between pages is never shown twice.
  */
-async function fetchUpTo(pile: PileName, first: ReviewCard[], next: string | null, want: number): Promise<ReviewCard[]> {
+async function fetchUpTo(pile: PileName, first: ReviewCard[], next: string | null, want: number, sure?: ReviewSure): Promise<ReviewCard[]> {
   const seen = new Set(first.map((c) => c.hash))
   const items = [...first]
   let cursor = next
   while (items.length < want && cursor) {
-    const pg = await window.sw.review.page(pile, cursor, 500)
+    const pg = await window.sw.review.page(pile, cursor, 500, sure)
     for (const c of pg.items) if (!seen.has(c.hash)) (seen.add(c.hash), items.push(c))
     cursor = pg.next
   }
@@ -30,6 +31,9 @@ async function fetchUpTo(pile: PileName, first: ReviewCard[], next: string | nul
 }
 import './review.css'
 import './teach.css'
+
+// The how-sure range lives for the session (until the window closes): kept here so leaving Review and coming back keeps it. Never saved.
+let sessionSure: ReviewSure | null = null
 
 type Mode = 'doubtful' | 'piles' | 'moved'
 const TEACH_KEY = 'sw.review.teachFirst' // remembered in this profile's own storage; on unless he switched it off
@@ -69,11 +73,20 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
   const [right, setRight] = useState<'throwaway' | 'bin'>('throwaway')
   const [focus, setFocus] = useState<{ col: Column; index: number }>({ col: 'kept', index: 0 })
   const [shown, setShown] = useState<Record<PileName, number>>({ kept: PAGE, throwaway: PAGE, bin: PAGE })
-  const [confirmEmpty, setConfirmEmpty] = useState(false)
+  // the Bin he is asked about: the count and the token of one unfiltered piles answer, taken together when the confirm opens
+  const [confirmEmpty, setConfirmEmpty] = useState<{ total: number; token: string } | null>(null)
   const [teachFirst, setTeachFirst] = useState(() => localStorage.getItem(TEACH_KEY) !== 'off')
   const [movedHashes, setMovedHashes] = useState<string[]>([])
+  const [sure, setSureState] = useState<ReviewSure | null>(sessionSure)
+  const setSure = useCallback((r: ReviewSure | null): void => {
+    sessionSure = r
+    setSureState(r)
+  }, [])
   const st = useSorterStatus()
   const busy = useRef(false)
+  // Every load takes a number; only the newest one may publish. A load that a newer one (another range, Show all, an answer)
+  // has overtaken drops its overview, piles and pages, however late they arrive.
+  const generation = useRef(0)
 
   // "See what moved" from the end of a teaching round: open the moved view, as the strip's link does
   useEffect(() => {
@@ -89,17 +102,26 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
   }, [])
 
   const load = useCallback(async (): Promise<void> => {
-    const o = await window.sw.review.overview({ queue: 50, sample: 12, order: teachFirst ? 'teach' : 'newest' })
+    const mine = ++generation.current
+    const stillNewest = (): boolean => mine === generation.current
+    const o = await window.sw.review.overview({ queue: 50, sample: 12, order: teachFirst ? 'teach' : 'newest', ...(sure ? { sure } : {}) })
+    if (!stillNewest()) return
     setOv(o)
-    onCount(o.needALook)
+    onCount(o.all.needALook) // the tab's count is never filtered
     if (mode === 'piles') {
-      const p = await window.sw.review.piles({ kept: PAGE, throwaway: PAGE, bin: PAGE })
+      const p = await window.sw.review.piles({ kept: PAGE, throwaway: PAGE, bin: PAGE, ...(sure ? { sure } : {}) })
+      if (!stillNewest()) return
       const [kept, throwaway, bin] = await Promise.all(
-        (['kept', 'throwaway', 'bin'] as const).map((k) => fetchUpTo(k, p[k].items, p[k].next, shown[k]))
+        (['kept', 'throwaway', 'bin'] as const).map((k) => fetchUpTo(k, p[k].items, p[k].next, shown[k], sure ?? undefined))
       )
+      if (!stillNewest()) return
       setPiles({ ...p, kept: { ...p.kept, items: kept }, throwaway: { ...p.throwaway, items: throwaway }, bin: { ...p.bin, items: bin } })
     }
-  }, [mode, shown, onCount, teachFirst])
+  }, [mode, shown, onCount, teachFirst, sure])
+  // An answer or undo reads the queue again when its write returns. That may be after the range changed, so it must
+  // call the latest load (this render's range), not the one captured when the answer began.
+  const loadRef = useRef(load)
+  loadRef.current = load
 
   useEffect(() => {
     void load()
@@ -148,11 +170,11 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
         onToast('That answer did not go through. Press the key again to try once more.')
       } finally {
         // read the queue again whatever happened: an answer that was written but answered with an error must not leave its card on screen
-        await load().catch(() => undefined)
+        await loadRef.current().catch(() => undefined)
         busy.current = false
       }
     },
-    [load, onToast, front]
+    [onToast, front]
   )
 
   const undo = useCallback(async (): Promise<void> => {
@@ -168,10 +190,10 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
     } catch {
       onToast('Undo did not go through; press ⌘Z to try again.')
     } finally {
-      await load().catch(() => undefined)
+      await loadRef.current().catch(() => undefined)
       busy.current = false
     }
-  }, [load, onToast])
+  }, [onToast])
 
   const skip = useCallback((): void => {
     if (!current) return
@@ -200,9 +222,10 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
   }, [keptItems.length, rightItems.length, focus])
 
   const emptyBin = async (): Promise<void> => {
-    if (!piles) return
-    setConfirmEmpty(false)
-    const r = await window.sw.review.emptyBin(piles.bin.token)
+    if (!confirmEmpty) return
+    const { token } = confirmEmpty
+    setConfirmEmpty(null)
+    const r = await window.sw.review.emptyBin(token)
     onToast(r.message)
     await load()
   }
@@ -217,7 +240,7 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
       if (confirmEmpty) {
         if (e.key === 'Escape') {
           e.preventDefault()
-          setConfirmEmpty(false)
+          setConfirmEmpty(null)
         }
         return
       }
@@ -265,6 +288,9 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
 
   const when = sortedWhen(ov.lastSortedAt)
   const confidentTotal = ov.confident.kept + ov.confident.throwaway
+  const sureCounts = { needALook: ov.needALook, needAll: ov.all.needALook, confident: confidentTotal, confidentAll: ov.all.confident }
+  const sureTag = sure ? ` · how sure ${sureWords(sure)}` : ''
+  const sureFilter = <SureFilter value={sure} onChange={setSure} counts={sureCounts} />
 
   if (mode === 'moved') return <ReviewMoved hashes={movedHashes} onBack={() => setMode('doubtful')} />
 
@@ -272,10 +298,11 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
     return (
       <div className="rv-screen" data-mode="piles">
         <div className="rv-head">
-          <h1>Both piles</h1>
+          <h1>Both piles{sureTag}</h1>
           <span className="rv-sub">
             {confidentTotal} sorted{when ? ` ${when}` : ''} · {ov.needALook} still need a look
           </span>
+          {sureFilter}
           <button className="rv-back-btn" onClick={() => setMode('doubtful')}>
             ‹ Back to doubtful {ov.needALook > 0 && <span className="rv-n">{ov.needALook}</span>}
           </button>
@@ -368,7 +395,13 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
                   Bin · {piles?.bin.total ?? 0} ›
                 </button>
               ) : (
-                <button className="rv-empty-btn" disabled={!piles?.bin.total} onClick={() => setConfirmEmpty(true)}>
+                <button
+                  className="rv-empty-btn"
+                  // only piles read with no range carry the whole Bin's token; until those are on screen the button waits
+                  disabled={!piles?.bin.token || !piles.bin.total}
+                  title={piles && !piles.bin.token ? 'Show all in How sure to empty the Bin: it empties everything in it.' : undefined}
+                  onClick={() => piles?.bin.token && setConfirmEmpty({ total: piles.bin.total, token: piles.bin.token })}
+                >
                   Empty Bin…
                 </button>
               )}
@@ -383,17 +416,17 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
           <span><kbd>⌘Z</kbd> undo</span>
           <span><kbd>Esc</kbd> back to doubtful</span>
         </div>
-        {confirmEmpty && piles && (
-          <div className="overlay rv-confirm-overlay" onClick={() => setConfirmEmpty(false)}>
+        {confirmEmpty && (
+          <div className="overlay rv-confirm-overlay" onClick={() => setConfirmEmpty(null)}>
             <div className="rv-confirm" role="dialog" aria-label="Empty the Bin" onClick={(e) => e.stopPropagation()}>
-              <h3>Hide {piles.bin.total} {piles.bin.total === 1 ? 'screenshot' : 'screenshots'} for good?</h3>
+              <h3>Hide {confirmEmpty.total} {confirmEmpty.total === 1 ? 'screenshot' : 'screenshots'} for good?</h3>
               <p>
                 <b>Emptying the Bin hides these for good. SlideWell never deletes your files.</b>
               </p>
               <p>They disappear from Review, Triage and search and cannot be rescued afterwards. The files stay where they are; delete them yourself if you want them gone.</p>
               <div className="rv-confirm-btns">
-                <button className="rv-cancel" autoFocus onClick={() => setConfirmEmpty(false)}>Cancel</button>
-                <button className="rv-danger" onClick={() => void emptyBin()}>Hide {piles.bin.total} for good</button>
+                <button className="rv-cancel" autoFocus onClick={() => setConfirmEmpty(null)}>Cancel</button>
+                <button className="rv-danger" onClick={() => void emptyBin()}>Hide {confirmEmpty.total} for good</button>
               </div>
             </div>
           </div>
@@ -404,11 +437,12 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
 
   return (
     <div className="rv-screen" data-mode="doubtful">
-      <ReviewStrip needALook={ov.needALook} onSeeMoved={(h) => { setMovedHashes(h); setMode('moved') }} onOpenAutoSorting={onOpenAutoSorting} onToast={onToast} />
+      <ReviewStrip needALook={ov.all.needALook} onSeeMoved={(h) => { setMovedHashes(h); setMode('moved') }} onOpenAutoSorting={onOpenAutoSorting} onToast={onToast} />
       <div className="rv-head">
-        <h1>{ov.needALook} need a look</h1>
+        <h1>{ov.needALook} need a look{sureTag}</h1>
         <span className="rv-sub">{confidentTotal} sorted confidently</span>
         {when && <span className="rv-when">· sorted {when}</span>}
+        {sureFilter}
         <button
           className="rv-teach-switch"
           role="switch"
@@ -485,6 +519,12 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
                 </button>
               </div>
             </div>
+          </div>
+        ) : sure ? (
+          <div className="rv-big rv-done" data-testid="sure-empty">
+            <h2>{confidentTotal > 0 ? 'Nothing that needs a look' : 'Nothing in Review'} is between {pctOf(sure.min)}% and {pctOf(sure.max)}% sure.</h2>
+            {confidentTotal > 0 && <p>Nothing needing a look is in this range; {confidentTotal} sorted confidently {confidentTotal === 1 ? 'is' : 'are'}, in the strip below.</p>}
+            <button className="rv-sure-btn rv-sure-empty-btn" onClick={() => setSure(null)}>Show all</button>
           </div>
         ) : (
           <div className="rv-big rv-done">
