@@ -553,6 +553,71 @@ export function writeEmptiedMarkers(wellRoot: string, snapshot: BinSnapshot[], n
   return out
 }
 
+/**
+ * One Review answer as the rescue saw it (review/rescue.ts): his decision and the sorter-store answer
+ * mark at that moment. `reset`: put this one back; false = only checked (kept-and-imported, emptied).
+ */
+export type AnswerSnapshot = { hash: string; decision: TriageDecisionRow; answer: { answer: string; answeredAt: string }; reset: boolean }
+
+/**
+ * Put Review answers back to undecided (review/rescue.ts), in one BEGIN IMMEDIATE transaction. First
+ * every item of the confirmed set (`reset` or not) is read again; each must still have exactly the
+ * decision (state, decided_at, well_id) and answer mark (answer, answered_at) of the snapshot. Any
+ * difference: nothing is written and the differing items are named in `changed`. Otherwise, for each
+ * `reset` item, the same two writes as Triage's reset (U) and Review's undo to "no answer": the
+ * decision row is forgotten (never an 'emptied' one) and the answer mark is cleared, with the picture
+ * recorded at answer time. No file and no well record is touched.
+ * Only the snapshot's members are compared, not full-set equality: a Review answer added meanwhile is not looked
+ * for. Safe because answer marks are written only by ReviewService, one call at a time, and rescue() rebuilds the
+ * snapshot and compares the token inside that same queued call; this depends on rescue running inside the service
+ * queue (rescue.ts refuses to run outside it).
+ */
+export function resetReviewAnswers(wellRoot: string, snapshot: AnswerSnapshot[]): { reset: string[]; changed: string[] } {
+  if (!snapshot.length) return { reset: [], changed: [] }
+  const db = new DatabaseSync(triageDb(wellRoot))
+  try {
+    db.exec('PRAGMA busy_timeout=5000;')
+    const picCol = (db.prepare("SELECT 1 FROM pragma_table_info('sorter_proposals') WHERE name = 'answered_picture'").get() as unknown) !== undefined
+    const getD = db.prepare('SELECT state, decided_at, well_id FROM triage_decisions WHERE hash = ?')
+    const getA = db.prepare('SELECT answer, answered_at FROM sorter_proposals WHERE hash = ?')
+    const forget = db.prepare("DELETE FROM triage_decisions WHERE hash = ? AND state != 'emptied'")
+    const unanswer = db.prepare(picCol ? 'UPDATE sorter_proposals SET answer = NULL, answered_at = NULL, answered_picture = NULL WHERE hash = ?' : 'UPDATE sorter_proposals SET answer = NULL, answered_at = NULL WHERE hash = ?')
+    const changed: string[] = []
+    const targets: string[] = []
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const s of snapshot) {
+        const d = getD.get(s.hash) as { state: string; decided_at: string | null; well_id: string | null } | undefined
+        const a = getA.get(s.hash) as { answer: string | null; answered_at: string | null } | undefined
+        const same =
+          Boolean(d && a) &&
+          d!.state === s.decision.state &&
+          (d!.decided_at ?? null) === s.decision.decidedAt &&
+          (d!.well_id ?? null) === s.decision.wellId &&
+          a!.answer === s.answer.answer &&
+          a!.answered_at === s.answer.answeredAt
+        if (!same || (s.reset && d!.state === 'emptied')) changed.push(s.hash)
+        else if (s.reset) targets.push(s.hash)
+      }
+      if (changed.length) {
+        db.exec('ROLLBACK')
+        return { reset: [], changed }
+      }
+      for (const h of targets) {
+        forget.run(h)
+        unanswer.run(h)
+      }
+      db.exec('COMMIT')
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+    return { reset: targets, changed: [] }
+  } finally {
+    db.close()
+  }
+}
+
 export type PromoteResult = {
   imported: Array<{ hash: string; wellId: string; relPath: string; created: boolean }>
   skipped: number

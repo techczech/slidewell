@@ -53,6 +53,7 @@ import type { AppRule } from './sorter/app-rules'
 import { appCounts, cleanAppList, decideAllFromApps } from './triage-apps'
 import { ReviewService } from './review/service'
 import { registerReviewIpc } from './review/ipc'
+import { decodeSwUrlPath as decodeSwPath, resolveSwUrlReal as resolveSwReal, serveSwFile, swUrlOf } from './swarchive-guard'
 import { CloudSorter, KEY_FIELD, normaliseCloudSettings, registerCloudIpc, type CloudRunSummary, type CloudSettings, type StoredCloudSettings } from './sorter/cloud/service'
 import { ApiKeyStore } from './sorter/cloud/key-store'
 import { shrinkForLuna } from './sorter/cloud/images'
@@ -317,36 +318,21 @@ function createWindow(): BrowserWindow {
 // renderer can never read outside it. Read-only; the archive's originals stay where they are.
 // The b64url payload lives in the URL PATH, not the host: URL hosts are lowercased by spec,
 // which would corrupt case-sensitive base64url. Host is a constant 'f'.
-function decodeB64Url(s: string): string {
-  return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')
-}
-function encodeB64Url(s: string): string {
-  return Buffer.from(s, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
+// (swarchive-guard.ts: the encoding and both checks)
 function swThumb(abs: string | null): string | null {
-  return abs ? `swarchive://f/${encodeB64Url(abs)}` : null
+  return swUrlOf(abs)
 }
 function within(root: string, target: string): boolean {
   const r = resolvePath(root) + pathSep
   return resolvePath(target).startsWith(r)
 }
-function withinAny(roots: string[], target: string): boolean {
-  return roots.some((r) => within(r, target))
-}
-/** Decode a swarchive://f/<b64> URL to a guarded absolute path (may not exist locally), or null. */
+/** Decode a swarchive://f/<b64> URL to a path written under an allowed root (may not exist locally), or null. */
 function decodeSwUrlPath(url: string): string | null {
-  try {
-    const b64 = new URL(url).pathname.replace(/^\/+/, '')
-    const abs = decodeB64Url(b64)
-    return withinAny(allowedRoots(), abs) ? abs : null
-  } catch {
-    return null
-  }
+  return decodeSwPath(url, allowedRoots())
 }
-/** Guarded absolute path that exists locally now, or null (used by copy/reveal which need a real file). */
-function resolveSwUrl(url: string): string | null {
-  const abs = decodeSwUrlPath(url)
-  return abs && existsSync(abs) ? abs : null
+/** The file a swarchive URL names, existing here, with its real path (symlinks followed) under an allowed root's real path; else null (copy, reveal). */
+function resolveSwUrlReal(url: string): string | null {
+  return resolveSwReal(url, allowedRoots())
 }
 
 // Per-store backend (spec 2026-06-24): which store a path is in, and its backend.
@@ -356,16 +342,17 @@ function storageRoots(): Partial<Record<StoreName, string>> {
 function storeBackend(store: StoreName): 'local' | 'r2' {
   return readConfig().storage?.[store]?.backend === 'r2' ? 'r2' : 'local'
 }
-// Serve a swarchive path: local file if present; else, for an R2-backed store, fetch it from R2 into
-// the local store dir (which doubles as the cache) and serve that. Never deletes anything.
-async function serveLocalOrR2(abs: string): Promise<string | null> {
-  if (existsSync(abs)) return abs
+// How to fetch a swarchive path that is not here: for an R2-backed store with credentials, from R2 into the
+// local store dir (which doubles as the cache); else null. swarchive-guard.ts serveSwFile decides whether it may
+// write there at all (real path of the nearest existing folder under an allowed root); fetchFromR2 re-checks the
+// folder after the download and renames the bytes into place, so a link planted meanwhile is replaced, not
+// written through. Never deletes anything.
+function r2FetcherFor(abs: string): ((dest: string) => Promise<boolean>) | null {
   const s = pickStore(storageRoots(), abs)
   if (!s || storeBackend(s.store) !== 'r2') return null
   const creds = r2Creds()
   if (!creds) return null
-  const ok = await fetchFromR2(r2Settings(), creds, keyForPath(r2Settings().prefix, s.store, s.root, abs), abs)
-  return ok ? abs : null
+  return (dest) => fetchFromR2(r2Settings(), creds, keyForPath(r2Settings().prefix, s.store, s.root, dest), dest, allowedRoots())
 }
 
 // One SlideWell per profile: a second launch focuses the open window and quits, so two processes never
@@ -385,7 +372,9 @@ app.whenReady().then(() => {
   if (!singleInstance) return
   protocol.handle('swarchive', async (request) => {
     const abs = decodeSwUrlPath(request.url)
-    const served = abs ? await serveLocalOrR2(abs) : null
+    // a fetch from R2 writes only under an allowed root's real path, and the file served passes the real-path check:
+    // a link inside a root that leads outside every root is neither written through nor served
+    const served = abs ? await serveSwFile(abs, allowedRoots(), existsSync(abs) ? null : r2FetcherFor(abs)) : null
     if (!served) return new Response('not found', { status: 404 })
     return net.fetch(pathToFileURL(served).toString())
   })
@@ -569,13 +558,17 @@ app.whenReady().then(() => {
     archiveRoot: () => archiveRoot(),
     sourceRoot: () => triageSources()[0]?.path ?? null,
     thumbUrl: swThumb,
+    allowedRoots,
     changed: () => {
       pictureSearch?.poke()
       mainWindow?.webContents.send('triage:changed')
       retrainer.noteAnswer() // a Review or teaching answer is one more choice to learn from
     },
     // stored embeddings only (the look-alike seam reads the index and embeds nothing)
-    why: whyReader({ wellRoot: wellRootResolved, storedVectors: (ids) => pics.lookAlikeInputs(ids).vectors })
+    why: whyReader({ wellRoot: wellRootResolved, storedVectors: (ids) => pics.lookAlikeInputs(ids).vectors }),
+    // blind answers put back (review/rescue.ts): a retrain like Retrain now, so the strip reports what changed;
+    // one already running may hold the old answers, so a fresh one follows it rather than joining it
+    retrain: () => retrainer.retrainAfterChange('manual')
   })
   registerReviewIpc(review, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
   registerTeachIpc({
@@ -592,7 +585,7 @@ app.whenReady().then(() => {
     wellRoot: wellRootResolved,
     appRules: () => readConfig().sorterAppRules,
     saveAppRules: (rules) => writeConfig({ sorterAppRules: rules }),
-    runs: new SortRuns({ wellRoot: wellRootResolved, sourceRoot: () => triageSources()[0]?.path ?? null, thumbUrl: swThumb })
+    runs: new SortRuns({ wellRoot: wellRootResolved, sourceRoot: () => triageSources()[0]?.path ?? null, thumbUrl: swThumb, allowedRoots })
   })
 
   // --- IPC: the typed contract lives in src/preload/index.ts ---
@@ -1022,12 +1015,12 @@ app.whenReady().then(() => {
       execFile('osascript', ['-e', `set the clipboard to POSIX file ${JSON.stringify(abs)}`], (err) => resolve(!err))
     )
   ipcMain.handle('clipboard:copy-image', async (_e, thumbUrl: string) => {
-    const abs = resolveSwUrl(thumbUrl)
+    const abs = resolveSwUrlReal(thumbUrl)
     return abs ? copyFileToClipboard(abs) : false
   })
   // Copy as a PNG raster bitmap (for Keynote / Slack / web that want a pasted image, not a file).
   ipcMain.handle('clipboard:copy-image-png', async (_e, thumbUrl: string) => {
-    const abs = resolveSwUrl(thumbUrl)
+    const abs = resolveSwUrlReal(thumbUrl)
     if (!abs) return false
     try {
       const img = abs.toLowerCase().endsWith('.webp')
@@ -1043,7 +1036,7 @@ app.whenReady().then(() => {
 
   // Reveal an image in Finder ("open containing deck/folder").
   ipcMain.handle('shell:reveal', (_e, thumbUrl: string) => {
-    const abs = resolveSwUrl(thumbUrl)
+    const abs = resolveSwUrlReal(thumbUrl) // a link inside a root that leads outside every root is not revealed
     if (!abs) return false
     shell.showItemInFolder(abs)
     return true

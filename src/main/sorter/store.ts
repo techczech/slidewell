@@ -18,9 +18,12 @@
  *                                                      OpenAI's Luna, haiku = Anthropic's Haiku
  *                    decided_model TEXT,               the model id when a cloud model made the call
  *                                                      (gpt-6-luna, claude-haiku-5-5); NULL otherwise
- *                    run_id TEXT)                      the sort run that last proposed it (ticket 20); NULL for
+ *                    run_id TEXT,                      the sort run that last proposed it (ticket 20); NULL for
  *                                                      a proposal from before runs. A cloud answer changes the
  *                                                      row in place and leaves this as it is
+ *                    answered_picture TEXT)            the card's picture when he answered in Review: ok |
+ *                                                      not-downloaded | missing | none; NULL = not recorded
+ *                                                      (an answer from before it, or no answer)
  *   sorter_runs(...)                                   one row per sort: runs.ts
  *   sorter_cloud_answers(hash TEXT, provider TEXT,    one row per screenshot AND provider (PRIMARY KEY
  *                    verdict TEXT, confidence REAL,    (hash, provider)): what that provider's model answered,
@@ -299,6 +302,7 @@ export function migrateProposalColumns(db: DatabaseSync): void {
   if (!cols.has('decided_by')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN decided_by TEXT')
   if (!cols.has('decided_model')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN decided_model TEXT')
   if (!cols.has('run_id')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN run_id TEXT')
+  if (!cols.has('answered_picture')) db.exec('ALTER TABLE sorter_proposals ADD COLUMN answered_picture TEXT')
 }
 
 const answersTableSql = (name: string): string => `
@@ -816,8 +820,9 @@ export class SorterStore {
   }
 
   /** The review screen marks a proposal answered (or, on undo, restores the earlier mark). */
-  setAnswer(hash: string, answer: { answer: string; answeredAt: string } | null): void {
-    this.db.prepare('UPDATE sorter_proposals SET answer = ?, answered_at = ? WHERE hash = ?').run(answer?.answer ?? null, answer?.answeredAt ?? null, hash)
+  /** `picture`: the card's picture state when he answered (review/picture.ts); absent or null = not recorded. */
+  setAnswer(hash: string, answer: { answer: string; answeredAt: string; picture?: string | null } | null): void {
+    this.db.prepare('UPDATE sorter_proposals SET answer = ?, answered_at = ?, answered_picture = ? WHERE hash = ?').run(answer?.answer ?? null, answer?.answeredAt ?? null, answer?.picture ?? null, hash)
   }
 
   /** Empty Bin: SlideWell's proposal records for these items go (one transaction). */

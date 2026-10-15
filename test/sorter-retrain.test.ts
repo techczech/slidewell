@@ -25,7 +25,9 @@ function rig(o: { kept?: number; thrown?: number; trainedWith?: number | null; b
     deferred: [] as Array<() => void>,
     ac: [] as Array<() => void>,
     /** What the next training answers; default: ok, trained with all his choices now. */
-    next: null as null | (() => Promise<RetrainOutcome> | RetrainOutcome)
+    next: null as null | (() => Promise<RetrainOutcome> | RetrainOutcome),
+    /** Called on every status push (index.ts hands each pushed status to sorterStatus). */
+    onPush: null as null | (() => void)
   }
   const deps: RetrainDeps = {
     train: async () => {
@@ -36,7 +38,10 @@ function rig(o: { kept?: number; thrown?: number; trainedWith?: number | null; b
       return { ok: true, report: report(w.trainedWith), before, moved: { rescored: 30, needALook: { before: 41, after: 18 }, movedToSure: { keep: 19, throwaway: 4 }, movedHashes: ['aa', 'bb'] } }
     },
     choices: () => ({ learnable: { kept: w.kept, binned: w.thrown }, trainedWith: w.trainedWith }),
-    changed: () => void w.pushes++,
+    changed: () => {
+      w.pushes++
+      w.onPush?.()
+    },
     power: { onBattery: () => w.battery, onAc: (cb) => void w.ac.push(cb) },
     settings: () => w.settings,
     saveSettings: (s) => void (w.settings = s),
@@ -354,5 +359,110 @@ describe('retrain: the switches and the stored record', () => {
     })
     expect((await r.retrain('manual')).ok).toBe(true)
     expect(lines).toEqual(['[sorter] the last retrain could not be saved: Error'])
+  })
+})
+
+describe('retrainAfterChange: a training that starts after the change always runs', () => {
+  it('none running: one training, as retrain()', async () => {
+    const t = rig()
+    expect((await t.r.retrainAfterChange('manual')).ok).toBe(true)
+    expect(t.w.trains).toBe(1)
+  })
+
+  it('one running: not joined; one more starts when it ends, however many ask meanwhile', async () => {
+    const t = rig({ settings: { enabled: false } })
+    let release!: () => void
+    const gate = new Promise<void>((res) => (release = res))
+    t.w.next = async () => {
+      if (t.w.trains === 1) await gate
+      return { ok: true }
+    }
+    const first = t.r.retrain('auto')
+    await new Promise((res) => setTimeout(res, 0))
+    expect(t.w.trains).toBe(1)
+    const a = t.r.retrainAfterChange('manual')
+    const b = t.r.retrainAfterChange('manual')
+    expect(a).toBe(b)
+    expect(t.r.retrain('manual')).toBe(first) // a plain request still joins the running one
+    release()
+    await first
+    await a
+    await t.settle()
+    expect(t.w.trains).toBe(2)
+    expect(t.status().retraining).toBeNull()
+  })
+})
+
+describe('retrainAfterChange: a busy sorter never loses the owed training', () => {
+  const BUSY = { ok: false, error: 'the sorter is already running', busy: true } as const
+
+  it('the sorter says idle while the attempt is being refused: tried again at once, not left waiting', async () => {
+    const t = rig({ settings: { enabled: false } })
+    let refuse!: () => void
+    const gate = new Promise<void>((res) => (refuse = res))
+    t.w.next = async () => {
+      if (t.w.trains === 1) {
+        await gate
+        return BUSY
+      }
+      return { ok: true }
+    }
+    const owed = t.r.retrainAfterChange('manual')
+    await new Promise((res) => setTimeout(res, 0))
+    expect(t.w.trains).toBe(1) // the attempt is in flight
+    t.r.sorterStatus('idle') // the sort ends before the refusal comes back
+    refuse()
+    expect((await owed).ok).toBe(true)
+    expect(t.w.trains).toBe(2)
+  })
+
+  it('the status push as the refusal ends says idle: started from that push', async () => {
+    const t = rig({ settings: { enabled: false } })
+    let sorterIdle = false
+    t.w.next = async () => {
+      if (t.w.trains === 1) {
+        sorterIdle = true // the sort ended while the attempt was being refused
+        return BUSY
+      }
+      return { ok: true }
+    }
+    t.w.onPush = () => t.r.sorterStatus(sorterIdle ? 'idle' : 'sorting') // as index.ts
+    expect((await t.r.retrainAfterChange('manual')).ok).toBe(true)
+    expect(t.w.trains).toBe(2)
+  })
+
+  it('refused with no idle meanwhile: waits, and starts on the next idle', async () => {
+    const t = rig({ settings: { enabled: false } })
+    t.w.next = () => (t.w.trains === 1 ? BUSY : { ok: true })
+    const owed = t.r.retrainAfterChange('manual')
+    let settled = false
+    void owed.then(() => (settled = true))
+    await t.settle()
+    expect(t.w.trains).toBe(1)
+    expect(settled).toBe(false)
+    t.r.sorterStatus('sorting')
+    await t.settle()
+    expect(t.w.trains).toBe(1)
+    t.r.sorterStatus('idle')
+    expect((await owed).ok).toBe(true)
+    expect(t.w.trains).toBe(2)
+  })
+
+  it('a change while the owed attempt trains is owed one more training after it', async () => {
+    const t = rig({ settings: { enabled: false } })
+    let release!: () => void
+    const gate = new Promise<void>((res) => (release = res))
+    t.w.next = async () => {
+      if (t.w.trains === 1) await gate
+      return { ok: true }
+    }
+    const first = t.r.retrainAfterChange('manual')
+    await new Promise((res) => setTimeout(res, 0))
+    const second = t.r.retrainAfterChange('manual')
+    expect(second).not.toBe(first)
+    release()
+    await first
+    await second
+    expect(t.w.trains).toBe(2)
   })
 })

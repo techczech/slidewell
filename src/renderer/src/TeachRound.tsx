@@ -4,7 +4,7 @@
 // window: K keep, T throw away, ↓ skip, Esc leave (Return = Another 10 on the result).
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReviewCard, SorterStatus } from '../../preload'
-import { Shot } from './ReviewShot'
+import { Shot, shownPicture } from './ReviewShot'
 import { TeachRoundResult, type RoundOutcome } from './TeachRoundResult'
 import { certainty, TRAIN_LINK, trainingState, untrainedSentence } from './teach-format'
 import { closeTeachingRound, showMovedInReview, useTeachingRoundOpen } from './teach-round'
@@ -111,7 +111,7 @@ function TeachRound({ onShowReview, onOpenAutoSorting }: { onShowReview: () => v
     setError(null)
     try {
       if (answer !== 'skipped') {
-        const r = await window.sw.review.act(current.card.hash, answer)
+        const r = await window.sw.review.act(current.card.hash, answer, shownPicture(current.card)) // the picture as he saw it
         if (!live.current) return
         if (!r.ok) {
           setError(r.message)

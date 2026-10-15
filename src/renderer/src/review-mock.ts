@@ -2,7 +2,7 @@
 // real pile state machine (src/main/review/piles.ts), so the piles, the 30-day clock, rescue, undo and
 // Empty Bin behave as in the app; only storage and the well are pretend. Never used in the packaged app.
 import { binToken, inSure, keysetPage, parseSure, pileKey, pileOf, planAction, summarise, type PileView, type ProposalLabel, type ReviewAction } from '../../main/review/piles'
-import type { ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewSure, ReviewActResult, ReviewUndoResult, EmptyBinResult, SwApi } from '../../preload'
+import type { ReviewBlindAnswers, ReviewBlindItem, ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewRescueResult, ReviewRescueRetrain, ReviewSure, ReviewActResult, ReviewUndoResult, EmptyBinResult, SwApi } from '../../preload'
 
 type MockItem = {
   hash: string
@@ -18,6 +18,8 @@ type MockItem = {
   decidedBy: ReviewCard['decidedBy']
   pKeep?: number
   why?: string
+  /** ?reviewBlind=1: an answer he gave on a card that had no picture (what main's review/rescue.ts finds) */
+  blind?: 'thrownAway' | 'keptNotImported' | 'keptImported'
 }
 
 const DAY = 86_400_000
@@ -71,6 +73,19 @@ function seed(now: number): MockItem[] {
   out[7] = { ...out[7], reason: 'A TalkWeaver layout showcase, useful slide material', decidedBy: 'luna' }
   // one he already kept from an earlier session
   out[8].decision = { state: 'included', decidedAt: new Date(now - DAY).toISOString() }
+  // ?reviewBlind=1: answers given an hour ago on cards that had no picture: three thrown away, two kept but not imported, one kept and imported
+  if (new URLSearchParams(globalThis.location?.search ?? '').get('reviewBlind') === '1') {
+    const at = new Date(now - 3_600_000).toISOString()
+    const mark = (i: number, blind: NonNullable<MockItem['blind']>, state: string): void => {
+      out[i] = { ...out[i], blind, decision: { state, decidedAt: at } }
+    }
+    mark(10, 'thrownAway', 'excluded')
+    mark(11, 'thrownAway', 'excluded')
+    mark(12, 'thrownAway', 'excluded')
+    mark(13, 'keptNotImported', 'selected')
+    mark(14, 'keptNotImported', 'selected')
+    mark(15, 'keptImported', 'included')
+  }
   // ?reviewBin=N adds N more items past 30 days (paging and Empty Bin at scale in the UI test)
   const extra = Number(new URLSearchParams(globalThis.location?.search ?? '').get('reviewBin')) || 0
   // every other one the sorter was less sure of (70% instead of 94%), so a how-sure range splits the Bin
@@ -89,6 +104,9 @@ export function reviewMock(): SwApi['review'] {
   const now = (): number => Date.now()
   let items = seed(now())
   const undo: Array<{ hash: string; prior: MockItem['decision'] }> = []
+  // the retrain the last put-back asked for, as main's ReviewService holds it
+  let rescueSeq = 0
+  let rescueTraining: { id: number; end: Promise<ReviewRescueRetrain> } | null = null
   const view = (i: MockItem): PileView => pileOf(i, now())
   const live = (): MockItem[] => items.filter((i) => view(i).pile !== 'gone')
   const newest = (a: MockItem, b: MockItem): number => b.takenAt.localeCompare(a.takenAt)
@@ -98,9 +116,13 @@ export function reviewMock(): SwApi['review'] {
   const thumbs = new URLSearchParams(globalThis.location?.search ?? '').get('reviewThumbs') === '1'
   const thumbOf = (hash: string): string | null =>
     !thumbs ? null : hash === 'm001' ? 'data:image/png;base64,AAAA' : `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="160" height="100"><rect width="160" height="100" fill="#cdd"/><text x="10" y="55">${hash}</text></svg>`)}`
+  // ?reviewPictures=1 gives cards each state without a picture, by hash: m001 not found, m002 not downloaded, m003 no picture
+  const states = new URLSearchParams(globalThis.location?.search ?? '').get('reviewPictures') === '1'
+  const noPic: Record<string, ReviewCard['picture']> = states ? { m001: 'missing', m002: 'not-downloaded', m003: 'none' } : {}
   const card = (i: MockItem): ReviewCard => {
     const v = view(i)
-    return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, decidedBy: i.decidedBy, binInDays: v.binInDays, thumbUrl: thumbOf(i.hash), offline: false, pKeep: i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06), leans: (i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06)) >= 0.5 ? 'keep' : 'throwaway', why: i.why ?? i.reason }
+    const picture = noPic[i.hash] ?? (thumbOf(i.hash) ? 'ok' : 'none')
+    return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, decidedBy: i.decidedBy, binInDays: v.binInDays, thumbUrl: noPic[i.hash] ? null : thumbOf(i.hash), offline: picture === 'not-downloaded', picture, revealUrl: picture === 'not-downloaded' ? 'swarchive://f/mock' : null, expectedDir: picture === 'missing' ? '/Volumes/example/Screenshots/2026-10' : null, pKeep: i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06), leans: (i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06)) >= 0.5 ? 'keep' : 'throwaway', why: i.why ?? i.reason }
   }
   const pOf = (i: MockItem): number => i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06)
   // a bad range is refused as main does, never clamped
@@ -125,6 +147,17 @@ export function reviewMock(): SwApi['review'] {
   const pageOf = (p: 'kept' | 'throwaway' | 'bin', after: string | null, limit: number) => {
     const pg = keysetPage(of(p), keyOf, after, Math.min(limit, 500))
     return { total: pg.total, items: pg.items.map(card), next: pg.next }
+  }
+  // blind answers still standing: an answer he changed since (act, undo) is no longer blind
+  const blindNow = (): { items: MockItem[]; answers: ReviewBlindAnswers } => {
+    const list = items.filter((i) => i.blind && i.decision && (i.blind === 'thrownAway' ? i.decision.state === 'excluded' : i.blind === 'keptNotImported' ? i.decision.state === 'selected' : i.decision.state === 'included'))
+    const n = (k: MockItem['blind']): number => list.filter((i) => i.blind === k).length
+    const keptImported = n('keptImported')
+    const keptNotImported = n('keptNotImported')
+    // why each had no picture: the three states in turn
+    const pics: ReviewBlindItem['picture'][] = ['missing', 'not-downloaded', 'none']
+    const blindItems = list.map((i, k): ReviewBlindItem => ({ hash: i.hash, filename: i.filename, answer: i.blind === 'thrownAway' ? 'throwaway' : 'keep', picture: pics[k % 3], recorded: k % 2 === 0, putBack: i.blind !== 'keptImported' }))
+    return { items: list, answers: { thrownAway: n('thrownAway'), kept: keptImported + keptNotImported, keptImported, keptNotImported, emptied: 0, items: blindItems, token: binToken(list.map((i) => `${i.blind}:${i.hash}:${i.decision?.decidedAt ?? ''}`)) } }
   }
   const lastSortedAt = (): string | null => items.reduce<string | null>((m, i) => (!m || i.proposedAt > m ? i.proposedAt : m), null)
   return {
@@ -165,7 +198,10 @@ export function reviewMock(): SwApi['review'] {
       const shown = new Map(live().filter((i) => view(i).pile !== 'bin').map((i) => [i.hash, i]))
       return [...new Set(hashes)].slice(0, 200).flatMap((h) => (shown.has(h) ? [card(shown.get(h)!)] : []))
     },
-    act: async (hash: string, action: ReviewAction): Promise<ReviewActResult> => {
+    act: async (hash: string, action: ReviewAction, shownPicture?: ReviewCard['picture']): Promise<ReviewActResult> => {
+      // what each answer said it was shown with, for the UI test (main records it: review/service.ts act)
+      const g = globalThis as unknown as { __reviewShown?: Array<[string, string | undefined]> }
+      ;(g.__reviewShown ??= []).push([hash, shownPicture])
       const it = items.find((i) => i.hash === hash)
       if (!it) return { ok: false, hash, message: 'This screenshot is no longer in review.' }
       const plan = planAction(view(it), action, now())
@@ -182,6 +218,26 @@ export function reviewMock(): SwApi['review'] {
       if (it) it.decision = e.prior
       return late(sureNow, { ok: true, hash: e.hash, message: 'Undone.' })
     },
+    blindAnswers: async (): Promise<ReviewBlindAnswers> => blindNow().answers,
+    // as main does: only the set behind the token, put back to undecided; then a retrain like Retrain now
+    rescueBlind: async (token: string): Promise<ReviewRescueResult> => {
+      const b = blindNow()
+      if (b.answers.token !== token) return { ok: false, reset: 0, error: 'Something changed since you looked; check the list again.' }
+      const back = b.items.filter((i) => i.blind !== 'keptImported')
+      for (const i of back) {
+        i.decision = null
+        i.blind = undefined
+      }
+      if (!back.length) return { ok: true, reset: 0 }
+      const id = ++rescueSeq
+      const end = (globalThis as unknown as { sw: SwApi }).sw.sorter.retrainNow('manual').then(
+        (r): ReviewRescueRetrain => (r.ok ? { ok: true } : { ok: false, error: r.error || 'The sorter could not retrain just now.' }),
+        (): ReviewRescueRetrain => ({ ok: false, error: 'The sorter could not retrain just now.' })
+      )
+      rescueTraining = { id, end }
+      return { ok: true, reset: back.length, retrain: id }
+    },
+    rescueRetrain: async (id: number): Promise<ReviewRescueRetrain | null> => (rescueTraining?.id === id ? rescueTraining.end : null),
     emptyBin: async (token: string): Promise<EmptyBinResult> => {
       const bin = live().filter((i) => view(i).pile === 'bin')
       if (binToken(bin.map((i) => i.hash)) !== token) return { ok: false, emptied: 0, changed: 0, message: 'The Bin changed since you looked; nothing was emptied.' }

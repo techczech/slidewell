@@ -8,8 +8,10 @@
  * later sub-increment; until then nothing is ever auto-deleted locally (full-mirror semantics).
  */
 import { join, relative, dirname, resolve, sep } from 'node:path'
-import { existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from 'node:fs'
 import { makeR2, r2KeyFor, type R2Settings, type R2Creds } from './r2'
+import { folderUnderRoots, makeableUnderRoots, plainWritePath } from './swarchive-guard'
 
 export type StoreName = 'archive' | 'others' | 'well'
 
@@ -36,16 +38,65 @@ export function keyForPath(prefix: string, store: StoreName, root: string, absPa
   return r2KeyFor(prefix, store, relative(root, absPath))
 }
 
-/** Fetch one object from R2 into destAbs (creating parent dirs). Returns true on success. */
-export async function fetchFromR2(cfg: R2Settings, creds: R2Creds, key: string, destAbs: string): Promise<boolean> {
+/** Write all of `bytes` to `fd`; a write that makes no progress (disk full) throws. */
+function writeAll(fd: number, bytes: Buffer): void {
+  let off = 0
+  while (off < bytes.length) {
+    const n = writeSync(fd, bytes, off, bytes.length - off)
+    if (n <= 0) throw new Error('short write')
+    off += n
+  }
+}
+
+/** Remove a temporary file if it is there; never throws. */
+function removeQuietly(path: string): void {
+  try {
+    rmSync(path, { force: true })
+  } catch {
+    // nothing more to do: a leftover .part file is never served or uploaded
+  }
+}
+
+/**
+ * Fetch one object from R2 into destAbs (creating parent dirs). Returns true on success.
+ * A destAbs that is relative or has a '..' segment is refused before anything is fetched or touched
+ * (plainWritePath); every later step uses that one validated path.
+ * The folder is checked before any folder is made (its nearest existing ancestor under `roots`), then again once
+ * made. The bytes go to a new temporary file in that folder (exclusive create, a short random name independent of
+ * destAbs, so a long file name stays within the name limit), every byte written, the folder re-checked (anything
+ * may have changed during the download), and the file renamed into place: a rename replaces a link planted at
+ * destAbs instead of writing through it. On any failure the temporary file is removed and nothing is written at
+ * destAbs.
+ */
+export async function fetchFromR2(cfg: R2Settings, creds: R2Creds, key: string, destAbs: string, roots: string[]): Promise<boolean> {
+  const dest = plainWritePath(destAbs)
+  if (dest === null) return false
+  let tmp: string | null = null
   try {
     const resp = await makeR2(cfg, creds).get(key)
     if (!resp.ok) return false
-    mkdirSync(dirname(destAbs), { recursive: true })
-    writeFileSync(destAbs, Buffer.from(await resp.arrayBuffer()))
+    const bytes = Buffer.from(await resp.arrayBuffer())
+    const dir = dirname(dest)
+    if (!makeableUnderRoots(dir, roots)) return false
+    mkdirSync(dir, { recursive: true })
+    if (!folderUnderRoots(dir, roots)) return false
+    // not a media extension, so a leftover is never uploaded by syncDirToR2
+    const name = join(dir, `.sw-${randomBytes(8).toString('hex')}.part`)
+    const fd = openSync(name, 'wx')
+    tmp = name // ours from here on: removed on any failure (never a file this call did not create)
+    try {
+      writeAll(fd, bytes)
+    } finally {
+      closeSync(fd)
+    }
+    if (!folderUnderRoots(dir, roots)) return false
+    renameSync(tmp, dest)
+    tmp = null
     return true
   } catch {
     return false
+  } finally {
+    if (tmp) removeQuietly(tmp)
   }
 }
 
