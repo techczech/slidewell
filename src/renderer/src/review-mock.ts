@@ -2,7 +2,7 @@
 // real pile state machine (src/main/review/piles.ts), so the piles, the 30-day clock, rescue, undo and
 // Empty Bin behave as in the app; only storage and the well are pretend. Never used in the packaged app.
 import { binToken, inSure, keysetPage, parseSure, pileKey, pileOf, planAction, summarise, type PileView, type ProposalLabel, type ReviewAction } from '../../main/review/piles'
-import type { ReviewBlindAnswers, ReviewBlindItem, ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewRescueResult, ReviewRescueRetrain, ReviewSure, ReviewActResult, ReviewUndoResult, EmptyBinResult, SwApi } from '../../preload'
+import type { ReviewAnsweredCard, ReviewAnswersSince, ReviewDownloadProgress, ReviewDownloadResult, ReviewBlindAnswers, ReviewBlindItem, ReviewCard, ReviewOverview, ReviewPage, ReviewPiles, ReviewRescueResult, ReviewRescueRetrain, ReviewRetrainAsked, ReviewSure, ReviewActResult, ReviewUndoResult, EmptyBinResult, SwApi } from '../../preload'
 
 type MockItem = {
   hash: string
@@ -20,7 +20,10 @@ type MockItem = {
   why?: string
   /** ?reviewBlind=1: an answer he gave on a card that had no picture (what main's review/rescue.ts finds) */
   blind?: 'thrownAway' | 'keptNotImported' | 'keptImported'
+  /** ?reviewLookAgain=1: his Review answer (the mark main keeps beside the decision), standing while the decision is still the one it wrote */
+  answered?: { answer: 'keep' | 'throwaway'; at: string }
 }
+const lookAgainOn = (): boolean => new URLSearchParams(globalThis.location?.search ?? '').get('reviewLookAgain') === '1'
 
 const DAY = 86_400_000
 
@@ -86,6 +89,18 @@ function seed(now: number): MockItem[] {
     mark(14, 'keptNotImported', 'selected')
     mark(15, 'keptImported', 'included')
   }
+  // ?reviewLookAgain=1: seven answers given since 13 October (four kept, three thrown away); ?reviewLookMany=1 adds seventy more thrown away
+  if (lookAgainOn()) {
+    const answer = (it: MockItem, a: 'keep' | 'throwaway', minsAgo: number): MockItem => {
+      const at = new Date(now - minsAgo * 60_000).toISOString()
+      return { ...it, decision: { state: a === 'keep' ? 'included' : 'excluded', decidedAt: at }, answered: { answer: a, at } }
+    }
+    for (let i = 0; i < 4; i++) out[10 + i] = answer(out[10 + i], 'keep', 600 + i * 10)
+    for (let i = 0; i < 3; i++) out[36 + i] = answer(out[36 + i], 'throwaway', 700 + i * 10)
+    if (new URLSearchParams(globalThis.location?.search ?? '').get('reviewLookMany') === '1') {
+      for (let i = 0; i < 70; i++) out.push(answer(item('keep', 'Finder', `Answered ${i + 1}`, 'Looks like screenshots you kept before.'), 'throwaway', 800 + i))
+    }
+  }
   // ?reviewBin=N adds N more items past 30 days (paging and Empty Bin at scale in the UI test)
   const extra = Number(new URLSearchParams(globalThis.location?.search ?? '').get('reviewBin')) || 0
   // every other one the sorter was less sure of (70% instead of 94%), so a how-sure range splits the Bin
@@ -103,7 +118,8 @@ function seed(now: number): MockItem[] {
 export function reviewMock(): SwApi['review'] {
   const now = (): number => Date.now()
   let items = seed(now())
-  const undo: Array<{ hash: string; prior: MockItem['decision'] }> = []
+  const undo: Array<{ id: number; hash: string; prior: MockItem['decision']; priorAnswered?: MockItem['answered'] }> = []
+  let undoSeq = 0
   // the retrain the last put-back asked for, as main's ReviewService holds it
   let rescueSeq = 0
   let rescueTraining: { id: number; end: Promise<ReviewRescueRetrain> } | null = null
@@ -119,10 +135,19 @@ export function reviewMock(): SwApi['review'] {
   // ?reviewPictures=1 gives cards each state without a picture, by hash: m001 not found, m002 not downloaded, m003 no picture
   const states = new URLSearchParams(globalThis.location?.search ?? '').get('reviewPictures') === '1'
   const noPic: Record<string, ReviewCard['picture']> = states ? { m001: 'missing', m002: 'not-downloaded', m003: 'none' } : {}
+  // ?reviewCloud=1: six screenshots whose picture is not on this Mac (two need a look, three kept, one throwaway), as main's
+  // picture chooser says of a cloud placeholder. Download them brings each down after window.__reviewMockDownloadMs (default
+  // 120 ms); hashes in window.__reviewMockDownloadFail stay not downloaded
+  const cloud = new Set<string>(new URLSearchParams(globalThis.location?.search ?? '').get('reviewCloud') === '1' ? ['m002', 'm004', 'm010', 'm011', 'm012', 'm036'] : [])
+  let leaveOut = false
+  const notHere = (i: MockItem): boolean => cloud.has(i.hash) || noPic[i.hash] === 'not-downloaded'
+  // the part of Review a read covers, as main's ReviewService.scoped: the Not on this Mac view, or the rest when "leave them out" is on
+  const inScope = (i: MockItem, notOnMac?: boolean): boolean => (notOnMac ? notHere(i) : leaveOut ? !notHere(i) : true)
   const card = (i: MockItem): ReviewCard => {
     const v = view(i)
-    const picture = noPic[i.hash] ?? (thumbOf(i.hash) ? 'ok' : 'none')
-    return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, decidedBy: i.decidedBy, binInDays: v.binInDays, thumbUrl: noPic[i.hash] ? null : thumbOf(i.hash), offline: picture === 'not-downloaded', picture, revealUrl: picture === 'not-downloaded' ? 'swarchive://f/mock' : null, expectedDir: picture === 'missing' ? '/Volumes/example/Screenshots/2026-10' : null, pKeep: i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06), leans: (i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06)) >= 0.5 ? 'keep' : 'throwaway', why: i.why ?? i.reason }
+    const away = cloud.has(i.hash)
+    const picture = away ? 'not-downloaded' : noPic[i.hash] ?? (thumbOf(i.hash) ? 'ok' : 'none')
+    return { hash: i.hash, filename: i.filename, app: i.app, windowTitle: i.windowTitle, takenAt: i.takenAt, reason: i.reason, confidence: 0.6, proposal: i.proposal, pile: v.pile as ReviewCard['pile'], by: v.by, decidedBy: i.decidedBy, binInDays: v.binInDays, thumbUrl: noPic[i.hash] || away ? null : thumbOf(i.hash), offline: picture === 'not-downloaded', picture, revealUrl: picture === 'not-downloaded' ? 'swarchive://f/mock' : null, expectedDir: picture === 'missing' ? '/Volumes/example/Screenshots/2026-10' : null, pKeep: i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06), leans: (i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06)) >= 0.5 ? 'keep' : 'throwaway', why: i.why ?? i.reason }
   }
   const pOf = (i: MockItem): number => i.pKeep ?? (i.proposal === 'keep' ? 0.93 : 0.06)
   // a bad range is refused as main does, never clamped
@@ -130,11 +155,15 @@ export function reviewMock(): SwApi['review'] {
     if (sure !== undefined && !parseSure(sure)) throw new Error('review: bad how-sure range')
     return sure
   }
-  const head = (sure?: ReviewSure): { needALook: number; kept: number; throwaway: number } => {
-    const s = summarise(live().filter((i) => inSure(pOf(i), sure)).map((i) => ({ view: view(i), proposal: i.proposal, decided: Boolean(i.decision) })))
+  const head = (sure?: ReviewSure, notOnMac?: boolean): { needALook: number; kept: number; throwaway: number } => {
+    const s = summarise(live().filter((i) => inSure(pOf(i), sure) && inScope(i, notOnMac)).map((i) => ({ view: view(i), proposal: i.proposal, decided: Boolean(i.decision) })))
     return { needALook: s.needALook, kept: s.confidentKept, throwaway: s.confidentThrowaway }
   }
   let sureNow: ReviewSure | undefined
+  let cloudNow = false
+  // Download them, as main runs it: one at a time, progress to every listener, Cancel stops before the next
+  const progressListeners = new Set<(p: ReviewDownloadProgress) => void>()
+  let fetching: { progress: ReviewDownloadProgress; cancel: boolean } | null = null
   // The UI test slows answers down to check that a late one never overwrites a newer one: window.__reviewMockDelay(sure) gives
   // the milliseconds to hold an overview, piles, page, act or undo answer back (worked out first, delivered late). Unset: answered at once.
   const late = async <T,>(sure: ReviewSure | undefined, answer: T): Promise<T> => {
@@ -142,7 +171,7 @@ export function reviewMock(): SwApi['review'] {
     if (ms > 0) await new Promise((r) => setTimeout(r, ms))
     return answer
   }
-  const of = (p: 'kept' | 'throwaway' | 'bin'): MockItem[] => live().filter((i) => view(i).pile === p && inSure(pOf(i), sureNow))
+  const of = (p: 'kept' | 'throwaway' | 'bin'): MockItem[] => live().filter((i) => view(i).pile === p && inSure(pOf(i), sureNow) && inScope(i, cloudNow))
   const keyOf = (i: MockItem) => pileKey(view(i).pile, view(i).binInDays, Date.parse(i.takenAt) || 0, i.hash)
   const pageOf = (p: 'kept' | 'throwaway' | 'bin', after: string | null, limit: number) => {
     const pg = keysetPage(of(p), keyOf, after, Math.min(limit, 500))
@@ -161,11 +190,11 @@ export function reviewMock(): SwApi['review'] {
   }
   const lastSortedAt = (): string | null => items.reduce<string | null>((m, i) => (!m || i.proposedAt > m ? i.proposedAt : m), null)
   return {
-    overview: async (opts?: { queue?: number; sample?: number; order?: 'newest' | 'teach'; sure?: ReviewSure }): Promise<ReviewOverview> => {
+    overview: async (opts?: { queue?: number; sample?: number; order?: 'newest' | 'teach'; sure?: ReviewSure; notOnMac?: boolean }): Promise<ReviewOverview> => {
       const sure = okSure(opts?.sure)
-      const h = head(sure)
+      const h = head(sure, opts?.notOnMac)
       const a = head()
-      const all = live().filter((i) => inSure(pOf(i), sure))
+      const all = live().filter((i) => inSure(pOf(i), sure) && inScope(i, opts?.notOnMac))
       return late(opts?.sure, {
         needALook: h.needALook,
         confident: { kept: h.kept, throwaway: h.throwaway },
@@ -173,24 +202,28 @@ export function reviewMock(): SwApi['review'] {
         lastSortedAt: lastSortedAt(),
         queue: all.filter((i) => view(i).pile === 'doubtful').sort(opts?.order === 'teach' ? unsureFirst : newest).slice(0, opts?.queue ?? 50).map(card),
         confidentSample: all.filter((i) => !i.decision && i.proposal !== 'doubtful').sort(newest).slice(0, opts?.sample ?? 12).map(card),
-        canUndo: undo.length > 0
+        canUndo: undo.length > 0,
+        notOnMac: live().filter(notHere).length,
+        leaveOutNotOnMac: leaveOut
       })
     },
-    piles: async (opts?: { kept?: number; throwaway?: number; bin?: number; sure?: ReviewSure }): Promise<ReviewPiles> => {
+    piles: async (opts?: { kept?: number; throwaway?: number; bin?: number; sure?: ReviewSure; notOnMac?: boolean }): Promise<ReviewPiles> => {
       sureNow = okSure(opts?.sure)
-      const h = head(sureNow)
+      cloudNow = opts?.notOnMac === true
+      const h = head(sureNow, cloudNow)
       return late(sureNow, {
         needALook: h.needALook,
         confidentTotal: h.kept + h.throwaway,
         lastSortedAt: lastSortedAt(),
         kept: pageOf('kept', null, opts?.kept ?? 60),
         throwaway: pageOf('throwaway', null, opts?.throwaway ?? 60),
-        bin: { ...pageOf('bin', null, opts?.bin ?? 60), token: sureNow ? null : binToken(live().filter((i) => view(i).pile === 'bin').map((i) => i.hash)) },
+        bin: { ...pageOf('bin', null, opts?.bin ?? 60), token: sureNow || cloudNow || of('bin').length !== live().filter((i) => view(i).pile === 'bin').length ? null : binToken(live().filter((i) => view(i).pile === 'bin').map((i) => i.hash)) },
         canUndo: undo.length > 0
       })
     },
-    page: async (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number, sure?: ReviewSure): Promise<ReviewPage> => {
+    page: async (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number, sure?: ReviewSure, notOnMac?: boolean): Promise<ReviewPage> => {
       sureNow = okSure(sure)
+      cloudNow = notOnMac === true
       return late(sureNow, pageOf(pile, after, limit ?? 60))
     },
     // as main answers it: in the order asked for, at most 200, nothing that is in the Bin or gone
@@ -206,17 +239,29 @@ export function reviewMock(): SwApi['review'] {
       if (!it) return { ok: false, hash, message: 'This screenshot is no longer in review.' }
       const plan = planAction(view(it), action, now())
       if (plan.kind !== 'decide') return { ok: plan.kind === 'noop', hash, message: plan.reason }
-      undo.push({ hash, prior: it.decision })
+      const undoId = ++undoSeq
+      undo.push({ id: undoId, hash, prior: it.decision, priorAnswered: it.answered })
       it.decision = { state: plan.state === 'selected' ? 'included' : 'excluded', decidedAt: plan.decidedAt }
       const message = plan.state === 'selected' ? (action === 'rescue' ? 'Rescued — kept and added to the well.' : 'Kept — added to the well.') : 'Moved to Throwaway — bin in 30 days. Your original file is not touched.'
-      return late(sureNow, { ok: true, hash, message, pile: plan.state === 'selected' ? 'kept' : 'throwaway' })
+      if (lookAgainOn()) it.answered = { answer: plan.state === 'selected' ? 'keep' : 'throwaway', at: plan.decidedAt }
+      return late(sureNow, { ok: true, hash, message, pile: plan.state === 'selected' ? 'kept' : 'throwaway', undoId })
     },
     undo: async (): Promise<ReviewUndoResult> => {
       const e = undo.pop()
       if (!e) return { ok: false, message: 'Nothing to undo.' }
       const it = items.find((i) => i.hash === e.hash)
-      if (it) it.decision = e.prior
-      return late(sureNow, { ok: true, hash: e.hash, message: 'Undone.' })
+      if (it) {
+        it.decision = e.prior
+        it.answered = e.priorAnswered
+      }
+      return late(sureNow, { ok: true, hash: e.hash, message: 'Undone.', undoId: e.id })
+    },
+    // as main does (ReviewService.answersSince): the answers still standing, newest first, paged by cursor
+    answersSince: async (_since: string, after?: string | null, limit?: number): Promise<ReviewAnswersSince> => {
+      const stand = items.filter((i) => i.answered && i.decision && i.decision.decidedAt === i.answered.at && i.decision.state === (i.answered.answer === 'keep' ? 'included' : 'excluded'))
+      const pg = keysetPage(stand, (i) => [-Date.parse(i.answered!.at), 0, i.hash], after ?? null, Math.max(1, Math.min(limit ?? 60, 200)))
+      const withAnswer = (i: MockItem): ReviewAnsweredCard => ({ ...card(i), answer: i.answered!.answer, answeredAt: i.answered!.at })
+      return { total: stand.length, kept: stand.filter((i) => i.answered!.answer === 'keep').length, thrownAway: stand.filter((i) => i.answered!.answer === 'throwaway').length, items: pg.items.map(withAnswer), next: pg.next }
     },
     blindAnswers: async (): Promise<ReviewBlindAnswers> => blindNow().answers,
     // as main does: only the set behind the token, put back to undecided; then a retrain like Retrain now
@@ -237,7 +282,72 @@ export function reviewMock(): SwApi['review'] {
       rescueTraining = { id, end }
       return { ok: true, reset: back.length, retrain: id }
     },
+    downloadNotOnMac: async (sure?: ReviewSure): Promise<ReviewDownloadResult> => {
+      if (fetching) return { ok: false, total: 0, done: 0, failed: 0, cancelled: false, message: 'A download is already running.' }
+      const g = globalThis as unknown as { __reviewMockDownloadMs?: number; __reviewMockDownloadFail?: string[] }
+      const list = live().filter((i) => notHere(i) && inSure(pOf(i), okSure(sure)))
+      const run = { progress: { running: true, total: list.length, current: 0, done: 0, failed: 0 } as ReviewDownloadProgress, cancel: false }
+      fetching = run
+      const tell = (): void => progressListeners.forEach((cb) => cb({ ...run.progress }))
+      let cancelled = false
+      for (let k = 0; k < list.length; k++) {
+        if (run.cancel) {
+          cancelled = true
+          break
+        }
+        run.progress = { ...run.progress, current: k + 1 }
+        tell()
+        await new Promise((res) => setTimeout(res, g.__reviewMockDownloadMs ?? 120))
+        if (run.cancel) {
+          cancelled = true
+          break
+        }
+        if ((g.__reviewMockDownloadFail ?? []).includes(list[k].hash)) run.progress = { ...run.progress, failed: run.progress.failed + 1 }
+        else {
+          cloud.delete(list[k].hash)
+          run.progress = { ...run.progress, done: run.progress.done + 1 }
+        }
+      }
+      run.progress = { ...run.progress, running: false, current: 0 }
+      tell()
+      fetching = null
+      const { total, done, failed } = run.progress
+      const got = `Downloaded ${done} of ${total}.`
+      const bad = failed ? ` ${failed} could not be downloaded (offline, unavailable or slower than a minute); they stay in this list.` : ''
+      return { ok: true, total, done, failed, cancelled, message: !total ? 'Nothing to download: every screenshot here is on this Mac.' : cancelled ? `Stopped. ${got}${bad}` : `${got}${bad}` }
+    },
+    cancelDownload: async (): Promise<boolean> => {
+      if (!fetching) return false
+      fetching.cancel = true
+      return true
+    },
+    downloadStatus: async (): Promise<ReviewDownloadProgress | null> => (fetching ? { ...fetching.progress } : null),
+    onDownloadProgress: (cb: (p: ReviewDownloadProgress) => void): (() => void) => {
+      progressListeners.add(cb)
+      return () => void progressListeners.delete(cb)
+    },
+    setLeaveOutNotOnMac: async (on: boolean): Promise<boolean> => {
+      leaveOut = on === true
+      return leaveOut
+    },
     rescueRetrain: async (id: number): Promise<ReviewRescueRetrain | null> => (rescueTraining?.id === id ? rescueTraining.end : null),
+    // as main does (ReviewService.retrainAfterAnswers): asked for at once; a busy sorter keeps it owed (here: it never ends),
+    // an idle one runs it (here through the sorter mock's Retrain now, so the strip shows it). window.__reviewRetrainAsked counts the asks.
+    retrainAfterAnswers: async (): Promise<ReviewRetrainAsked> => {
+      const g = globalThis as unknown as { __reviewRetrainAsked?: number; sw: SwApi }
+      g.__reviewRetrainAsked = (g.__reviewRetrainAsked ?? 0) + 1
+      const sorter = g.sw.sorter
+      const busy = (await sorter.status()).phase !== 'idle'
+      const id = ++rescueSeq
+      const end: Promise<ReviewRescueRetrain> = busy
+        ? new Promise(() => undefined)
+        : sorter.retrainNow('manual').then(
+            (r): ReviewRescueRetrain => (r.ok ? { ok: true } : { ok: false, error: r.error || 'The sorter could not retrain just now.' }),
+            (): ReviewRescueRetrain => ({ ok: false, error: 'The sorter could not retrain just now.' })
+          )
+      rescueTraining = { id, end }
+      return { ok: true, retrain: id }
+    },
     emptyBin: async (token: string): Promise<EmptyBinResult> => {
       const bin = live().filter((i) => view(i).pile === 'bin')
       if (binToken(bin.map((i) => i.hash)) !== token) return { ok: false, emptied: 0, changed: 0, message: 'The Bin changed since you looked; nothing was emptied.' }

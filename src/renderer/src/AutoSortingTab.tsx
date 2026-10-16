@@ -49,14 +49,14 @@ function BalanceBar({ kept, binned }: { kept: number; binned: number }): JSX.Ele
 }
 
 // The last run as the three numbers of the mockup: the local sort's, then the service's run when it followed that sort.
-function lastRunNumbers(st: SorterStatus, cl: CloudStatus): { label: string; at: string; lookedAt: number | null; confident: number | null; needLook: number | null; settled: number; sent: number; note: string | null } | null {
+function lastRunNumbers(st: SorterStatus, cl: CloudStatus): { label: string; at: string; lookedAt: number | null; confident: number | null; needLook: number | null; settled: number; sent: number; note: string | null; notOnMacSkipped: number } | null {
   const local = st.lastRun
   const cloud = cl.lastRun
   const follows = cloud && (!local || cloud.at >= local.at) // a service run older than the latest local sort belongs to an earlier sort
   const ran = follows && !cloud.skipped && !cloud.error && cloud.sent > 0
   const label = follows ? (cloud.trigger === 'nightly' ? 'nightly sort' : 'Sort now') : 'sort on this Mac'
   if (!local && !follows) return null
-  if (!local) return { label, at: cloud!.at, lookedAt: null, confident: null, needLook: null, settled: 0, sent: 0, note: cloud!.message }
+  if (!local) return { label, at: cloud!.at, lookedAt: null, confident: null, needLook: null, settled: 0, sent: 0, note: cloud!.message, notOnMacSkipped: 0 }
   const settled = ran ? cloud.settled : 0
   return {
     label,
@@ -66,7 +66,8 @@ function lastRunNumbers(st: SorterStatus, cl: CloudStatus): { label: string; at:
     needLook: Math.max(0, local.needLook - settled),
     settled,
     sent: ran ? cloud.sent : 0,
-    note: follows && !ran ? cloud.message : null
+    note: follows && !ran ? cloud.message : null,
+    notOnMacSkipped: local.notOnMacSkipped ?? 0
   }
 }
 
@@ -102,7 +103,8 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
       return
     }
     const r = await window.sw.sorter.sort()
-    setResult(r.ok && r.counts ? `Sorted ${n(r.sorted ?? 0)}${r.periodPhrase ?? ''}: ${n(r.counts.keep)} keep, ${n(r.counts.throwaway)} throwaway, ${n(r.counts.doubtful)} need a look.` : (r.error ?? null))
+    const away = r.notOnMacSkipped ? ` ${n(r.notOnMacSkipped)} not on this Mac, skipped.` : ''
+    setResult(r.ok && r.counts ? `Sorted ${n(r.sorted ?? 0)}${r.periodPhrase ?? ''}: ${n(r.counts.keep)} keep, ${n(r.counts.throwaway)} throwaway, ${n(r.counts.doubtful)} need a look.${away}` : (r.error ?? null))
   }, [cl?.settings.enabled])
   const send = useCallback(async () => {
     if (!preview?.token) return
@@ -272,6 +274,7 @@ export function AutoSortingTab({ onReview, onSettings, triageUndecided }: { onRe
             <span className="as-muted">
               {run.label}, {whenShort(run.at)}
               {run.lookedAt !== null ? ` · ${n(run.lookedAt)} looked at` : ''}
+              {run.notOnMacSkipped > 0 ? ` · ${n(run.notOnMacSkipped)} not on this Mac, skipped` : ''}
             </span>
           )}
           <button className="as-link as-review-link" onClick={onReview}>

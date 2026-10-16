@@ -170,3 +170,43 @@
 .rv-blind-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rv-blind-answer { flex: none; width: 90px; }
 .rv-blind-pic { flex: none; width: 210px; color: var(--muted); }
+
+/* Look again (ReviewLookAgain.tsx) */
+.rv-tag.toss { background: var(--accent); }
+.rv-la-chips { display: flex; gap: 6px; }
+.rv-la-chip { border: 1px solid var(--line); background: var(--card); border-radius: 14px; padding: 3px 12px; font: inherit; font-size: 13px; cursor: pointer; color: var(--ink); }
+.rv-la-chip.on { background: var(--oxford); border-color: var(--oxford); color: #fff; }
+.rv-la-changed { position: absolute; top: 6px; right: 6px; z-index: 2; font-size: 10.5px; font-weight: 700; padding: 2px 6px; border-radius: 4px; background: #fff; border: 1px solid var(--accent); color: var(--accent); }
+.rv-pc:has(.rv-pc-acts) .rv-la-changed { right: auto; left: 6px; top: 30px; }
+.rv-la-more { padding: 16px; text-align: center; color: var(--muted); font-size: 13px; }
+
+/* Not on this Mac: the header chip and the bar of its view */
+.rv-cloud-chip { font: 600 13.5px -apple-system, system-ui, sans-serif; color: var(--oxford); border: 1.5px dashed var(--oxford); border-radius: 8px; padding: 7px 12px; background: var(--card); cursor: pointer; white-space: nowrap; }
+.rv-cloud-chip.on { background: var(--oxford); color: #fff; border-style: solid; }
+.rv-cloud-chip:focus-visible { outline: 2px solid var(--oxford); outline-offset: 2px; }
+.rv-cloud-chip + .rv-teach-switch { margin-left: 0; }
+.rv-cloud-bar { margin: 8px 40px 4px; padding: 12px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+.rv-cloud-note { margin: 0; color: var(--muted); }
+.rv-cloud-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.rv-cloud-download, .rv-cloud-cancel { font: 600 13.5px -apple-system, system-ui, sans-serif; border-radius: 8px; padding: 6px 14px; cursor: pointer; border: 1.5px solid var(--oxford); }
+.rv-cloud-download { background: var(--oxford); color: #fff; }
+.rv-cloud-cancel { background: var(--card); color: var(--oxford); }
+.rv-cloud-progress { color: var(--ink); font-variant-numeric: tabular-nums; }
+.rv-cloud-result { color: var(--muted); }
+.rv-cloud-switch { align-self: flex-start; display: inline-flex; align-items: center; gap: 8px; font: 13.5px -apple-system, system-ui, sans-serif; color: var(--ink); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.rv-cloud-switch .rv-tg { width: 30px; height: 17px; border-radius: 9px; background: #b8ad98; position: relative; flex: none; }
+.rv-cloud-switch .rv-tg::after { content: ''; position: absolute; left: 2px; top: 2px; width: 13px; height: 13px; border-radius: 50%; background: #fff; }
+.rv-cloud-switch[aria-checked='true'] .rv-tg { background: var(--oxford); }
+.rv-cloud-switch[aria-checked='true'] .rv-tg::after { left: auto; right: 2px; }
+.rv-cloud-switch:focus-visible { outline: 2px solid var(--oxford); outline-offset: 2px; }
+
+/* Step back: a card he answered before, with his answer on it */
+.rv-big.rv-stepped { border-style: dashed; }
+.rv-answered { margin-bottom: 12px; padding: 8px 12px; border-radius: 8px; font-size: 14px; background: #efeadf; color: var(--ink); }
+.rv-answered.keep b { color: var(--oxford); }
+.rv-answered.toss b { color: var(--accent); }
+.rv-answered-hint { display: block; margin-top: 2px; font-size: 12.5px; color: var(--muted); }
+.rv-btn-big[aria-pressed='true'] { box-shadow: 0 0 0 3px var(--accent); }
+.rv-step-btns { display: inline-flex; gap: 6px; margin-left: 8px; }
+.rv-step-btn { font: 600 12px -apple-system, system-ui, sans-serif; color: var(--oxford); border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; background: var(--card); cursor: pointer; }
+.rv-step-btn:disabled { color: var(--muted); cursor: default; opacity: .6; }

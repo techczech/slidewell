@@ -504,6 +504,26 @@ export async function putTriageDecision(wellRoot: string, hash: string, row: Tri
   )
 }
 
+/**
+ * Set one scan row's `offline` flag (a cloud placeholder or not) to what the file is now, after Review asked the cloud
+ * provider for it (review/download.ts). Only that flag of the rows at this path changes, and only when it differs; the
+ * hash, the text read from the picture and every other column stay as the scan wrote them (a later scan of a changed
+ * file rewrites the row as usual). Returns how many rows changed. No file is read or touched.
+ */
+export function setTriageOffline(wellRoot: string, source: string, relPath: string, offline: boolean): number {
+  const file = triageDb(wellRoot)
+  if (!existsSync(file)) return 0
+  const db = new DatabaseSync(file)
+  try {
+    db.exec('PRAGMA busy_timeout=5000;')
+    const flag = offline ? '1' : '0'
+    const r = db.prepare('UPDATE triage_fts SET offline = ? WHERE source = ? AND rel_path = ? AND offline IS NOT ?').run(flag, source, relPath, flag)
+    return Number(r.changes)
+  } finally {
+    db.close()
+  }
+}
+
 /** One Bin item as Empty Bin saw it: his decision at that moment (null = none). */
 export type BinSnapshot = { hash: string; decision: TriageDecisionRow | null }
 

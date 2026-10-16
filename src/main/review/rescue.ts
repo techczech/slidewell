@@ -87,7 +87,7 @@ function since(s: string): number {
 }
 
 /** Which of the four kinds this row's current decision is, when it is still the Review answer; null otherwise. */
-function kindOf(r: ReviewRow): BlindKind | null {
+export function kindOf(r: ReviewRow): BlindKind | null {
   const d = r.decision
   const at = r.answeredAt
   if (!d || !at || (r.answer !== 'keep' && r.answer !== 'throwaway')) return null

@@ -8,10 +8,14 @@
  *   openDownloaded(path, expect)       → the descriptor to read a downloaded file through (no path reopen)
  *   insideDir(path, dir)               → canonical containment test (the primary Triage subtree exclusion)
  *
- * The download runs OUT OF PROCESS: a child (this app's own binary in Node mode) opens the file with
- * O_NOFOLLOW, checks with fstat that the descriptor it holds is a regular file with the same device and
- * inode this process checked with lstat, and only then reads it to the end, which makes macOS (File
- * Provider) fetch it. A swapped-in symlink, FIFO, device or other file is refused before a byte is read.
+ * The download runs OUT OF PROCESS: a child (this app's own binary in Node mode) changes its working
+ * folder to the file's folder, opens the file's name there with O_NOFOLLOW, checks with fstat that the
+ * descriptor it holds is a regular file with the same device and inode this process checked with lstat,
+ * checks that its working folder, by its real location now (getcwd answers for the folder it holds, not
+ * for a path, so a folder on the way swapped for a link after this process's checks is seen where it
+ * really is), is inside `root` and outside `exclude`, and only then reads it to the end, which makes
+ * macOS (File Provider) fetch it. A swapped-in symlink, FIFO, device or other file, and a file reached
+ * through a folder that leads outside the root, are refused before a byte is read.
  * SlideWell itself never opens a dataless file: a read blocked on a download inside this process holds
  * a libuv worker until the OS returns, and four of them would stall every file operation in the app. A
  * child can always be killed: on the timeout or Stop it gets SIGKILL. The download only reads; nothing
@@ -68,6 +72,8 @@ export type DownloadOptions = {
   identity?: FileIdentity
   /** Test seam: called with the child's pid once it is running. */
   onSpawn?: (pid: number) => void
+  /** Test seam: called after each of this process's own checks (the file's lstat, its folder's real path), before the next step. */
+  onCheck?: (step: 'lstat' | 'realpath') => void | Promise<void>
 }
 
 export type FileIdentity = { dev: bigint; ino: bigint }
@@ -75,17 +81,28 @@ export type FileIdentity = { dev: bigint; ino: bigint }
 const abortError = (): Error => Object.assign(new Error('stopped'), { code: 'ABORT_ERR' })
 const coded = (message: string, code: string): Error => Object.assign(new Error(message), { code })
 
-// Runs in the child. argv tail: path, dev, ino. Exit 0 = read to the end; 3 = not the file that was
-// checked; 4 = not a regular file (or a link); 5 = open failed; anything else = read failed.
+// Runs in the child. argv tail: path, dev, ino, root, exclude ('' = none). Exit 0 = read to the end; 3 = not the
+// file that was checked; 4 = not a regular file (or a link); 5 = open failed; 6 = its folder is not inside root (or is
+// inside exclude); anything else = read failed. The name is opened relative to the folder the child holds as its working
+// folder, so no folder on the way is looked up again after the containment check, and that check asks where the held
+// folder really is (getcwd), never what a path resolves to. On any doubt it exits before reading.
 const CHILD = `
 const fs = require('fs');
-const [p, dev, ino] = process.argv.slice(-3);
+const path = require('path');
+const [p, dev, ino, root, exclude] = process.argv.slice(-5);
+const inside = (x, d) => Boolean(d) && (x === d || x.startsWith(d.endsWith('/') ? d : d + '/'));
+const name = path.basename(p);
+if (!path.isAbsolute(p) || !name || name === '.' || name === '..') process.exit(5);
+try { process.chdir(path.dirname(p)); } catch (e) { process.exit(5); }
 let fd;
-try { fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
+try { fd = fs.openSync(name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
 catch (e) { process.exit(e && e.code === 'ELOOP' ? 4 : 5); }
 const st = fs.fstatSync(fd, { bigint: true });
 if (!st.isFile()) process.exit(4);
 if (String(st.dev) !== dev || String(st.ino) !== ino) process.exit(3);
+let here;
+try { here = process.cwd(); } catch (e) { process.exit(6); }
+if (!inside(here, root) || inside(here, exclude)) process.exit(6);
 const b = Buffer.allocUnsafe(1 << 20);
 while (fs.readSync(fd, b, 0, b.length, null) > 0) {}
 process.exit(0);
@@ -94,7 +111,7 @@ process.exit(0);
 /**
  * Download one online-only file by reading it in a child process. Resolves when the read finished;
  * rejects with code ETIMEDOUT (no download within `timeoutMs`), ABORT_ERR (Stop), ENOTREG (not a
- * regular file), EOUTSIDE (not inside `root`), ECHANGED (the file was swapped after the check) or
+ * regular file), EOUTSIDE (not inside `root`, here or as the child finds it), ECHANGED (the file was swapped after the check) or
  * EDOWNLOAD (the read failed, e.g. offline). Stop is checked again after every await, before spawning.
  */
 export async function downloadOnlineOnly(path: string, opts: DownloadOptions): Promise<void> {
@@ -102,12 +119,16 @@ export async function downloadOnlineOnly(path: string, opts: DownloadOptions): P
   const st = await fsp.lstat(path, { bigint: true })
   if (!st.isFile()) throw coded('not a regular file', 'ENOTREG')
   if (opts.identity && (st.dev !== opts.identity.dev || st.ino !== opts.identity.ino)) throw coded('the file changed before it was read', 'ECHANGED')
+  await opts.onCheck?.('lstat')
   const dir = await realpathNative(dirname(path))
   if (!insideDir(dir, opts.root) || insideDir(dir, opts.exclude)) throw coded('outside the folder it may download in', 'EOUTSIDE')
+  await opts.onCheck?.('realpath')
   if (opts.signal?.aborted) throw abortError()
   await new Promise<void>((resolve, reject) => {
-    // stdin/stdout/stderr all /dev/null: nothing of the file reaches this process
-    const child = spawn(process.execPath, ['-e', CHILD, '--', path, String(st.dev), String(st.ino)], { stdio: 'ignore', env: { ELECTRON_RUN_AS_NODE: '1' } })
+    // stdin/stdout/stderr all /dev/null: nothing of the file reaches this process. The child checks containment again
+    // itself, on the folder it holds (above): these checks here only spare a child for a file that is plainly refused.
+    const args = ['-e', CHILD, '--', path, String(st.dev), String(st.ino), opts.root, opts.exclude ?? '']
+    const child = spawn(process.execPath, args, { stdio: 'ignore', env: { ELECTRON_RUN_AS_NODE: '1' } })
     let settled = false
     const finish = (err: Error | null): void => {
       if (settled) return
@@ -131,7 +152,9 @@ export async function downloadOnlineOnly(path: string, opts: DownloadOptions): P
             ? coded('the file changed before it was read', 'ECHANGED')
             : code === 4
               ? coded('not a regular file', 'ENOTREG')
-              : coded('download failed (offline, or the file is unavailable)', 'EDOWNLOAD')
+              : code === 6
+                ? coded('outside the folder it may download in', 'EOUTSIDE')
+                : coded('download failed (offline, or the file is unavailable)', 'EDOWNLOAD')
       )
     )
     if (child.pid) opts.onSpawn?.(child.pid)

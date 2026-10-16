@@ -129,7 +129,7 @@ export type TrainResult = { ok: boolean; cancelled?: boolean; report?: SorterRep
 export const SORTER_BUSY = 'the sorter is already running'
 
 /** One sort on this Mac as numbers: when it ended, the period it was limited to, how many it looked at, and of those how many got a keep or throwaway proposal and how many stayed doubtful. */
-export type LocalRunSummary = { at: string; period: SortPeriod; lookedAt: number; confident: number; needLook: number }
+export type LocalRunSummary = { at: string; period: SortPeriod; lookedAt: number; confident: number; needLook: number; /** Left out because not on this Mac (only when the switch was on and some were). */ notOnMacSkipped?: number }
 
 /** A stored LocalRunSummary; null when what is stored is not one (nothing is guessed from it). */
 export function storedLocalRun(raw: unknown): LocalRunSummary | null {
@@ -137,10 +137,20 @@ export function storedLocalRun(raw: unknown): LocalRunSummary | null {
   const r = raw as Record<string, unknown>
   const n = (x: unknown): x is number => typeof x === 'number' && Number.isInteger(x) && x >= 0
   if (typeof r.at !== 'string' || !Number.isFinite(Date.parse(r.at)) || !isSortPeriod(r.period) || !n(r.lookedAt) || !n(r.confident) || !n(r.needLook)) return null
-  return { at: r.at, period: r.period, lookedAt: r.lookedAt, confident: r.confident, needLook: r.needLook }
+  return { at: r.at, period: r.period, lookedAt: r.lookedAt, confident: r.confident, needLook: r.needLook, ...(n(r.notOnMacSkipped) && r.notOnMacSkipped > 0 ? { notOnMacSkipped: r.notOnMacSkipped } : {}) }
 }
 
-export type SortResult = { ok: boolean; sorted?: number; counts?: { keep: number; throwaway: number; doubtful: number }; error?: string; /** The period this run was limited to, and it inside a sentence (' from the last 30 days'; '' for everything). */ period?: SortPeriod; periodPhrase?: string }
+export type SortResult = {
+  ok: boolean
+  sorted?: number
+  counts?: { keep: number; throwaway: number; doubtful: number }
+  error?: string
+  /** The period this run was limited to, and it inside a sentence (' from the last 30 days'; '' for everything). */
+  period?: SortPeriod
+  periodPhrase?: string
+  /** Screenshots left out because their file is not on this Mac (the Review switch is on); absent when none were. */
+  notOnMacSkipped?: number
+}
 
 export type SorterDeps = {
   wellRoot: () => string
@@ -167,6 +177,10 @@ export type SorterDeps = {
    * the choices the model in use was trained with (null: no current model). Absent: teachDefaults.
    */
   teach?: (c: { learnable: Choices | null; trainedWith: number | null }) => SorterTeachStatus
+  /** Review's "leave screenshots that are not on this Mac out of Review and sorting" (config). On: a sort skips them. */
+  skipNotOnMac?: () => boolean
+  /** A cloud placeholder on disk (store.ts loadUndecided); a test seam. */
+  dataless?: (abs: string) => boolean
   /** One warning line for the log (no screenshot content, no paths). Default: console.warn. */
   log?: (line: string) => void
   now?: () => Date
@@ -209,7 +223,8 @@ export class SorterService {
     try {
       const period = this.period()
       const window = period ? periodWindow(period, this.now()) : null
-      const undecided = loadUndecided(this.deps.wellRoot())
+      const skip = this.skipNotOnMac()
+      const undecided = loadUndecided(this.deps.wellRoot(), this.deps.dataless).filter((s) => !(skip && s.notOnMac))
       const labelled = loadLabelled(this.deps.wellRoot()).filter((s) => s.image)
       this.counts = {
         undecided: { period, inPeriod: window ? undecided.filter((s) => inWindow(s.takenAt, window)).length : null, all: undecided.length },
@@ -217,6 +232,14 @@ export class SorterService {
       }
     } catch {
       /* the last count stays */
+    }
+  }
+
+  private skipNotOnMac(): boolean {
+    try {
+      return this.deps.skipNotOnMac?.() === true
+    } catch {
+      return false
     }
   }
 
@@ -480,6 +503,7 @@ export class SorterService {
     this.abort = ctl
     const counts = { keep: 0, throwaway: 0, doubtful: 0 }
     let sorted = 0
+    let notOnMacSkipped = 0
     const started = this.now()
     const runId = newRunId(started)
     // a sort that ended (or was stopped) is recorded as numbers and the counts are taken again, before the last status goes out
@@ -490,7 +514,7 @@ export class SorterService {
         /* the sort itself stands */
       }
       try {
-        this.deps.saveLastRun?.({ at: this.now().toISOString(), period: window.period, lookedAt: sorted, confident: counts.keep + counts.throwaway, needLook: counts.doubtful })
+        this.deps.saveLastRun?.({ at: this.now().toISOString(), period: window.period, lookedAt: sorted, confident: counts.keep + counts.throwaway, needLook: counts.doubtful, ...(notOnMacSkipped ? { notOnMacSkipped } : {}) })
       } catch {
         /* the sort itself stands */
       }
@@ -499,7 +523,13 @@ export class SorterService {
     try {
       this.withStore((st) => st.startRun({ id: runId, startedAt: started.toISOString(), period: window.period, trigger: opts.trigger === 'nightly' ? 'nightly' : 'manual' }))
       const ctx = { model: rec.model, thresholds: this.thresholds(), rules: appRuleLookup(rules), asked: new Map() as ReturnType<SorterStore['cloudAnswersIn']> }
-      let shots = loadUndecided(this.deps.wellRoot()).filter((s) => inWindow(s.takenAt, window))
+      let shots = loadUndecided(this.deps.wellRoot(), this.deps.dataless).filter((s) => inWindow(s.takenAt, window))
+      // Review's switch: screenshots whose file is a cloud placeholder wait until they are downloaded (counted, not sorted)
+      if (this.skipNotOnMac()) {
+        const here = shots.filter((s) => !s.notOnMac)
+        notOnMacSkipped = shots.length - here.length
+        shots = here
+      }
       if (opts.limit !== undefined) shots = shots.slice(0, Math.max(0, opts.limit))
       // pictures of everything he kept: a look-alike of one of them leans throwaway
       const keptShots = loadLabelled(this.deps.wellRoot()).filter((s) => s.truth === 'keep' && s.image)
@@ -532,13 +562,13 @@ export class SorterService {
       }
       record()
       this.set({ phase: 'idle', done: 0, total: 0, message: '' }, true)
-      return { ok: true, sorted, counts, ...within }
+      return { ok: true, sorted, counts, ...within, ...(notOnMacSkipped ? { notOnMacSkipped } : {}) }
     } catch (e) {
       if (ctl.signal.aborted) {
         // Stop ended the worker mid-chunk: proposals already written stay, nothing more is recorded
         record()
         this.set({ phase: 'idle', done: 0, total: 0, message: '' }, true)
-        return { ok: true, sorted, counts, ...within }
+        return { ok: true, sorted, counts, ...within, ...(notOnMacSkipped ? { notOnMacSkipped } : {}) }
       }
       const msg = (e as Error)?.message ?? String(e)
       try {
@@ -548,7 +578,7 @@ export class SorterService {
         /* the error below is the one reported */
       }
       this.set({ phase: 'error', message: '', error: msg }, true)
-      return { ok: false, sorted, counts, error: msg, ...within }
+      return { ok: false, sorted, counts, error: msg, ...within, ...(notOnMacSkipped ? { notOnMacSkipped } : {}) }
     } finally {
       this.abort = null
     }
