@@ -80,6 +80,8 @@ export type Shot = {
   image: IndexItem | null
   /** A kept screenshot whose original is gone; the well's own (re-encoded) copy is embedded instead. */
   fromWellCopy: boolean
+  /** loadUndecided: no picture here because its file is a cloud placeholder (not on this Mac); a sort may leave it out. */
+  notOnMac?: boolean
 }
 
 export type ProposalRow = { hash: string; proposal: Proposal; confidence: number; pKeep: number; reason: string; rule: string | null; decidedBy?: DecidedBy | null; decidedModel?: string | null }
@@ -154,6 +156,16 @@ function localFile(p: string): { size: number; mtimeMs: number } | null {
     return { size: st.size, mtimeMs: Math.round(st.mtimeMs) }
   } catch {
     return null
+  }
+}
+
+/** A cloud placeholder: the name and size are here, the bytes are not (the triage scan's test). Metadata only. */
+function placeholderFile(p: string): boolean {
+  try {
+    const st = statSync(p)
+    return st.isFile() && st.size > 0 && st.blocks === 0
+  } catch {
+    return false
   }
 }
 
@@ -267,8 +279,11 @@ export function loadLabelled(wellRoot: string): Shot[] {
   }
 }
 
-/** Screenshots in triage with no decision of his (pictures only; videos and placeholders skipped). */
-export function loadUndecided(wellRoot: string): Shot[] {
+/**
+ * Screenshots in triage with no decision of his (pictures only; videos and placeholders skipped). One whose file is a
+ * cloud placeholder on disk (`dataless`; default the scan's own test, metadata only) is marked notOnMac.
+ */
+export function loadUndecided(wellRoot: string, dataless: (abs: string) => boolean = placeholderFile): Shot[] {
   const tdb = openRead(join(wellRoot, 'triage.db'))
   if (!tdb) return []
   try {
@@ -281,7 +296,17 @@ export function loadUndecided(wellRoot: string): Shot[] {
          WHERE f.kind = 'image' AND f.offline = '0' ${decisions ? 'AND d.hash IS NULL' : ''}`
       )
       .all() as TriageJoinRow[]
-    return [...byHash(rows)].map(([hash, g]) => ({ key: `h:${hash}`, hash, facts: factsOf(g.row), takenAt: g.row.taken_at ?? '', image: g.image, fromWellCopy: false }))
+    const groups = byHash(rows)
+    // a screenshot with no picture to read because a copy of it is a cloud placeholder: not on this Mac
+    const away = new Set<string>()
+    for (const r of rows) {
+      if (away.has(r.hash) || !r.source || !r.rel_path || !IMAGE_EXT.test(r.rel_path)) continue
+      const abs = join(r.source, r.rel_path)
+      const image = groups.get(r.hash)?.image
+      if (image && image.path !== abs) continue // a readable copy elsewhere is the one read
+      if (dataless(abs)) away.add(r.hash)
+    }
+    return [...groups].map(([hash, g]) => ({ key: `h:${hash}`, hash, facts: factsOf(g.row), takenAt: g.row.taken_at ?? '', image: g.image, fromWellCopy: false, ...(away.has(hash) ? { notOnMac: true } : {}) }))
   } finally {
     tdb.close()
   }

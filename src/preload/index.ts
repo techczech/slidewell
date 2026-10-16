@@ -230,7 +230,15 @@ export type ReviewOverview = {
   /** Counts with no "how sure" range applied (the same as needALook and confident when none is set). */
   all: { needALook: number; confident: number }
   canUndo: boolean
+  /** Screenshots in Review (need a look and the sorted piles) whose picture is not on this Mac (a cloud placeholder), whatever the range and the switch. */
+  notOnMac: number
+  /** "Leave screenshots that are not on this Mac out of Review and sorting until they are downloaded" (stored; default off). */
+  leaveOutNotOnMac: boolean
 }
+/** Download them, while it runs: `current` = the file being asked for now (1-based), 0 before the first and once it ended. */
+export type ReviewDownloadProgress = { running: boolean; total: number; current: number; done: number; failed: number }
+/** How Download them ended: done = now on this Mac, failed = still not (they stay in the list); message in his words. */
+export type ReviewDownloadResult = { ok: boolean; total: number; done: number; failed: number; cancelled: boolean; message: string }
 /** A "how sure" range, fractions 0.5..1, both ends inclusive (compared as the whole percents the card shows). */
 export type ReviewSure = { min: number; max: number }
 export type ReviewPiles = {
@@ -242,8 +250,10 @@ export type ReviewPiles = {
   bin: { total: number; items: ReviewCard[]; next: string | null; token: string | null } // token: Empty Bin acts only on this set; null when the piles were read under a how-sure range (never a token for part of the Bin)
   canUndo: boolean
 }
-export type ReviewActResult = { ok: boolean; hash: string; message: string; pile?: ReviewPile }
-export type ReviewUndoResult = { ok: boolean; hash?: string; message: string }
+// undoId: set when the act wrote an answer ⌘Z can take back; review.undo answers with the undoId of the act it took back,
+// so the renderer knows exactly which act that was (never by hash alone)
+export type ReviewActResult = { ok: boolean; hash: string; message: string; pile?: ReviewPile; undoId?: number }
+export type ReviewUndoResult = { ok: boolean; hash?: string; message: string; undoId?: number }
 // changed: Bin items that changed between his confirm and the write (rescued, re-decided) and were left alone
 export type EmptyBinResult = { ok: boolean; emptied: number; changed: number; message: string }
 // Review answers given on cards that had no picture (review/rescue.ts): kept = keptImported + keptNotImported.
@@ -252,10 +262,16 @@ export type EmptyBinResult = { ok: boolean; emptied: number; changed: number; me
 // picture: why the card had no picture; recorded: true = as recorded when he answered, false = an older answer, as it is on this Mac now
 export type ReviewBlindItem = { hash: string; filename: string; answer: 'keep' | 'throwaway'; picture: 'not-downloaded' | 'missing' | 'none'; recorded: boolean; putBack: boolean }
 export type ReviewBlindAnswers = { thrownAway: number; kept: number; keptImported: number; keptNotImported: number; emptied: number; items: ReviewBlindItem[]; token: string }
+// Look again (answersSince): every Review answer still standing since a date, newest answer first, each as the card shows it now.
+// kept + thrownAway = total; items is one page (limit at most 200); next is an opaque cursor (null = no more).
+export type ReviewAnsweredCard = ReviewCard & { answer: 'keep' | 'throwaway'; answeredAt: string }
+export type ReviewAnswersSince = { total: number; kept: number; thrownAway: number; items: ReviewAnsweredCard[]; next: string | null }
 /** `retrain`: an id for the retrain asked for after the answers went back (pass it to review.rescueRetrain). */
 export type ReviewRescueResult = { ok: boolean; reset: number; error?: string; retrain?: number }
 /** How that retrain ended: ok, or the reason it did not finish. */
 export type ReviewRescueRetrain = { ok: boolean; error?: string }
+/** Look again's Done: the retrain was asked for (ok, with an id for review.rescueRetrain), or why it was not. */
+export type ReviewRetrainAsked = { ok: boolean; retrain?: number; error?: string }
 // keyset paging: `next` is an opaque cursor (null = no more); pass it to review.page
 export type ReviewPage = { total: number; items: ReviewCard[]; next: string | null }
 export type TriageCounts = { undecided: number; selected: number; included: number; excluded: number; total: number }
@@ -451,12 +467,13 @@ export type SorterLearning = {
   error?: string // why there are no points although there are enough choices
 }
 // One sort on this Mac: when it ended, its period, how many it looked at, how many got keep or throwaway, how many stayed doubtful.
-export type SorterLocalRun = { at: string; period: SortPeriod; lookedAt: number; confident: number; needLook: number }
+// notOnMacSkipped: left out because their file is not on this Mac (Review's switch on); absent when none were
+export type SorterLocalRun = { at: string; period: SortPeriod; lookedAt: number; confident: number; needLook: number; notOnMacSkipped?: number }
 // The period a manual sort is limited to, by each screenshot's capture time (src/main/sorter/period.ts).
 // The renderer only names one of these; main stores it, works out the cut-off from its own clock and
 // refuses anything else. The nightly sort ignores it.
 export type SortPeriod = '7d' | '30d' | '90d' | 'all'
-export type SortResult = { ok: boolean; sorted?: number; counts?: { keep: number; throwaway: number; doubtful: number }; error?: string; period?: SortPeriod; periodPhrase?: string }
+export type SortResult = { ok: boolean; sorted?: number; counts?: { keep: number; throwaway: number; doubtful: number }; error?: string; period?: SortPeriod; periodPhrase?: string; notOnMacSkipped?: number }
 
 // Screenshot sorter, cloud step (tickets 07, 16). Same shapes as src/main/sorter/cloud/service.ts.
 // provider = which company is asked: OpenAI (Luna) or Anthropic (Haiku).
@@ -754,10 +771,24 @@ const api = {
   // Review screen (ticket 08). act/undo/emptyBin write his decisions; nothing here deletes or moves any
   // file. emptyBin needs the token of the Bin he confirmed and only hides those items for good.
   review: {
-    overview: (opts?: { queue?: number; sample?: number; order?: 'newest' | 'teach'; sure?: ReviewSure }): Promise<ReviewOverview> => ipcRenderer.invoke('review:overview', opts ?? {}),
-    piles: (opts?: { kept?: number; throwaway?: number; bin?: number; sure?: ReviewSure }): Promise<ReviewPiles> => ipcRenderer.invoke('review:piles', opts ?? {}),
+    // notOnMac: true = only the screenshots whose picture is not on this Mac (the Not on this Mac view)
+    overview: (opts?: { queue?: number; sample?: number; order?: 'newest' | 'teach'; sure?: ReviewSure; notOnMac?: boolean }): Promise<ReviewOverview> => ipcRenderer.invoke('review:overview', opts ?? {}),
+    piles: (opts?: { kept?: number; throwaway?: number; bin?: number; sure?: ReviewSure; notOnMac?: boolean }): Promise<ReviewPiles> => ipcRenderer.invoke('review:piles', opts ?? {}),
     // the page after a cursor (keyset; no cap on how far)
-    page: (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number, sure?: ReviewSure): Promise<ReviewPage> => ipcRenderer.invoke('review:page', pile, after, limit, sure),
+    page: (pile: 'kept' | 'throwaway' | 'bin', after: string | null, limit?: number, sure?: ReviewSure, notOnMac?: boolean): Promise<ReviewPage> =>
+      ipcRenderer.invoke('review:page', pile, after, limit, sure, ...(notOnMac === undefined ? [] : [notOnMac])),
+    // Not on this Mac: ask the cloud provider for each one in that view (under the range when set), one at a time; Cancel stops it.
+    // Progress streams through onDownloadProgress; downloadStatus answers while one runs (null when none does)
+    downloadNotOnMac: (sure?: ReviewSure): Promise<ReviewDownloadResult> => ipcRenderer.invoke('review:download-not-on-mac', ...(sure === undefined ? [] : [sure])),
+    cancelDownload: (): Promise<boolean> => ipcRenderer.invoke('review:download-cancel'),
+    downloadStatus: (): Promise<ReviewDownloadProgress | null> => ipcRenderer.invoke('review:download-status'),
+    onDownloadProgress: (cb: (p: ReviewDownloadProgress) => void): (() => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, p: ReviewDownloadProgress): void => cb(p)
+      ipcRenderer.on('review:download-progress', handler)
+      return () => ipcRenderer.removeListener('review:download-progress', handler)
+    },
+    // "Leave screenshots that are not on this Mac out of Review and sorting until they are downloaded"; answers what is stored now
+    setLeaveOutNotOnMac: (on: boolean): Promise<boolean> => ipcRenderer.invoke('review:set-leave-out-not-on-mac', on),
     // the cards of up to 200 screenshots by hash, in the order asked for; one in the Bin, emptied or no longer in review is left out
     cards: (hashes: string[]): Promise<ReviewCard[]> => ipcRenderer.invoke('review:cards', hashes),
     // shownPicture: the picture state the card was shown with (ReviewShot shownPicture); main records the worse of it and its own check
@@ -768,8 +799,13 @@ const api = {
     // answers given on cards with no picture since `since` (an ISO date-time), and putting exactly that set back to undecided
     blindAnswers: (since?: string): Promise<ReviewBlindAnswers> => ipcRenderer.invoke('review:blind-answers', ...(since === undefined ? [] : [since])),
     rescueBlind: (token: string, since?: string): Promise<ReviewRescueResult> => ipcRenderer.invoke('review:rescue-blind', token, ...(since === undefined ? [] : [since])),
-    // answers when the retrain rescueBlind asked for (its `retrain` id) has ended; null for an id it does not know
-    rescueRetrain: (id: number): Promise<ReviewRescueRetrain | null> => ipcRenderer.invoke('review:rescue-retrain', id)
+    // every Review answer still standing since `since` (ISO date-time), newest first, paged by cursor; reads only
+    answersSince: (since: string, after?: string | null, limit?: number): Promise<ReviewAnswersSince> => ipcRenderer.invoke('review:answers-since', since, after ?? null, limit),
+    // answers when the retrain rescueBlind or retrainAfterAnswers asked for (its `retrain` id) has ended; null for an id it does not know
+    rescueRetrain: (id: number): Promise<ReviewRescueRetrain | null> => ipcRenderer.invoke('review:rescue-retrain', id),
+    // Look again's Done: one training that starts after every answer written so far, however busy the sorter and whatever the
+    // auto-retrain switch says (sorter/retrain.ts retrainAfterChange); answers as soon as it is asked for, not when it ends
+    retrainAfterAnswers: (): Promise<ReviewRetrainAsked> => ipcRenderer.invoke('review:retrain-after-answers')
   },
   // One-off backlog import (ticket 13). dryRun writes nothing; run needs the id of the plan just shown.
   backlog: {

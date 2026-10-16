@@ -4,7 +4,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReviewCard, ReviewOverview, ReviewPiles, ReviewSure } from '../../preload'
 import { ReviewBlind } from './ReviewBlind'
+import { ReviewLookAgain, ReviewLookBanner } from './ReviewLookAgain'
 import { ReviewMoved } from './ReviewMoved'
+import { NotOnMacBar, NotOnMacChip } from './ReviewNotOnMac'
+import { afterUndo, answerOf, changeAnswer, noteAct, recordAnswer, session, standingAnswer, type Answer, type HistoryEntry } from './review-history'
 import { Shot, shownPicture } from './ReviewShot'
 import { ReviewStrip } from './ReviewStrip'
 import { SureFilter, sureWords, pctOf } from './ReviewSure'
@@ -19,12 +22,12 @@ const PAGE = 60
  * Page through one pile (keyset cursors) until `want` items are in hand or the pile ends. No cap.
  * Pages are joined by hash, so an item that moved between pages is never shown twice.
  */
-async function fetchUpTo(pile: PileName, first: ReviewCard[], next: string | null, want: number, sure?: ReviewSure): Promise<ReviewCard[]> {
+async function fetchUpTo(pile: PileName, first: ReviewCard[], next: string | null, want: number, sure?: ReviewSure, notOnMac?: boolean): Promise<ReviewCard[]> {
   const seen = new Set(first.map((c) => c.hash))
   const items = [...first]
   let cursor = next
   while (items.length < want && cursor) {
-    const pg = await window.sw.review.page(pile, cursor, 500, sure)
+    const pg = await window.sw.review.page(pile, cursor, 500, sure, notOnMac || undefined)
     for (const c of pg.items) if (!seen.has(c.hash)) (seen.add(c.hash), items.push(c))
     cursor = pg.next
   }
@@ -35,8 +38,10 @@ import './teach.css'
 
 // The how-sure range lives for the session (until the window closes): kept here so leaving Review and coming back keeps it. Never saved.
 let sessionSure: ReviewSure | null = null
+// The Not on this Mac view is on or off for the session too
+let sessionNotOnMac = false
 
-type Mode = 'doubtful' | 'piles' | 'moved'
+type Mode = 'doubtful' | 'piles' | 'moved' | 'again'
 const TEACH_KEY = 'sw.review.teachFirst' // remembered in this profile's own storage; on unless he switched it off
 type Column = 'kept' | 'right'
 const KEPT_COLS = 4
@@ -83,6 +88,22 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
     sessionSure = r
     setSureState(r)
   }, [])
+  const [notOnMac, setNotOnMacState] = useState(sessionNotOnMac)
+  const setNotOnMac = useCallback((on: boolean): void => {
+    sessionNotOnMac = on
+    setNotOnMacState(on)
+  }, [])
+  // Step back: this session's answers in the queue (review-history.ts) and how far back he is (0 = the current card)
+  const [history, setHistoryState] = useState<HistoryEntry[]>(session.history)
+  const setHistory = useCallback((f: (h: HistoryEntry[]) => HistoryEntry[]): void => {
+    session.history = f(session.history)
+    setHistoryState(session.history)
+  }, [])
+  const [back, setBack] = useState(0)
+  const stepped: HistoryEntry | null = back > 0 ? history[history.length - back] ?? null : null
+  // the card he stepped back to, as main has it now (review.cards): shown and compared against, never the history's copy.
+  // `card` null: it is no longer in Need a look, Kept or Throwaway (in the Bin, emptied, gone).
+  const [fresh, setFresh] = useState<{ hash: string; card: ReviewCard | null } | null>(null)
   const st = useSorterStatus()
   const busy = useRef(false)
   // Every load takes a number; only the newest one may publish. A load that a newer one (another range, Show all, an answer)
@@ -105,20 +126,20 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
   const load = useCallback(async (): Promise<void> => {
     const mine = ++generation.current
     const stillNewest = (): boolean => mine === generation.current
-    const o = await window.sw.review.overview({ queue: 50, sample: 12, order: teachFirst ? 'teach' : 'newest', ...(sure ? { sure } : {}) })
+    const o = await window.sw.review.overview({ queue: 50, sample: 12, order: teachFirst ? 'teach' : 'newest', ...(sure ? { sure } : {}), ...(notOnMac ? { notOnMac } : {}) })
     if (!stillNewest()) return
     setOv(o)
     onCount(o.all.needALook) // the tab's count is never filtered
     if (mode === 'piles') {
-      const p = await window.sw.review.piles({ kept: PAGE, throwaway: PAGE, bin: PAGE, ...(sure ? { sure } : {}) })
+      const p = await window.sw.review.piles({ kept: PAGE, throwaway: PAGE, bin: PAGE, ...(sure ? { sure } : {}), ...(notOnMac ? { notOnMac } : {}) })
       if (!stillNewest()) return
       const [kept, throwaway, bin] = await Promise.all(
-        (['kept', 'throwaway', 'bin'] as const).map((k) => fetchUpTo(k, p[k].items, p[k].next, shown[k], sure ?? undefined))
+        (['kept', 'throwaway', 'bin'] as const).map((k) => fetchUpTo(k, p[k].items, p[k].next, shown[k], sure ?? undefined, notOnMac))
       )
       if (!stillNewest()) return
       setPiles({ ...p, kept: { ...p.kept, items: kept }, throwaway: { ...p.throwaway, items: throwaway }, bin: { ...p.bin, items: bin } })
     }
-  }, [mode, shown, onCount, teachFirst, sure])
+  }, [mode, shown, onCount, teachFirst, sure, notOnMac])
   // An answer or undo reads the queue again when its write returns. That may be after the range changed, so it must
   // call the latest load (this render's range), not the one captured when the answer began.
   const loadRef = useRef(load)
@@ -156,8 +177,9 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
   }, [ov, skipped, front])
   const current = queue[0] ?? null
 
+  // `fromQueue`: an answer to the need-a-look card, which step back remembers
   const act = useCallback(
-    async (card: ReviewCard | null, action: 'keep' | 'throwaway' | 'rescue'): Promise<void> => {
+    async (card: ReviewCard | null, action: 'keep' | 'throwaway' | 'rescue', fromQueue = false): Promise<void> => {
       if (!card || busy.current) return
       busy.current = true
       try {
@@ -166,6 +188,12 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
         if (r.ok) {
           setSkipped((s) => s.filter((h) => h !== card.hash))
           if (front === card.hash) setFront(null)
+          // every act main can undo goes in the session's log (the piles too), so ⌘Z knows exactly which one it took back
+          noteAct(r.undoId, card.hash, fromQueue ? 'queue' : 'pile')
+          const undoId = r.undoId
+          if (fromQueue && typeof undoId === 'number') {
+            setHistory((h) => recordAnswer(h, card, action === 'throwaway' ? 'throwaway' : 'keep', new Date().toISOString(), undoId))
+          }
         }
       } catch {
         onToast('That answer did not go through. Press the key again to try once more.')
@@ -175,8 +203,49 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
         busy.current = false
       }
     },
-    [onToast, front]
+    [onToast, front, setHistory]
   )
+
+  // A different answer on a card he stepped back to: an ordinary answer (main records the picture as shown); then back to
+  // where he was. The same answer writes nothing. "Same" is judged on the card as main has it now, read afresh here (an
+  // answer in the piles, Look again or Triage may have changed it since), never on the history's record.
+  const changeTo = useCallback(
+    async (entry: HistoryEntry, answer: Answer): Promise<void> => {
+      if (busy.current) return
+      busy.current = true
+      let wrote = false
+      try {
+        const hash = entry.card.hash
+        const [now] = await window.sw.review.cards([hash])
+        setFresh({ hash, card: now ?? null })
+        if (!now) {
+          onToast('This screenshot is no longer in Need a look, Kept or Throwaway. Nothing changed.')
+          return
+        }
+        if (standingAnswer(now) === answer) {
+          onToast(answer === 'keep' ? 'You kept this already. Nothing changed.' : 'You threw this away already. Nothing changed.')
+          return
+        }
+        wrote = true
+        const r = await window.sw.review.act(hash, answer, shownPicture(now))
+        onToast(r.message)
+        const undoId = r.undoId
+        if (r.ok && typeof undoId === 'number') {
+          noteAct(undoId, hash, 'change')
+          setHistory((h) => changeAnswer(h, hash, answer, new Date().toISOString(), undoId))
+          setBack(0)
+        }
+      } catch {
+        onToast('That answer did not go through. Press the key again to try once more.')
+      } finally {
+        if (wrote) await loadRef.current().catch(() => undefined)
+        busy.current = false
+      }
+    },
+    [onToast, setHistory]
+  )
+  const stepBack = useCallback((): void => setBack((b) => Math.min(history.length, b + 1)), [history.length])
+  const stepForward = useCallback((): void => setBack((b) => Math.max(0, b - 1)), [])
 
   const undo = useCallback(async (): Promise<void> => {
     if (busy.current) return
@@ -185,8 +254,11 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
       const r = await window.sw.review.undo()
       onToast(r.message)
       if (r.ok && r.hash) {
-        setSkipped((s) => s.filter((h) => h !== r.hash))
-        setFront(r.hash)
+        const hash = r.hash
+        setSkipped((s) => s.filter((h) => h !== hash))
+        setFront(hash)
+        setHistory((h) => afterUndo(h, r.undoId))
+        setBack(0)
       }
     } catch {
       onToast('Undo did not go through; press ⌘Z to try again.')
@@ -194,7 +266,30 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
       await loadRef.current().catch(() => undefined)
       busy.current = false
     }
-  }, [onToast])
+  }, [onToast, setHistory])
+
+  // stepping back only ever counts the answers there are; leaving the queue comes back to the current card
+  useEffect(() => {
+    if (back > history.length) setBack(history.length)
+  }, [back, history.length])
+  useEffect(() => {
+    if (mode !== 'doubtful') setBack(0)
+    // Look again's ⌘Z goes through the same session log and may have changed it
+    if (mode !== 'again') setHistoryState(session.history)
+  }, [mode])
+  // read the stepped-back card from main whenever he steps to it and whenever Review is read again
+  const steppedHash = stepped?.card.hash ?? null
+  useEffect(() => {
+    if (!steppedHash) return
+    let live = true
+    window.sw.review
+      .cards([steppedHash])
+      .then(([c]) => live && setFresh({ hash: steppedHash, card: c ?? null }))
+      .catch(() => undefined)
+    return () => {
+      live = false
+    }
+  }, [steppedHash, ov])
 
   const skip = useCallback((): void => {
     if (!current) return
@@ -245,6 +340,7 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
         }
         return
       }
+      if (mode === 'again') return // Look again owns the keyboard
       if (cmd && e.key.toLowerCase() === 'z') {
         e.preventDefault()
         void undo()
@@ -254,10 +350,17 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
       const k = e.key.toLowerCase()
       if (mode === 'moved') return
       if (mode === 'doubtful') {
-        if (k === 'k') void act(current, 'keep')
-        else if (k === 't') void act(current, 'throwaway')
-        else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') skip()
-        else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') unskip()
+        if (e.key === 'ArrowLeft') stepBack()
+        else if (e.key === 'ArrowRight') stepForward()
+        else if (stepped) {
+          // a card he answered before: K / T change the answer; nothing else applies to it
+          if (k === 'k') void changeTo(stepped, 'keep')
+          else if (k === 't') void changeTo(stepped, 'throwaway')
+          else return
+        } else if (k === 'k') void act(current, 'keep', true)
+        else if (k === 't') void act(current, 'throwaway', true)
+        else if (e.key === 'ArrowDown') skip()
+        else if (e.key === 'ArrowUp') unskip()
         else return
         e.preventDefault()
         return
@@ -279,7 +382,7 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [mode, current, act, undo, skip, unskip, focus, keptItems.length, rightItems.length, focusedCard, confirmEmpty])
+  }, [mode, current, act, undo, skip, unskip, focus, keptItems.length, rightItems.length, focusedCard, confirmEmpty, stepped, changeTo, stepBack, stepForward])
 
   useEffect(() => {
     document.querySelector('.rv-focus')?.scrollIntoView({ block: 'nearest' })
@@ -290,9 +393,28 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
   const when = sortedWhen(ov.lastSortedAt)
   const confidentTotal = ov.confident.kept + ov.confident.throwaway
   const sureCounts = { needALook: ov.needALook, needAll: ov.all.needALook, confident: confidentTotal, confidentAll: ov.all.confident }
-  const sureTag = sure ? ` · how sure ${sureWords(sure)}` : ''
-  const sureFilter = <SureFilter value={sure} onChange={setSure} counts={sureCounts} />
+  const sureTag = `${notOnMac ? ' · not on this Mac' : ''}${sure ? ` · how sure ${sureWords(sure)}` : ''}`
+  const sureFilter = (
+    <>
+      <SureFilter value={sure} onChange={setSure} counts={sureCounts} />
+      <NotOnMacChip count={ov.notOnMac} on={notOnMac} onChange={setNotOnMac} />
+    </>
+  )
+  const cloudBar = notOnMac ? <NotOnMacBar sure={sure} leaveOut={ov.leaveOutNotOnMac} onChanged={() => void loadRef.current().catch(() => undefined)} onToast={onToast} /> : null
+  // the big card: the current one, or one he stepped back to, as main has it now (with his answer that stands on it)
+  const now = stepped && fresh?.hash === stepped.card.hash ? fresh : null
+  const shownCard = stepped ? (now?.card ?? stepped.card) : current
+  const standing = now ? standingAnswer(now.card) : null
+  // when: the time this session recorded, only if that answer is the one that stands now
+  const answered: { answer: Answer | null; at: string | null } | null = !stepped || !now ? null : { answer: standing, at: standing && answerOf(stepped).answer === standing ? answerOf(stepped).at : null }
+  const press = (a: Answer): void => {
+    if (stepped) void changeTo(stepped, a)
+    else void act(current, a, true)
+  }
 
+  if (mode === 'again') {
+    return <ReviewLookAgain onBack={() => setMode('doubtful')} onFinished={() => { setMode('doubtful'); void loadRef.current().catch(() => undefined) }} onToast={onToast} />
+  }
   if (mode === 'moved') return <ReviewMoved hashes={movedHashes} onBack={() => setMode('doubtful')} />
 
   if (mode === 'piles') {
@@ -308,6 +430,7 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
             ‹ Back to doubtful {ov.needALook > 0 && <span className="rv-n">{ov.needALook}</span>}
           </button>
         </div>
+        {cloudBar}
         <div className="rv-pl-main">
           <section className="rv-pl-left" aria-label="Slide material">
             <div className="rv-pl-h">
@@ -440,6 +563,7 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
     <div className="rv-screen" data-mode="doubtful">
       <ReviewStrip needALook={ov.all.needALook} onSeeMoved={(h) => { setMovedHashes(h); setMode('moved') }} onOpenAutoSorting={onOpenAutoSorting} onToast={onToast} />
       <ReviewBlind refreshKey={ov} onChanged={() => void loadRef.current().catch(() => undefined)} />
+      <ReviewLookBanner refreshKey={ov} onOpen={() => setMode('again')} />
       <div className="rv-head">
         <h1>{ov.needALook} need a look{sureTag}</h1>
         <span className="rv-sub">{confidentTotal} sorted confidently</span>
@@ -462,18 +586,26 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
           <span className="rv-icon"><i /><i /></span>Show both piles
         </button>
       </div>
+      {cloudBar}
       <div className="rv-main">
-        {current ? (
-          <div className="rv-big" data-hash={current.hash}>
-            <Shot key={current.hash} card={current} caption={takenLabel(current)} className="rv-big-shot" />
+        {shownCard ? (
+          <div className={`rv-big${stepped ? ' rv-stepped' : ''}`} data-hash={shownCard.hash} data-stepped={stepped ? String(back) : undefined}>
+            <Shot key={shownCard.hash} card={shownCard} caption={takenLabel(shownCard)} className="rv-big-shot" />
             <div className="rv-body">
-              <div className="rv-fn">{current.filename}</div>
+              {answered && (
+                <div className={`rv-answered ${answered.answer === 'keep' ? 'keep' : answered.answer ? 'toss' : ''}`} data-testid="answered">
+                  <b>{answered.answer === 'keep' ? 'You kept this' : answered.answer ? 'You threw this away' : now?.card ? 'No answer of yours stands on this now' : 'No longer in Review'}</b>
+                  {answered.at && whenWords(answered.at) ? `, ${whenWords(answered.at)}` : ''}
+                  <span className="rv-answered-hint">{back === 1 ? 'Your last answer.' : `${back} answers back.`} Press K or T to change it, → to go forward.</span>
+                </div>
+              )}
+              <div className="rv-fn">{shownCard.filename}</div>
               <div className="rv-am">
-                {current.app || current.windowTitle ? (
+                {shownCard.app || shownCard.windowTitle ? (
                   <>
-                    <b>{current.app ?? ''}</b>
-                    {current.app && current.windowTitle ? ' · ' : ''}
-                    {current.windowTitle ?? ''}
+                    <b>{shownCard.app ?? ''}</b>
+                    {shownCard.app && shownCard.windowTitle ? ' · ' : ''}
+                    {shownCard.windowTitle ?? ''}
                   </>
                 ) : (
                   <span className="rv-muted">No app or window recorded</span>
@@ -481,13 +613,13 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
               </div>
               <div className="rv-why-l">Why it is asking</div>
               <p className="rv-why">
-                {current.why || current.reason}
-                {asked(current.decidedBy) && <span className="rv-why-step"> · {asked(current.decidedBy)}</span>}
+                {shownCard.why || shownCard.reason}
+                {asked(shownCard.decidedBy) && <span className="rv-why-step"> · {asked(shownCard.decidedBy)}</span>}
               </p>
               {(() => {
-                const c = certainty(current.pKeep, current.leans)
+                const c = certainty(shownCard.pKeep, shownCard.leans)
                 const t = st?.report?.thresholds
-                const need = t ? Math.round((current.leans === 'keep' ? t.keep : t.throwaway) * 100) : null
+                const need = t ? Math.round((shownCard.leans === 'keep' ? t.keep : t.throwaway) * 100) : null
                 return (
                   <div className="rv-cert" data-testid="certainty">
                     <div className="rv-cert-head">
@@ -502,25 +634,34 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
                       <span><b>Throwaway</b> {c.throwaway}%</span>
                     </div>
                     <p className="rv-cert-note">
-                      {need !== null ? `It counts as sure at ${need}%. ` : ''}Question 1 of {ov.needALook}{teachFirst ? ', most unsure first' : ''}.
+                      {need !== null ? `It counts as sure at ${need}%. ` : ''}
+                      {stepped ? '' : `Question 1 of ${ov.needALook}${teachFirst ? ', most unsure first' : ''}.`}
                     </p>
                   </div>
                 )
               })()}
-              <p className="rv-lean">
-                If you skip it, it stays <b>kept</b>. Only sure throwaways go to the Throwaway pile.
-              </p>
+              {!stepped && (
+                <p className="rv-lean">
+                  If you skip it, it stays <b>kept</b>. Only sure throwaways go to the Throwaway pile.
+                </p>
+              )}
               <div className="rv-btns">
-                <button className="rv-btn-big keep" onClick={() => void act(current, 'keep')}>
+                <button className="rv-btn-big keep" aria-pressed={answered ? answered.answer === 'keep' : undefined} onClick={() => press('keep')}>
                   <kbd>K</kbd>
                   <span>Keep<small>slide material</small></span>
                 </button>
-                <button className="rv-btn-big toss" onClick={() => void act(current, 'throwaway')}>
+                <button className="rv-btn-big toss" aria-pressed={answered ? answered.answer === 'throwaway' : undefined} onClick={() => press('throwaway')}>
                   <kbd>T</kbd>
                   <span>Throwaway<small>bin in 30 days</small></span>
                 </button>
               </div>
             </div>
+          </div>
+        ) : notOnMac ? (
+          <div className="rv-big rv-done" data-testid="cloud-empty">
+            <h2>Nothing that needs a look is waiting to be downloaded{sure ? ` between ${pctOf(sure.min)}% and ${pctOf(sure.max)}% sure` : ''}.</h2>
+            {confidentTotal > 0 && <p>{confidentTotal} sorted confidently {confidentTotal === 1 ? 'is' : 'are'} not on this Mac; Show both piles to see them.</p>}
+            <button className="rv-sure-btn rv-sure-empty-btn" onClick={() => setNotOnMac(false)}>Show all</button>
           </div>
         ) : sure ? (
           <div className="rv-big rv-done" data-testid="sure-empty">
@@ -558,7 +699,11 @@ export function ReviewScreen({ onCount, onToast, onOpenAutoSorting }: { onCount:
             </div>
           ))}
           <div className="rv-keys">
-            <kbd>K</kbd> keep &nbsp; <kbd>T</kbd> throwaway &nbsp; <kbd>↓</kbd> skip &nbsp; <kbd>⌘Z</kbd> undo
+            <kbd>K</kbd> keep &nbsp; <kbd>T</kbd> throwaway &nbsp; <kbd>↓</kbd> skip &nbsp; <kbd>←</kbd> back &nbsp; <kbd>⌘Z</kbd> undo
+            <span className="rv-step-btns">
+              <button className="rv-step-btn" data-testid="step-back" disabled={back >= history.length} onClick={stepBack}>‹ Back</button>
+              {back > 0 && <button className="rv-step-btn" data-testid="step-forward" onClick={stepForward}>Forward ›</button>}
+            </span>
           </div>
         </aside>
       </div>

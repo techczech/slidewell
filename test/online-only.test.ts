@@ -84,6 +84,42 @@ describe('downloadOnlineOnly (real child)', () => {
     await expect(downloadOnlineOnly(file, { timeoutMs: 10_000, root, onSpawn: swapIn((at) => execFileSync('mkfifo', [at])) })).rejects.toMatchObject({ code: 'ENOTREG' })
   })
 
+  it('a folder on the way swapped for a link between the checks and the read is seen where it really is: refused', async () => {
+    // Shots/a.png in the root; Elsewhere/a.png outside it. The swaps run at the test seam after each of this process's
+    // checks: the file's lstat sees the outside file (Shots is a link then), the folder's real path sees the real Shots,
+    // and the child is started with Shots a link again. Only the child's own check, on the folder it holds, can see that.
+    const shots = join(root, 'Shots')
+    mkdirSync(shots)
+    const inner = join(shots, 'a.png')
+    writeFileSync(inner, 'mine')
+    const out = join(dir, 'Elsewhere')
+    mkdirSync(out)
+    writeFileSync(join(out, 'a.png'), 'not in the root')
+    const parked = join(root, 'Shots-real')
+    const link = join(dir, 'link-to-elsewhere')
+    symlinkSync(out, link)
+    const toLink = (): void => (renameSync(shots, parked), renameSync(link, shots))
+    const toReal = (): void => (renameSync(shots, link), renameSync(parked, shots))
+    toLink()
+    let spawned = 0
+    const steps: string[] = []
+    await expect(
+      downloadOnlineOnly(inner, { timeoutMs: 10_000, root, onSpawn: () => void spawned++, onCheck: (s) => (steps.push(s), s === 'lstat' ? toReal() : toLink()) })
+    ).rejects.toMatchObject({ code: 'EOUTSIDE' })
+    expect(steps).toEqual(['lstat', 'realpath'])
+    expect(spawned).toBe(1) // this process's checks passed; the child refused
+  })
+
+  it('the child checks containment itself: a file whose folder is inside the root still downloads', async () => {
+    mkdirSync(join(root, 'Shots'))
+    const inner = join(root, 'Shots', 'a.png')
+    writeFileSync(inner, 'mine')
+    await downloadOnlineOnly(inner, { timeoutMs: 10_000, root })
+    // a link to the root's own folder resolves inside it, so the child (which sees the real folder) accepts it too
+    symlinkSync(join(root, 'Shots'), join(root, 'Alias'))
+    await downloadOnlineOnly(join(root, 'Alias', 'a.png'), { timeoutMs: 10_000, root })
+  })
+
   it('Stop during the checks: no child is started', async () => {
     let spawned = 0
     const stop = new AbortController()

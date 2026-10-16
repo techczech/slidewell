@@ -122,6 +122,9 @@ type Config = {
   sorterLastRetrain?: SorterRetrain
   // the "how much is enough" reading for one training (learning.ts storedLearning reads it; anything else = none)
   sorterLearning?: { key: string; learning: SorterLearning }
+  // "Leave screenshots that are not on this Mac out of Review and sorting until they are downloaded" (Review's Not on this
+  // Mac view): only true = on; absent or anything else = off. Read by the review service and by a sort on this Mac
+  reviewLeaveOutNotOnMac?: boolean
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
@@ -458,7 +461,8 @@ app.whenReady().then(() => {
     lastRun: () => readConfig().sorterLastRun,
     saveLastRun: (r) => writeConfig({ sorterLastRun: r }),
     appRules: () => readConfig().sorterAppRules,
-    teach: (c) => retrainer.status(c)
+    teach: (c) => retrainer.status(c),
+    skipNotOnMac: () => readConfig().reviewLeaveOutNotOnMac === true
   })
   // --- teaching the sorter (ticket 22; sorter/retrain.ts): one retrain routine for Train, the end of a round and
   // the retrain by itself after ten answers. It trains, tests and re-scores existing proposals of undecided
@@ -568,7 +572,17 @@ app.whenReady().then(() => {
     why: whyReader({ wellRoot: wellRootResolved, storedVectors: (ids) => pics.lookAlikeInputs(ids).vectors }),
     // blind answers put back (review/rescue.ts): a retrain like Retrain now, so the strip reports what changed;
     // one already running may hold the old answers, so a fresh one follows it rather than joining it
-    retrain: () => retrainer.retrainAfterChange('manual')
+    retrain: () => retrainer.retrainAfterChange('manual'),
+    // Not on this Mac (review/download.ts): the switch, the progress of Download them, and files that came down
+    leaveOutNotOnMac: () => readConfig().reviewLeaveOutNotOnMac === true,
+    saveLeaveOutNotOnMac: (on) => writeConfig({ reviewLeaveOutNotOnMac: on }),
+    downloadProgress: (p) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('review:download-progress', p)
+    },
+    downloaded: () => {
+      pictureSearch?.poke()
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('triage:changed')
+    }
   })
   registerReviewIpc(review, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
   registerTeachIpc({
@@ -1172,6 +1186,7 @@ app.whenReady().then(() => {
     try {
       for (const s of sources) {
         const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, await scanOptionsFor(s, o))
+        review.filesChanged() // Review's Not on this Mac answers are worked out again (review/not-on-mac-cache.ts)
         sum.indexed += res.indexed
         sum.total += res.total
         sum.offline += res.offline
@@ -1193,7 +1208,10 @@ app.whenReady().then(() => {
     if (!s) return
     void scanOptionsFor(s)
       .then((o) => scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, o))
-      .then(() => mainWindow?.webContents.send('triage:changed'))
+      .then(() => {
+        review.filesChanged()
+        mainWindow?.webContents.send('triage:changed')
+      })
       .catch(() => undefined)
   })
   refreshWatchers = (): void => watcher.setSources(triageSources().map((s) => ({ path: s.path, recursive: !s.namedOnly })))
