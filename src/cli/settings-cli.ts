@@ -9,7 +9,7 @@ import { runSettingsCli, type LockOptions, type SettingsCliIO } from '@bridle/se
 import { registry } from '../shared/commands'
 import { APP_ID, APP_NAME, migrateLegacy, schema } from '../shared/settings-schema'
 import { migrateFromConfig, stampMigration } from '../main/settings-migration'
-import { installWriteRules } from '../main/settings-rules'
+import { libraryFolderRule } from '../main/settings-rules'
 import { userDataDir } from './paths'
 
 export function appVersion(): string {
@@ -21,7 +21,6 @@ const processIO = { stdout: (t: string): void => void process.stdout.write(t), s
 
 /** `dir`, `io` and `lock` (how long to wait for the settings file) are injectable for tests; by default the real userData folder and the terminal. */
 export async function run(argv: string[], io: SettingsCliIO = processIO, dir: string = userDataDir(), lock?: LockOptions): Promise<number> {
-  installWriteRules() // the library-folder rule applies to the CLI's store too
   // Run before the app has started this version: move config.json's preferences first, exactly as the app
   // would, so the CLI never creates an empty settings.json that would hide them.
   const version = appVersion()
@@ -35,7 +34,7 @@ export async function run(argv: string[], io: SettingsCliIO = processIO, dir: st
   }
   const code = await runSettingsCli(
     argv,
-    { app: APP_ID, appName: APP_NAME, dir, schema, registry: commandsAdapter(registry), version, migrate: migrateLegacy, ...(lock ? { lock } : {}) },
+    { app: APP_ID, appName: APP_NAME, dir, schema, registry: commandsAdapter(registry), version, migrate: migrateLegacy, beforeWrite: libraryFolderRule, ...(lock ? { lock } : {}) },
     io
   )
   try {

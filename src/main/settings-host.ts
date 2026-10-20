@@ -10,7 +10,7 @@ import { installSettings, type SecretSlots, type SettingsHost } from '@bridle/se
 import { MAIN_COMMANDS, MENUS, NO_CONTEXT, registry, type CommandContext } from '../shared/commands'
 import { APP_ID, migrateLegacy, schema } from '../shared/settings-schema'
 import { migrateFromConfig, stampMigration } from './settings-migration'
-import { installWriteRules } from './settings-rules'
+import { libraryFolderRule } from './settings-rules'
 
 /** Custom pages of the Settings window (renderer/src/settings-pages.tsx); the window may be opened at them. */
 export const CUSTOM_PAGES = ['picture-search', 'sorter-service', 'capture-sources', 'backlog-import', 'sync', 'requirements'] as const
@@ -60,7 +60,6 @@ function settingsPageUrl(): string {
  * then keeps reading its preferences from config.json as before, and the store is read-only.
  */
 export async function startSettings(wiring: Wiring): Promise<{ settings: SettingsApp; legacy: boolean }> {
-  installWriteRules() // the library-folder rule, before any store opens
   const dir = app.getPath('userData')
   const version = app.getVersion()
   const migration = await migrateFromConfig(dir, version, wiring.log)
@@ -77,6 +76,7 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
     registry: commandsAdapter(registry),
     appVersion: version,
     migrate: migrateLegacy,
+    beforeWrite: libraryFolderRule, // the library-folder rule, on every write this store makes
     log: (line: string) => wiring.log(`[settings] ${line}`),
     onChange: (state) => {
       host?.storeChanged(state)

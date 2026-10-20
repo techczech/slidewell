@@ -10,7 +10,7 @@ import { SettingsStore } from '@bridle/settings/node'
 import { registry } from '../src/shared/commands'
 import { APP_ID, migrateLegacy, schema } from '../src/shared/settings-schema'
 import { migrateFromConfig, REMIGRATION_AGENT, stampMigration, STAMP_FILE } from '../src/main/settings-migration'
-import { foldersOverlap, libraryRoots, OTHERS_DEFAULT } from '../src/main/settings-rules'
+import { foldersOverlap, libraryFolderRule, libraryRoots, OTHERS_DEFAULT, OVERLAP_REASON } from '../src/main/settings-rules'
 import { run } from '../src/cli/settings-cli'
 
 const VERSION = '0.4.0-alpha.16'
@@ -45,7 +45,7 @@ function folder(config?: unknown): string {
 /** What the app does at startup: migrate, open the store once, stamp. */
 async function launch(dir: string, version = VERSION): Promise<SettingsStore> {
   const m = await migrateFromConfig(dir, version)
-  const store = new SettingsStore({ dir, app: APP_ID, schema, registry: commandsAdapter(registry), appVersion: version, migrate: migrateLegacy, log: () => {} })
+  const store = new SettingsStore({ dir, app: APP_ID, schema, registry: commandsAdapter(registry), appVersion: version, migrate: migrateLegacy, beforeWrite: libraryFolderRule, log: () => {} })
   await store.ready
   stampMigration(dir, version, m)
   return store
@@ -239,7 +239,7 @@ describe('the library-folder rule on the first migration (the store writes it pa
     const lines: string[] = []
     const m = await migrateFromConfig(dir, VERSION, (l) => void lines.push(l))
     expect(m.kind).toBe('first')
-    const store = new SettingsStore({ dir, app: APP_ID, schema, registry: commandsAdapter(registry), appVersion: VERSION, migrate: migrateLegacy, log: () => {} })
+    const store = new SettingsStore({ dir, app: APP_ID, schema, registry: commandsAdapter(registry), appVersion: VERSION, migrate: migrateLegacy, beforeWrite: libraryFolderRule, log: () => {} })
     await store.ready
     stampMigration(dir, VERSION, m)
     expect(store.view().settings['library.archiveRoot']).toBe('/tmp/fake-archive')
@@ -254,13 +254,34 @@ describe('the library-folder rule on the first migration (the store writes it pa
     const lines: string[] = []
     const m = await migrateFromConfig(dir, VERSION, (l) => void lines.push(l))
     expect(m.kind).toBe('first')
-    const store = new SettingsStore({ dir, app: APP_ID, schema, registry: commandsAdapter(registry), appVersion: VERSION, migrate: migrateLegacy, log: () => {} })
+    const store = new SettingsStore({ dir, app: APP_ID, schema, registry: commandsAdapter(registry), appVersion: VERSION, migrate: migrateLegacy, beforeWrite: libraryFolderRule, log: () => {} })
     await store.ready
     const settings = store.view().settings
     expect(settings['library.archiveRoot']).toBe(OTHERS_DEFAULT)
     expect(settings['library.othersRoot'] ?? '').toBe('')
     expect(foldersOverlap(libraryRoots(settings).archive, libraryRoots(settings).others)).toBe(true) // only the use-time check stands between them
     expect(lines.join('\n')).toContain('its default folder')
+    await store.close()
+  })
+  test('the rule refuses an overlap by a re-migration and by an import, and lets the first migration through', async () => {
+    // re-migration: the older version set the Others' Library to the archive folder
+    const dir = folder(OLD)
+    await (await launch(dir)).close()
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...OLD, othersArchiveRoot: join(OLD.archiveRoot, 'others') }))
+    const lines: string[] = []
+    const m = await migrateFromConfig(dir, VERSION, (l) => void lines.push(l))
+    expect(m.kind).toBe('again')
+    if (m.kind === 'again') expect(m.failed).toEqual([]) // refused by the rule, so stamped, not retried
+    expect(lines.join('\n')).toContain(OVERLAP_REASON)
+    const store = await launch(dir)
+    expect('library.othersRoot' in store.view().settings).toBe(false)
+    expect((await migrateFromConfig(dir, VERSION)).kind).toBe('none')
+    // an import that would make them overlap: refused whole, with the rule's reason
+    const file = JSON.stringify({ format: 'bridle-settings-export', version: 1, app: APP_ID, appVersion: '0', exportedFrom: 'x', exportedAt: '2026-10-20T00:00:00.000Z', settings: { 'library.othersRoot': OLD.archiveRoot, 'library.convertOcr': false }, keys: {} })
+    const preview = store.previewImport(file)
+    const r = await store.applyImport(preview, { file: 'overlap.json' })
+    expect(r).toMatchObject({ ok: false, code: 'rejected', error: OVERLAP_REASON })
+    expect(store.view().settings['library.convertOcr']).toBe(true)
     await store.close()
   })
 })

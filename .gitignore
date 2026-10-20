@@ -5,3 +5,6 @@ dist
 *.local
 release/
 out/
+
+# Bridle tarballs: private code, never committed in this public repo (Bridle ADR-0033). Run Bridle release:pack and release:vendor before installing.
+vendor/bridle/

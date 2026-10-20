@@ -19,9 +19,7 @@ import { commandsAdapter, type ChangeEntry } from '@bridle/settings'
 import { SettingsStore, type LockOptions } from '@bridle/settings/node'
 import { registry } from '../shared/commands'
 import { APP_ID, LEGACY_MARK, migrateLegacy, prefsFromLegacy, schema } from '../shared/settings-schema'
-import { foldersOverlap, installWriteRules, libraryRoots, OTHERS_DEFAULT, OVERLAP_REASON } from './settings-rules'
-
-installWriteRules()
+import { foldersOverlap, libraryFolderRule, libraryRoots, OTHERS_DEFAULT, OVERLAP_REASON } from './settings-rules'
 
 export const CONFIG_FILE = 'config.json'
 export const SETTINGS_FILE = 'settings.json'
@@ -108,7 +106,7 @@ export async function migrateFromConfig(
   const legacy = readLegacyPrefs(dir)
   if (!existsSync(join(dir, SETTINGS_FILE))) {
     if (!legacy) return { kind: 'none' }
-    // The store writes this hand-over itself (its startup repair), past the write rule in settings-rules.ts,
+    // The store writes this hand-over itself (its migration), which libraryFolderRule lets through (settings-rules.ts),
     // so the library-folder rule is applied here: an Others' Library that overlaps the archive is left out
     // (it stays the default). The stamp still records it, so it is not tried again every launch.
     // The default can itself overlap the archive (an archive at ~/SlideWell/others-library), so the pair is
@@ -141,7 +139,7 @@ export async function migrateFromConfig(
   const changed = changedSince(stamp, legacy)
   if (changed.length === 0) return { kind: 'none' }
   const store = new SettingsStore({
-    dir, app: APP_ID, schema, registry: commandsAdapter(registry), appVersion: version, migrate: migrateLegacy,
+    dir, app: APP_ID, schema, registry: commandsAdapter(registry), appVersion: version, migrate: migrateLegacy, beforeWrite: libraryFolderRule,
     who: { kind: 'agent', name: REMIGRATION_AGENT }, watch: false, log, ...(opts.lock ? { lock: opts.lock } : {})
   })
   const applied: string[] = []
@@ -189,7 +187,7 @@ export async function migrateFromConfig(
 }
 
 /** The store refused the value itself (not the file): trying again would give the same answer. */
-const OP_REFUSALS: ReadonlySet<string> = new Set(['unknown-key', 'secret', 'invalid-value', 'not-possible', 'too-many', 'already', 'not-found'])
+const OP_REFUSALS: ReadonlySet<string> = new Set(['unknown-key', 'secret', 'invalid-value', 'rejected', 'not-possible', 'too-many', 'already', 'not-found'])
 
 /**
  * Settings changed in the new version after `at`: by you, an agent other than the re-migration, an import or a

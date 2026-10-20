@@ -16,12 +16,11 @@ export const APP_NAME = 'SlideWell'
 const PATH_HELP_DEFAULT = 'Empty means the default location.'
 
 /**
- * Settings that name something to run or somewhere to send data are never applied by import: a settings file
- * from elsewhere must not choose the program SlideWell runs or where uploads go. They are set on each Mac:
- * the Python, the archive folder (its tools/ are run), and the R2 account, endpoint, bucket and prefix.
+ * Settings that name something to run, somewhere to send data, or a folder that becomes a code path are
+ * declared `importable: false`, so an import never applies them: a settings file from elsewhere must not choose
+ * the program SlideWell runs or where uploads go. They are set on each Mac: the Python, the archive folder
+ * (its tools/ are run), and the R2 account, endpoint, bucket and prefix.
  */
-export const THIS_MAC_ONLY = 'Set on this Mac only'
-const thisMacOnly = (): string => THIS_MAC_ONLY
 
 export const R2_ENDPOINT_RULE = 'The R2 endpoint must be an https address ending in .r2.cloudflarestorage.com.'
 /** Empty (worked out from the account ID) or https://….r2.cloudflarestorage.com, with no user name or password. */
@@ -52,7 +51,7 @@ export const schema = defineSchema({
       key: 'library.archiveRoot', label: 'Archive folder', section: 'library', group: 'Folders', type: 'path', default: '',
       help: `The Core A archive with your presentations. ${PATH_HELP_DEFAULT} (~/gitrepos/05_ppt-tools/ppt-archive)`,
       // Its tools/ run: it is the import's working folder and PYTHONPATH (ingest.ts) and holds the OCR helper.
-      canApply: thisMacOnly
+      importable: false
     },
     {
       key: 'library.othersRoot', label: 'Others’ Library folder', section: 'library', group: 'Folders', type: 'path', default: '',
@@ -118,20 +117,20 @@ export const schema = defineSchema({
     },
     {
       key: 'storage.r2AccountId', label: 'R2 account ID', section: 'storage', group: 'R2 cloud storage', type: 'text', default: '',
-      help: 'Your Cloudflare account ID.', canApply: thisMacOnly
+      help: 'Your Cloudflare account ID.', importable: false
     },
     {
       key: 'storage.r2Bucket', label: 'R2 bucket', section: 'storage', group: 'R2 cloud storage', type: 'text', default: 'ppt-archive-media',
-      help: 'A private bucket; SlideWell signs every request.', canApply: thisMacOnly
+      help: 'A private bucket; SlideWell signs every request.', importable: false
     },
     {
       key: 'storage.r2Prefix', label: 'R2 key prefix', section: 'storage', group: 'R2 cloud storage', type: 'text', default: 'slidewell',
-      help: 'Folder-like prefix inside the bucket.', canApply: thisMacOnly
+      help: 'Folder-like prefix inside the bucket.', importable: false
     },
     {
       key: 'storage.r2Endpoint', label: 'R2 endpoint', section: 'storage', group: 'R2 cloud storage', type: 'text', default: '',
       help: 'Empty means the endpoint worked out from the account ID.',
-      validate: (v) => checkR2Endpoint(v), canApply: thisMacOnly
+      validate: (v) => checkR2Endpoint(v), importable: false
     },
     {
       key: 'storage.r2AccessKeyId', label: 'R2 access key ID', section: 'accounts', type: 'secret', default: null,
@@ -156,7 +155,7 @@ export const schema = defineSchema({
     })),
     {
       key: 'advanced.pythonPath', label: 'Python', section: 'advanced', type: 'path', default: '',
-      help: 'The Python that runs Core A’s import tools. Empty means the one SlideWell finds.', canApply: thisMacOnly
+      help: 'The Python that runs Core A’s import tools. Empty means the one SlideWell finds.', importable: false
     }
   ]
 })

@@ -3,17 +3,15 @@
 // in this process: the app's window and old-shape writes, the CLI (its own store inside runSettingsCli), an
 // import, a reset, an undo and a re-migration.
 //
-// The seam: @bridle/settings' SettingsStore runs every operation as lock → read → op(state on disk) → write
-// (its `mutate`). There is no public hook for a cross-setting rule (package follow-up), so installWriteRules
-// wraps that one method on the prototype; the rule then judges the state the operation would write, under the
-// lock. If the package changes shape, installWriteRules throws at startup instead of silently not guarding.
+// The seam: @bridle/settings' public `beforeWrite` store option (0.2.0). The store calls it once per write, under
+// the lock, with the state on disk and the whole state the write would leave, on every route (set, reset, undo,
+// import, migration, ...). Every SlideWell store is created with `beforeWrite: libraryFolderRule`: the app's
+// (settings-host.ts), the re-migration's (settings-migration.ts) and the CLI's (passed to runSettingsCli).
 // No Electron here, so the CLI and the tests share it.
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import type { OpResult, SettingsState } from '@bridle/settings'
-import { SettingsStore } from '@bridle/settings/node'
-import { APP_ID } from '../shared/settings-schema'
+import type { BeforeWrite, SettingsState } from '@bridle/settings'
 
 /** Where each library lives when its folder setting is empty (main's readers use the same). */
 export const ARCHIVE_DEFAULT = join(homedir(), 'gitrepos', '05_ppt-tools', 'ppt-archive')
@@ -78,27 +76,16 @@ export function crossSettingProblem(before: SettingsState, after: SettingsState)
   return foldersOverlap(b.archive, b.others) ? OVERLAP_REASON : null
 }
 
-type Op = (s: SettingsState) => OpResult
-type Mutate = (this: unknown, op: Op) => Promise<unknown>
-const INSTALLED = Symbol.for('slidewell.settings-write-rules')
-
-/** Installs the rule on every SlideWell settings store in this process (idempotent). */
-export function installWriteRules(): void {
-  const proto = SettingsStore.prototype as unknown as { mutate?: Mutate; [INSTALLED]?: true }
-  if (proto[INSTALLED]) return
-  const inner = proto.mutate
-  if (typeof inner !== 'function') throw new Error('SlideWell: @bridle/settings no longer has the write seam the library-folder rule needs')
-  proto.mutate = function (this: unknown, op: Op) {
-    const app = (this as { opts?: { schema?: { app?: string } } }).opts?.schema?.app
-    if (app !== APP_ID) return inner.call(this, op)
-    return inner.call(this, (s: SettingsState): OpResult => {
-      const r = op(s)
-      if (!r.ok) return r
-      const why = crossSettingProblem(s, r.state)
-      return why ? { ok: false, code: 'invalid-value', error: why } : r
-    })
-  }
-  proto[INSTALLED] = true
+/**
+ * The store's `beforeWrite` rule. A migration (route `migration`: the store reading the hand-over file that
+ * migrateFromConfig wrote) is let through: migrateFromConfig has already left out an Others' Library that
+ * overlaps the archive, and what can remain (an archive inside the Others' default folder, with the Others'
+ * folder empty) has no non-overlapping value to fall back to; refusing it would refuse the whole migration and
+ * show every setting at its default. The use-time check in index.ts refuses Others' imports in that case.
+ * Every other route is judged by crossSettingProblem.
+ */
+export const libraryFolderRule: BeforeWrite = (p) => {
+  if (p.route === 'migration') return undefined
+  const why = crossSettingProblem(p.before, p.next)
+  return why ? { reject: why } : undefined
 }
-
-installWriteRules()
