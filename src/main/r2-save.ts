@@ -62,6 +62,9 @@ async function saveR2Now(patch: unknown, deps: R2SaveDeps): Promise<R2SaveAnswer
   const fields = FIELDS.filter((f) => f in prefs)
   const before = deps.snapshot(fields)
   // Puts back only what this save changed and is still its value now; anything else is left as it is.
+  // Accepted residual: the compare (snapshot) and the write below are not under one settings lock, so a generic
+  // Settings or CLI write of the same R2 field landing between them is overwritten by the put-back. Same user on
+  // the same Mac, and only after a ciphertext failure (review round 3, #6).
   const putBack = async (): Promise<boolean> => {
     const now = deps.snapshot(fields)
     const back: R2Prefs = {}

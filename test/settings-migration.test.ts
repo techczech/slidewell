@@ -10,6 +10,7 @@ import { SettingsStore } from '@bridle/settings/node'
 import { registry } from '../src/shared/commands'
 import { APP_ID, migrateLegacy, schema } from '../src/shared/settings-schema'
 import { migrateFromConfig, REMIGRATION_AGENT, stampMigration, STAMP_FILE } from '../src/main/settings-migration'
+import { foldersOverlap, libraryRoots, OTHERS_DEFAULT } from '../src/main/settings-rules'
 import { run } from '../src/cli/settings-cli'
 
 const VERSION = '0.4.0-alpha.16'
@@ -247,5 +248,19 @@ describe('the library-folder rule on the first migration (the store writes it pa
     expect(lines.join('\n')).toContain('library.othersRoot')
     await store.close()
     expect((await migrateFromConfig(dir, VERSION)).kind).toBe('none') // stamped: not tried every launch
+  })
+  test('an archive at the Others’ default folder, with the same Others’ folder: no overlapping pair is written, and why is logged', async () => {
+    const dir = folder({ archiveRoot: OTHERS_DEFAULT, othersArchiveRoot: OTHERS_DEFAULT })
+    const lines: string[] = []
+    const m = await migrateFromConfig(dir, VERSION, (l) => void lines.push(l))
+    expect(m.kind).toBe('first')
+    const store = new SettingsStore({ dir, app: APP_ID, schema, registry: commandsAdapter(registry), appVersion: VERSION, migrate: migrateLegacy, log: () => {} })
+    await store.ready
+    const settings = store.view().settings
+    expect(settings['library.archiveRoot']).toBe(OTHERS_DEFAULT)
+    expect(settings['library.othersRoot'] ?? '').toBe('')
+    expect(foldersOverlap(libraryRoots(settings).archive, libraryRoots(settings).others)).toBe(true) // only the use-time check stands between them
+    expect(lines.join('\n')).toContain('its default folder')
+    await store.close()
   })
 })

@@ -23,15 +23,17 @@ export const OTHERS_DEFAULT = join(homedir(), 'SlideWell', 'others-library')
 export const OVERLAP_REASON = 'That folder overlaps your own archive. Pick a separate location for the Others’ Library so other people’s slides never mix into your archive.'
 
 /**
- * The folder as the file system sees it: symbolic links followed. For a folder that does not exist yet, its
- * nearest existing parent is resolved and the rest appended, so a link anywhere above it still counts.
+ * The folder as the file system sees it: symbolic links followed. The raw path is handed to realpath as typed,
+ * so a `..` is taken after the link before it (`other/link/..` with link → mine/child is `mine`), never
+ * removed first by string normalising. For a folder that does not exist yet, the longest existing prefix of
+ * the raw path is resolved and the rest appended (normalised), so a link anywhere above it still counts.
  */
 export function realFolder(p: string): string {
-  let head = resolve(p)
+  let head = isAbsolute(p) ? p : process.cwd() + sep + p
   const tail: string[] = []
   for (;;) {
     try {
-      return join(realpathSync.native(head), ...tail.reverse())
+      return resolve(realpathSync.native(head), ...tail.reverse())
     } catch {
       const up = dirname(head)
       if (up === head) return resolve(p)

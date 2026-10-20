@@ -183,6 +183,21 @@ describe('settings CLI', () => {
     expect(await run(['set', 'library.othersRoot', link], r.io, dir)).not.toBe(0)
     expect(r.err.join('') + r.out.join('')).toContain(OVERLAP_REASON)
   })
+  test('overlap follows a symbolic link before a `..` after it (other/link/.. with link → mine/child is mine)', async () => {
+    const dir = folder()
+    const mine = join(dir, 'mine')
+    mkdirSync(join(mine, 'child'), { recursive: true })
+    mkdirSync(join(dir, 'other'))
+    symlinkSync(join(mine, 'child'), join(dir, 'other', 'link'))
+    const sneaky = join(dir, 'other', 'link') + '/..'
+    expect(foldersOverlap(mine, sneaky)).toBe(true)
+    expect(foldersOverlap(mine, sneaky + '/not-yet')).toBe(true) // through the nearest existing parent too
+    expect(foldersOverlap(mine, join(dir, 'other'))).toBe(false)
+    expect(await run(['set', 'library.archiveRoot', mine], io().io, dir)).toBe(0)
+    const r = ioErr()
+    expect(await run(['set', 'library.othersRoot', sneaky], r.io, dir)).not.toBe(0)
+    expect(r.err.join('') + r.out.join('')).toContain(OVERLAP_REASON)
+  })
   test('what to run and where to send data are never imported; the R2 endpoint must be Cloudflare’s', async () => {
     const from = { ...emptyState(schema.app), settings: { 'advanced.pythonPath': '/tmp/evil/python', 'library.archiveRoot': '/tmp/evil/archive', 'storage.r2Prefix': 'elsewhere', 'storage.r2Endpoint': 'https://acc.r2.cloudflarestorage.com', 'storage.r2Bucket': 'b', 'storage.r2AccountId': 'a', 'library.convertOcr': true } }
     const file = exportFile(from, { appVersion: '0', hostName: 'x', now: 0, schema, commands: commandsAdapter(registry) })

@@ -19,7 +19,7 @@ import { commandsAdapter, type ChangeEntry } from '@bridle/settings'
 import { SettingsStore, type LockOptions } from '@bridle/settings/node'
 import { registry } from '../shared/commands'
 import { APP_ID, LEGACY_MARK, migrateLegacy, prefsFromLegacy, schema } from '../shared/settings-schema'
-import { foldersOverlap, installWriteRules, libraryRoots, OVERLAP_REASON } from './settings-rules'
+import { foldersOverlap, installWriteRules, libraryRoots, OTHERS_DEFAULT, OVERLAP_REASON } from './settings-rules'
 
 installWriteRules()
 
@@ -111,6 +111,10 @@ export async function migrateFromConfig(
     // The store writes this hand-over itself (its startup repair), past the write rule in settings-rules.ts,
     // so the library-folder rule is applied here: an Others' Library that overlaps the archive is left out
     // (it stays the default). The stamp still records it, so it is not tried again every launch.
+    // The default can itself overlap the archive (an archive at ~/SlideWell/others-library), so the pair is
+    // checked again after the fallback. The schema has no "no Others' Library" value: empty (the default) is
+    // the only one, so it stays empty, the reason is logged, and the use-time check in index.ts refuses every
+    // Others' import until a separate folder is picked.
     const handed = { ...legacy }
     if ('library.othersRoot' in handed) {
       const roots = libraryRoots(handed)
@@ -118,6 +122,11 @@ export async function migrateFromConfig(
         delete handed['library.othersRoot']
         log(`[settings] library.othersRoot from the older version was not applied: ${OVERLAP_REASON}`)
       }
+    }
+    const fallback = libraryRoots(handed)
+    if (foldersOverlap(fallback.archive, fallback.others)) {
+      delete handed['library.othersRoot']
+      log(`[settings] library.othersRoot is left empty: its default folder (${OTHERS_DEFAULT}) overlaps your archive too, so imports into the Others’ Library are refused until a separate folder is picked in Settings.`)
     }
     try {
       writeVia(join(dir, SETTINGS_FILE), JSON.stringify({ [LEGACY_MARK]: 1, prefs: handed }, null, 2), true)
