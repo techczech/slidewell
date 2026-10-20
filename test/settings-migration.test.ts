@@ -231,3 +231,21 @@ describe('migration from config.json', () => {
     expect(g.join('').trim()).toBe('/tmp/C')
   })
 })
+
+describe('the library-folder rule on the first migration (the store writes it past the write rule)', () => {
+  test('an older version’s identical archive and Others’ Library: the Others’ folder is left out, logged, and not retried', async () => {
+    const dir = folder({ archiveRoot: '/tmp/fake-archive', othersArchiveRoot: '/tmp/fake-archive', convertOcrByDefault: true })
+    const lines: string[] = []
+    const m = await migrateFromConfig(dir, VERSION, (l) => void lines.push(l))
+    expect(m.kind).toBe('first')
+    const store = new SettingsStore({ dir, app: APP_ID, schema, registry: commandsAdapter(registry), appVersion: VERSION, migrate: migrateLegacy, log: () => {} })
+    await store.ready
+    stampMigration(dir, VERSION, m)
+    expect(store.view().settings['library.archiveRoot']).toBe('/tmp/fake-archive')
+    expect(store.view().settings['library.convertOcr']).toBe(true)
+    expect('library.othersRoot' in store.view().settings).toBe(false)
+    expect(lines.join('\n')).toContain('library.othersRoot')
+    await store.close()
+    expect((await migrateFromConfig(dir, VERSION)).kind).toBe('none') // stamped: not tried every launch
+  })
+})

@@ -204,6 +204,16 @@ function fromAppWindow(e: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): 
   if (mainWindow && !mainWindow.isDestroyed() && e.sender === mainWindow.webContents) return true
   return Boolean(settings?.isSettingsSender(e))
 }
+/**
+ * ipcMain.handle answered only for the main window or the Settings window (fromAppWindow): the Settings window
+ * carries the app's whole bridge, so every handler it can reach checks the event, never only the channel.
+ */
+function appHandle(channel: string, fn: (e: Electron.IpcMainInvokeEvent, ...args: any[]) => unknown): void { // eslint-disable-line @typescript-eslint/no-explicit-any
+  ipcMain.handle(channel, (e, ...args) => {
+    if (!fromAppWindow(e)) throw new Error(`${channel}: not allowed from this window`)
+    return fn(e, ...args)
+  })
+}
 /** Sends a status push to the main window and an open Settings window. */
 function toAppWindows(channel: string, payload: unknown): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)
@@ -746,8 +756,8 @@ app.whenReady().then(async () => {
   })
 
   // --- IPC: the typed contract lives in src/preload/index.ts ---
-  ipcMain.handle('archive:available', () => archiveAvailable())
-  ipcMain.handle('settings:get-paths', async () => ({
+  appHandle('archive:available', () => archiveAvailable())
+  appHandle('settings:get-paths', async () => ({
     archiveRoot: readConfig().archiveRoot ?? null,
     archiveDefault: ARCHIVE_DEFAULT,
     archiveAvailable: archiveAvailable(),
@@ -763,7 +773,7 @@ app.whenReady().then(async () => {
     othersArchiveRoot: othersArchiveRootResolved(),
     othersArchiveAvailable: othersArchiveAvailable()
   }))
-  ipcMain.handle('settings:choose-archive', async () => {
+  appHandle('settings:choose-archive', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     const picked = r.filePaths[0]
@@ -784,12 +794,12 @@ app.whenReady().then(async () => {
     pictureSearch?.pokeArchive() // index the newly chosen archive's renders
     return picked
   })
-  ipcMain.handle('shell:open-path', (_e, p: string) => shell.openPath(p).then((err) => err === ''))
-  ipcMain.handle('shell:open-external', (_e, url: string) => shell.openExternal(url).then(() => true))
+  appHandle('shell:open-path', (_e, p: string) => shell.openPath(p).then((err) => err === ''))
+  appHandle('shell:open-external', (_e, url: string) => shell.openExternal(url).then(() => true))
 
   // Detected status of the external tools SlideWell leans on — surfaced in Settings so users know
   // what to install. `required` deps gate core features; the rest degrade gracefully when absent.
-  ipcMain.handle('settings:dependencies', () => {
+  appHandle('settings:dependencies', () => {
     const py = detectPython(readConfig().pythonPath)
     const ocrBin = join(archiveRoot(), 'tools', 'ocr', 'vision_ocr')
     const ocrSwift = join(archiveRoot(), 'tools', 'ocr', 'vision_ocr.swift')
@@ -1011,7 +1021,7 @@ app.whenReady().then(async () => {
     }
   }
 
-  ipcMain.handle('archive:search', async (_e, query: string, filters: SearchFilters) => {
+  appHandle('archive:search', async (_e, query: string, filters: SearchFilters) => {
     const from = filters?.from ?? 'all'
     const kind = filters?.kind ?? 'all'
     const plan = planSources(filters?.type ?? 'slides', from, kind)
@@ -1022,7 +1032,7 @@ app.whenReady().then(async () => {
   // Search with the Match switch (Words / Meaning / Both): word hits, picture hits, two bands.
   // Picture hits are resolved to the same wire rows and pass the same Library/Owner/Date/Category/
   // Presentation/From/Kind filters as word hits. Words mode never runs a picture query.
-  ipcMain.handle('archive:search-matched', async (_e, query: string, filters: SearchFilters, mode: MatchMode) => {
+  appHandle('archive:search-matched', async (_e, query: string, filters: SearchFilters, mode: MatchMode) => {
     const from = filters?.from ?? 'all'
     const kind = filters?.kind ?? 'all'
     const resolve = (ids: string[]): Promise<Map<string, MatchCluster>> => resolvePictureIds(ids, filters, query)
@@ -1046,7 +1056,7 @@ app.whenReady().then(async () => {
 
   // More like this (inspector): the six most similar items from other presentations and the well, by
   // stored vectors (no model run, but the model must be downloaded). Any Library, Owner and date.
-  ipcMain.handle('archive:more-like-this', async (_e, row: { kind: string; deck: string; slideOrder: number | null; reference: string }) => {
+  appHandle('archive:more-like-this', async (_e, row: { kind: string; deck: string; slideOrder: number | null; reference: string }) => {
     const open = { library: 'all', owner: 'all', era: 'all', category: '', deck: '', role: 'all', from: 'all', kind: 'all' } as unknown as SearchFilters
     return runMoreLikeThis<MatchCluster['representative']>(
       {
@@ -1062,14 +1072,14 @@ app.whenReady().then(async () => {
   })
 
   // Counts for the From chips: the current query over every store, Kind applied, From ignored.
-  ipcMain.handle('archive:from-counts', async (_e, query: string, filters: SearchFilters): Promise<FromCounts> => {
+  appHandle('archive:from-counts', async (_e, query: string, filters: SearchFilters): Promise<FromCounts> => {
     const kind = filters?.kind ?? 'all'
     const rows = await collectResults(query ?? '', filters, { slides: true, archiveImages: true, well: true })
     return countFrom(rows.map(rep), kind)
   })
 
   // Distinct deck categories (with counts) for the Category filter dropdown.
-  ipcMain.handle('archive:categories', () => {
+  appHandle('archive:categories', () => {
     if (!archiveAvailable()) return []
     try {
       return categoryList(loadDeckMeta(archiveRoot(), cacheDir()))
@@ -1079,7 +1089,7 @@ app.whenReady().then(async () => {
   })
 
   // All decks (id, title, date) newest-first, for the Deck filter picker.
-  ipcMain.handle('archive:decks', () => {
+  appHandle('archive:decks', () => {
     if (!archiveAvailable()) return []
     try {
       const idx = loadDeckMeta(archiveRoot(), cacheDir())
@@ -1092,7 +1102,7 @@ app.whenReady().then(async () => {
   })
 
   // Deck MODE: one card per presentation (title-slide cover), filtered like the slide search.
-  ipcMain.handle('archive:list-decks', async (_e, filters: SearchFilters) => {
+  appHandle('archive:list-decks', async (_e, filters: SearchFilters) => {
     const lib = filters?.library ?? 'mine'
     const out: Array<Record<string, unknown>> = []
     const add = async (root: string, library: 'mine' | 'others'): Promise<void> => {
@@ -1109,7 +1119,7 @@ app.whenReady().then(async () => {
     return out
   })
   // Full metadata for one deck (for the sidebar). Resolves to whichever store holds the deck.
-  ipcMain.handle('archive:deck-detail', (_e, pid: string) => {
+  appHandle('archive:deck-detail', (_e, pid: string) => {
     if (!archiveAvailable() && !othersArchiveAvailable()) return null
     try {
       const root = rootForDeck(pid)
@@ -1123,7 +1133,7 @@ app.whenReady().then(async () => {
   })
 
   // Stats bundle (timeline of "my" PowerPoint history) for the Stats view.
-  ipcMain.handle('archive:stats', async () => {
+  appHandle('archive:stats', async () => {
     if (!archiveAvailable()) return null
     try {
       return await archiveStats(archiveRoot(), cacheDir())
@@ -1133,7 +1143,7 @@ app.whenReady().then(async () => {
   })
 
   // The structured content (presentation.json node) of one slide — for "Copy structure".
-  ipcMain.handle('archive:slide-structure', (_e, deck: string, slideOrder: number | null) => {
+  appHandle('archive:slide-structure', (_e, deck: string, slideOrder: number | null) => {
     if (!archiveAvailable() && !othersArchiveAvailable()) return null
     try {
       return slideStructure(rootForDeck(deck), deck, slideOrder)
@@ -1143,7 +1153,7 @@ app.whenReady().then(async () => {
   })
 
   // The embedded image assets on one slide → renderable swarchive:// thumbnails (for the inspector).
-  ipcMain.handle('archive:slide-images', (_e, deck: string, slideOrder: number | null) => {
+  appHandle('archive:slide-images', (_e, deck: string, slideOrder: number | null) => {
     if (!archiveAvailable() && !othersArchiveAvailable()) return []
     try {
       return slideImages(rootForDeck(deck), deck, slideOrder).map((im) => ({ thumbUrl: swThumb(im.absPath) }))
@@ -1153,7 +1163,7 @@ app.whenReady().then(async () => {
   })
 
   // All slides of one presentation, in order — for "See in context". Tagged with the store it came from.
-  ipcMain.handle('archive:deck-slides', async (_e, deck: string) => {
+  appHandle('archive:deck-slides', async (_e, deck: string) => {
     if (!archiveAvailable() && !othersArchiveAvailable()) return []
     try {
       const root = rootForDeck(deck)
@@ -1171,12 +1181,12 @@ app.whenReady().then(async () => {
     new Promise((resolve) =>
       execFile('osascript', ['-e', `set the clipboard to POSIX file ${JSON.stringify(abs)}`], (err) => resolve(!err))
     )
-  ipcMain.handle('clipboard:copy-image', async (_e, thumbUrl: string) => {
+  appHandle('clipboard:copy-image', async (_e, thumbUrl: string) => {
     const abs = resolveSwUrlReal(thumbUrl)
     return abs ? copyFileToClipboard(abs) : false
   })
   // Copy as a PNG raster bitmap (for Keynote / Slack / web that want a pasted image, not a file).
-  ipcMain.handle('clipboard:copy-image-png', async (_e, thumbUrl: string) => {
+  appHandle('clipboard:copy-image-png', async (_e, thumbUrl: string) => {
     const abs = resolveSwUrlReal(thumbUrl)
     if (!abs) return false
     try {
@@ -1192,7 +1202,7 @@ app.whenReady().then(async () => {
   })
 
   // Reveal an image in Finder ("open containing deck/folder").
-  ipcMain.handle('shell:reveal', (_e, thumbUrl: string) => {
+  appHandle('shell:reveal', (_e, thumbUrl: string) => {
     const abs = resolveSwUrlReal(thumbUrl) // a link inside a root that leads outside every root is not revealed
     if (!abs) return false
     shell.showItemInFolder(abs)
@@ -1201,7 +1211,7 @@ app.whenReady().then(async () => {
 
   // TalkWeaver registers no URL scheme and no document type, so the nearest thing to "open the talk"
   // is showing its outline file in Finder. The path is vault-relative and must stay inside the vault.
-  ipcMain.handle('talks:reveal', (_e, relPath: string) => {
+  appHandle('talks:reveal', (_e, relPath: string) => {
     const vr = detectVaultRoot()
     if (!vr || typeof relPath !== 'string') return false
     const abs = talkAbsPath(vr, relPath)
@@ -1211,7 +1221,7 @@ app.whenReady().then(async () => {
   })
 
   // --- well / import paths ---
-  ipcMain.handle('settings:choose-vault', async () => {
+  appHandle('settings:choose-vault', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     writeConfig({ vaultRoot: r.filePaths[0] })
@@ -1219,7 +1229,7 @@ app.whenReady().then(async () => {
     return r.filePaths[0]
   })
   // Re-scan the TalkWeaver vault for new images and index them; returns count added.
-  ipcMain.handle('well:scan-vault', async () => {
+  appHandle('well:scan-vault', async () => {
     const vr = detectVaultRoot()
     if (!vr) return 0
     try {
@@ -1235,7 +1245,7 @@ app.whenReady().then(async () => {
   })
 
   // --- triage (ADR-0029): scan a source folder, browse/decide, promote keepers into the well ---
-  ipcMain.handle('settings:choose-screenshot-folder', async () => {
+  appHandle('settings:choose-screenshot-folder', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     writeConfig({ screenshotRoot: r.filePaths[0] })
@@ -1243,7 +1253,7 @@ app.whenReady().then(async () => {
     return r.filePaths[0]
   })
   // Capture inbox extras: 'desktop' | 'cleanshot' add the offered defaults; 'folder' asks for a folder.
-  ipcMain.handle('settings:add-capture-source', async (_e, which: 'desktop' | 'cleanshot' | 'folder') => {
+  appHandle('settings:add-capture-source', async (_e, which: 'desktop' | 'cleanshot' | 'folder') => {
     let src: CaptureSource | null = null
     if (which === 'desktop' || which === 'cleanshot') src = (await captureDefaults())[which]
     else {
@@ -1256,7 +1266,7 @@ app.whenReady().then(async () => {
     refreshWatchers()
     return true
   })
-  ipcMain.handle('settings:remove-capture-source', (_e, path: string) => {
+  appHandle('settings:remove-capture-source', (_e, path: string) => {
     writeConfig({ captureSources: (readConfig().captureSources ?? []).filter((c) => c.path !== path) })
     refreshWatchers()
     return true
@@ -1458,13 +1468,13 @@ app.whenReady().then(async () => {
   })
 
   // --- R2 backend (spec 2026-06-24): config + credentials (safeStorage) + connection test ---
-  ipcMain.handle('settings:get-r2', () => {
+  appHandle('settings:get-r2', () => {
     const s = r2Settings()
     return { accountId: s.accountId, endpoint: s.endpoint ?? '', bucket: s.bucket, prefix: s.prefix, hasCreds: Boolean(r2Creds()) }
   })
   // The endpoint, bucket and account (settings.json) and the key ciphertext (config.json) describe one connection, so
   // they change together or not at all (r2-save.ts). Report the truth so the UI can't show a false "saved".
-  ipcMain.handle('settings:set-r2', (_e, patch: unknown) =>
+  appHandle('settings:set-r2', (_e, patch: unknown) =>
     saveR2(patch, {
       encAvailable: () => safeStorage.isEncryptionAvailable(),
       encrypt: (plain) => safeStorage.encryptString(plain).toString('base64'),
@@ -1484,24 +1494,24 @@ app.whenReady().then(async () => {
       writeCiphertext: (enc) => writeRawConfig({ r2: { ...(rawConfig().r2 ?? {}), ...enc } })
     })
   )
-  ipcMain.handle('settings:test-r2', async () => {
+  appHandle('settings:test-r2', async () => {
     const creds = r2Creds()
     if (!creds) return { ok: false, error: 'No credentials saved' }
     return testR2(r2Settings(), creds)
   })
   // Per-store backend (Local | R2) + a media sync (upload) to R2.
-  ipcMain.handle('settings:get-storage', () => ({
+  appHandle('settings:get-storage', () => ({
     archive: storeBackend('archive'),
     others: storeBackend('others'),
     well: storeBackend('well')
   }))
-  ipcMain.handle('settings:set-store-backend', (_e, store: StoreName, backend: 'local' | 'r2') => {
+  appHandle('settings:set-store-backend', (_e, store: StoreName, backend: 'local' | 'r2') => {
     const s = { ...(readConfig().storage ?? {}) }
     s[store] = { ...(s[store] ?? {}), backend: backend === 'r2' ? 'r2' : 'local' }
     writeConfig({ storage: s })
     return { ok: true }
   })
-  ipcMain.handle('settings:sync-store', async (_e, store: StoreName) => {
+  appHandle('settings:sync-store', async (_e, store: StoreName) => {
     const creds = r2Creds()
     if (!creds) return { ok: false, error: 'No R2 credentials saved' }
     const root = storageRoots()[store]
@@ -1511,7 +1521,7 @@ app.whenReady().then(async () => {
   })
 
   // --- Others' Library (Scenario A, ADR-0031): a separate store for other people's decks ---
-  ipcMain.handle('settings:choose-others-folder', async () => {
+  appHandle('settings:choose-others-folder', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     const picked = r.filePaths[0]
@@ -1524,7 +1534,7 @@ app.whenReady().then(async () => {
     return picked
   })
   // Purge the whole Others' Library (its built store only) — never touches the personal archive.
-  ipcMain.handle('settings:clear-others-library', async () => {
+  appHandle('settings:clear-others-library', async () => {
     const root = othersArchiveRootResolved()
     if (foldersOverlap(root, archiveRoot())) return { ok: false }
     const res = await dialog.showMessageBox({
@@ -1548,7 +1558,7 @@ app.whenReady().then(async () => {
   // Streamed feedback when import can't even start — otherwise the button "does nothing".
   const archiveMissingLine = (): void =>
     sendLine(`✕ No archive found at ${archiveRoot()} — it must contain a "registry" folder. Set a valid archive in Settings (⚙ → Archive).`)
-  ipcMain.handle('ingest:pending', async () => {
+  appHandle('ingest:pending', async () => {
     if (!archiveAvailable()) {
       archiveMissingLine()
       return { ok: false }
@@ -1559,7 +1569,7 @@ app.whenReady().then(async () => {
     return r
   })
   // Pick the file/folder to import (returns the path so the panel can SHOW it before committing).
-  ipcMain.handle('ingest:choose-path', async () => {
+  appHandle('ingest:choose-path', async () => {
     const r = await dialog.showOpenDialog({
       properties: ['openFile', 'openDirectory'],
       filters: [{ name: 'PowerPoint', extensions: ['pptx', 'ppt'] }]
@@ -1569,7 +1579,7 @@ app.whenReady().then(async () => {
   // Run the import against an already-chosen path (no dialog — the panel confirmed what + where).
   // library 'others' routes the data into the separate Others' Library store (Scenario A); the
   // ENGINE is always the user's ppt-archive (that's where Core A's tools/ live).
-  ipcMain.handle('ingest:run-path', async (_e, targetPath: string, library?: 'mine' | 'others') => {
+  appHandle('ingest:run-path', async (_e, targetPath: string, library?: 'mine' | 'others') => {
     if (!archiveAvailable()) {
       archiveMissingLine()
       return { ok: false }
@@ -1590,7 +1600,7 @@ app.whenReady().then(async () => {
     if (library !== 'others') pictureSearch?.pokeArchive()
     return r
   })
-  ipcMain.handle('ingest:cancel', () => {
+  appHandle('ingest:cancel', () => {
     cancelIngest()
     return true
   })
@@ -1598,19 +1608,19 @@ app.whenReady().then(async () => {
   // --- convert (sideband, throwaway): someone else's .pptx → a mechanical Outline folder,
   //     saved wherever the user picks. Never touches the archive registry or the vault. ---
   const sendConvertLine = (s: string): void => mainWindow?.webContents.send('convert:line', s)
-  ipcMain.handle('settings:choose-conversions-folder', async () => {
+  appHandle('settings:choose-conversions-folder', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     writeConfig({ conversionsRoot: r.filePaths[0] })
     return r.filePaths[0]
   })
-  ipcMain.handle('settings:set-convert-ocr', (_e, on: boolean) => {
+  appHandle('settings:set-convert-ocr', (_e, on: boolean) => {
     writeConfig({ convertOcrByDefault: Boolean(on) })
     return Boolean(on)
   })
   // "My decks" owner names. Unset → computed from the OS account (never written until the user saves).
-  ipcMain.handle('settings:get-owner-names', () => resolveOwnerNames(readConfig().ownerNames))
-  ipcMain.handle('settings:set-owner-names', (_e, names: unknown) => {
+  appHandle('settings:get-owner-names', () => resolveOwnerNames(readConfig().ownerNames))
+  appHandle('settings:set-owner-names', (_e, names: unknown) => {
     const cleaned = cleanOwnerNames(names)
     writeConfig({ ownerNames: cleaned.length > 0 ? cleaned : undefined }) // empty → back to the account default
     const resolved = resolveOwnerNames(readConfig().ownerNames)
@@ -1618,12 +1628,12 @@ app.whenReady().then(async () => {
     return resolved
   })
   // Step 1: pick the source .pptx — returns its path so the panel SHOWS it before converting.
-  ipcMain.handle('convert:choose-source', async () => {
+  appHandle('convert:choose-source', async () => {
     const pick = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'PowerPoint', extensions: ['pptx', 'ppt'] }] })
     return pick.canceled || !pick.filePaths[0] ? null : pick.filePaths[0]
   })
   // Step 2: pick the destination folder, pre-filled from the source name + the conversionsRoot default.
-  ipcMain.handle('convert:choose-dest', async (_e, sourcePath: string) => {
+  appHandle('convert:choose-dest', async (_e, sourcePath: string) => {
     const suggested = slugify(basename(sourcePath || '').replace(/\.(pptx|ppt)$/i, '')) || 'converted'
     const defDir = conversionsRootResolved()
     const defaultPath = join(defDir && existsSync(defDir) ? defDir : homedir(), suggested)
@@ -1631,7 +1641,7 @@ app.whenReady().then(async () => {
     return save.canceled || !save.filePath ? null : save.filePath
   })
   // Step 3: run the conversion against the already-chosen source + destination (no dialogs here).
-  ipcMain.handle('convert:run', async (_e, opts: { pptxPath: string; outDir: string; ocr: boolean }) => {
+  appHandle('convert:run', async (_e, opts: { pptxPath: string; outDir: string; ocr: boolean }) => {
     if (!archiveAvailable()) {
       sendConvertLine('✕ Archive engine not found — set it in Settings (extraction needs Core A).')
       return { ok: false, error: 'archive unavailable' }
@@ -1662,7 +1672,7 @@ app.whenReady().then(async () => {
   // Delete-by-filter (ADR-0031): remove every Others' Library deck matching the current query +
   // filters, then rebuild the index from what remains. No filter → deletes the whole library.
   // Scoped to the Others' Library only — never the personal archive.
-  ipcMain.handle('others:delete-matching', async (_e, query: string, filters: SearchFilters) => {
+  appHandle('others:delete-matching', async (_e, query: string, filters: SearchFilters) => {
     const root = othersArchiveRootResolved()
     if (!othersArchiveAvailable()) return { ok: false, deleted: 0 }
     const f: SearchFilters = { ...filters, owner: 'all', library: 'others' }

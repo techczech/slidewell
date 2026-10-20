@@ -1,13 +1,13 @@
 // The registry, schema, key slots and settings CLI: SKILL.md's per-app tests 1–5 at their seams.
 import { afterEach, describe, expect, test } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildMenuTemplate, RESERVED_ESTATE, validateMenuCoverage } from '@bridle/commands'
 import { commandsAdapter, exportFile, emptyState, previewImport, searchSettings } from '@bridle/settings'
 import { aliasesOf, commandForEvent, MENUS, registry } from '../src/shared/commands'
 import { legacyFromPrefs, R2_ENDPOINT_RULE, schema, SECRET_KEYS, splitLegacyPatch, THIS_MAC_ONLY } from '../src/shared/settings-schema'
-import { OVERLAP_REASON } from '../src/main/settings-rules'
+import { foldersOverlap, OVERLAP_REASON } from '../src/main/settings-rules'
 import { keySlots, type KeyBackend } from '../src/main/key-slots'
 import { run } from '../src/cli/settings-cli'
 
@@ -166,13 +166,30 @@ describe('settings CLI', () => {
     await run(['get', 'library.othersRoot'], o.io, dir)
     expect(o.out.join('').trim()).toBe(others)
   })
+  test('overlap follows symbolic links and counts a root folder as holding everything', async () => {
+    const dir = folder()
+    const mine = join(dir, 'mine')
+    mkdirSync(mine)
+    const link = join(dir, 'link-to-mine')
+    symlinkSync(mine, link)
+    expect(foldersOverlap(mine, link)).toBe(true)
+    expect(foldersOverlap(mine, join(link, 'not-yet', 'made'))).toBe(true) // resolved through its nearest existing parent
+    expect(foldersOverlap('/', '/tmp/mine')).toBe(true)
+    expect(foldersOverlap('/tmp/mine', '/')).toBe(true)
+    expect(foldersOverlap(join(dir, 'a'), join(dir, 'ab'))).toBe(false)
+    expect(foldersOverlap(join(dir, 'a'), join(dir, '..a'))).toBe(false)
+    expect(await run(['set', 'library.archiveRoot', mine], io().io, dir)).toBe(0)
+    const r = ioErr()
+    expect(await run(['set', 'library.othersRoot', link], r.io, dir)).not.toBe(0)
+    expect(r.err.join('') + r.out.join('')).toContain(OVERLAP_REASON)
+  })
   test('what to run and where to send data are never imported; the R2 endpoint must be Cloudflare’s', async () => {
-    const from = { ...emptyState(schema.app), settings: { 'advanced.pythonPath': '/tmp/evil/python', 'storage.r2Endpoint': 'https://acc.r2.cloudflarestorage.com', 'storage.r2Bucket': 'b', 'storage.r2AccountId': 'a', 'library.convertOcr': true } }
+    const from = { ...emptyState(schema.app), settings: { 'advanced.pythonPath': '/tmp/evil/python', 'library.archiveRoot': '/tmp/evil/archive', 'storage.r2Prefix': 'elsewhere', 'storage.r2Endpoint': 'https://acc.r2.cloudflarestorage.com', 'storage.r2Bucket': 'b', 'storage.r2AccountId': 'a', 'library.convertOcr': true } }
     const file = exportFile(from, { appVersion: '0', hostName: 'x', now: 0, schema, commands: commandsAdapter(registry) })
     const preview = previewImport(emptyState(schema.app), file, { schema, commands: commandsAdapter(registry) })
     expect(preview.changes.map((c) => c.key)).toEqual(['library.convertOcr'])
     const skipped = Object.fromEntries(preview.skipped.map((x) => [(x as { key?: string }).key, (x as { reason?: string }).reason]))
-    for (const k of ['advanced.pythonPath', 'storage.r2Endpoint', 'storage.r2Bucket', 'storage.r2AccountId']) expect(skipped[k]).toBe(THIS_MAC_ONLY)
+    for (const k of ['advanced.pythonPath', 'library.archiveRoot', 'storage.r2Prefix', 'storage.r2Endpoint', 'storage.r2Bucket', 'storage.r2AccountId']) expect(skipped[k]).toBe(THIS_MAC_ONLY)
     const dir = folder()
     const bad = ioErr()
     expect(await run(['set', 'storage.r2Endpoint', 'https://evil.example.com'], bad.io, dir)).not.toBe(0)

@@ -19,7 +19,7 @@ import { commandsAdapter, type ChangeEntry } from '@bridle/settings'
 import { SettingsStore, type LockOptions } from '@bridle/settings/node'
 import { registry } from '../shared/commands'
 import { APP_ID, LEGACY_MARK, migrateLegacy, prefsFromLegacy, schema } from '../shared/settings-schema'
-import { installWriteRules } from './settings-rules'
+import { foldersOverlap, installWriteRules, libraryRoots, OVERLAP_REASON } from './settings-rules'
 
 installWriteRules()
 
@@ -108,8 +108,19 @@ export async function migrateFromConfig(
   const legacy = readLegacyPrefs(dir)
   if (!existsSync(join(dir, SETTINGS_FILE))) {
     if (!legacy) return { kind: 'none' }
+    // The store writes this hand-over itself (its startup repair), past the write rule in settings-rules.ts,
+    // so the library-folder rule is applied here: an Others' Library that overlaps the archive is left out
+    // (it stays the default). The stamp still records it, so it is not tried again every launch.
+    const handed = { ...legacy }
+    if ('library.othersRoot' in handed) {
+      const roots = libraryRoots(handed)
+      if (foldersOverlap(roots.archive, roots.others)) {
+        delete handed['library.othersRoot']
+        log(`[settings] library.othersRoot from the older version was not applied: ${OVERLAP_REASON}`)
+      }
+    }
     try {
-      writeVia(join(dir, SETTINGS_FILE), JSON.stringify({ [LEGACY_MARK]: 1, prefs: legacy }, null, 2), true)
+      writeVia(join(dir, SETTINGS_FILE), JSON.stringify({ [LEGACY_MARK]: 1, prefs: handed }, null, 2), true)
     } catch (e) {
       if (code(e) === 'EEXIST') return { kind: 'none' }
       return { kind: 'failed', reason: `settings.json could not be written (${code(e)})` }
@@ -130,6 +141,9 @@ export async function migrateFromConfig(
   const failed: string[] = []
   try {
     await store.ready
+    // Accepted residual: this snapshot is taken once, outside the write locks of the sets below, so a CLI
+    // write to the same key landing between it and the re-migration write is overwritten. Same user on the
+    // same Mac, at startup only; outside the threat model (review round 2, #1).
     const since = changedInStoreSince(store.view().changes, stamp.at)
     for (const key of changed) {
       if (failed.length > 0) {
@@ -143,6 +157,8 @@ export async function migrateFromConfig(
       const value = key in legacy ? legacy[key] : schema.def(key)?.default
       const r = await store.set(key, value)
       if (r.ok) applied.push(key)
+      // Accepted residual: a value the store refuses as invalid is stamped on purpose (it never lands, so
+      // retrying it every launch would only repeat the refusal and its log line; review round 2, #2).
       else if (OP_REFUSALS.has(r.code)) {
         refused.push(key)
         log(`[settings] ${key} from the older version was not applied: ${r.error}`)

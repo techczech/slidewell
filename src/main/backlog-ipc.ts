@@ -72,7 +72,8 @@ export function registerBacklogIpc(deps: {
     }
   })
 
-  ipcMain.handle('backlog:cancel', () => {
+  ipcMain.handle('backlog:cancel', (e) => {
+    if (!deps.isMainWindow(e)) return false
     running?.abort()
     deps.captureDownloads?.stop()
     return Boolean(running)
@@ -81,12 +82,14 @@ export function registerBacklogIpc(deps: {
   app.on('will-quit', () => running?.abort())
 
   // Opens the folder holding the run logs (one JSONL file per real run).
-  ipcMain.handle('backlog:show-logs', async () => {
+  ipcMain.handle('backlog:show-logs', async (e) => {
+    if (!deps.isMainWindow(e)) return false
     const dir = join(deps.stateDir(), 'logs')
     return (await shell.openPath(dir)) === ''
   })
 
-  ipcMain.handle('backlog:cleanshot-setting', async () => {
+  ipcMain.handle('backlog:cleanshot-setting', async (e) => {
+    if (!deps.isMainWindow(e)) return null
     const w = deps.watchedFolder()
     return w ? cleanShotSetting(w) : null
   })

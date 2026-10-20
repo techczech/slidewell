@@ -8,8 +8,9 @@
 // wraps that one method on the prototype; the rule then judges the state the operation would write, under the
 // lock. If the package changes shape, installWriteRules throws at startup instead of silently not guarding.
 // No Electron here, so the CLI and the tests share it.
+import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { OpResult, SettingsState } from '@bridle/settings'
 import { SettingsStore } from '@bridle/settings/node'
 import { APP_ID } from '../shared/settings-schema'
@@ -21,13 +22,36 @@ export const OTHERS_DEFAULT = join(homedir(), 'SlideWell', 'others-library')
 /** The words the old folder chooser showed, for every writer. */
 export const OVERLAP_REASON = 'That folder overlaps your own archive. Pick a separate location for the Others’ Library so other people’s slides never mix into your archive.'
 
-function within(root: string, target: string): boolean {
-  return resolve(target).startsWith(resolve(root) + sep)
+/**
+ * The folder as the file system sees it: symbolic links followed. For a folder that does not exist yet, its
+ * nearest existing parent is resolved and the rest appended, so a link anywhere above it still counts.
+ */
+export function realFolder(p: string): string {
+  let head = resolve(p)
+  const tail: string[] = []
+  for (;;) {
+    try {
+      return join(realpathSync.native(head), ...tail.reverse())
+    } catch {
+      const up = dirname(head)
+      if (up === head) return resolve(p)
+      tail.push(basename(head))
+      head = up
+    }
+  }
 }
 
-/** The same folder, or one inside the other. */
+/** `target` is `root` or inside it (`/` contains every folder). */
+function within(root: string, target: string): boolean {
+  const rel = relative(root, target)
+  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep))
+}
+
+/** The same folder, or one inside the other, after following symbolic links. */
 export function foldersOverlap(a: string, b: string): boolean {
-  return resolve(a) === resolve(b) || within(a, b) || within(b, a)
+  const ra = realFolder(a)
+  const rb = realFolder(b)
+  return within(ra, rb) || within(rb, ra)
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')

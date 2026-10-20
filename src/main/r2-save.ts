@@ -2,7 +2,10 @@
 // settings file and its key ciphertext in config.json, so one change is two writes to two files. They land
 // together or not at all: the key is encrypted first (nothing written yet), the preferences are written and
 // awaited, then the ciphertext; if the ciphertext cannot be written the preferences are put back. The answer
-// is ok only when both landed. No Electron here: main passes the writes in, the tests pass fakes.
+// is ok only when both landed. Saves run one at a time in this process, and a put-back restores only a value
+// this save wrote that is still there, so it never undoes another writer's change. If the put-back itself
+// fails, the answer says the R2 settings were not saved completely (PARTIAL_R2_SAVE).
+// No Electron here: main passes the writes in, the tests pass fakes.
 
 export type R2Patch = { accountId?: string; endpoint?: string; bucket?: string; prefix?: string; accessKeyId?: string; secretAccessKey?: string }
 export type R2Prefs = { accountId?: string; endpoint?: string; bucket?: string; prefix?: string }
@@ -23,9 +26,21 @@ export type R2SaveDeps = {
 }
 
 const FIELDS = ['accountId', 'endpoint', 'bucket', 'prefix'] as const
+/** Shown when a save failed and its put-back failed too, so the R2 settings may be half old, half new. */
+export const PARTIAL_R2_SAVE = 'The R2 settings could not be saved completely — check them.'
+const sameValue = (a: unknown, b: unknown): boolean => (a ?? '') === (b ?? '')
 const code = (e: unknown): string => (e as NodeJS.ErrnoException)?.code ?? 'error'
 
-export async function saveR2(patch: unknown, deps: R2SaveDeps): Promise<R2SaveAnswer> {
+let queue: Promise<unknown> = Promise.resolve()
+
+/** One save at a time per process: a second save starts only after the first has finished, put-back included. */
+export function saveR2(patch: unknown, deps: R2SaveDeps): Promise<R2SaveAnswer> {
+  const run = queue.then(() => saveR2Now(patch, deps))
+  queue = run.catch(() => undefined)
+  return run
+}
+
+async function saveR2Now(patch: unknown, deps: R2SaveDeps): Promise<R2SaveAnswer> {
   const p = (patch && typeof patch === 'object' ? patch : {}) as R2Patch
   const prefs: R2Prefs = {}
   for (const f of FIELDS) if (typeof p[f] === 'string') prefs[f] = (p[f] as string).trim()
@@ -46,19 +61,28 @@ export async function saveR2(patch: unknown, deps: R2SaveDeps): Promise<R2SaveAn
 
   const fields = FIELDS.filter((f) => f in prefs)
   const before = deps.snapshot(fields)
+  // Puts back only what this save changed and is still its value now; anything else is left as it is.
+  const putBack = async (): Promise<boolean> => {
+    const now = deps.snapshot(fields)
+    const back: R2Prefs = {}
+    for (const f of fields) if (!sameValue(before[f], prefs[f]) && sameValue(now[f], prefs[f])) back[f] = before[f]
+    if (Object.keys(back).length === 0) return true
+    try {
+      return (await deps.writePrefs(back)).ok
+    } catch {
+      return false
+    }
+  }
   if (fields.length > 0) {
     const wrote = await deps.writePrefs(prefs)
-    if (!wrote.ok) {
-      await deps.writePrefs(before) // any that did land go back, so the old pair stays together
-      return fail(wrote.error)
-    }
+    if (!wrote.ok) return fail((await putBack()) ? wrote.error : PARTIAL_R2_SAVE)
   }
   if (enc) {
     try {
       deps.writeCiphertext(enc)
     } catch (e) {
-      const back = fields.length > 0 ? await deps.writePrefs(before) : ({ ok: true } as Saved)
-      return fail(`The R2 keys were not saved (${code(e)}); ${back.ok ? 'your earlier R2 settings were kept' : 'the R2 settings may need saving again'}.`)
+      if (!(await putBack())) return fail(PARTIAL_R2_SAVE)
+      return fail(`The R2 keys were not saved (${code(e)}); your earlier R2 settings were kept.`)
     }
   }
   return { ok: true, gotKeys, encAvailable, savedCreds: Boolean(enc) }

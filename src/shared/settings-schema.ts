@@ -17,7 +17,8 @@ const PATH_HELP_DEFAULT = 'Empty means the default location.'
 
 /**
  * Settings that name something to run or somewhere to send data are never applied by import: a settings file
- * from elsewhere must not choose the program SlideWell runs or where uploads go. They are set on each Mac.
+ * from elsewhere must not choose the program SlideWell runs or where uploads go. They are set on each Mac:
+ * the Python, the archive folder (its tools/ are run), and the R2 account, endpoint, bucket and prefix.
  */
 export const THIS_MAC_ONLY = 'Set on this Mac only'
 const thisMacOnly = (): string => THIS_MAC_ONLY
@@ -49,7 +50,9 @@ export const schema = defineSchema({
   settings: [
     {
       key: 'library.archiveRoot', label: 'Archive folder', section: 'library', group: 'Folders', type: 'path', default: '',
-      help: `The Core A archive with your presentations. ${PATH_HELP_DEFAULT} (~/gitrepos/05_ppt-tools/ppt-archive)`
+      help: `The Core A archive with your presentations. ${PATH_HELP_DEFAULT} (~/gitrepos/05_ppt-tools/ppt-archive)`,
+      // Its tools/ run: it is the import's working folder and PYTHONPATH (ingest.ts) and holds the OCR helper.
+      canApply: thisMacOnly
     },
     {
       key: 'library.othersRoot', label: 'Others’ Library folder', section: 'library', group: 'Folders', type: 'path', default: '',
@@ -123,7 +126,7 @@ export const schema = defineSchema({
     },
     {
       key: 'storage.r2Prefix', label: 'R2 key prefix', section: 'storage', group: 'R2 cloud storage', type: 'text', default: 'slidewell',
-      help: 'Folder-like prefix inside the bucket.'
+      help: 'Folder-like prefix inside the bucket.', canApply: thisMacOnly
     },
     {
       key: 'storage.r2Endpoint', label: 'R2 endpoint', section: 'storage', group: 'R2 cloud storage', type: 'text', default: '',
