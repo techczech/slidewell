@@ -34,6 +34,24 @@ Release builds are signed with a Developer ID certificate and notarised by Apple
 
 Early / soft launch. The app currently relies on a local engine — the `ppt-archive` Core A toolchain, the macOS Vision OCR helper, and `ffmpeg`; bundling these so it runs self-contained on any Mac is in progress. The glossary and binding design decisions live in a separate design repository.
 
+## Settings
+
+SlideWell › Settings… (⌘,) opens the Settings window: folders, screenshots, sorting and storage, keyboard shortcuts, the R2 and model-provider keys (kept encrypted in the macOS keychain, never shown), a list of every change with Reset, and export and import of a settings file. Settings live in `settings.json` in the app's data folder. On the first launch of 0.4.0-alpha.16 the preferences in `config.json` are copied into it; `config.json` itself is left as it was, so an older SlideWell still finds its own settings.
+
+### Settings from the command line
+
+```
+bun bin/slidewell.mjs settings list [--json]
+bun bin/slidewell.mjs settings get <key>
+bun bin/slidewell.mjs settings set <key> <value>
+bun bin/slidewell.mjs settings reset <key>
+bun bin/slidewell.mjs settings changes
+bun bin/slidewell.mjs settings export <file>
+bun bin/slidewell.mjs settings import <file> [--yes]
+```
+
+Changes made here are recorded as made by an agent and show in an open Settings window within a second. Keys cannot be read or set from the command line. `SLIDEWELL_DATA_DIR` points both the app and the command line at another data folder.
+
 ## Develop
 
 ```sh

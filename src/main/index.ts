@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage, safeStorage, powerMonitor } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage, safeStorage, powerMonitor } from 'electron'
 import sharp from 'sharp'
 import { join, basename } from 'path'
 import { homedir, tmpdir } from 'os'
@@ -8,7 +8,10 @@ import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { planSources, matchesFromKind, countFrom, type FilterableResult, type FromCounts, type SourcePlan } from './searchfilters'
 import { matchedSearch, rowIds, type MatchCluster, type MatchRow } from './matched-search'
-import { appMenuTemplate } from './app-menu'
+import { startSettings, type SettingsApp } from './settings-host'
+import { keySlots } from './key-slots'
+import { legacyFromPrefs, splitLegacyPatch } from '../shared/settings-schema'
+import { MAIN_COMMANDS, registry, type CommandContext } from '../shared/commands'
 import { mergeLookAlikeClusters } from './look-alike/merge-clusters'
 import { cachedDHash } from './look-alike/fingerprint'
 import { runMoreLikeThis } from './more-like-this'
@@ -54,7 +57,7 @@ import { appCounts, cleanAppList, decideAllFromApps } from './triage-apps'
 import { ReviewService } from './review/service'
 import { registerReviewIpc } from './review/ipc'
 import { decodeSwUrlPath as decodeSwPath, resolveSwUrlReal as resolveSwReal, serveSwFile, swUrlOf } from './swarchive-guard'
-import { CloudSorter, KEY_FIELD, normaliseCloudSettings, registerCloudIpc, type CloudRunSummary, type CloudSettings, type StoredCloudSettings } from './sorter/cloud/service'
+import { CloudSorter, KEY_FIELD, normaliseCloudSettings, registerCloudIpc, saveCloudKey, removeCloudKey, type CloudRunSummary, type CloudSettings, type StoredCloudSettings } from './sorter/cloud/service'
 import { ApiKeyStore } from './sorter/cloud/key-store'
 import { shrinkForLuna } from './sorter/cloud/images'
 import type { HttpPost } from './sorter/cloud/client'
@@ -67,6 +70,8 @@ const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUI
 // Test-only: SLIDEWELL_E2E_HIDDEN=1 keeps automated runs in the background (no window shown, no
 // Dock icon, nothing takes focus). Honoured only when set to exactly '1'; unset changes nothing.
 const E2E_HIDDEN = process.env['SLIDEWELL_E2E_HIDDEN'] === '1'
+// Tests and the settings CLI can point the app at a throwaway data folder (the CLI reads the same variable).
+if (process.env['SLIDEWELL_DATA_DIR']) app.setPath('userData', process.env['SLIDEWELL_DATA_DIR'])
 if (E2E_HIDDEN && process.platform === 'darwin') app.dock?.hide()
 
 // Custom schemes must be registered as privileged BEFORE app ready so the renderer treats them
@@ -131,17 +136,65 @@ type Config = {
 function configPath(): string {
   return join(app.getPath('userData'), 'config.json')
 }
-function readConfig(): Config {
+// The preferences moved to the shared settings file (settings-host.ts, shared/settings-schema.ts). Readers
+// here still see config.json's old shape: readConfig() lays the current settings over config.json, and
+// writeConfig() sends preference fields to the settings store (who: you) and the rest to config.json.
+// Until the settings start, and when the move could not be made safely, config.json is read as before.
+let settings: SettingsApp | null = null
+let prefsInStore = false
+function rawConfig(): Config {
   try {
     return JSON.parse(readFileSync(configPath(), 'utf8'))
   } catch {
     return {}
   }
 }
+function readConfig(): Config {
+  const raw = rawConfig()
+  if (!settings || !prefsInStore) return raw
+  const p = legacyFromPrefs(settings.values())
+  return {
+    ...raw,
+    ...p,
+    r2: { ...(raw.r2 ?? {}), ...p.r2 },
+    pictureSearch: { ...(raw.pictureSearch ?? {}), ...p.pictureSearch }
+  }
+}
 function writeConfig(patch: Partial<Config>): void {
   const dir = app.getPath('userData')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  writeFileSync(configPath(), JSON.stringify({ ...readConfig(), ...patch }, null, 2), 'utf8')
+  let rest: Partial<Config> = patch
+  if (settings && prefsInStore) {
+    const split = splitLegacyPatch(patch as Record<string, unknown>)
+    for (const [key, value] of Object.entries(split.prefs)) settings.set(key, value)
+    rest = split.rest as Partial<Config>
+    if (Object.keys(rest).length === 0) return
+    // config.json stays the older version's file: its own preference fields inside r2 and pictureSearch are kept
+    const raw = rawConfig()
+    if (rest.r2 && raw.r2) rest = { ...rest, r2: { ...pickLegacy(raw.r2, ['accountId', 'endpoint', 'bucket', 'prefix']), ...rest.r2 } }
+    if (rest.pictureSearch && raw.pictureSearch) rest = { ...rest, pictureSearch: { ...pickLegacy(raw.pictureSearch, ['includeWell']), ...rest.pictureSearch } }
+  }
+  writeRawConfig(rest)
+}
+/** Writes state fields (and the key ciphertext) to config.json as they are, without touching its preferences. */
+function writeRawConfig(patch: Partial<Config>): void {
+  const dir = app.getPath('userData')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  writeFileSync(configPath(), JSON.stringify({ ...rawConfig(), ...patch }, null, 2), 'utf8')
+}
+function pickLegacy<T extends object>(o: T, keys: string[]): Partial<T> {
+  return Object.fromEntries(Object.entries(o).filter(([k]) => keys.includes(k))) as Partial<T>
+}
+
+/** The main window or the Settings window (whose custom pages use the app's own IPC); nothing else. */
+function fromAppWindow(sender: Electron.WebContents): boolean {
+  if (mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents) return true
+  return Boolean(settings?.isSettingsSender(sender))
+}
+/** Sends a status push to the main window and an open Settings window. */
+function toAppWindows(channel: string, payload: unknown): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)
+  settings?.settingsWebContents()?.send(channel, payload)
 }
 
 // Core A (ppt-archive) is the engine SlideWell sits on. Default to its conventional location;
@@ -278,10 +331,12 @@ let pictureSearch: PictureSearchService | null = null
 let launchScanHook: () => void = () => undefined
 let refreshWatchers: () => void = () => undefined
 
-// ⌘, (the app menu's Settings… item) opens the Settings overlay in the renderer. Nothing happens
-// when the main window is missing or destroyed.
-function openSettingsFromMenu(): void {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app:open-settings')
+function openMain(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow()
+  else {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+  }
 }
 
 function createWindow(): BrowserWindow {
@@ -371,8 +426,69 @@ else
     mainWindow.focus()
   })
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (!singleInstance) return
+  // --- shared settings (settings-host.ts): store + migration from config.json, Settings window, menu bar, key slots ---
+  // The cloud step's two keys are wired once the cloud service exists (below); until then they read as missing.
+  let cloudKeyOps: { has(p: 'openai' | 'anthropic'): boolean; set(p: 'openai' | 'anthropic', k: string): { ok: boolean }; remove(p: 'openai' | 'anthropic'): void } | null = null
+  const r2Key = (field: 'accessKeyIdEnc' | 'secretEnc', label: string) => ({
+    label,
+    has: () => Boolean(rawConfig().r2?.[field]),
+    set(value: string) {
+      if (!value || value.length > 512 || !safeStorage.isEncryptionAvailable()) return { ok: false }
+      writeRawConfig({ r2: { ...(rawConfig().r2 ?? {}), [field]: safeStorage.encryptString(value).toString('base64') } })
+      return { ok: true }
+    },
+    remove() {
+      const { [field]: _gone, ...rest } = rawConfig().r2 ?? {}
+      writeRawConfig({ r2: rest })
+    }
+  })
+  const cloudKey = (p: 'openai' | 'anthropic', label: string) => ({
+    label,
+    has: () => cloudKeyOps?.has(p) ?? false,
+    set: (value: string) => cloudKeyOps?.set(p, value) ?? { ok: false },
+    remove: () => cloudKeyOps?.remove(p)
+  })
+  const started = await startSettings({
+    openMain,
+    sendCommand: (id) => mainWindow?.webContents.send('app:command', id),
+    changed: () => {
+      setOwnerNames(resolveOwnerNames(readConfig().ownerNames).names)
+      mainWindow?.webContents.send('app:settings-changed', settings?.bindings() ?? {})
+    },
+    slots: keySlots(
+      {
+        'storage.r2AccessKeyId': r2Key('accessKeyIdEnc', 'R2 access key ID'),
+        'storage.r2SecretAccessKey': r2Key('secretEnc', 'R2 secret access key'),
+        'sorting.openaiKey': cloudKey('openai', 'OpenAI key'),
+        'sorting.anthropicKey': cloudKey('anthropic', 'Anthropic key')
+      },
+      () => safeStorage.isEncryptionAvailable()
+    ),
+    log: (line) => console.warn(line)
+  })
+  settings = started.settings
+  prefsInStore = !started.legacy
+  app.on('will-quit', () => settings?.dispose())
+  ipcMain.handle('app:bindings', (e) => (fromAppWindow(e.sender) ? (settings?.bindings() ?? {}) : {}))
+  ipcMain.handle('app:run-command', (e, id: unknown) => {
+    if (fromAppWindow(e.sender) && typeof id === 'string' && MAIN_COMMANDS.has(id)) settings?.runMainCommand(id)
+  })
+  ipcMain.handle('app:show-in-main', (e, id: unknown) => {
+    if (!fromAppWindow(e.sender) || typeof id !== 'string' || !registry.byId(id) || MAIN_COMMANDS.has(id)) return
+    openMain()
+    mainWindow?.webContents.send('app:command', id)
+  })
+  ipcMain.handle('app:open-settings-at', (e, section: unknown) => {
+    if (fromAppWindow(e.sender)) settings?.openSettings(typeof section === 'string' ? section : undefined)
+  })
+  ipcMain.handle('app:set-context', (e, c: Partial<CommandContext> | null) => {
+    if (!fromAppWindow(e.sender)) return
+    const view = c?.view === 'review' || c?.view === 'triage' ? c.view : 'search'
+    settings?.setContext({ view, hasItems: c?.hasItems === true, hasActive: c?.hasActive === true })
+  })
+
   protocol.handle('swarchive', async (request) => {
     const abs = decodeSwUrlPath(request.url)
     // a fetch from R2 writes only under an allowed root's real path, and the file served passes the real-path check:
@@ -398,11 +514,11 @@ app.whenReady().then(() => {
     fetch: picFetch,
     makeEmbedder: (dir) => new WebGpuEmbedder(dir, electronEmbedHost(join(__dirname, '../preload/embedder.js'))),
     broadcast: (st) => {
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('picture:status', st)
+      toAppWindows('picture:status', st)
     }
   })
   // picture IPC answers the main window only (never the hidden picture-search window)
-  registerPictureSearchIpc(pictureSearch, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+  registerPictureSearchIpc(pictureSearch, fromAppWindow)
   app.on('will-quit', () => pictureSearch?.dispose())
 
   // --- local picture query for TalkWeaver (picture-search/query-socket.ts, contract v1) ---
@@ -535,7 +651,7 @@ app.whenReady().then(() => {
     },
     saveState: (patch) => saveCloudCfg(patch),
     broadcast: (st) => {
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('cloud:status', st)
+      toAppWindows('cloud:status', st)
     },
     // consent is main's own native dialog, raised on the main window; no window, no consent
     confirm: async (p) => {
@@ -545,7 +661,14 @@ app.whenReady().then(() => {
     },
     log: (line) => console.warn(line)
   })
-  registerCloudIpc(cloud, cloudKeys, (s) => saveCloudCfg(s), () => cloudCfg(), (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+  registerCloudIpc(cloud, cloudKeys, (s) => saveCloudCfg(s), () => cloudCfg(), fromAppWindow)
+  // Settings › Accounts and keys: the same save and remove as the cloud IPC (removing withdraws the agreement)
+  cloudKeyOps = {
+    has: (p) => Boolean(cloudCfg()[KEY_FIELD[p]]),
+    set: (p, k) => saveCloudKey(cloud, cloudKeys, p, k),
+    remove: (p) => removeCloudKey(cloud, (s) => saveCloudCfg(s), () => cloudCfg(), p)
+  }
+  settings?.slotsChanged()
   // the nightly batch runs only while the app is open: checked shortly after launch (a missed night runs then) and every minute
   const cloudTick = (): void => void cloud.tick().catch((e) => console.warn(`[sorter-cloud] nightly check failed: ${(e as Error)?.name ?? 'error'}`))
   const cloudFirst = setTimeout(cloudTick, 30_000)
@@ -1225,7 +1348,7 @@ app.whenReady().then(() => {
   registerBacklogIpc({
     watchedFolder: screenshotRootResolved,
     stateDir: () => join(app.getPath('userData'), 'backlog-import'),
-    isMainWindow: (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents),
+    isMainWindow: fromAppWindow,
     afterRun: ({ stopped }) => void scanAllSources({ downloads: !stopped }).then(() => mainWindow?.webContents.send('triage:changed')),
     captureDownloads
   })
@@ -1591,7 +1714,6 @@ app.whenReady().then(() => {
     return { ok: true, deleted: idList.length }
   })
 
-  Menu.setApplicationMenu(Menu.buildFromTemplate(appMenuTemplate(openSettingsFromMenu)))
   void startWell().finally(() => pictureSearch?.start())
   createWindow().webContents.once('did-finish-load', () => launchScanHook())
 

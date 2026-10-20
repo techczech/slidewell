@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { nextPreviewIndex } from '../../main/triage-logic'
 import { IDLE, adoptStatus, applySnapshot, failureMessage, importButtonLabel, importLine, isWorking, startClick, type ImportState } from '../../main/triage-import-progress'
-import { PictureSearchSettings, PictureSearchStatusBar, usePictureStatus } from './PictureSearch'
-import { BacklogImportSettings } from './BacklogImport'
-import { SorterServiceSettings } from './SorterServiceSettings'
+import { PictureSearchStatusBar, usePictureStatus } from './PictureSearch'
+import { aliasesOf, commandForEvent, MAIN_COMMANDS, registry, SCREEN_KEYS, withChord } from '../../shared/commands'
 import { AutoSortingTab } from './AutoSortingTab'
 import { TriageAppBar, TriageAppMenu, useTickedApps } from './TriageAppMenu'
 import { useSorterBusy } from './sorter-hooks'
@@ -97,7 +96,15 @@ export default function App(): JSX.Element {
   const [showImport, setShowImport] = useState(false)
   const [showConvert, setShowConvert] = useState(false)
   const [showStats, setShowStats] = useState(false)
-  const [showSettings, setShowSettings] = useState(false)
+  // effective chords (defaults + his own shortcuts from Settings › Shortcuts), for keys, tooltips and the cheat sheet
+  const [bindings, setBindings] = useState<Record<string, string>>(() => registry.bindingsOf({}))
+  useEffect(() => {
+    void window.sw.app.bindings().then((b) => { if (Object.keys(b).length) setBindings(b) })
+    return window.sw.app.onSettingsChanged((b) => {
+      setBindings(b)
+      setRefreshKey((k) => k + 1)
+    })
+  }, [])
   const [showHelp, setShowHelp] = useState(false)
   // Search | Review | Triage (locked 2026-10-12); the Review tab carries how many need a look, the Triage tab a dot while the sorter runs
   const [appView, setAppView] = useState<'search' | 'review' | 'triage'>('search')
@@ -108,8 +115,6 @@ export default function App(): JSX.Element {
   const [refreshKey, setRefreshKey] = useState(0)
   // a scan of the talks finished: counts, pills and the inspector follow the new usage
   useEffect(() => window.sw.archive.onTalkUsageChanged((r) => { if (r.ok) setRefreshKey((k) => k + 1) }), [])
-  // ⌘, from the app menu (main process, so it works over Triage, Review and any overlay); already open = stays open
-  useEffect(() => window.sw.app.onOpenSettings(() => setShowSettings(true)), [])
   // keyboard selection + inspector + command palette
   const [sel, setSel] = useState(-1)
   const [inspectorOpen, setInspectorOpen] = useState(false)
@@ -377,12 +382,10 @@ export default function App(): JSX.Element {
     [activeItem, lightbox, deckMode, orderedReps, sel, openLightbox, copyImage, copyImagePng, copyText, copyStructure, reveal]
   )
 
-  // global keyboard layer
-  useEffect(() => {
-    // move the selection one visual row up (dir=-1) or down (dir=+1). Works from the rendered card
-    // geometry, so it respects the live column count and group boundaries; picks the card on the
-    // nearest adjacent row whose horizontal centre is closest to the current one.
-    const moveByRow = (dir: 1 | -1): void => {
+  // move the selection one visual row up (dir=-1) or down (dir=+1). Works from the rendered card
+  // geometry, so it respects the live column count and group boundaries; picks the card on the
+  // nearest adjacent row whose horizontal centre is closest to the current one.
+  const moveByRow = useCallback((dir: 1 | -1): void => {
       const cards = Array.from(document.querySelectorAll<HTMLElement>('main .grid .card'))
       if (cards.length === 0) return
       if (sel < 0) {
@@ -407,160 +410,115 @@ export default function App(): JSX.Element {
         }
       }
       setSel(best >= 0 ? best : dir > 0 ? navCount - 1 : 0)
-    }
-    const onKey = (e: KeyboardEvent): void => {
-      if (showSettings || appView !== 'search') return // Settings, Review and Triage own the keyboard while open
-      const el = document.activeElement as HTMLElement | null
-      const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
-      const cmd = e.metaKey || e.ctrlKey
-      if (cmd && e.key.toLowerCase() === 'k') {
-        e.preventDefault()
-        // works over the lightbox too — acts on the image on screen, not the grid selection
-        if (lightbox || navCount > 0) {
-          if (!lightbox && sel < 0) setSel(0)
-          setPaletteOpen(true)
-        }
-        return
+  }, [sel, navCount])
+
+  // What each registry command does (shared/commands.ts). `field` is the text field the key came from.
+  const runCommand = useCallback(
+    (id: string, field: HTMLElement | null = null): void => {
+      if (MAIN_COMMANDS.has(id)) return void window.sw.app.runCommand(id)
+      switch (id) {
+        case 'cheat': return setShowHelp(true)
+        case 'go-search': return setAppView('search')
+        case 'go-review': return setAppView('review')
+        case 'go-triage': return setAppView('triage')
+        case 'convert': return setShowConvert(true)
+        case 'open-auto-sorting':
+          setTriageTab('auto')
+          return setAppView('triage')
       }
-      if (cmd && e.key.toLowerCase() === 'f') {
-        e.preventDefault()
-        searchRef.current?.focus()
-        return
-      }
-      // ⌘C copies the active image as WebP (TalkWeaver), ⌘⇧C as PNG — unless the user is
-      // selecting text (e.g. in the inspector JSON), where native copy should win.
-      if (cmd && e.key.toLowerCase() === 'c' && activeItem && !(deckMode && !lightbox)) {
-        const hasSelection = (window.getSelection()?.toString().length ?? 0) > 0
-        if (!hasSelection) {
-          e.preventDefault()
-          runAction(e.shiftKey ? 'copy-image-png' : 'copy-image')
+      if (appView !== 'search') return
+      switch (id) {
+        case 'find': return searchRef.current?.focus()
+        case 'actions':
+          // works over the lightbox too — acts on the image on screen, not the grid selection
+          if (lightbox || navCount > 0) {
+            if (!lightbox && sel < 0) setSel(0)
+            setPaletteOpen(true)
+          }
           return
-        }
-      }
-      if (e.key === 'Escape') {
-        if (paletteOpen) setPaletteOpen(false)
-        else if (lightbox) setLightbox(null)
-        else if (showHelp) setShowHelp(false)
-        else if (showStats) setShowStats(false)
-        else if (showImport) setShowImport(false)
-        else if (showConvert) setShowConvert(false)
-        else if (inspectorOpen) setInspectorOpen(false)
-        else if (deckFilter) setDeckFilter(null)
-        else if (typing) el?.blur()
-        return
-      }
-      if (typing || cmd) return
-      switch (e.key) {
-        case '/':
-          e.preventDefault()
-          searchRef.current?.focus()
-          break
-        case '?':
-          setShowHelp(true)
-          break
-        // arrows move the grid selection; while the lightbox is open it owns ←/→ (its own listener)
-        case 'ArrowRight':
-          if (navCount && !lightbox) {
-            e.preventDefault()
-            setSel((s) => Math.min(s < 0 ? 0 : s + 1, navCount - 1))
-          }
-          break
-        case 'ArrowLeft':
-          if (navCount && !lightbox) {
-            e.preventDefault()
-            setSel((s) => Math.max(s <= 0 ? 0 : s - 1, 0))
-          }
-          break
-        case 'ArrowDown':
-          if (navCount && !lightbox) {
-            e.preventDefault()
-            moveByRow(1)
-          }
-          break
-        case 'ArrowUp':
-          if (navCount && !lightbox) {
-            e.preventDefault()
-            moveByRow(-1)
-          }
-          break
-        case 'Enter':
-          if (!lightbox) activateCurrent()
-          break
-        case 'i':
-        case 'I':
-        case ' ':
+        case 'dismiss':
+          if (paletteOpen) setPaletteOpen(false)
+          else if (lightbox) setLightbox(null)
+          else if (showHelp) setShowHelp(false)
+          else if (showStats) setShowStats(false)
+          else if (showImport) setShowImport(false)
+          else if (showConvert) setShowConvert(false)
+          else if (inspectorOpen) setInspectorOpen(false)
+          else if (deckFilter) setDeckFilter(null)
+          else field?.blur()
+          return
+        case 'move-right': if (navCount && !lightbox) setSel((s) => Math.min(s < 0 ? 0 : s + 1, navCount - 1)); return
+        case 'move-left': if (navCount && !lightbox) setSel((s) => Math.max(s <= 0 ? 0 : s - 1, 0)); return
+        case 'move-down': if (navCount && !lightbox) moveByRow(1); return
+        case 'move-up': if (navCount && !lightbox) moveByRow(-1); return
+        case 'open-item': if (!lightbox) activateCurrent(); return
+        case 'inspector':
           if (navCount) {
-            e.preventDefault()
             if (sel < 0) setSel(0)
             setInspectorOpen((o) => !o)
           }
-          break
-        case '1':
-          patch({ type: 'slides' })
-          break
-        case '2':
-          patch({ type: 'images' })
-          break
-        case '3':
-          patch({ type: 'decks' })
-          break
-        case 'g':
-        case 'G':
-          setGroupByDeck((x) => !x)
-          break
-        case 'c':
-        case 'C':
-          patch({ cluster: !filters.cluster })
-          break
-        case 's':
-        case 'S':
-          openStats()
-          break
-        case 'o':
-        case 'O':
-          setShowImport(true)
-          break
-        // action shortcuts (mirrored in the ⌘K palette) — act on the active item
-        case 't':
-        case 'T':
-          if (activeItem) {
-            e.preventDefault()
-            runAction('copy-text')
-          }
-          break
-        case 'j':
-        case 'J':
-          if (activeItem) {
-            e.preventDefault()
-            runAction('copy-structure')
-          }
-          break
-        case 'r':
-        case 'R':
-          if (activeItem) {
-            e.preventDefault()
-            runAction('copy-ref')
-          }
-          break
-        case 'f':
-        case 'F':
-          if (activeItem) {
-            e.preventDefault()
-            runAction('reveal')
-          }
-          break
-        case 'x':
-        case 'X':
-          if (activeItem) {
-            e.preventDefault()
-            runAction('context')
-          }
-          break
+          return
+        case 'show-slides': return patch({ type: 'slides' })
+        case 'show-images': return patch({ type: 'images' })
+        case 'show-decks': return patch({ type: 'decks' })
+        case 'group-by-deck': return setGroupByDeck((x) => !x)
+        case 'toggle-clusters': return patch({ cluster: !filters.cluster })
+        case 'stats': return openStats()
+        case 'import': return setShowImport(true)
+        case 'copy-image': case 'copy-image-png': case 'copy-text': case 'copy-structure': case 'copy-ref': case 'reveal': case 'context':
+          if (activeItem) runAction(id)
+          return
       }
+    },
+    [appView, lightbox, navCount, sel, paletteOpen, showHelp, showStats, showImport, showConvert, inspectorOpen, deckFilter, moveByRow, activateCurrent, patch, filters, openStats, activeItem, runAction]
+  )
+
+  // global keyboard layer
+  useEffect(() => {
+    // One registry (shared/commands.ts) names every chord; `runCommand` below does what each command does.
+    const onKey = (e: KeyboardEvent): void => {
+      if (appView !== 'search') return // Review and Triage own the keyboard while open
+      const el = document.activeElement as HTMLElement | null
+      const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
+      const cmd = e.metaKey || e.ctrlKey
+      // ⌘C is the system's Copy: with no text selected it copies the active image (WebP, as TalkWeaver does)
+      if (cmd && !e.shiftKey && e.key.toLowerCase() === 'c' && activeItem && !(deckMode && !lightbox)) {
+        if ((window.getSelection()?.toString().length ?? 0) === 0) {
+          e.preventDefault()
+          runCommand('copy-image')
+        }
+        return
+      }
+      const id = commandForEvent(e, bindings, { inField: typing, onControl: false, overlay: false })
+      if (!id || FRAME_COMMANDS.has(id)) return // the frame's commands are handled for every screen below
+      // the lightbox owns ← → and Esc (its own listener); the copy actions there act on the image on screen
+      if (lightbox && (id.startsWith('move-') || id === 'open-item')) return
+      if (id !== 'dismiss') e.preventDefault()
+      runCommand(id, typing ? el : null)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navCount, sel, activeItem, runAction, activateCurrent, paletteOpen, lightbox, deckMode, inspectorOpen, showHelp, showStats, showImport, showConvert, showSettings, deckFilter, filters, openStats, appView])
+  }, [appView, activeItem, deckMode, lightbox, bindings, runCommand])
+
+  // Settings (⌘,), the cheat sheet (⌘/) and export/import work on every screen, over any overlay
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const el = document.activeElement as HTMLElement | null
+      const typing = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA'
+      const id = commandForEvent(e, bindings, { inField: typing, onControl: false, overlay: false })
+      if (!id || !FRAME_COMMANDS.has(id)) return
+      e.preventDefault()
+      runCommand(id)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [bindings, runCommand])
+  // menu-bar commands (generated from the registry in main) run here; Settings, Export and Import run in main
+  useEffect(() => window.sw.app.onCommand((id) => runCommand(id)), [runCommand])
+  // the menu greys out what cannot run now
+  useEffect(() => {
+    void window.sw.app.setContext({ view: appView, hasItems: navCount > 0, hasActive: Boolean(activeItem) })
+  }, [appView, navCount, activeItem])
 
   // when inspecting a deck, fetch its full metadata (re-fetches as selection moves)
   useEffect(() => {
@@ -616,11 +574,11 @@ export default function App(): JSX.Element {
               setShowStats(true)
               if (!stats) void window.sw.archive.stats().then(setStats)
             }}
-            title="Your PowerPoint history in numbers (S)"
+            title={withChord(bindings, 'stats', 'Your PowerPoint history in numbers')}
           >
             📊 Stats
           </button>
-          <button className="tb-btn" onClick={() => setShowImport(true)} title="Import PowerPoint into the archive (O)">
+          <button className="tb-btn" onClick={() => setShowImport(true)} title={withChord(bindings, 'import', 'Import PowerPoint into the archive')}>
             ⤓ Import
           </button>
           <button
@@ -630,10 +588,10 @@ export default function App(): JSX.Element {
           >
             ⇄ Convert
           </button>
-          <button className="tb-btn" onClick={() => setShowSettings(true)} title="Settings · folders · requirements">
+          <button className="tb-btn" onClick={() => runCommand('settings')} title={withChord(bindings, 'settings', 'Settings')}>
             ⚙
           </button>
-          <button className="tb-btn" onClick={() => setShowHelp(true)} title="Keyboard shortcuts (?)">
+          <button className="tb-btn" onClick={() => setShowHelp(true)} title={withChord(bindings, 'cheat', 'Keyboard shortcuts')}>
             ⌨
           </button>
         </div>
@@ -642,7 +600,7 @@ export default function App(): JSX.Element {
       <TeachRoundHost onShowReview={() => setAppView('review')} onOpenAutoSorting={() => { setTriageTab('auto'); setAppView('triage') }} />
       {appView === 'review' && <ReviewScreen onCount={setReviewCount} onToast={setToast} onOpenAutoSorting={() => { setTriageTab('auto'); setAppView('triage') }} />}
       {appView === 'triage' && (
-        <TriagePanel tab={triageTab} onTab={setTriageTab} onReview={() => setAppView('review')} onSettings={() => setShowSettings(true)} onChanged={() => setRefreshKey((k) => k + 1)} onToast={setToast} />
+        <TriagePanel tab={triageTab} onTab={setTriageTab} onReview={() => setAppView('review')} onSettings={() => void window.sw.app.openSettings('capture')} onChanged={() => setRefreshKey((k) => k + 1)} onToast={setToast} />
       )}
       {appView === 'search' && (<>
       <div className="searchbar">
@@ -723,7 +681,7 @@ export default function App(): JSX.Element {
             })}
           </div>
           {!modelReady && pic && (
-            <button className="link match-settings" onClick={() => setShowSettings(true)}>Meaning search is off · set up in Settings</button>
+            <button className="link match-settings" onClick={() => void window.sw.app.openSettings('picture-search')}>Meaning search is off · set up in Settings</button>
           )}
         </label>
         <Select label="Owner" value={filters.owner} onChange={(v) => patch({ owner: v as SearchFilters['owner'] })}
@@ -1104,7 +1062,7 @@ export default function App(): JSX.Element {
         />
       )}
 
-      {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
+      {showHelp && <HelpOverlay bindings={bindings} onClose={() => setShowHelp(false)} />}
 
       {showImport && <ImportPanel onClose={() => setShowImport(false)} onDone={() => setRefreshKey((k) => k + 1)} />}
 
@@ -1112,14 +1070,6 @@ export default function App(): JSX.Element {
 
       {showStats && <StatsPanel stats={stats} onClose={() => setShowStats(false)} />}
 
-      {showSettings && <SettingsPanel
-          onClose={() => setShowSettings(false)}
-          onOpenAutoSorting={() => {
-            setShowSettings(false)
-            setTriageTab('auto')
-            setAppView('triage')
-          }}
-          onChanged={() => setRefreshKey((k) => k + 1)} />}
 
       {toast && <div className="toast">{toast}</div>}
     </div>
@@ -1652,318 +1602,8 @@ function TriagePreview({ item, onClose, onDecide }: { item: TriageItem; onClose:
   )
 }
 
-function SettingsPanel({ onClose, onChanged, onOpenAutoSorting }: { onClose: () => void; onChanged: () => void; onOpenAutoSorting: () => void }): JSX.Element {
-  const [paths, setPaths] = useState<{ archiveRoot: string | null; wellRoot: string; vaultRoot: string | null; screenshotRoot: string | null; conversionsRoot: string | null; othersArchiveRoot: string } | null>(null)
-  const [cleanshotOffered, setCleanshotOffered] = useState(false)
-  const [captureSources, setCaptureSources] = useState<{ path: string; namedOnly: boolean; exists: boolean }[]>([])
-  const [convertOcr, setConvertOcr] = useState(false)
-  const [deps, setDeps] = useState<Dependency[]>([])
-  const [reqUrl, setReqUrl] = useState('https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md')
-  const [r2, setR2] = useState<{ accountId: string; endpoint: string; bucket: string; prefix: string; hasCreds: boolean }>({ accountId: '', endpoint: '', bucket: 'ppt-archive-media', prefix: 'slidewell', hasCreds: false })
-  const [r2key, setR2key] = useState('')
-  const [r2secret, setR2secret] = useState('')
-  const [r2status, setR2status] = useState('')
-  const [storage, setStorage] = useState<{ archive: 'local' | 'r2'; others: 'local' | 'r2'; well: 'local' | 'r2' }>({ archive: 'local', others: 'local', well: 'local' })
-  const [syncStatus, setSyncStatus] = useState('')
-  const [owners, setOwners] = useState('')
-  const [ownersDefault, setOwnersDefault] = useState(true)
-  const [ownersStatus, setOwnersStatus] = useState('')
-
-  const load = useCallback(async () => {
-    const o = await window.sw.settings.getOwnerNames()
-    setOwners(o.names.join(', '))
-    setOwnersDefault(o.isDefault)
-    const p = await window.sw.settings.getPaths()
-    setPaths({ archiveRoot: p.archiveRoot, wellRoot: p.wellRoot, vaultRoot: p.vaultRoot, screenshotRoot: p.screenshotRoot, conversionsRoot: p.conversionsRoot, othersArchiveRoot: p.othersArchiveRoot })
-    setConvertOcr(p.convertOcrDefault)
-    setCaptureSources(p.captureSources)
-    setCleanshotOffered(Boolean(p.captureDefaults.cleanshot))
-    setR2(await window.sw.settings.getR2())
-    setStorage(await window.sw.settings.getStorage())
-    const d = await window.sw.settings.dependencies()
-    setDeps(d.deps)
-    setReqUrl(d.requirementsUrl)
-  }, [])
-  const setBackend = useCallback(async (store: 'archive' | 'others' | 'well', backend: 'local' | 'r2') => {
-    await window.sw.settings.setStoreBackend(store, backend)
-    setStorage(await window.sw.settings.getStorage())
-  }, [])
-  const syncStore = useCallback(async (store: 'archive' | 'others' | 'well') => {
-    setSyncStatus(`Syncing ${store} → R2…`)
-    const r = await window.sw.settings.syncStore(store)
-    setSyncStatus(r.ok ? `✓ ${store}: ${r.uploaded ?? 0} uploaded, ${r.skipped ?? 0} already there` : `✕ ${store}: ${r.error ?? `${r.failed ?? 0} failed`}`)
-  }, [])
-  const saveR2 = useCallback(async () => {
-    const res = await window.sw.settings.setR2({ accountId: r2.accountId, endpoint: r2.endpoint, bucket: r2.bucket, prefix: r2.prefix, ...(r2key && r2secret ? { accessKeyId: r2key, secretAccessKey: r2secret } : {}) })
-    if (res.savedCreds) {
-      setR2status('✓ Saved — credentials stored in your keychain.')
-      setR2key('')
-      setR2secret('')
-    } else if (!res.gotKeys) {
-      setR2status('Settings saved, but no credentials entered — paste BOTH the access key and the secret, then Save.')
-    } else if (!res.encAvailable) {
-      setR2status('✕ Could not store credentials — OS keychain unavailable on this build.')
-    } else {
-      setR2status(`✕ Could not store credentials: ${res.error ?? 'keychain error'}`)
-    }
-    setR2(await window.sw.settings.getR2())
-  }, [r2, r2key, r2secret])
-  const testR2 = useCallback(async () => {
-    setR2status('Testing…')
-    const r = await window.sw.settings.testR2()
-    setR2status(r.ok ? '✓ Connected' : `✕ ${r.error ?? 'failed'}`)
-  }, [])
-  useEffect(() => {
-    void load()
-  }, [load])
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const openReq = (): void => void window.sw.shell.openExternal(reqUrl)
-  const choose = async (which: 'archive' | 'vault' | 'screenshot' | 'conversions' | 'others'): Promise<void> => {
-    const fn =
-      which === 'archive'
-        ? window.sw.settings.chooseArchive
-        : which === 'vault'
-          ? window.sw.settings.chooseVault
-          : which === 'conversions'
-            ? window.sw.settings.chooseConversionsFolder
-            : which === 'others'
-              ? window.sw.settings.chooseOthersFolder
-              : window.sw.settings.chooseScreenshotFolder
-    const r = await fn()
-    if (r) {
-      await load()
-      onChanged()
-    }
-  }
-  const saveOwners = async (): Promise<void> => {
-    const names = owners.split(/[,;\n]/).map((n) => n.trim()).filter(Boolean)
-    const r = await window.sw.settings.setOwnerNames(names)
-    setOwners(r.names.join(', '))
-    setOwnersDefault(r.isDefault)
-    setOwnersStatus(r.isDefault ? '✓ Reset to your Mac account name.' : '✓ Saved.')
-    onChanged()
-  }
-  const clearOthers = async (): Promise<void> => {
-    const r = await window.sw.settings.clearOthersLibrary()
-    if (r.ok) {
-      await load()
-      onChanged()
-    }
-  }
-
-  const folders: Array<{ key: 'archive' | 'vault' | 'screenshot' | 'well' | 'conversions' | 'others'; label: string; value: string | null; choosable: boolean }> = [
-    { key: 'archive', label: 'Archive (Core A engine · your presentations)', value: paths?.archiveRoot ?? null, choosable: true },
-    { key: 'others', label: "Others’ Library (other people’s slides, separate)", value: paths?.othersArchiveRoot ?? null, choosable: true },
-    { key: 'well', label: 'Well (SlideWell store)', value: paths?.wellRoot ?? null, choosable: false },
-    { key: 'vault', label: 'TalkWeaver vault', value: paths?.vaultRoot ?? null, choosable: true },
-    { key: 'screenshot', label: 'Triage source folder', value: paths?.screenshotRoot ?? null, choosable: true },
-    { key: 'conversions', label: 'Conversions output (not-mine, default)', value: paths?.conversionsRoot ?? null, choosable: true }
-  ]
-
-  return (
-    <div className="overlay" onClick={onClose}>
-      <div className="modal settings-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <b>⚙ Settings</b>
-          <button className="copyref" onClick={onClose}>close ✕</button>
-        </div>
-
-        <PictureSearchSettings />
-        <SorterServiceSettings onOpenAutoSorting={onOpenAutoSorting} />
-
-        <div className="settings-section">Folders</div>
-        <div className="settings-rows">
-          {folders.map((f) => (
-            <div className="settings-row" key={f.key}>
-              <div className="settings-row-main">
-                <div className="settings-row-label">{f.label}</div>
-                <div className="settings-row-detail" title={f.value || ''}>{f.value || '— not set —'}</div>
-              </div>
-              {f.choosable && (
-                <button className="copyref" onClick={() => void choose(f.key as 'archive' | 'vault' | 'screenshot' | 'conversions' | 'others')}>
-                  Choose…
-                </button>
-              )}
-            </div>
-          ))}
-          <div className="settings-row">
-            <div className="settings-row-main">
-              <div className="settings-row-label">Others’ Library — purge</div>
-              <div className="settings-row-detail"><i>Delete everything imported into the Others’ Library. Your own archive is never touched.</i></div>
-            </div>
-            <button className="copyref" onClick={() => void clearOthers()}>Clear library…</button>
-          </div>
-        </div>
-
-        <div className="settings-section">Capture sources</div>
-        <div className="settings-rows">
-          {captureSources.map((c) => (
-            <div className="settings-row" key={c.path}>
-              <div className="settings-row-main">
-                <div className="settings-row-label">{c.namedOnly ? 'Only files named like screenshots (Screenshot…, CleanShot…)' : 'All images and videos'}{c.exists ? '' : ' · folder not found'}</div>
-                <div className="settings-row-detail" title={c.path}>{c.path}</div>
-              </div>
-              <button className="copyref" onClick={() => void window.sw.settings.removeCaptureSource(c.path).then(load)}>Remove</button>
-            </div>
-          ))}
-          <div className="settings-row">
-            <div className="settings-row-main">
-              <div className="settings-row-label">Watched for new screenshots, alongside the Triage source folder</div>
-              <div className="settings-row-detail"><i>New files reach Triage within a minute. SlideWell only reads these folders; it never moves or changes the originals.</i></div>
-            </div>
-            <button className="copyref" onClick={() => void window.sw.settings.addCaptureSource('desktop').then(load)}>Add Desktop</button>
-            {cleanshotOffered && <button className="copyref" onClick={() => void window.sw.settings.addCaptureSource('cleanshot').then(load)}>Add CleanShot folder</button>}
-            <button className="copyref" onClick={() => void window.sw.settings.addCaptureSource('folder').then(load)}>Add folder…</button>
-          </div>
-        </div>
-
-        <BacklogImportSettings />
-
-        <div className="settings-section">My presentations</div>
-        <div className="settings-rows">
-          <div className="settings-row">
-            <div className="settings-row-main">
-              <div className="settings-row-label">Your names as PPTX author{ownersDefault ? ' · from your Mac account' : ''}</div>
-              <div className="settings-row-detail">
-                <i>{ownersStatus || 'Comma-separated. A presentation counts as yours (Owner: My presentations) when its author contains any of these names or their words; accents and case are ignored. Clear the field and Save to go back to your Mac account name.'}</i>
-              </div>
-              <input className="search-input" value={owners} placeholder="e.g. Jane Smith, jsmith" onChange={(e) => setOwners(e.target.value)} />
-            </div>
-            <button className="copyref" onClick={() => void saveOwners()}>Save</button>
-          </div>
-        </div>
-
-        <div className="settings-section">Conversions</div>
-        <div className="settings-rows">
-          <div className="settings-row">
-            <div className="settings-row-main">
-              <div className="settings-row-label">OCR image text by default</div>
-              <div className="settings-row-detail">When converting someone’s presentation, recognise text inside images (macOS Vision) and inline it into the Outline.</div>
-            </div>
-            <label className="toggle" title="Default state of the OCR toggle in the Convert panel">
-              <input
-                type="checkbox"
-                checked={convertOcr}
-                onChange={(e) => {
-                  setConvertOcr(e.target.checked)
-                  void window.sw.settings.setConvertOcr(e.target.checked)
-                }}
-              />{' '}
-              {convertOcr ? 'On' : 'Off'}
-            </label>
-          </div>
-        </div>
-
-        <div className="settings-section">R2 (cloud storage)</div>
-        <div className="settings-rows">
-          <div className="settings-row">
-            <div className="settings-row-main">
-              <div className="settings-row-label">Account ID</div>
-              <input className="search-input" value={r2.accountId} placeholder="Cloudflare account id" onChange={(e) => setR2({ ...r2, accountId: e.target.value })} />
-            </div>
-          </div>
-          <div className="settings-row">
-            <div className="settings-row-main">
-              <div className="settings-row-label">Bucket</div>
-              <input className="search-input" value={r2.bucket} placeholder="ppt-archive-media" onChange={(e) => setR2({ ...r2, bucket: e.target.value })} />
-            </div>
-          </div>
-          <div className="settings-row">
-            <div className="settings-row-main">
-              <div className="settings-row-label">Key prefix</div>
-              <input className="search-input" value={r2.prefix} placeholder="slidewell" onChange={(e) => setR2({ ...r2, prefix: e.target.value })} />
-            </div>
-          </div>
-          <div className="settings-row">
-            <div className="settings-row-main">
-              <div className="settings-row-label">Endpoint (optional)</div>
-              <input className="search-input" value={r2.endpoint} placeholder={r2.accountId ? `https://${r2.accountId}.r2.cloudflarestorage.com` : 'derived from account id'} onChange={(e) => setR2({ ...r2, endpoint: e.target.value })} />
-            </div>
-          </div>
-          <div className="settings-row">
-            <div className="settings-row-main">
-              <div className="settings-row-label">S3 access key{r2.hasCreds ? ' · saved' : ''}</div>
-              <div className="settings-row-detail"><i>Write-only; stored encrypted in your OS keychain. Leave blank to keep the saved one.</i></div>
-              <input className="search-input" value={r2key} placeholder={r2.hasCreds ? '•••••••• (saved)' : 'access key id'} onChange={(e) => setR2key(e.target.value)} />
-              <input className="search-input" type="password" value={r2secret} placeholder="secret access key" onChange={(e) => setR2secret(e.target.value)} />
-            </div>
-          </div>
-          <div className="settings-row">
-            <div className="settings-row-main">
-              <div className="settings-row-detail">{r2status || 'Private bucket; SlideWell signs requests (SigV4).'}</div>
-            </div>
-            <button className="copyref" onClick={() => void saveR2()}>Save</button>
-            <button className="copyref" onClick={() => void testR2()}>Test connection</button>
-          </div>
-        </div>
-
-        <div className="settings-section">Per-store storage</div>
-        <p className="settings-note">
-          <b>Local</b> = files on this machine only. <b>Local + R2 backup</b> = the full copy stays here (primary, offline) <i>and</i> is mirrored to R2 (press Sync) so another machine can fetch it. <i>(A bounded “R2 cache” mode for space-tight machines comes with the eviction step.)</i>
-        </p>
-        <div className="settings-rows">
-          {(['archive', 'others', 'well'] as const).map((store) => (
-            <div className="settings-row" key={store}>
-              <div className="settings-row-main">
-                <div className="settings-row-label">{store === 'archive' ? 'Archive' : store === 'others' ? 'Others’ Library' : 'Well'}</div>
-                <div className="settings-row-detail"><i>{storage[store] === 'r2' ? 'Full copy stays here; mirrored to R2 — Sync to push, then a remote machine can fetch it.' : 'Local files only — not backed up to R2.'}</i></div>
-              </div>
-              <div className="scope" role="tablist" aria-label={`${store} storage`}>
-                <button className={storage[store] === 'local' ? 'scope-tab active' : 'scope-tab'} onClick={() => void setBackend(store, 'local')}>Local</button>
-                <button className={storage[store] === 'r2' ? 'scope-tab active' : 'scope-tab'} onClick={() => void setBackend(store, 'r2')}>Local + R2 backup</button>
-              </div>
-              {storage[store] === 'r2' && (
-                <button className="copyref" disabled={!r2.hasCreds} title={r2.hasCreds ? 'Upload this store’s media to R2 now' : 'Save R2 credentials first'} onClick={() => void syncStore(store)}>
-                  Sync to R2
-                </button>
-              )}
-            </div>
-          ))}
-          {syncStatus && (
-            <div className="settings-row">
-              <div className="settings-row-main">
-                <div className="settings-row-detail">{syncStatus}</div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="settings-section">
-          Requirements
-          <button className="link settings-reqlink" onClick={openReq}>full setup guide on GitHub →</button>
-        </div>
-        <div className="settings-rows">
-          {deps.map((d) => (
-            <div className={`settings-row dep ${d.found ? 'ok' : d.required ? 'bad' : 'warn'}`} key={d.key}>
-              <span className="dep-badge">{d.found ? '✓' : '⚠'}</span>
-              <div className="settings-row-main">
-                <div className="settings-row-label">
-                  {d.label}
-                  {d.required && !d.found ? ' · required' : ''}
-                </div>
-                <div className="settings-row-detail">
-                  {d.requiredFor}
-                  {d.found ? '' : ` — ${d.install}`}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-        <p className="settings-note">
-          Anything missing just disables its feature — SlideWell still runs. See the{' '}
-          <button className="link" onClick={openReq}>requirements guide</button> to install what you need.
-        </p>
-      </div>
-    </div>
-  )
-}
+/** The settings frame's commands: they work on every screen and over any overlay. */
+const FRAME_COMMANDS: ReadonlySet<string> = new Set(['settings', 'cheat', 'export-settings', 'import-settings'])
 
 const fileName = (p: string): string => p.split('/').pop() || p
 
@@ -2963,41 +2603,45 @@ function CommandPalette({
   )
 }
 
-function HelpOverlay({ onClose }: { onClose: () => void }): JSX.Element {
-  const rows: [string, string][] = [
-    ['/  ·  ⌘F', 'Focus search'],
-    ['← →', 'Previous / next'],
-    ['↑ ↓', 'Up / down a row'],
-    ['Enter · dbl-click', 'Open full size (presentation: open it)'],
-    ['I  ·  Space', 'Toggle inspector sidebar'],
-    ['⌘K', 'Command palette (actions)'],
-    ['⌘,', 'Settings'],
-    ['⌘C  ·  ⌘⇧C', 'Copy image (WebP) · as PNG'],
-    ['T · J · R', 'Copy text · structure · reference'],
-    ['F · X', 'Reveal in Finder · See in context'],
-    ['1 · 2 · 3', 'Slides · Images · Presentations'],
-    ['G', 'Group by presentation'],
-    ['C', 'Cluster near-identical'],
-    ['S · O', 'Stats · Import'],
-    ['Review', 'Review tab — K keep · T throwaway · ↓ skip · ⌘Z undo · both piles: arrows · Tab · Esc'],
-    ['⛏ Triage', 'Triage (title bar tab) — Space select · U unselect · X exclude · ⌘Y full · sort/group by date'],
-    ['Esc', 'Close / back'],
-    ['?', 'This help']
-  ]
+// The cheat sheet (⌘/, also ?): generated from the command registry with his own shortcuts applied. Every
+// command is listed; one with no shortcut shows None. The Review and Triage screens' own keys follow.
+function HelpOverlay({ bindings, onClose }: { bindings: Record<string, string>; onClose: () => void }): JSX.Element {
+  const groups = registry.groups
+    .map((group) => ({ group, entries: registry.defs.filter((d) => d.group === group && !d.hidden) }))
+    .filter((g) => g.entries.length > 0)
   return (
     <div className="overlay" onClick={onClose}>
-      <div className="modal help-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal help-modal" role="dialog" aria-label="Keyboard shortcuts" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <b>⌨ Keyboard shortcuts</b>
+          <b>Keyboard shortcuts</b>
           <button className="copyref" onClick={onClose}>close ✕</button>
         </div>
-        <div className="details-table">
-          {rows.map(([k, v]) => (
-            <div className="drow" key={k}>
-              <span className="dk help-key">{k}</span>
-              <span className="dv">{v}</span>
+        <p className="settings-note">Change any shortcut in Settings › Shortcuts. Single-letter keys work when the cursor is outside the search field.</p>
+        <div className="details-table help-table">
+          {groups.map((g) => (
+            <div key={g.group} className="help-group">
+              <div className="help-group-head">{g.group}</div>
+              {g.entries.map((d) => {
+                const chord = bindings[d.id]
+                const keys = chord ? [chord, ...aliasesOf(d.id)] : []
+                return (
+                  <div className="drow" key={d.id} data-command={d.id}>
+                    <span className="dk help-key">{keys.length > 0 ? keys.join('  ·  ') : <span className="help-none">None</span>}</span>
+                    <span className="dv">{d.label}</span>
+                  </div>
+                )
+              })}
             </div>
           ))}
+          <div className="help-group">
+            <div className="help-group-head">On the Review and Triage screens</div>
+            {SCREEN_KEYS.map(([screen, keys]) => (
+              <div className="drow" key={screen}>
+                <span className="dk help-key">{screen}</span>
+                <span className="dv">{keys}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>

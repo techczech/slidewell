@@ -1338,6 +1338,34 @@ export function changeSecondOpinions(svc: Pick<CloudSorter, 'secondOpinionsChang
   return { ok: true }
 }
 
+/** Saves a provider's key (Settings › Accounts and keys and the cloud IPC). Saving a key never turns the cloud step on. */
+export function saveCloudKey(
+  svc: Pick<CloudSorter, 'keyChanged'>,
+  keys: Record<ProviderId, { set(k: unknown): { ok: boolean; saved: boolean; error?: string } }>,
+  provider: ProviderId,
+  k: unknown
+): { ok: boolean; saved: boolean; error?: string } {
+  const r = keys[provider].set(k)
+  if (r.saved) svc.keyChanged(provider, 'saved') // a running batch is bound to the key it started with
+  return r
+}
+
+/**
+ * Removes a provider's key. Removing a key withdraws his agreement to that provider: a key saved later needs
+ * the dialog again. One write for the key, the agreement and on/off; only then is the service told.
+ */
+export function removeCloudKey(
+  svc: Pick<CloudSorter, 'keyChanged' | 'serviceChanged'>,
+  saveSettings: (s: StoredCloudSettings & StoredKeys) => void,
+  current: () => StoredCloudSettings,
+  provider: ProviderId
+): void {
+  const before = current()
+  saveSettings(removeKey(before, provider))
+  svc.keyChanged(provider, 'cleared')
+  if (serviceOn(before) !== serviceOn(current())) svc.serviceChanged()
+}
+
 /**
  * IPC for Settings › Screenshot sorter › cloud step. Types: src/preload/index.ts. Never returns a key.
  * A key is saved or removed for the provider the call names (one of the two ids, or it is refused):
@@ -1363,18 +1391,12 @@ export function registerCloudIpc(
   handle('cloud:status', () => svc.status())
   handle('cloud:set-key', (provider: unknown, k: unknown) => {
     if (!isProviderId(provider)) return { ok: false, saved: false, error: 'The key was not saved: no provider was named.', status: svc.status() }
-    const r = keys[provider].set(k) // saving a key never turns the cloud step on
-    if (r.saved) svc.keyChanged(provider, 'saved') // a running batch is bound to the key it started with
+    const r = saveCloudKey(svc, keys, provider, k)
     return { ok: r.ok, saved: r.saved, error: r.error, status: svc.status() }
   })
   handle('cloud:clear-key', (provider: unknown) => {
     if (!isProviderId(provider)) return svc.status()
-    // removing a key withdraws his agreement to that provider: a key saved later needs the dialog again.
-    // One write for the key, the agreement and on/off; only then is the service told
-    const before = current()
-    saveSettings(removeKey(before, provider))
-    svc.keyChanged(provider, 'cleared')
-    if (serviceOn(before) !== serviceOn(current())) svc.serviceChanged()
+    removeCloudKey(svc, saveSettings, current, provider)
     return svc.status()
   })
   // only the provider, on/off (his agreement per provider is recorded here with its time after main's own dialog; off keeps it) and the batch time can be set; the limit is fixed
