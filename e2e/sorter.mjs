@@ -187,13 +187,16 @@ try {
   out('sort', sorted)
   check('sorting finished', sorted.ok, sorted.error)
 
-  // Settings shows the report
-  await win.locator('button[title^="Settings"]').click()
-  await win.locator('.sorter-settings .sorter-table').waitFor({ timeout: 10000 })
-  const shown = await win.locator('.sorter-settings').innerText()
-  check('Settings shows the accuracy report', /Keep right/.test(shown) && /Throwaway right/.test(shown) && /Need a look/.test(shown))
-  await win.locator('.sorter-settings').scrollIntoViewIfNeeded()
-  await win.locator('.sorter-settings').screenshot({ path: join(screens, 'settings-sorter.png') })
+  // The accuracy report is no longer in Settings (the Settings window holds only the service, keys and agreements);
+  // it is on Triage > Auto sorting, behind "Accuracy table and thresholds: show".
+  await win.locator('.view-switch .scope-tab', { hasText: 'Triage' }).click()
+  await win.locator('.triage-controls .scope-tab', { hasText: 'Auto sorting' }).click()
+  await win.locator('.as-accuracy-toggle').click()
+  await win.locator('.sorter-report .sorter-table').waitFor({ timeout: 10000 })
+  const shown = await win.locator('.sorter-report').innerText()
+  check('Auto sorting shows the accuracy report', /Keep right/.test(shown) && /Throwaway right/.test(shown) && /Need a look/.test(shown))
+  await win.locator('.sorter-report').scrollIntoViewIfNeeded()
+  await win.locator('.sorter-report').screenshot({ path: join(screens, 'settings-sorter.png') })
 
   const reqs = await app.evaluate(() => globalThis.__requests)
   check('no network request', reqs.length === 0, JSON.stringify(reqs.slice(0, 5)))
