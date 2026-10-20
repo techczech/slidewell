@@ -453,7 +453,7 @@ app.whenReady().then(async () => {
   if (!singleInstance) return
   // --- shared settings (settings-host.ts): store + migration from config.json, Settings window, menu bar, key slots ---
   // The cloud step's two keys are wired once the cloud service exists (below); until then they read as missing.
-  let cloudKeyOps: { has(p: 'openai' | 'anthropic'): boolean; set(p: 'openai' | 'anthropic', k: string): { ok: boolean }; remove(p: 'openai' | 'anthropic'): void } | null = null
+  let cloudKeyOps: { has(p: 'openai' | 'anthropic'): boolean; set(p: 'openai' | 'anthropic', k: string): { ok: boolean; error?: string; shape?: boolean }; remove(p: 'openai' | 'anthropic'): void } | null = null
   const r2Key = (field: 'accessKeyIdEnc' | 'secretEnc', label: string) => ({
     label,
     has: () => Boolean(rawConfig().r2?.[field]),

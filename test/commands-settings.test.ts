@@ -1,5 +1,6 @@
 // The registry, schema, key slots and settings CLI: SKILL.md's per-app tests 1–5 at their seams.
 import { afterEach, describe, expect, test } from 'vitest'
+import { SLOT_MESSAGES } from '@bridle/settings-electron'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -91,6 +92,14 @@ describe('key slots', () => {
     expect(slots.set('nope', 'x')).toEqual({ ok: false, error: 'unknown' })
     expect(slots.remove('storage.r2AccessKeyId')).toEqual({ ok: true })
     expect(log).toEqual(['set:2', 'set:13', 'remove'])
+  })
+  test('a key of the wrong shape gets the package shape message, never the key', () => {
+    const shape = 'That does not look like an Anthropic API key (they start with sk-ant-).'
+    const typed = 'sk-proj-SECRETVALUE1234567890'
+    const slots = keySlots({ 'storage.r2AccessKeyId': backend(false, []), 'storage.r2SecretAccessKey': backend(false, []), 'sorting.openaiKey': backend(false, []), 'sorting.anthropicKey': { label: 'K', has: () => false, set: () => ({ ok: false, error: shape, shape: true }), remove: () => undefined } }, () => true)
+    const r = slots.set('sorting.anthropicKey', typed)
+    expect(r).toEqual({ ok: false, error: SLOT_MESSAGES.shape })
+    expect(JSON.stringify(r)).not.toContain('SECRETVALUE')
   })
   test('without the keychain nothing is saved and saved keys show a problem', () => {
     const log: string[] = []

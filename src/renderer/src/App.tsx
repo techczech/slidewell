@@ -1449,7 +1449,7 @@ function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToast }: {
           </div>
 
           {tab === 'auto' ? (
-            <AutoSortingTab onReview={onReview} onSettings={onSettings} triageUndecided={counts.undecided} />
+            <AutoSortingTab onReview={onReview} onSettings={() => void window.sw.app.openSettings('sorter-service')} triageUndecided={counts.undecided} />
           ) : root === undefined ? (
             <div className="triage-empty">loading…</div>
           ) : root === null ? (

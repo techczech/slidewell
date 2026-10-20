@@ -20,7 +20,7 @@ export type SecretBox = {
   decrypt(cipher: Buffer): string
 }
 
-export type KeySetResult = { ok: boolean; saved: boolean; error?: string }
+export type KeySetResult = { ok: boolean; saved: boolean; error?: string; shape?: boolean }
 
 /** A pasted key: trimmed, one token, of plausible length. */
 export function checkKeyShape(key: unknown): string | null {
@@ -50,9 +50,9 @@ export class ApiKeyStore {
 
   set(key: unknown): KeySetResult {
     const k = checkKeyShape(key)
-    if (!k) return { ok: false, saved: false, error: 'That does not look like an API key.' }
+    if (!k) return { ok: false, saved: false, error: 'That does not look like an API key.', shape: true }
     const refused = this.rule(k)
-    if (refused) return { ok: false, saved: false, error: refused }
+    if (refused) return { ok: false, saved: false, error: refused, shape: true }
     if (!this.encryptionAvailable()) return { ok: false, saved: false, error: 'The macOS keychain is not available, so the key cannot be stored safely.' }
     try {
       const enc = this.box.encrypt(k).toString('base64')
