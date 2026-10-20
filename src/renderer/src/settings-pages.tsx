@@ -3,7 +3,7 @@
 // component where one exists; every call goes through window.sw, which main answers only from the main
 // window and the Settings window.
 import { useCallback, useEffect, useState } from 'react'
-import type { CustomPage } from '@bridle/settings-react'
+import type { CustomPage } from '@app-patterns/settings-react'
 import type { Dependency } from '../../preload'
 import { PictureSearchSettings } from './PictureSearch'
 import { SorterServiceSettings } from './SorterServiceSettings'

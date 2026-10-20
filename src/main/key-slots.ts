@@ -2,7 +2,7 @@
 // (the macOS keychain) and stored in config.json only as that ciphertext. Nothing here reads a key's
 // value: the list goes by whether the ciphertext is there, a save hands the typed value straight to the
 // backend that encrypts it, and no result carries the value or the backend's own words.
-import { SLOT_MESSAGES, type SecretSlots, type SlotInfo, type SlotResult } from '@bridle/settings-electron'
+import { SLOT_MESSAGES, type SecretSlots, type SlotInfo, type SlotResult } from '@app-patterns/settings-electron'
 import type { SecretKey } from '../shared/settings-schema'
 
 export type KeyBackend = {

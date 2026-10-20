@@ -4,8 +4,8 @@
 // Keys are never read or printed here: a key shows only as kept in the keychain.
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { commandsAdapter } from '@bridle/settings'
-import { runSettingsCli, type LockOptions, type SettingsCliIO } from '@bridle/settings/node'
+import { commandsAdapter } from '@app-patterns/settings'
+import { runSettingsCli, type LockOptions, type SettingsCliIO } from '@app-patterns/settings/node'
 import { registry } from '../shared/commands'
 import { APP_ID, APP_NAME, migrateLegacy, schema } from '../shared/settings-schema'
 import { migrateFromConfig, stampMigration } from '../main/settings-migration'

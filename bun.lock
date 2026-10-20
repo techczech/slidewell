@@ -5,10 +5,10 @@
     "": {
       "name": "slidewell",
       "dependencies": {
-        "@bridle/commands": "file:./vendor/bridle/bridle-commands-0.2.0.tgz",
-        "@bridle/settings": "file:./vendor/bridle/bridle-settings-0.2.0.tgz",
-        "@bridle/settings-electron": "file:./vendor/bridle/bridle-settings-electron-0.2.0.tgz",
-        "@bridle/settings-react": "file:./vendor/bridle/bridle-settings-react-0.2.0.tgz",
+        "@app-patterns/commands": "file:./vendor/app-patterns/app-patterns-commands-0.3.0.tgz",
+        "@app-patterns/settings": "file:./vendor/app-patterns/app-patterns-settings-0.3.0.tgz",
+        "@app-patterns/settings-electron": "file:./vendor/app-patterns/app-patterns-settings-electron-0.3.0.tgz",
+        "@app-patterns/settings-react": "file:./vendor/app-patterns/app-patterns-settings-react-0.3.0.tgz",
         "@huggingface/tokenizers": "0.2.0",
         "aws4fetch": "^1.0.20",
         "onnxruntime-web": "1.30.0",
@@ -42,13 +42,21 @@
     },
   },
   "overrides": {
-    "@bridle/commands": "file:./vendor/bridle/bridle-commands-0.2.0.tgz",
-    "@bridle/settings": "file:./vendor/bridle/bridle-settings-0.2.0.tgz",
-    "@bridle/settings-electron": "file:./vendor/bridle/bridle-settings-electron-0.2.0.tgz",
-    "@bridle/settings-react": "file:./vendor/bridle/bridle-settings-react-0.2.0.tgz",
+    "@app-patterns/commands": "file:./vendor/app-patterns/app-patterns-commands-0.3.0.tgz",
+    "@app-patterns/settings": "file:./vendor/app-patterns/app-patterns-settings-0.3.0.tgz",
+    "@app-patterns/settings-electron": "file:./vendor/app-patterns/app-patterns-settings-electron-0.3.0.tgz",
+    "@app-patterns/settings-react": "file:./vendor/app-patterns/app-patterns-settings-react-0.3.0.tgz",
   },
   "packages": {
     "7zip-bin": ["7zip-bin@5.2.0", "", {}, "sha512-ukTPVhqG4jNzMro2qA9HSCSSVJN3aN7tlb+hfqYCt3ER0yWroeA2VR38MNrOHLQ/cVj+DaIMad0kFCtWWowh/A=="],
+
+    "@app-patterns/commands": ["@app-patterns/commands@./vendor/app-patterns/app-patterns-commands-0.3.0.tgz", {}, "sha512-GoyHOuZpluDzGyITk2kRMG23NfSPmvLfOyp1lCkAg6anwyFHWpoUlj/Axi0h1SiUmrn9DsJSA5zeY5jGykB2Pg=="],
+
+    "@app-patterns/settings": ["@app-patterns/settings@./vendor/app-patterns/app-patterns-settings-0.3.0.tgz", {}, "sha512-yEGHyt5GALdZAD6qbd7LdpR4Q6T+JQVlK9Gr4AKb5Af8XVW5b8qMvSuovmH36gVbpuTJhIMshYFhZ9pMgl2zRw=="],
+
+    "@app-patterns/settings-electron": ["@app-patterns/settings-electron@./vendor/app-patterns/app-patterns-settings-electron-0.3.0.tgz", { "peerDependencies": { "@app-patterns/commands": "^0.3.0", "@app-patterns/settings": "^0.3.0", "@app-patterns/settings-react": "^0.3.0", "electron": ">=30 <43" }, "optionalPeers": ["@app-patterns/commands", "@app-patterns/settings", "@app-patterns/settings-react", "electron"] }, "sha512-1iKLF8CCFGjBR3YEwT215u5wxzTu8iQNGzH8jYE8Mg4o3HKUCbFO3O19IDIipWGeZxKtO/Y62U+sCg+CtiBcuQ=="],
+
+    "@app-patterns/settings-react": ["@app-patterns/settings-react@./vendor/app-patterns/app-patterns-settings-react-0.3.0.tgz", { "peerDependencies": { "@app-patterns/commands": "^0.3.0", "@app-patterns/settings": "^0.3.0", "lucide-react": ">=0.468.0 <2", "react": ">=18" } }, "sha512-DS1SFAyiuzbhJYdVLW1jqNuz1sJDXH2SJ9JUPqY3bQnqgRKz8Zjbk2RZwhyq73tvyg5GSJN0DeVu6RjtxRLHaw=="],
 
     "@babel/code-frame": ["@babel/code-frame@7.29.7", "", { "dependencies": { "@babel/helper-validator-identifier": "^7.29.7", "js-tokens": "^4.0.0", "picocolors": "^1.1.1" } }, "sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw=="],
 
@@ -89,14 +97,6 @@
     "@babel/traverse": ["@babel/traverse@7.29.7", "", { "dependencies": { "@babel/code-frame": "^7.29.7", "@babel/generator": "^7.29.7", "@babel/helper-globals": "^7.29.7", "@babel/parser": "^7.29.7", "@babel/template": "^7.29.7", "@babel/types": "^7.29.7", "debug": "^4.3.1" } }, "sha512-EhlfNQtZ+NK22w5BM61ciuiq1m58ed33Wr1Xan//ZRTy6hgjnwyCffRYwzsGXdASJSUJ1guZILsErh1eQcl+zw=="],
 
     "@babel/types": ["@babel/types@7.29.7", "", { "dependencies": { "@babel/helper-string-parser": "^7.29.7", "@babel/helper-validator-identifier": "^7.29.7" } }, "sha512-4zBIxpPzowiZpusoFkyGVwakdRJUyuH5PxQ/PrqghfdFWWasvnCdPfQXHrenDai+gyLARulZjZowCOj6fjT4pA=="],
-
-    "@bridle/commands": ["@bridle/commands@./vendor/bridle/bridle-commands-0.2.0.tgz", {}, "sha512-y1Y323oZLILBkXNUzw9iocZ3raNlosQV53XZdEmVzQamvKZ3Dcezi0wAgdrPZCMScYo80O2ZJuC9lcMIFQ0lBg=="],
-
-    "@bridle/settings": ["@bridle/settings@./vendor/bridle/bridle-settings-0.2.0.tgz", {}, "sha512-vtMqk1g1R5GLpFWJG33U1d8KWZ0kc37RM5MgnRnU+pefdCEtnUZESahhPOZpNoao0XB9iqlXYnGUSTCNYzxZOw=="],
-
-    "@bridle/settings-electron": ["@bridle/settings-electron@./vendor/bridle/bridle-settings-electron-0.2.0.tgz", { "peerDependencies": { "@bridle/commands": "^0.2.0", "@bridle/settings": "^0.2.0", "@bridle/settings-react": "^0.2.0", "electron": ">=30 <43" }, "optionalPeers": ["@bridle/commands", "@bridle/settings", "@bridle/settings-react", "electron"] }, "sha512-GQV1fryvKrjnCtJYg/ArIq24+BY1Pn+Ss9sJGO5Db+GfUuteG1vqpfIQYgNm0z87zFUyugYKofxUno8BJnTDUQ=="],
-
-    "@bridle/settings-react": ["@bridle/settings-react@./vendor/bridle/bridle-settings-react-0.2.0.tgz", { "peerDependencies": { "@bridle/commands": "^0.2.0", "@bridle/settings": "^0.2.0", "lucide-react": ">=0.468.0 <2", "react": ">=18" } }, "sha512-xTPBcLBglQpZWejHaEv2ICArSAaIZ5/tt2pTQyBK0QWyWs8dZkgkCc3Whhfeum6eIRKP/fQUHor7fmCgsArNFQ=="],
 
     "@codemirror/autocomplete": ["@codemirror/autocomplete@6.20.3", "", { "dependencies": { "@codemirror/language": "^6.0.0", "@codemirror/state": "^6.0.0", "@codemirror/view": "^6.17.0", "@lezer/common": "^1.0.0" } }, "sha512-tlosUqb+3BbxCxZdu4tKeRghPFC+QM7q4X5YhKV2eCmPG+1r2F3f4AaSz5sCrFqUtX4Jh20VFTKecl16MgiV9g=="],
 
@@ -1152,15 +1152,11 @@
 
     "@electron/get/undici": ["undici@7.27.2", "", {}, "sha512-uZsKNuzQxDMUY6M3pIMvy5tvlGmtq8XJ2oLAkfRKGNu+1VQAIvLy2xIVG5ATZl5wDXl/tddByAWCizRbOme+TA=="],
 
-    "@electron/node-gyp/env-paths": ["env-paths@2.2.1", "", {}, "sha512-+h1lkLKhZMTYjog1VEpJNG7NZJWcuc2DDk/qsqSTRRCOXiLjeQ1d1/udrUGhqMxUgAlwKNZ0cf2uqan5GLuS2A=="],
-
     "@electron/node-gyp/glob": ["glob@8.1.0", "", { "dependencies": { "fs.realpath": "^1.0.0", "inflight": "^1.0.4", "inherits": "2", "minimatch": "^5.0.1", "once": "^1.3.0" } }, "sha512-r8hpEjiQEYlF2QU0df3dS+nxxSIreXQS1qRhMJM0Q5NDdR386C7jb7Hwwod8Fgiuex+k0GFjgft18yvxm5XoCQ=="],
 
     "@electron/node-gyp/nopt": ["nopt@6.0.0", "", { "dependencies": { "abbrev": "^1.0.0" }, "bin": "bin/nopt.js" }, "sha512-ZwLpbTgdhuZUnZzjd7nb1ZV+4DoiC6/sfiVKok72ym/4Tlf+DFdlHYmT2JPmcNNWV6Pi3SDf1kT+A4r9RTuT9g=="],
 
     "@electron/node-gyp/proc-log": ["proc-log@2.0.1", "", {}, "sha512-Kcmo2FhfDTXdcbfDH76N7uBYHINxc/8GW7UAVuVP9I+Va3uHSerrnKV6dLooga/gh7GlgzuCCr/eoldnL1muGw=="],
-
-    "@electron/node-gyp/semver": ["semver@7.8.4", "", { "bin": "bin/semver.js" }, "sha512-rUCObTnP32Q08R2uuIrt7r9PlEonuTmtuXYcW6s5kjdlj3xbnwe+21yXptAUYcMAABLkYYTtnmzb3w3EDZfueA=="],
 
     "@electron/node-gyp/tar": ["tar@6.2.1", "", { "dependencies": { "chownr": "^2.0.0", "fs-minipass": "^2.0.0", "minipass": "^5.0.0", "minizlib": "^2.1.1", "mkdirp": "^1.0.3", "yallist": "^4.0.0" } }, "sha512-DZ4yORTwrbTj/7MZYq2w+/ZFdI6OZ/f9SFHR+71gIVUZhOQPHzVCLpvRnPgyaMpfWxxk/4ONva3GQSyNIKRv6A=="],
 
@@ -1192,15 +1188,9 @@
 
     "@malept/flatpak-bundler/fs-extra": ["fs-extra@9.1.0", "", { "dependencies": { "at-least-node": "^1.0.0", "graceful-fs": "^4.2.0", "jsonfile": "^6.0.1", "universalify": "^2.0.0" } }, "sha512-hcg3ZmepS30/7BSFqRvoo3DOMQu7IjqxO5nCDt+zM9XWjb33Wg7ziNT+Qvqbuc3+gWpzO02JubVyk2G4Zvo1OQ=="],
 
-    "@npmcli/fs/semver": ["semver@7.8.4", "", { "bin": "bin/semver.js" }, "sha512-rUCObTnP32Q08R2uuIrt7r9PlEonuTmtuXYcW6s5kjdlj3xbnwe+21yXptAUYcMAABLkYYTtnmzb3w3EDZfueA=="],
-
-    "@npmcli/move-file/mkdirp": ["mkdirp@1.0.4", "", { "bin": "bin/cmd.js" }, "sha512-vVqVZQyf3WLx2Shd0qJ9xuvqgAyKPLAiqITEtqW0oIUjzo3PePDd6fW9iFz30ef7Ysp/oiWqbhszeGWW2T6Gzw=="],
-
     "@npmcli/move-file/rimraf": ["rimraf@3.0.2", "", { "dependencies": { "glob": "^7.1.3" }, "bin": "bin.js" }, "sha512-JZkJMZkAGFFPP2YqXZXPbMlMBgsxzE8ILs4lMIX/2o0L9UBw9O/Y3o6wFw/i9YLapcUJWwqbi3kdxIPdC62TIA=="],
 
     "app-builder-lib/@electron/rebuild": ["@electron/rebuild@3.7.0", "", { "dependencies": { "@electron/node-gyp": "git+https://github.com/electron/node-gyp.git#06b29aafb7708acef8b3669835c8a7857ebc92d2", "@malept/cross-spawn-promise": "^2.0.0", "chalk": "^4.0.0", "debug": "^4.1.1", "detect-libc": "^2.0.1", "fs-extra": "^10.0.0", "got": "^11.7.0", "node-abi": "^3.45.0", "node-api-version": "^0.2.0", "ora": "^5.1.0", "read-binary-file-arch": "^1.0.6", "semver": "^7.3.5", "tar": "^6.0.5", "yargs": "^17.0.1" }, "bin": { "electron-rebuild": "lib/cli.js" } }, "sha512-VW++CNSlZwMYP7MyXEbrKjpzEwhB5kDNbzGtiPEjwYysqyTCF+YbNJ210Dj3AjWsGSV4iEEwNkmJN9yGZmVvmw=="],
-
-    "app-builder-lib/semver": ["semver@7.8.4", "", { "bin": "bin/semver.js" }, "sha512-rUCObTnP32Q08R2uuIrt7r9PlEonuTmtuXYcW6s5kjdlj3xbnwe+21yXptAUYcMAABLkYYTtnmzb3w3EDZfueA=="],
 
     "app-builder-lib/tar": ["tar@6.2.1", "", { "dependencies": { "chownr": "^2.0.0", "fs-minipass": "^2.0.0", "minipass": "^5.0.0", "minizlib": "^2.1.1", "mkdirp": "^1.0.3", "yallist": "^4.0.0" } }, "sha512-DZ4yORTwrbTj/7MZYq2w+/ZFdI6OZ/f9SFHR+71gIVUZhOQPHzVCLpvRnPgyaMpfWxxk/4ONva3GQSyNIKRv6A=="],
 
@@ -1211,8 +1201,6 @@
     "cacache/lru-cache": ["lru-cache@7.18.3", "", {}, "sha512-jumlc0BIUrS3qJGgIkWZsyfAM7NCWiBcCDhnd+3NNM5KbBmLTgHVfWBcg6W+rLUsIpzpERPsvwUP7CckAQSOoA=="],
 
     "cacache/minipass": ["minipass@3.3.6", "", { "dependencies": { "yallist": "^4.0.0" } }, "sha512-DxiNidxSEK+tHG6zOIklvNOwm3hvCrbUrdtzY74U6HKTJxvIDfOUL5W5P2Ghd3DTkhhKPYGqeNUIh5qcM4YBfw=="],
-
-    "cacache/mkdirp": ["mkdirp@1.0.4", "", { "bin": "bin/cmd.js" }, "sha512-vVqVZQyf3WLx2Shd0qJ9xuvqgAyKPLAiqITEtqW0oIUjzo3PePDd6fW9iFz30ef7Ysp/oiWqbhszeGWW2T6Gzw=="],
 
     "cacache/rimraf": ["rimraf@3.0.2", "", { "dependencies": { "glob": "^7.1.3" }, "bin": "bin.js" }, "sha512-JZkJMZkAGFFPP2YqXZXPbMlMBgsxzE8ILs4lMIX/2o0L9UBw9O/Y3o6wFw/i9YLapcUJWwqbi3kdxIPdC62TIA=="],
 
@@ -1262,12 +1250,6 @@
 
     "minipass-sized/minipass": ["minipass@3.3.6", "", { "dependencies": { "yallist": "^4.0.0" } }, "sha512-DxiNidxSEK+tHG6zOIklvNOwm3hvCrbUrdtzY74U6HKTJxvIDfOUL5W5P2Ghd3DTkhhKPYGqeNUIh5qcM4YBfw=="],
 
-    "node-abi/semver": ["semver@7.8.4", "", { "bin": "bin/semver.js" }, "sha512-rUCObTnP32Q08R2uuIrt7r9PlEonuTmtuXYcW6s5kjdlj3xbnwe+21yXptAUYcMAABLkYYTtnmzb3w3EDZfueA=="],
-
-    "node-api-version/semver": ["semver@7.8.4", "", { "bin": "bin/semver.js" }, "sha512-rUCObTnP32Q08R2uuIrt7r9PlEonuTmtuXYcW6s5kjdlj3xbnwe+21yXptAUYcMAABLkYYTtnmzb3w3EDZfueA=="],
-
-    "node-gyp/semver": ["semver@7.8.4", "", { "bin": "bin/semver.js" }, "sha512-rUCObTnP32Q08R2uuIrt7r9PlEonuTmtuXYcW6s5kjdlj3xbnwe+21yXptAUYcMAABLkYYTtnmzb3w3EDZfueA=="],
-
     "path-scurry/lru-cache": ["lru-cache@10.4.3", "", {}, "sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ=="],
 
     "postject/commander": ["commander@9.5.0", "", {}, "sha512-KRs7WVDKg86PWiuAqhDrAQnTXZKraVcCc6vFdL14qrZ/DcWwuRo7VoiYXalXO7S5GKpqYiVEwCbgFDfxNHKJBQ=="],
@@ -1275,8 +1257,6 @@
     "restore-cursor/signal-exit": ["signal-exit@3.0.7", "", {}, "sha512-wnD2ZE+l+SPC/uoS0vXeE9L1+0wuaMqKlfz9AMUo38JsyLSBWSFcHR1Rri62LZc12vLr1gb3jl7iwQhgwpAbGQ=="],
 
     "rollup/fsevents": ["fsevents@2.3.3", "", { "os": "darwin" }, "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw=="],
-
-    "simple-update-notifier/semver": ["semver@7.8.4", "", { "bin": "bin/semver.js" }, "sha512-rUCObTnP32Q08R2uuIrt7r9PlEonuTmtuXYcW6s5kjdlj3xbnwe+21yXptAUYcMAABLkYYTtnmzb3w3EDZfueA=="],
 
     "socks-proxy-agent/agent-base": ["agent-base@6.0.2", "", { "dependencies": { "debug": "4" } }, "sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ=="],
 
@@ -1301,8 +1281,6 @@
     "@electron/node-gyp/tar/minipass": ["minipass@5.0.0", "", {}, "sha512-3FnjYuehv9k6ovOEbyOswadCDPX1piCfhV8ncmYtHOjuPwylVWsghTLo7rabjC3Rx5xD4HDx8Wm1xnMF7S5qFQ=="],
 
     "@electron/node-gyp/tar/minizlib": ["minizlib@2.1.2", "", { "dependencies": { "minipass": "^3.0.0", "yallist": "^4.0.0" } }, "sha512-bAxsR8BVfj60DWXHE3u30oHzfl4G7khkSuPW+qvpd7jFRHm7dLxOjUk1EHACJ/hxLY8phGJ0YhYHZo7jil7Qdg=="],
-
-    "@electron/node-gyp/tar/mkdirp": ["mkdirp@1.0.4", "", { "bin": "bin/cmd.js" }, "sha512-vVqVZQyf3WLx2Shd0qJ9xuvqgAyKPLAiqITEtqW0oIUjzo3PePDd6fW9iFz30ef7Ysp/oiWqbhszeGWW2T6Gzw=="],
 
     "@electron/node-gyp/tar/yallist": ["yallist@4.0.0", "", {}, "sha512-3wdGidZyq5PB084XLES5TpOSRA3wjXAlIWMhum2kRcv/41Sn2emQ0dycQW4uZXLejwKvg6EsvbdlVL+FYEct7A=="],
 

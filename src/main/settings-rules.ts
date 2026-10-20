@@ -3,7 +3,7 @@
 // in this process: the app's window and old-shape writes, the CLI (its own store inside runSettingsCli), an
 // import, a reset, an undo and a re-migration.
 //
-// The seam: @bridle/settings' public `beforeWrite` store option (0.2.0). The store calls it once per write, under
+// The seam: @app-patterns/settings' public `beforeWrite` store option (0.2.0). The store calls it once per write, under
 // the lock, with the state on disk and the whole state the write would leave, on every route (set, reset, undo,
 // import, migration, ...). Every SlideWell store is created with `beforeWrite: libraryFolderRule`: the app's
 // (settings-host.ts), the re-migration's (settings-migration.ts) and the CLI's (passed to runSettingsCli).
@@ -11,7 +11,7 @@
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import type { BeforeWrite, SettingsState } from '@bridle/settings'
+import type { BeforeWrite, SettingsState } from '@app-patterns/settings'
 
 /** Where each library lives when its folder setting is empty (main's readers use the same). */
 export const ARCHIVE_DEFAULT = join(homedir(), 'gitrepos', '05_ppt-tools', 'ppt-archive')

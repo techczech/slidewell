@@ -1,4 +1,4 @@
-import type { SettingsBridge } from '@bridle/settings-electron'
+import type { SettingsBridge } from '@app-patterns/settings-electron'
 
 declare global {
   interface Window {

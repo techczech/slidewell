@@ -15,8 +15,8 @@
 // No Electron here: `dir` is the user-data folder, so tests and the CLI run it on any folder.
 import { existsSync, linkSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { commandsAdapter, type ChangeEntry } from '@bridle/settings'
-import { SettingsStore, type LockOptions } from '@bridle/settings/node'
+import { commandsAdapter, type ChangeEntry } from '@app-patterns/settings'
+import { SettingsStore, type LockOptions } from '@app-patterns/settings/node'
 import { registry } from '../shared/commands'
 import { APP_ID, LEGACY_MARK, migrateLegacy, prefsFromLegacy, schema } from '../shared/settings-schema'
 import { foldersOverlap, libraryFolderRule, libraryRoots, OTHERS_DEFAULT, OVERLAP_REASON } from './settings-rules'

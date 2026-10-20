@@ -6,7 +6,7 @@
 // the Search view binds to other commands, and the registry has no per-screen scope, so registering them
 // here would be chord collisions. They are listed in the cheat sheet as SCREEN_KEYS until the registry
 // can scope commands to a screen.
-import { chordFromEvent, defineRegistry, dispatchKey, type Bindings, type CommandDef, type KeyContext, type KeyLike, type MenuDecl } from '@bridle/commands'
+import { chordFromEvent, defineRegistry, dispatchKey, type Bindings, type CommandDef, type KeyContext, type KeyLike, type MenuDecl } from '@app-patterns/commands'
 
 export type Group = 'Find' | 'Selection' | 'Copy' | 'Show' | 'Library' | 'Go' | 'Move'
 

@@ -1,12 +1,12 @@
 // The app's side of the shared settings: the store (userData/settings.json), the first-launch migration
 // from config.json, the Settings window, the generated menu bar, export/import and the key slots.
-// Behaviour lives in the @bridle packages; this file wires them to SlideWell's schema, registry and windows.
+// Behaviour lives in the @app-patterns packages; this file wires them to SlideWell's schema, registry and windows.
 import { app } from 'electron'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { commandsAdapter, type SettingValue, type SettingsState } from '@bridle/settings'
-import { SettingsStore } from '@bridle/settings/node'
-import { installSettings, type SecretSlots, type SettingsHost } from '@bridle/settings-electron/main'
+import { commandsAdapter, type SettingValue, type SettingsState } from '@app-patterns/settings'
+import { SettingsStore } from '@app-patterns/settings/node'
+import { installSettings, type SecretSlots, type SettingsHost } from '@app-patterns/settings-electron/main'
 import { MAIN_COMMANDS, MENUS, NO_CONTEXT, registry, type CommandContext } from '../shared/commands'
 import { APP_ID, migrateLegacy, schema } from '../shared/settings-schema'
 import { migrateFromConfig, stampMigration } from './settings-migration'

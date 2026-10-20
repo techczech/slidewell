@@ -8,7 +8,7 @@
 // ciphertext, which is already encrypted with safeStorage and is exposed to the window only as key slots.
 //
 // Pure: no Electron, no node:, so main, renderer, the CLI and tests share it.
-import { defineSchema, type Migrated, type SettingValue } from '@bridle/settings'
+import { defineSchema, type Migrated, type SettingValue } from '@app-patterns/settings'
 
 export const APP_ID = 'slidewell'
 export const APP_NAME = 'SlideWell'

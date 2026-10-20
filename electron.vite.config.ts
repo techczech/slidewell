@@ -3,10 +3,10 @@ import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import { build as viteBuild, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// @bridle/* are bundled (not left as node_modules files): they are linked by file: path, and electron-builder
+// @app-patterns/* are bundled (not left as node_modules files): they are installed from vendored tarballs by file: path, and electron-builder
 // copies those as plain files with whatever transitive versions it finds. The Settings window is sandboxed, so
 // its preload cannot require packages either.
-const BUNDLED = ['@bridle/commands', '@bridle/settings', '@bridle/settings-electron', '@bridle/settings-react']
+const BUNDLED = ['@app-patterns/commands', '@app-patterns/settings', '@app-patterns/settings-electron', '@app-patterns/settings-react']
 
 // The Settings window's preload is sandboxed: it may require nothing but electron, so it must be one file.
 // Built as its own bundle after the other preloads (as a third input, rollup would split the window.sw

@@ -1,10 +1,10 @@
-// Entry of the Settings window: the shared @bridle/settings-react window over SlideWell's schema and command
+// Entry of the Settings window: the shared @app-patterns/settings-react window over SlideWell's schema and command
 // registry, plus the app's own pages. State and every action come from main through the preload bridge.
 import React, { useCallback, useEffect, useState } from 'react'
 import ReactDOM from 'react-dom/client'
-import { SettingsWindow, type RowHint, type SheetState } from '@bridle/settings-react'
-import type { SectionRequest, SettingsView } from '@bridle/settings-electron'
-import '@bridle/settings-react/settings.css'
+import { SettingsWindow, type RowHint, type SheetState } from '@app-patterns/settings-react'
+import type { SectionRequest, SettingsView } from '@app-patterns/settings-electron'
+import '@app-patterns/settings-react/settings.css'
 import './styles.css'
 import './settings-page.css'
 import { MENUS, registry } from '../../shared/commands'
