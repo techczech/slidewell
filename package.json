@@ -5,6 +5,7 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
+    "fetch:app-patterns": "node scripts/fetch-app-patterns.mjs",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && electron-vite build",
     "icon": "node build/make-icon.mjs",

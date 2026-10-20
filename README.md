@@ -56,6 +56,8 @@ An imported settings file never sets the Python SlideWell runs or the R2 account
 
 ## Develop
 
+In a fresh clone, run `npm run fetch:app-patterns` before installing dependencies.
+
 ```sh
 npm install
 npm run dev          # electron-vite dev (renderer HMR + Electron)
