@@ -1380,11 +1380,11 @@ export function registerCloudIpc(
   keys: Record<ProviderId, { set(k: unknown): { ok: boolean; saved: boolean; error?: string } }>,
   saveSettings: (s: StoredCloudSettings & StoredKeys) => void,
   current: () => StoredCloudSettings,
-  allowed: (sender: Electron.WebContents) => boolean
+  allowed: (e: Electron.IpcMainInvokeEvent) => boolean
 ): void {
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
     ipcMain.handle(channel, (e, ...args) => {
-      if (!allowed(e.sender)) throw new Error(`${channel}: not allowed from this window`)
+      if (!allowed(e)) throw new Error(`${channel}: not allowed from this window`)
       return fn(...args)
     })
   }

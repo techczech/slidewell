@@ -5,10 +5,11 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { commandsAdapter } from '@bridle/settings'
-import { runSettingsCli, type SettingsCliIO } from '@bridle/settings/node'
+import { runSettingsCli, type LockOptions, type SettingsCliIO } from '@bridle/settings/node'
 import { registry } from '../shared/commands'
 import { APP_ID, APP_NAME, migrateLegacy, schema } from '../shared/settings-schema'
 import { migrateFromConfig, stampMigration } from '../main/settings-migration'
+import { installWriteRules } from '../main/settings-rules'
 import { userDataDir } from './paths'
 
 export function appVersion(): string {
@@ -18,19 +19,23 @@ export function appVersion(): string {
 
 const processIO = { stdout: (t: string): void => void process.stdout.write(t), stderr: (t: string): void => void process.stderr.write(t) }
 
-/** `dir` and `io` are injectable for tests; by default the real userData folder and the terminal. */
-export async function run(argv: string[], io: SettingsCliIO = processIO, dir: string = userDataDir()): Promise<number> {
+/** `dir`, `io` and `lock` (how long to wait for the settings file) are injectable for tests; by default the real userData folder and the terminal. */
+export async function run(argv: string[], io: SettingsCliIO = processIO, dir: string = userDataDir(), lock?: LockOptions): Promise<number> {
+  installWriteRules() // the library-folder rule applies to the CLI's store too
   // Run before the app has started this version: move config.json's preferences first, exactly as the app
   // would, so the CLI never creates an empty settings.json that would hide them.
   const version = appVersion()
-  const migration = await migrateFromConfig(dir, version)
+  const migration = await migrateFromConfig(dir, version, () => {}, lock ? { lock } : {})
   if (migration.kind === 'failed') {
     io.stderr(`SlideWell could not move its settings to the new settings file (${migration.reason}). Nothing was changed.\n`)
     return 1
   }
+  if (migration.kind === 'again' && migration.failed.length > 0) {
+    io.stderr(`${migration.failed.length} setting(s) changed in an older SlideWell could not be applied yet; they are tried again next time.\n`)
+  }
   const code = await runSettingsCli(
     argv,
-    { app: APP_ID, appName: APP_NAME, dir, schema, registry: commandsAdapter(registry), version, migrate: migrateLegacy },
+    { app: APP_ID, appName: APP_NAME, dir, schema, registry: commandsAdapter(registry), version, migrate: migrateLegacy, ...(lock ? { lock } : {}) },
     io
   )
   try {

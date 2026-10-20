@@ -3,7 +3,7 @@
 // none may appear in any file the migration writes.
 import { afterEach, describe, expect, test } from 'vitest'
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { commandsAdapter } from '@bridle/settings'
 import { SettingsStore } from '@bridle/settings/node'
@@ -152,5 +152,82 @@ describe('migration from config.json', () => {
     const stamp = JSON.parse(readFileSync(join(dir, STAMP_FILE), 'utf8'))
     for (const k of Object.keys(stamp.legacy)) expect(schema.def(k)?.type).not.toBe('secret')
     expect(Object.keys(stamp.legacy).every((k) => schema.def(k))).toBe(true)
+  })
+
+  const oldWrites = (dir: string, patch: Record<string, unknown>) => writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...OLD, ...patch }))
+  const valueIn = async (dir: string, key: string) => {
+    const store = await launch(dir)
+    const v = store.view().settings[key]
+    await store.close()
+    return v
+  }
+
+  test('A, then B in the new version, then C in the old one, then upgrade: B is kept', async () => {
+    const dir = folder(OLD) // A = /tmp/fake-archive
+    const first = await launch(dir)
+    expect((await first.set('library.archiveRoot', '/tmp/B')).ok).toBe(true)
+    await first.close()
+    oldWrites(dir, { archiveRoot: '/tmp/C', sorterPeriod: '7d' })
+    const m = await migrateFromConfig(dir, VERSION)
+    expect(m.kind).toBe('again')
+    if (m.kind === 'again') {
+      expect(m.kept).toEqual(['library.archiveRoot'])
+      expect(m.applied).toEqual(['sorting.period']) // untouched in the new version: the old version's change applies
+    }
+    const store = await launch(dir)
+    expect(store.view().settings['library.archiveRoot']).toBe('/tmp/B')
+    expect(store.view().settings['sorting.period']).toBe('7d')
+    await store.close()
+    expect((await migrateFromConfig(dir, VERSION)).kind).toBe('none') // C is stamped: not tried again
+  })
+
+  test('A, then C in the old version only: C is applied', async () => {
+    const dir = folder(OLD)
+    await (await launch(dir)).close()
+    oldWrites(dir, { archiveRoot: '/tmp/C' })
+    expect(await valueIn(dir, 'library.archiveRoot')).toBe('/tmp/C')
+  })
+
+  /** A live lock on settings.json held by this process (never stale), as another writer would hold it. */
+  const holdLock = (dir: string) => {
+    const lock = join(dir, 'settings.json.lock')
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now(), nonce: 'held-by-test', host: hostname() }))
+    return () => rmSync(lock, { force: true })
+  }
+
+  test('a re-migration write that does not land is not stamped, and is applied on the next launch', async () => {
+    const dir = folder(OLD)
+    await (await launch(dir)).close()
+    oldWrites(dir, { archiveRoot: '/tmp/C' })
+    const release = holdLock(dir)
+    const m = await migrateFromConfig(dir, VERSION, () => {}, { lock: { waitMs: 200 } })
+    release()
+    expect(m.kind).toBe('again')
+    if (m.kind === 'again') expect(m.failed).toEqual(['library.archiveRoot'])
+    const store = new SettingsStore({ dir, app: APP_ID, schema, registry: commandsAdapter(registry), appVersion: VERSION, migrate: migrateLegacy, log: () => {} })
+    await store.ready
+    expect(store.view().settings['library.archiveRoot']).toBe('/tmp/fake-archive')
+    stampMigration(dir, VERSION, m)
+    await store.close()
+    expect(JSON.parse(readFileSync(join(dir, STAMP_FILE), 'utf8')).legacy['library.archiveRoot']).toBe('/tmp/fake-archive') // still A
+    const again = await migrateFromConfig(dir, VERSION)
+    expect(again.kind).toBe('again') // tried again
+    if (again.kind === 'again') expect(again.applied).toEqual(['library.archiveRoot'])
+    expect(await valueIn(dir, 'library.archiveRoot')).toBe('/tmp/C')
+  })
+
+  test('the CLI path stamps only what landed too', async () => {
+    const dir = folder(OLD)
+    await (await launch(dir)).close()
+    oldWrites(dir, { archiveRoot: '/tmp/C' })
+    const release = holdLock(dir)
+    const err: string[] = []
+    await run(['list'], { stdout: () => {}, stderr: (t) => void err.push(t) }, dir, { waitMs: 200 })
+    release()
+    expect(err.join('')).toContain('tried again next time')
+    expect(JSON.parse(readFileSync(join(dir, STAMP_FILE), 'utf8')).legacy['library.archiveRoot']).toBe('/tmp/fake-archive')
+    const g: string[] = []
+    expect(await run(['get', 'library.archiveRoot'], { stdout: (t) => void g.push(t), stderr: () => {} }, dir)).toBe(0)
+    expect(g.join('').trim()).toBe('/tmp/C')
   })
 })

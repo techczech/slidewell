@@ -15,6 +15,28 @@ export const APP_NAME = 'SlideWell'
 
 const PATH_HELP_DEFAULT = 'Empty means the default location.'
 
+/**
+ * Settings that name something to run or somewhere to send data are never applied by import: a settings file
+ * from elsewhere must not choose the program SlideWell runs or where uploads go. They are set on each Mac.
+ */
+export const THIS_MAC_ONLY = 'Set on this Mac only'
+const thisMacOnly = (): string => THIS_MAC_ONLY
+
+export const R2_ENDPOINT_RULE = 'The R2 endpoint must be an https address ending in .r2.cloudflarestorage.com.'
+/** Empty (worked out from the account ID) or https://….r2.cloudflarestorage.com, with no user name or password. */
+export function checkR2Endpoint(v: unknown): string | null {
+  if (v === '') return null
+  if (typeof v !== 'string') return R2_ENDPOINT_RULE
+  try {
+    const u = new URL(v)
+    const host = u.hostname.toLowerCase()
+    if (u.protocol !== 'https:' || u.username || u.password || !host.endsWith('.r2.cloudflarestorage.com')) return R2_ENDPOINT_RULE
+    return null
+  } catch {
+    return R2_ENDPOINT_RULE
+  }
+}
+
 export const schema = defineSchema({
   app: APP_ID,
   sections: [
@@ -93,11 +115,11 @@ export const schema = defineSchema({
     },
     {
       key: 'storage.r2AccountId', label: 'R2 account ID', section: 'storage', group: 'R2 cloud storage', type: 'text', default: '',
-      help: 'Your Cloudflare account ID.'
+      help: 'Your Cloudflare account ID.', canApply: thisMacOnly
     },
     {
       key: 'storage.r2Bucket', label: 'R2 bucket', section: 'storage', group: 'R2 cloud storage', type: 'text', default: 'ppt-archive-media',
-      help: 'A private bucket; SlideWell signs every request.'
+      help: 'A private bucket; SlideWell signs every request.', canApply: thisMacOnly
     },
     {
       key: 'storage.r2Prefix', label: 'R2 key prefix', section: 'storage', group: 'R2 cloud storage', type: 'text', default: 'slidewell',
@@ -105,7 +127,8 @@ export const schema = defineSchema({
     },
     {
       key: 'storage.r2Endpoint', label: 'R2 endpoint', section: 'storage', group: 'R2 cloud storage', type: 'text', default: '',
-      help: 'Empty means the endpoint worked out from the account ID.'
+      help: 'Empty means the endpoint worked out from the account ID.',
+      validate: (v) => checkR2Endpoint(v), canApply: thisMacOnly
     },
     {
       key: 'storage.r2AccessKeyId', label: 'R2 access key ID', section: 'accounts', type: 'secret', default: null,
@@ -130,7 +153,7 @@ export const schema = defineSchema({
     })),
     {
       key: 'advanced.pythonPath', label: 'Python', section: 'advanced', type: 'path', default: '',
-      help: 'The Python that runs Core A’s import tools. Empty means the one SlideWell finds.'
+      help: 'The Python that runs Core A’s import tools. Empty means the one SlideWell finds.', canApply: thisMacOnly
     }
   ]
 })

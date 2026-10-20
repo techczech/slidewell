@@ -8,9 +8,11 @@ import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { planSources, matchesFromKind, countFrom, type FilterableResult, type FromCounts, type SourcePlan } from './searchfilters'
 import { matchedSearch, rowIds, type MatchCluster, type MatchRow } from './matched-search'
-import { startSettings, type SettingsApp } from './settings-host'
+import { startSettings, type SaveResult, type SettingsApp } from './settings-host'
+import { ARCHIVE_DEFAULT, foldersOverlap, OTHERS_DEFAULT, OVERLAP_REASON } from './settings-rules'
 import { keySlots } from './key-slots'
 import { legacyFromPrefs, splitLegacyPatch } from '../shared/settings-schema'
+import { saveR2 } from './r2-save'
 import { MAIN_COMMANDS, registry, type CommandContext } from '../shared/commands'
 import { mergeLookAlikeClusters } from './look-alike/merge-clusters'
 import { cachedDHash } from './look-alike/fingerprint'
@@ -160,21 +162,29 @@ function readConfig(): Config {
     pictureSearch: { ...(raw.pictureSearch ?? {}), ...p.pictureSearch }
   }
 }
-function writeConfig(patch: Partial<Config>): void {
+/**
+ * Resolves once every preference in `patch` reached the settings file (or config.json); a failure is returned,
+ * never thrown. Callers that only fire and forget may ignore it: a failure is logged by the settings host.
+ */
+function writeConfig(patch: Partial<Config>): Promise<SaveResult> {
   const dir = app.getPath('userData')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   let rest: Partial<Config> = patch
+  let prefs: Promise<SaveResult> = Promise.resolve({ ok: true })
   if (settings && prefsInStore) {
     const split = splitLegacyPatch(patch as Record<string, unknown>)
-    for (const [key, value] of Object.entries(split.prefs)) settings.set(key, value)
+    const s = settings
+    const writes = Object.entries(split.prefs).map(([key, value]) => s.set(key, value))
+    prefs = Promise.all(writes).then((rs) => rs.find((r) => !r.ok) ?? { ok: true })
     rest = split.rest as Partial<Config>
-    if (Object.keys(rest).length === 0) return
+    if (Object.keys(rest).length === 0) return prefs
     // config.json stays the older version's file: its own preference fields inside r2 and pictureSearch are kept
     const raw = rawConfig()
     if (rest.r2 && raw.r2) rest = { ...rest, r2: { ...pickLegacy(raw.r2, ['accountId', 'endpoint', 'bucket', 'prefix']), ...rest.r2 } }
     if (rest.pictureSearch && raw.pictureSearch) rest = { ...rest, pictureSearch: { ...pickLegacy(raw.pictureSearch, ['includeWell']), ...rest.pictureSearch } }
   }
   writeRawConfig(rest)
+  return prefs
 }
 /** Writes state fields (and the key ciphertext) to config.json as they are, without touching its preferences. */
 function writeRawConfig(patch: Partial<Config>): void {
@@ -186,10 +196,13 @@ function pickLegacy<T extends object>(o: T, keys: string[]): Partial<T> {
   return Object.fromEntries(Object.entries(o).filter(([k]) => keys.includes(k))) as Partial<T>
 }
 
-/** The main window or the Settings window (whose custom pages use the app's own IPC); nothing else. */
-function fromAppWindow(sender: Electron.WebContents): boolean {
-  if (mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents) return true
-  return Boolean(settings?.isSettingsSender(sender))
+/**
+ * The main window or the Settings window (whose custom pages use the app's own IPC); nothing else. The Settings
+ * window is judged by the whole event (its own page in its top frame), as the shared package judges its own IPC.
+ */
+function fromAppWindow(e: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean {
+  if (mainWindow && !mainWindow.isDestroyed() && e.sender === mainWindow.webContents) return true
+  return Boolean(settings?.isSettingsSender(e))
 }
 /** Sends a status push to the main window and an open Settings window. */
 function toAppWindows(channel: string, payload: unknown): void {
@@ -199,7 +212,6 @@ function toAppWindows(channel: string, payload: unknown): void {
 
 // Core A (ppt-archive) is the engine SlideWell sits on. Default to its conventional location;
 // the user can repoint it in Settings. The archive is "present" when its registry/ exists.
-const ARCHIVE_DEFAULT = join(homedir(), 'gitrepos', '05_ppt-tools', 'ppt-archive')
 function archiveRoot(): string {
   return readConfig().archiveRoot ?? ARCHIVE_DEFAULT
 }
@@ -218,7 +230,6 @@ function wellRootResolved(): string {
 // The Others' Library (Scenario A, ADR-0031): a SEPARATE Core A archive store for other people's
 // decks — built by the same engine (ppt-archive's tools/), never merged into the personal archive.
 // Default to a dedicated user folder; configurable in Settings; created on first import.
-const OTHERS_DEFAULT = join(homedir(), 'SlideWell', 'others-library')
 function othersArchiveRootResolved(): string {
   return readConfig().othersArchiveRoot ?? OTHERS_DEFAULT
 }
@@ -330,6 +341,8 @@ let mainWindow: BrowserWindow | null = null
 let pictureSearch: PictureSearchService | null = null
 let launchScanHook: () => void = () => undefined
 let refreshWatchers: () => void = () => undefined
+// The Triage folder the watcher was last pointed at, so a settings change elsewhere re-points it (settings `changed`).
+let lastWatchedRoot = ''
 
 function openMain(): void {
   if (!mainWindow || mainWindow.isDestroyed()) createWindow()
@@ -455,6 +468,12 @@ app.whenReady().then(async () => {
     sendCommand: (id) => mainWindow?.webContents.send('app:command', id),
     changed: () => {
       setOwnerNames(resolveOwnerNames(readConfig().ownerNames).names)
+      // the Triage folder changed from the window, the CLI or an import: the watcher follows it at once
+      const watched = readConfig().screenshotRoot ?? ''
+      if (watched !== lastWatchedRoot) {
+        lastWatchedRoot = watched
+        refreshWatchers()
+      }
       mainWindow?.webContents.send('app:settings-changed', settings?.bindings() ?? {})
     },
     slots: keySlots(
@@ -470,21 +489,22 @@ app.whenReady().then(async () => {
   })
   settings = started.settings
   prefsInStore = !started.legacy
+  lastWatchedRoot = readConfig().screenshotRoot ?? ''
   app.on('will-quit', () => settings?.dispose())
-  ipcMain.handle('app:bindings', (e) => (fromAppWindow(e.sender) ? (settings?.bindings() ?? {}) : {}))
+  ipcMain.handle('app:bindings', (e) => (fromAppWindow(e) ? (settings?.bindings() ?? {}) : {}))
   ipcMain.handle('app:run-command', (e, id: unknown) => {
-    if (fromAppWindow(e.sender) && typeof id === 'string' && MAIN_COMMANDS.has(id)) settings?.runMainCommand(id)
+    if (fromAppWindow(e) && typeof id === 'string' && MAIN_COMMANDS.has(id)) settings?.runMainCommand(id)
   })
   ipcMain.handle('app:show-in-main', (e, id: unknown) => {
-    if (!fromAppWindow(e.sender) || typeof id !== 'string' || !registry.byId(id) || MAIN_COMMANDS.has(id)) return
+    if (!fromAppWindow(e) || typeof id !== 'string' || !registry.byId(id) || MAIN_COMMANDS.has(id)) return
     openMain()
     mainWindow?.webContents.send('app:command', id)
   })
   ipcMain.handle('app:open-settings-at', (e, section: unknown) => {
-    if (fromAppWindow(e.sender)) settings?.openSettings(typeof section === 'string' ? section : undefined)
+    if (fromAppWindow(e)) settings?.openSettings(typeof section === 'string' ? section : undefined)
   })
   ipcMain.handle('app:set-context', (e, c: Partial<CommandContext> | null) => {
-    if (!fromAppWindow(e.sender)) return
+    if (!fromAppWindow(e)) return
     const view = c?.view === 'review' || c?.view === 'triage' ? c.view : 'search'
     settings?.setContext({ view, hasItems: c?.hasItems === true, hasActive: c?.hasActive === true })
   })
@@ -626,7 +646,7 @@ app.whenReady().then(async () => {
   // Each provider's key is stored like the R2 credentials: safeStorage ciphertext in config.json, never returned or
   // logged. One store per provider, each with its own field, and no other source: no environment variable is read.
   const cloudCfg = (): NonNullable<Config['sorterCloud']> => readConfig().sorterCloud ?? {}
-  const saveCloudCfg = (patch: Partial<NonNullable<Config['sorterCloud']>>): void => writeConfig({ sorterCloud: { ...cloudCfg(), ...patch } })
+  const saveCloudCfg = (patch: Partial<NonNullable<Config['sorterCloud']>>): void => void writeConfig({ sorterCloud: { ...cloudCfg(), ...patch } })
   const keychain = { available: () => safeStorage.isEncryptionAvailable(), encrypt: (k: string) => safeStorage.encryptString(k), decrypt: (b: Buffer) => safeStorage.decryptString(b) }
   const cloudKeys = {
     openai: new ApiKeyStore(() => cloudCfg()[KEY_FIELD.openai], (enc) => saveCloudCfg({ [KEY_FIELD.openai]: enc }), keychain, PROVIDERS.openai.keyRule),
@@ -1442,34 +1462,28 @@ app.whenReady().then(async () => {
     const s = r2Settings()
     return { accountId: s.accountId, endpoint: s.endpoint ?? '', bucket: s.bucket, prefix: s.prefix, hasCreds: Boolean(r2Creds()) }
   })
-  ipcMain.handle('settings:set-r2', (_e, patch: { accountId?: string; endpoint?: string; bucket?: string; prefix?: string; accessKeyId?: string; secretAccessKey?: string }) => {
-    const r = { ...(readConfig().r2 ?? {}) }
-    if (patch.accountId !== undefined) r.accountId = patch.accountId.trim()
-    if (patch.endpoint !== undefined) r.endpoint = patch.endpoint.trim()
-    if (patch.bucket !== undefined) r.bucket = patch.bucket.trim()
-    if (patch.prefix !== undefined) r.prefix = patch.prefix.trim()
-    // Secret is write-only: only update creds when both are supplied; encrypt at rest. Report the
-    // truth so the UI can't show a false "saved" (the earlier bug) — and so we can diagnose.
-    const gotKeys = Boolean(patch.accessKeyId && patch.secretAccessKey)
-    const encAvailable = safeStorage.isEncryptionAvailable()
-    let savedCreds = false
-    let error: string | undefined
-    if (gotKeys) {
-      if (!encAvailable) {
-        error = 'OS keychain (safeStorage) unavailable'
-      } else {
+  // The endpoint, bucket and account (settings.json) and the key ciphertext (config.json) describe one connection, so
+  // they change together or not at all (r2-save.ts). Report the truth so the UI can't show a false "saved".
+  ipcMain.handle('settings:set-r2', (_e, patch: unknown) =>
+    saveR2(patch, {
+      encAvailable: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (plain) => safeStorage.encryptString(plain).toString('base64'),
+      snapshot: (fields) => {
+        const r = readConfig().r2 ?? {}
+        return Object.fromEntries(fields.map((f) => [f, r[f]]))
+      },
+      async writePrefs(prefs) {
+        if (settings && prefsInStore) return writeConfig({ r2: prefs })
         try {
-          r.accessKeyIdEnc = safeStorage.encryptString(patch.accessKeyId as string).toString('base64')
-          r.secretEnc = safeStorage.encryptString(patch.secretAccessKey as string).toString('base64')
-          savedCreds = true
+          writeRawConfig({ r2: { ...(rawConfig().r2 ?? {}), ...prefs } }) // preferences still in config.json
+          return { ok: true }
         } catch (e) {
-          error = (e as Error).message
+          return { ok: false, error: `The R2 settings were not saved (${(e as NodeJS.ErrnoException)?.code ?? 'error'}).` }
         }
-      }
-    }
-    writeConfig({ r2: r })
-    return { ok: true, gotKeys, encAvailable, savedCreds, error }
-  })
+      },
+      writeCiphertext: (enc) => writeRawConfig({ r2: { ...(rawConfig().r2 ?? {}), ...enc } })
+    })
+  )
   ipcMain.handle('settings:test-r2', async () => {
     const creds = r2Creds()
     if (!creds) return { ok: false, error: 'No credentials saved' }
@@ -1502,7 +1516,7 @@ app.whenReady().then(async () => {
     if (r.canceled || !r.filePaths[0]) return null
     const picked = r.filePaths[0]
     // Never let the Others' Library overlap the personal archive — that would defeat the separation.
-    if (within(picked, archiveRoot()) || within(archiveRoot(), picked) || resolvePath(picked) === resolvePath(archiveRoot())) {
+    if (foldersOverlap(picked, archiveRoot())) {
       await dialog.showMessageBox({ type: 'warning', buttons: ['OK'], message: "That folder overlaps your own archive.", detail: 'Pick a separate location for the Others’ Library so other people’s slides never mix into your archive.' })
       return readConfig().othersArchiveRoot ?? null
     }
@@ -1512,7 +1526,7 @@ app.whenReady().then(async () => {
   // Purge the whole Others' Library (its built store only) — never touches the personal archive.
   ipcMain.handle('settings:clear-others-library', async () => {
     const root = othersArchiveRootResolved()
-    if (resolvePath(root) === resolvePath(archiveRoot()) || within(archiveRoot(), root)) return { ok: false }
+    if (foldersOverlap(root, archiveRoot())) return { ok: false }
     const res = await dialog.showMessageBox({
       type: 'warning',
       buttons: ['Cancel', 'Clear it'],
@@ -1565,6 +1579,11 @@ app.whenReady().then(async () => {
       return { ok: false }
     }
     const dataRoot = library === 'others' ? othersArchiveRootResolved() : archiveRoot()
+    // checked again on use: the Others' Library never shares a folder with your own archive, however it was set
+    if (library === 'others' && foldersOverlap(dataRoot, archiveRoot())) {
+      sendLine(`✕ ${OVERLAP_REASON}`)
+      return { ok: false }
+    }
     if (library === 'others') sendLine(`→ Importing into your Others' Library (kept separate from your archive): ${dataRoot}`)
     const r = await runIngest({ engineRoot: archiveRoot(), dataRoot, python: python(), mode: 'path', targetPath }, sendLine)
     invalidateDeckMeta(cacheDir()) // new decks added → drop the cached index so they show without restart

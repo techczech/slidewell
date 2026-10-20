@@ -10,6 +10,7 @@ import { installSettings, type SecretSlots, type SettingsHost } from '@bridle/se
 import { MAIN_COMMANDS, MENUS, NO_CONTEXT, registry, type CommandContext } from '../shared/commands'
 import { APP_ID, migrateLegacy, schema } from '../shared/settings-schema'
 import { migrateFromConfig, stampMigration } from './settings-migration'
+import { installWriteRules } from './settings-rules'
 
 /** Custom pages of the Settings window (renderer/src/settings-pages.tsx); the window may be opened at them. */
 export const CUSTOM_PAGES = ['picture-search', 'sorter-service', 'capture-sources', 'backlog-import', 'sync', 'requirements'] as const
@@ -17,18 +18,26 @@ export const CUSTOM_PAGES = ['picture-search', 'sorter-service', 'capture-source
 export type SettingsApp = {
   /** Stored values (non-defaults only) plus values written but not yet saved, by schema key. */
   values(): Record<string, unknown>
-  /** Changes one setting as the user (who: you); the value is readable through `values()` at once. */
-  set(key: string, value: SettingValue): void
+  /**
+   * Changes one setting as the user (who: you); the value is readable through `values()` at once, and the
+   * promise says whether it reached the settings file (a failure is also logged).
+   */
+  set(key: string, value: SettingValue): Promise<SaveResult>
   bindings(): Record<string, string>
   runMainCommand(id: string): void
   openSettings(section?: string): void
   setContext(ctx: CommandContext): void
   slotsChanged(): void
-  /** The Settings window's web contents, for the app's own IPC guards behind the custom pages. */
-  isSettingsSender(sender: Electron.WebContents): boolean
+  /**
+   * Whether an IPC event comes from the Settings window's own page in its top frame (the shared package's
+   * rule), for the app's own IPC guards behind the custom pages. Pass the whole event, never just its sender.
+   */
+  isSettingsSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean
   settingsWebContents(): Electron.WebContents | null
   dispose(): void
 }
+
+export type SaveResult = { ok: true } | { ok: false; error: string }
 
 type Wiring = {
   openMain(): void
@@ -51,6 +60,7 @@ function settingsPageUrl(): string {
  * then keeps reading its preferences from config.json as before, and the store is read-only.
  */
 export async function startSettings(wiring: Wiring): Promise<{ settings: SettingsApp; legacy: boolean }> {
+  installWriteRules() // the library-folder rule, before any store opens
   const dir = app.getPath('userData')
   const version = app.getVersion()
   const migration = await migrateFromConfig(dir, version, wiring.log)
@@ -105,10 +115,19 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
     values: () => ({ ...store.view().settings, ...Object.fromEntries(pending) }),
     set(key, value) {
       pending.set(key, value)
-      void store.set(key, value).then((r) => {
-        if (pending.get(key) === value) pending.delete(key)
-        if (!r.ok) wiring.log(`[settings] ${key} was not saved: ${r.error}`)
-      })
+      return store.set(key, value).then(
+        (r): SaveResult => {
+          if (pending.get(key) === value) pending.delete(key)
+          if (r.ok) return { ok: true }
+          wiring.log(`[settings] ${key} was not saved: ${r.error}`)
+          return { ok: false, error: r.error }
+        },
+        (e: unknown): SaveResult => {
+          if (pending.get(key) === value) pending.delete(key)
+          wiring.log(`[settings] ${key} was not saved: ${(e as Error)?.message ?? 'error'}`)
+          return { ok: false, error: 'The setting was not saved.' }
+        }
+      )
     },
     bindings: () => registry.bindingsOf(store.view().keys),
     runMainCommand(id) {
@@ -124,9 +143,8 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
       host?.rebuildMenu()
     },
     slotsChanged: () => host?.slotsChanged(),
-    isSettingsSender(sender) {
-      const w = host?.settingsWindow() as Electron.BrowserWindow | null | undefined
-      return Boolean(w && !w.isDestroyed() && w.webContents === sender)
+    isSettingsSender(event) {
+      return Boolean(host?.isSettingsWindowSender(event as unknown as Parameters<SettingsHost['isSettingsWindowSender']>[0]))
     },
     settingsWebContents() {
       const w = host?.settingsWindow() as Electron.BrowserWindow | null | undefined

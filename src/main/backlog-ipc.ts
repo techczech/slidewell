@@ -3,7 +3,7 @@
  * exact plan it was shown, by id, (3) cancel, (4) read / change CleanShot's export folder on a click.
  * A run without a fresh plan id from a dry run is refused, so a real run always follows a shown plan.
  */
-import { app, ipcMain, shell, type WebContents } from 'electron'
+import { app, ipcMain, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -22,7 +22,8 @@ const PLAN_TTL_MS = 30 * 60 * 1000
 export function registerBacklogIpc(deps: {
   watchedFolder: () => string | null // the Triage source folder (config.screenshotRoot)
   stateDir: () => string
-  isMainWindow: (sender: WebContents) => boolean
+  /** Judges the whole IPC event (sender and frame), never just its sender. */
+  isMainWindow: (e: IpcMainInvokeEvent) => boolean
   // e.g. one scan of the capture sources; `stopped` = the run was cancelled (that scan must not download)
   afterRun: (o: { stopped: boolean }) => void
   writer?: DefaultsWriter
@@ -42,7 +43,7 @@ export function registerBacklogIpc(deps: {
   })
 
   ipcMain.handle('backlog:dry-run', async (e) => {
-    if (!deps.isMainWindow(e.sender)) return null
+    if (!deps.isMainWindow(e)) return null
     // Desktop names are recognised with CleanShot's own name template, read fresh for every dry run
     const plan = await dryRun({ ...env(), nameTemplate: await cleanShotNameTemplate(deps.nameTemplateReader) })
     const id = randomUUID()
@@ -52,7 +53,7 @@ export function registerBacklogIpc(deps: {
   })
 
   ipcMain.handle('backlog:run', async (e, planId: string) => {
-    if (!deps.isMainWindow(e.sender)) return null
+    if (!deps.isMainWindow(e)) return null
     if (running) return { refused: 'already running' }
     if (!shown || shown.id !== planId || Date.now() - shown.at > PLAN_TTL_MS) return { refused: 'show the plan again first' }
     const plan = shown.plan
@@ -92,7 +93,7 @@ export function registerBacklogIpc(deps: {
 
   // Writes only the folder the user was shown, and only if it is still the watched folder (by realpath).
   ipcMain.handle('backlog:set-cleanshot', async (e, shown: string) => {
-    if (!deps.isMainWindow(e.sender)) return null
+    if (!deps.isMainWindow(e)) return null
     const w = deps.watchedFolder()
     const [a, b] = await Promise.all([realOrNull(w), realOrNull(typeof shown === 'string' ? shown : null)])
     if (!a || !b || a !== b) return { refused: 'the folder changed, review again' }

@@ -341,7 +341,7 @@ describe('the period is bound into the prepared batch', () => {
   it('the renderer cannot widen it: prepare and send read no period, date or list from their arguments', async () => {
     const a = app('7d')
     const sender = {}
-    registerCloudIpc(a.svc, { openai: { set: () => ({ ok: false, saved: false }) }, anthropic: { set: () => ({ ok: false, saved: false }) } }, () => undefined, () => ({}), (s) => s === sender)
+    registerCloudIpc(a.svc, { openai: { set: () => ({ ok: false, saved: false }) }, anthropic: { set: () => ({ ok: false, saved: false }) } }, () => undefined, () => ({}), (e) => e.sender === sender)
     const widen = { period: 'all', window: { period: 'all', cutoff: null }, cutoff: '1970-01-01T00:00:00', since: '1970-01-01', hashes: NAMES.map(hashOf), only: NAMES.map(hashOf) }
     const p = (await ipc.get('cloud:prepare')!({ sender }, widen, 'all')) as Awaited<ReturnType<typeof a.svc.prepare>>
     expect(p).toMatchObject({ period: '7d', toSend: 2 })

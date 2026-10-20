@@ -6,16 +6,22 @@
 //   First launch (no settings.json): the preferences are handed to the store as settings.json
 //   (`{ [LEGACY_MARK]: 1, prefs }`, by temporary file and link, so an existing file is never replaced); the
 //   store's migrate hook reads them and writes the v2 file, each change logged as "app update".
-//   Later launches: the stamp (settings-migration.json) records the preferences that were migrated. If
-//   config.json's preferences differ from it (an older SlideWell changed them after a downgrade), each
-//   preference that changed there is applied again, before the store opens for the app.
+//   Later launches: the stamp (settings-migration.json) records the preferences that were migrated and when.
+//   If config.json's preferences differ from it (an older SlideWell changed them after a downgrade), each
+//   preference that changed there is applied again, before the store opens for the app, unless the new
+//   version changed that setting since the stamp (by you, an agent, an import or a reset): then the new
+//   value is kept. A preference whose write did not land (the file locked or unwritable) is not stamped, so
+//   the next launch tries it again; one the store refuses as invalid is stamped and stays as it is.
 // No Electron here: `dir` is the user-data folder, so tests and the CLI run it on any folder.
 import { existsSync, linkSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { commandsAdapter } from '@bridle/settings'
-import { SettingsStore } from '@bridle/settings/node'
+import { commandsAdapter, type ChangeEntry } from '@bridle/settings'
+import { SettingsStore, type LockOptions } from '@bridle/settings/node'
 import { registry } from '../shared/commands'
 import { APP_ID, LEGACY_MARK, migrateLegacy, prefsFromLegacy, schema } from '../shared/settings-schema'
+import { installWriteRules } from './settings-rules'
+
+installWriteRules()
 
 export const CONFIG_FILE = 'config.json'
 export const SETTINGS_FILE = 'settings.json'
@@ -25,8 +31,24 @@ export const REMIGRATION_AGENT = 'SlideWell update (settings from an older versi
 
 export type Migration =
   | { kind: 'none' }
-  | { kind: 'first'; legacy: Record<string, unknown> }
-  | { kind: 'again'; legacy: Record<string, unknown>; changed: string[] }
+  | { kind: 'first'; legacy: Record<string, unknown>; at: number }
+  | {
+      kind: 'again'
+      legacy: Record<string, unknown>
+      /** Keys whose value in config.json differs from the stamp. */
+      changed: string[]
+      /** Written to settings.json. */
+      applied: string[]
+      /** Changed in the new version since the stamp: the new value was kept. */
+      kept: string[]
+      /** Refused by the store as invalid: left as it is (stamped, not tried again). */
+      refused: string[]
+      /** Not written (the file locked or unwritable): not stamped, so the next launch tries again. */
+      failed: string[]
+      /** What the stamp records: config.json's preferences, except a failed key keeps its earlier stamped value. */
+      stamp: Record<string, unknown>
+      at: number
+    }
   | { kind: 'failed'; reason: string } // nothing was written; main keeps reading config.json as before
 
 type Stamp = { format: 'slidewell-settings-migration'; at: number; version: string; legacy: Record<string, unknown> }
@@ -76,7 +98,13 @@ function changedSince(stamp: Stamp, legacy: Record<string, unknown>): string[] {
  * Runs before the store opens for the app (or the CLI), so startup reads one settings snapshot. Hands a
  * first migration to the store, or applies a re-migration through a short-lived store.
  */
-export async function migrateFromConfig(dir: string, version: string, log: (line: string) => void = () => {}): Promise<Migration> {
+export async function migrateFromConfig(
+  dir: string,
+  version: string,
+  log: (line: string) => void = () => {},
+  opts: { lock?: LockOptions; now?: () => number } = {}
+): Promise<Migration> {
+  const at = (opts.now ?? Date.now)()
   const legacy = readLegacyPrefs(dir)
   if (!existsSync(join(dir, SETTINGS_FILE))) {
     if (!legacy) return { kind: 'none' }
@@ -86,7 +114,7 @@ export async function migrateFromConfig(dir: string, version: string, log: (line
       if (code(e) === 'EEXIST') return { kind: 'none' }
       return { kind: 'failed', reason: `settings.json could not be written (${code(e)})` }
     }
-    return { kind: 'first', legacy }
+    return { kind: 'first', legacy, at }
   }
   const stamp = readStamp(dir)
   if (!legacy || !stamp) return { kind: 'none' }
@@ -94,19 +122,65 @@ export async function migrateFromConfig(dir: string, version: string, log: (line
   if (changed.length === 0) return { kind: 'none' }
   const store = new SettingsStore({
     dir, app: APP_ID, schema, registry: commandsAdapter(registry), appVersion: version, migrate: migrateLegacy,
-    who: { kind: 'agent', name: REMIGRATION_AGENT }, watch: false, log
+    who: { kind: 'agent', name: REMIGRATION_AGENT }, watch: false, log, ...(opts.lock ? { lock: opts.lock } : {})
   })
+  const applied: string[] = []
+  const kept: string[] = []
+  const refused: string[] = []
+  const failed: string[] = []
   try {
     await store.ready
+    const since = changedInStoreSince(store.view().changes, stamp.at)
     for (const key of changed) {
+      if (failed.length > 0) {
+        failed.push(key) // the file cannot be written now: the rest wait for the next launch too
+        continue
+      }
+      if (since.has(key)) {
+        kept.push(key)
+        continue
+      }
       const value = key in legacy ? legacy[key] : schema.def(key)?.default
       const r = await store.set(key, value)
-      if (!r.ok) log(`[settings] ${key} from the older version was not applied: ${r.error}`)
+      if (r.ok) applied.push(key)
+      else if (OP_REFUSALS.has(r.code)) {
+        refused.push(key)
+        log(`[settings] ${key} from the older version was not applied: ${r.error}`)
+      } else {
+        failed.push(key)
+        log(`[settings] ${key} from the older version was not applied yet (${r.error}); it is tried again next launch`)
+      }
     }
   } finally {
     await store.close()
   }
-  return { kind: 'again', legacy, changed }
+  const next: Record<string, unknown> = { ...legacy }
+  for (const key of failed) {
+    if (key in stamp.legacy) next[key] = stamp.legacy[key]
+    else delete next[key]
+  }
+  // A key still owed keeps the earlier stamp's time, so a change the new version made to it before this launch still wins next time.
+  return { kind: 'again', legacy, changed, applied, kept, refused, failed, stamp: next, at: failed.length > 0 ? stamp.at : at }
+}
+
+/** The store refused the value itself (not the file): trying again would give the same answer. */
+const OP_REFUSALS: ReadonlySet<string> = new Set(['unknown-key', 'secret', 'invalid-value', 'not-possible', 'too-many', 'already', 'not-found'])
+
+/**
+ * Settings changed in the new version after `at`: by you, an agent other than the re-migration, an import or a
+ * reset. The loader's own entries (app update: the first migration, repairs) are not a change by anyone.
+ */
+function changedInStoreSince(changes: readonly ChangeEntry[], at: number): Set<string> {
+  const out = new Set<string>()
+  for (const e of changes) {
+    if (e.at < at) continue
+    if (e.who.kind === 'app-update') continue
+    if (e.who.kind === 'agent' && e.who.name === REMIGRATION_AGENT) continue
+    const rec = e as unknown as { key?: unknown; targets?: unknown }
+    if (typeof rec.key === 'string') out.add(rec.key)
+    if (Array.isArray(rec.targets)) for (const t of rec.targets) if (typeof t === 'string') out.add(t)
+  }
+  return out
 }
 
 /**
@@ -123,8 +197,10 @@ export function stampMigration(dir: string, version: string, m: Migration, now: 
   } catch {
     return false
   }
-  const legacy = m.kind === 'first' || m.kind === 'again' ? m.legacy : readLegacyPrefs(dir) ?? {}
-  const stamp: Stamp = { format: 'slidewell-settings-migration', at: now(), version, legacy }
+  // `at` is when the migration ran, so a change made after it (by the CLI in the same run) counts as the new version's.
+  const legacy = m.kind === 'again' ? m.stamp : m.kind === 'first' ? m.legacy : readLegacyPrefs(dir) ?? {}
+  const at = m.kind === 'again' || m.kind === 'first' ? m.at : now()
+  const stamp: Stamp = { format: 'slidewell-settings-migration', at, version, legacy }
   writeVia(join(dir, STAMP_FILE), JSON.stringify(stamp, null, 2), false)
   return true
 }

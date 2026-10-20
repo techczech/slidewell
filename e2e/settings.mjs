@@ -1,7 +1,9 @@
 // Shared settings end to end, on a throwaway --user-data-dir and HOME (never the real data): the first launch
 // moves config.json's preferences into settings.json (config.json left as it was, entries "app update"),
 // the gear opens the one Settings window, the menu bar is generated with Settings… ⌘, the cheat sheet lists
-// every command (None when unbound), and a change made by the settings CLI shows in the open window.
+// every command (None when unbound), and a change made by the settings CLI shows in the open window. The
+// Settings window's custom pages still reach the app's own IPC (judged by frame), and a Triage folder set
+// by the CLI is watched at once (a screenshot dropped there is picked up without a Scan).
 // Needs no archive. Run: npm run test:settings (builds first).
 import { _electron as electron } from 'playwright'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs'
@@ -80,6 +82,23 @@ try {
   await settingsWin.waitForTimeout(1200)
   r.liveFromCli = (await settingsWin.locator('.bsw-root').innerText()).includes('Last 30 days')
   await settingsWin.screenshot({ path: join(tmpdir(), 'sw-settings-sorting.png') }).catch(() => {})
+
+  // the app's own IPC answers the Settings window's page (top frame, its own page)
+  r.customIpcFromSettings = await settingsWin.evaluate(() => window.sw.picture.status().then(() => true, () => false))
+
+  // the Triage folder set from the CLI: the watcher follows it (no Scan pressed)
+  const shots = join(work, 'shots')
+  mkdirSync(shots, { recursive: true })
+  execFileSync('bun', ['bin/slidewell.mjs', 'settings', 'set', 'capture.triageRoot', shots, '--agent', 'e2e'], { env: { ...process.env, SLIDEWELL_DATA_DIR: userData } })
+  await win.waitForTimeout(1500)
+  const SHOT = 'CleanShot 2026-10-20 at 0915 from Safari with Watched.png'
+  writeFileSync(join(shots, SHOT), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'))
+  let seen = []
+  for (let i = 0; i < 15 && seen.length < 1; i++) {
+    await win.waitForTimeout(1000)
+    seen = (await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0))).items.filter((x) => x.filename.includes('Watched'))
+  }
+  r.watcherFollowsCli = seen.length === 1
 } finally {
   await app.close()
 }

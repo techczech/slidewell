@@ -4,9 +4,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildMenuTemplate, RESERVED_ESTATE, validateMenuCoverage } from '@bridle/commands'
-import { exportFile, emptyState, searchSettings } from '@bridle/settings'
+import { commandsAdapter, exportFile, emptyState, previewImport, searchSettings } from '@bridle/settings'
 import { aliasesOf, commandForEvent, MENUS, registry } from '../src/shared/commands'
-import { legacyFromPrefs, schema, SECRET_KEYS, splitLegacyPatch } from '../src/shared/settings-schema'
+import { legacyFromPrefs, R2_ENDPOINT_RULE, schema, SECRET_KEYS, splitLegacyPatch, THIS_MAC_ONLY } from '../src/shared/settings-schema'
+import { OVERLAP_REASON } from '../src/main/settings-rules'
 import { keySlots, type KeyBackend } from '../src/main/key-slots'
 import { run } from '../src/cli/settings-cli'
 
@@ -136,5 +137,47 @@ describe('settings CLI', () => {
     const g = io()
     expect(await run(['get', 'library.archiveRoot'], g.io, dir)).toBe(0)
     expect(g.out.join('').trim()).toBe('/tmp/x')
+  })
+
+  const ioErr = () => { const out: string[] = []; const err: string[] = []; return { out, err, io: { stdout: (t: string) => void out.push(t), stderr: (t: string) => void err.push(t) } } }
+  test('the Others’ Library may never overlap your archive, set from either side, by set or by import', async () => {
+    const dir = folder()
+    const mine = join(dir, 'mine')
+    expect(await run(['set', 'library.archiveRoot', mine], io().io, dir)).toBe(0)
+    for (const bad of [mine, join(mine, 'others'), dir]) {
+      const r = ioErr()
+      expect(await run(['set', 'library.othersRoot', bad], r.io, dir)).not.toBe(0)
+      expect(r.err.join('') + r.out.join('')).toContain(OVERLAP_REASON)
+    }
+    const others = join(dir, 'others')
+    expect(await run(['set', 'library.othersRoot', others], io().io, dir)).toBe(0)
+    const back = ioErr()
+    expect(await run(['set', 'library.archiveRoot', join(others, 'inside')], back.io, dir)).not.toBe(0) // the other direction
+    expect(back.err.join('') + back.out.join('')).toContain(OVERLAP_REASON)
+    const g = io()
+    await run(['get', 'library.archiveRoot'], g.io, dir)
+    expect(g.out.join('').trim()).toBe(mine)
+    // an import that would make them overlap is refused as a whole
+    const file = join(dir, 'overlap.json')
+    writeFileSync(file, JSON.stringify({ format: 'bridle-settings-export', version: 1, app: 'slidewell', appVersion: '0', exportedFrom: 'x', exportedAt: '2026-10-20T00:00:00.000Z', settings: { 'library.othersRoot': join(mine, 'sub') }, keys: {} }))
+    const imp = ioErr()
+    expect(await run(['import', file, '--yes'], imp.io, dir)).not.toBe(0)
+    const o = io()
+    await run(['get', 'library.othersRoot'], o.io, dir)
+    expect(o.out.join('').trim()).toBe(others)
+  })
+  test('what to run and where to send data are never imported; the R2 endpoint must be Cloudflare’s', async () => {
+    const from = { ...emptyState(schema.app), settings: { 'advanced.pythonPath': '/tmp/evil/python', 'storage.r2Endpoint': 'https://acc.r2.cloudflarestorage.com', 'storage.r2Bucket': 'b', 'storage.r2AccountId': 'a', 'library.convertOcr': true } }
+    const file = exportFile(from, { appVersion: '0', hostName: 'x', now: 0, schema, commands: commandsAdapter(registry) })
+    const preview = previewImport(emptyState(schema.app), file, { schema, commands: commandsAdapter(registry) })
+    expect(preview.changes.map((c) => c.key)).toEqual(['library.convertOcr'])
+    const skipped = Object.fromEntries(preview.skipped.map((x) => [(x as { key?: string }).key, (x as { reason?: string }).reason]))
+    for (const k of ['advanced.pythonPath', 'storage.r2Endpoint', 'storage.r2Bucket', 'storage.r2AccountId']) expect(skipped[k]).toBe(THIS_MAC_ONLY)
+    const dir = folder()
+    const bad = ioErr()
+    expect(await run(['set', 'storage.r2Endpoint', 'https://evil.example.com'], bad.io, dir)).not.toBe(0)
+    expect(bad.err.join('') + bad.out.join('')).toContain(R2_ENDPOINT_RULE)
+    expect(await run(['set', 'storage.r2Endpoint', 'http://acc.r2.cloudflarestorage.com'], io().io, dir)).not.toBe(0)
+    expect(await run(['set', 'storage.r2Endpoint', 'https://acc.eu.r2.cloudflarestorage.com'], io().io, dir)).toBe(0)
   })
 })

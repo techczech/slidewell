@@ -52,6 +52,8 @@ bun bin/slidewell.mjs settings import <file> [--yes]
 
 Changes made here are recorded as made by an agent and show in an open Settings window within a second. Keys cannot be read or set from the command line. `SLIDEWELL_DATA_DIR` points both the app and the command line at another data folder.
 
+An imported settings file never sets the Python SlideWell runs or the R2 account, bucket and endpoint; those are skipped as “Set on this Mac only”. The Others’ Library folder can never be the same as your archive folder or inside it (or the other way round), whether it is set in the window, from the command line or by an import.
+
 ## Develop
 
 ```sh
