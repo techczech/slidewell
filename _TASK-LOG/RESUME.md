@@ -1,12 +1,16 @@
 # SlideWell — RESUME (session entry point)
 
-**FOR ME.** Last updated 2026-10-09.
+**FOR AGENTS.** Last updated 2026-10-17.
+
+## Build verification (2026-10-17)
+
+Branch `codex/slidewell-real-typecheck`: `npm run typecheck` explicitly checks node/preload and renderer projects; build, pack and dist use it. One Buffer annotation fixes the real node check. Production build passes; 1,100 tests pass, one skipped. Negative controls reject type errors in both projects. No install or archive mutation. See `_CHANGELOG/changes/build-typechecks-main-and-renderer.md`.
 
 ## State
 
 Electron + React + TS (electron-vite), mirrored from `talk-weaver`. Shipped (see `_CHANGELOG/INDEX.md`): search + full filter/cluster/lightbox surface, archive **Import** (Core A pipeline), the **well** + screenshot/video **Triage**, Stats, Settings + dependency detection. Newest: **Convert** — sideband throwaway PPTX→Outline (a distinct verb from Import; never catalogued into archive/vault; `origin: external` stamp). Direction layer in `presentation-system` (ADR-0026, CONTEXT.md, ROADMAP P7).
 
-**Convert internals** (2026-06-23): `src/main/outline.ts` (pure transform, 17 vitest tests in `test/`), `src/main/convert.ts` (sideband extract → optional OCR → emit), `convert:*` IPC + `conversionsRoot`/`convertOcrByDefault` settings, `⇄ Convert` titlebar panel. Verified end-to-end on a real third-party deck. **Unit tests now exist**: `npm test` (vitest). Note: repo `tsc --noEmit` is a no-op (root tsconfig `files:[]`); real type-check is `tsc -p tsconfig.node.json/--web` (baseline reds: `well.ts:108`, web `TS6307` preload→main/stats).
+**Convert internals** (2026-06-23): `src/main/outline.ts` (pure transform, 17 vitest tests in `test/`), `src/main/convert.ts` (sideband extract → optional OCR → emit), `convert:*` IPC + `conversionsRoot`/`convertOcrByDefault` settings, `⇄ Convert` titlebar panel. Verified end-to-end on a real third-party deck. **Unit tests now exist**: `npm test` (vitest). Use `npm run typecheck` for both application projects; the historical empty-root check and baseline errors are resolved on the branch above.
 
 ## Screenshot sorter, local part (2026-10-09)
 
