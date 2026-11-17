@@ -1,0 +1,83 @@
+{
+  "mode": "score",
+  "date": "2026-11-17",
+  "rounds": 1,
+  "models": [
+    "gpt-6.1-sol",
+    "gpt-6.1-sol"
+  ],
+  "same_family": true,
+  "rubric": "architecture-options.md",
+  "raw_seats": [
+    "judge-one.md",
+    "judge-two.md"
+  ],
+  "scores": {
+    "H": [
+      [
+        8,
+        9,
+        9,
+        6,
+        8
+      ],
+      [
+        8,
+        9,
+        9,
+        6,
+        8
+      ]
+    ],
+    "E": [
+      [
+        5,
+        9,
+        6,
+        8,
+        5
+      ],
+      [
+        5,
+        9,
+        6,
+        7,
+        4
+      ]
+    ],
+    "F": [
+      [
+        6,
+        6,
+        7,
+        7,
+        6
+      ],
+      [
+        6,
+        5,
+        8,
+        6,
+        6
+      ]
+    ]
+  },
+  "weighted": {
+    "H": [
+      8.15,
+      8.15
+    ],
+    "E": [
+      6.5,
+      6.25
+    ],
+    "F": [
+      6.4,
+      6.3
+    ]
+  },
+  "owner_verdict": "not requested here; coordinator collects choices",
+  "tokens": null,
+  "cost": null,
+  "basis": "native subagent metadata; no per-call usage exposed"
+}

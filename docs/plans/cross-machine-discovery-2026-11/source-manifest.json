@@ -1,0 +1,104 @@
+{
+  "captured": "2026-11-17",
+  "purpose": "Reconstruct source-derived inventory and design reasoning; metadata only; no corpus excerpts or credentials",
+  "repos": {
+    "slidewell": {
+      "path": "06_apps-utilities/01_desktop-apps/slidewell",
+      "head": "d7320fbaa1c22ecfa8176cfa96e5480a97b02288",
+      "files": {
+        "src/main/picture-search/model-manifest.ts": "561cf36dae97f397d2b404d597251177d0bb9b7d635aa0075699d1a8f8085e25",
+        "src/main/picture-search/vector-store.ts": "6f2f3ff7c0400b75b5756d65a794950a4af874161f14142fd61b3222cbe9eac9",
+        "src/main/picture-search/query-socket.ts": "308a3bdf0e791c0ae3529e4a30d26f6757b8c3369fbd5878add1e215a6acb6c4",
+        "src/main/picture-search/service.ts": "e1bb11a31937430523c0eccca9f2a9e47913aa4385e3b42691ef88540f2a9895",
+        "src/main/storage.ts": "e1830edc5aeb867ddc2d4391c4bb23485450bf5a0b0abbe47402379998664ff5",
+        "src/main/index.ts": "30ce6487914031e9c6a8893aa199db3394dbe39feeb85157bfb8308fd27a4430"
+      }
+    },
+    "talk-weaver": {
+      "path": "06_apps-utilities/01_desktop-apps/talk-weaver",
+      "head": "326697a6e36bcab9c163b9fdfa5789f3ed5fc55b",
+      "files": {
+        "src/main/image-search/slidewell-provider.ts": "7ff17e3ba0495cb8609684bba9b7f627f9d855b99b354e9fe1cb3395f9c406a7",
+        "src/main/image-search/slidewell-query.ts": "54024d2a44a041b37a412ed8959a320997b630fafc01b9ed47cd79e6a3016c8f",
+        "src/main/cross-vault-insert.ts": "7da9ead76d3ff668d2725af978c77c9a95c6efc08d7e19df0cc14d0da89c0051",
+        "src/main/vault-index.mjs": "5b4e60c40400ab37f515d37a33589d5ca5c43d9e6f166e2f5b42eeac2f9c88f9"
+      }
+    },
+    "mediawell": {
+      "path": "06_apps-utilities/01_desktop-apps/mediawell",
+      "head": "bbb62e6bca59d18c0ada41d2b6448e7158b33437",
+      "files": {
+        "CONTEXT.md": "c7ef2409a6309f1510ef42793157db5b1aabd0987a4423d6e1eac98df3f708f7",
+        "oxford_rag/embeddings.py": "e8c1fd454b42b3545e6576c7cd792ac79a17a247064f35b96b435e4598139745",
+        "oxford_rag/desktop_models.py": "619f6031f0e8d4722154bbfdf50d7cb1937edcf1d976a6ecff7b622de9b8f9bb",
+        "oxford_rag/desktop_inference.py": "0de626ed7012ce60f34df29402e953a454e05384e278ec4dd60d3bc8278f1c73",
+        "oxford_rag/vault_index.py": "36618a4fae6af97d5dd1d092ae2c2c2d740295a361dbb53536fe7486ff08f866",
+        "docs/adr/decision-multiwell-vaults.md": "e971b655d5eb055adaa910c3f07a56172e7c125059e7f008d6041123bd84e121"
+      }
+    },
+    "highlight-scout": {
+      "path": "06_apps-utilities/01_desktop-apps/highlight-scout",
+      "head": "7a8e362b03e5343d2669de03b0b7ebd3ac6b90f5",
+      "files": {
+        "src-tauri/src/meaning.rs": "7aa90aca96a025ecf7d05e70d66da35a93b9ec1973baba41470c2f8cfa32960c",
+        "src-tauri/src/r2.rs": "ee7ba398c8c83c2d15dfb1b7f948858d0849d0a291d9065c1d352badf79e126b"
+      }
+    },
+    "scout-core": {
+      "path": "06_apps-utilities/03_misc-utilities/scout-core",
+      "head": "d3deedd3d668bb1bd5282c64d3580a6df50df20c",
+      "files": {
+        "crates/scout-corpus/src/semantic/embed.rs": "0b5a45c41d2419a3835b90514e4b3ce5a0a50f7b37736f642dca9904f9f8f528",
+        "crates/scout-corpus/src/semantic/store.rs": "a51ed7c0f32ac4ec365c8de8db4c377eec7d211176ec646c184b4a9c313e9b52"
+      }
+    },
+    "ppt-archive": {
+      "path": "03_presenting-teaching/01_presentation-libraries/ppt-archive",
+      "head": "30c5f1b9406554f0ad1963aeb1ecb4b49b0ee00b",
+      "files": {
+        "tools/embeddings/README.md": "744527c58d6f7f115edbde02c15a11b1cabfc8bf01de1801bd35394c570d4f87"
+      }
+    },
+    "learnweaver-demo": {
+      "path": "07_webapps-websites/learnweaver-demo",
+      "head": "0757e5cf0c07e49ab0eb57547f563696ab0ff95a",
+      "files": {
+        "docs/adr/0031-library-folder-is-the-content-authority.md": "362b32550b619b001b761cbfda180abb2bbdaa59a4865efed989f43cf4dd22f9",
+        "server/library/library-service.ts": "e2bf9c1104fa8f2f013d945a987bfb6d70caa5a3a8a030146955b1aabaccfe7b",
+        "README.md": "e5e836896c5eb9dcf844eb21fbf1ebc790a857832954e4b99c71c820441aa7c0"
+      }
+    },
+    "presentation-system": {
+      "path": "_COORDINATION/presentations/presentation-system",
+      "head": "0f2247c8fddeeb6d51691d98cef51e72fa37dc8d",
+      "files": {
+        "CONTEXT.md": "e9de534265c9b5860c87fb5f344a67fb114fd57861b1f314c5b3c769474e805e",
+        "ROADMAP.md": "9716e2b943c08ab925336a2869a0f30adc79fbb5acd38c93706cd6f10dd3180f",
+        "docs/adr/0026-provenance-versioning-external-slidewell-tracking.md": "d2daa03ee2486cfc51c446446f65b7c4c306666d0f17839e8cf83776905a847c",
+        "docs/adr/0032-slide-ledger-identity-propagation.md": "08d59eb2048277473780177b4cf837f2d80443197c0a7f3bd21da2c9ecec3a30"
+      }
+    },
+    "t3code-upstream": {
+      "path": "05_skills/t3code-upstream",
+      "head": "8760d063e903406c8e8f695b0852c0a15fc1e00f",
+      "files": {
+        "LICENSE": "935d8f2af0c703f9c39517ee57cc4930b19d02d533be930b63f0e82f93614b43",
+        "apps/server/src/environment/ServerEnvironment.ts": "ba2482e792550f3ab4eda9efe84fda55110c8c5eb17d78945fa3c2b0e4e5ea64",
+        "apps/web/src/environments/primary/target.ts": "374c66e634e81d26f4cc3fef43121d0f05a5f5a90eceba56f3614029b4d4dd42",
+        "apps/web/src/hooks/useLogicalProjectEnvironments.ts": "ca1e773f5854edb958b311ddd0d3dddfb1631a54c7d44c471df1b6cb86e59c75",
+        "packages/client-runtime/src/connection/routes.ts": "c87774e51512c8606200ca98d92d7449a55fdc88ac0199dc058bc710f77482a4",
+        "packages/client-runtime/src/connection/resolver.ts": "24304f3ef8174a6988ace75d3bd55df97cb57002e0f6b67c748adef8f9dfff11",
+        "packages/client-runtime/src/connection/registry.ts": "6ddb96b3422c0b7892d5788259cc3c939b85e9d885d22f93c24c5c5bd2b30b80",
+        "packages/client-runtime/src/connection/supervisor.ts": "6cbd8fc486d82b507594ab7286aa7d35563769df4d6a3e8dbff00ed94f1f4edd",
+        "packages/client-runtime/src/connection/catalog.ts": "14f80aef06e289f5600c2b56d811e56842eb2a4c2c037635b8c3b20399f5a7dc"
+      }
+    },
+    "learnweaverapp": {
+      "path": "07_webapps-websites/02_lovable/learnweaverapp",
+      "head": "39f8ea169fd6d639161818025de6daf92e95d9eb",
+      "files": {
+        "src/hooks/usePresentationData.ts": "6a1e751a01e8955eb0719d94d778e1ea6bbb1a6321dc0078e1bf8790fb72b409"
+      }
+    }
+  }
+}

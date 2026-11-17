@@ -1,0 +1,841 @@
+<!doctype html>
+<html lang="en-GB"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Cross-machine library discovery</title><style>:root{--background:#fcfbf7;--foreground:#203344;--muted:#64727c;--card:#f5f5f0;--border:#d6ddd9;--primary:#185779;--accent:#dcecf0;--radius:12px;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--font-mono:ui-monospace,monospace;color-scheme:light}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;color:var(--foreground);font:1rem/1.6 var(--font-sans)}.report-body{max-width:1220px;margin:0 auto;min-width:0}.report-body>h1{font-size:clamp(2rem,4vw,3.2rem);line-height:1.1;letter-spacing:-.04em;margin:24px 0}.report-body>h2{border-top:3px solid var(--primary);padding-top:22px;margin:56px 0 20px;font-size:1.8rem;scroll-margin-top:20px}.report-body>h3{margin:30px 0 10px;font-size:1.2rem}.report-body>p{max-width:92ch}.report-body>p:first-of-type{font-size:1.2rem;line-height:1.6}.report-body a{color:var(--primary);text-underline-offset:3px}.report-nav,.direction-index{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0}.report-nav a,.direction-index a{padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--card);text-decoration:none;font-weight:600}.report-body>table{display:block;overflow:auto;border-collapse:collapse;font-size:.9rem;margin:20px 0 28px;max-width:100%}.report-body>table th{background:#e5edf0;white-space:normal}.report-body>table th,.report-body>table td{border:1px solid var(--border);padding:12px 14px;vertical-align:top;min-width:120px}.report-body>table td:first-child{min-width:170px;font-weight:550}.report-body>table tbody tr:nth-child(even){background:#f7f8f4}.report-body code{font: .88em var(--font-mono);overflow-wrap:anywhere}.option-board{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.option-board article{border:1px solid var(--border);border-top:4px solid var(--primary);border-radius:10px;padding:20px;background:var(--card)}.option-board h3{margin:0;font-size:1.15rem}.option-board p{font-size:.95rem}.score-chart{background:var(--card);padding:20px;border-radius:var(--radius);margin:20px 0}.score-chart>div{display:grid;grid-template-columns:180px 1fr 135px;gap:16px;align-items:center;margin:10px 0}.score-chart meter{height:24px;width:100%;accent-color:#1f6c82}.score-chart span{font-size:.9rem}.architecture-map{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:24px 0}.architecture-map>div{border:1px solid var(--border);border-left:5px solid #24758b;padding:20px;border-radius:10px;background:var(--card);display:flex;flex-direction:column;gap:6px}.architecture-map .map-host{background:#e8f1f1}.architecture-map strong{font-size:1.1rem}.architecture-map span{font-size:.95rem}.architecture-map .map-routes{border-left-color:#b58232}.report-body>ol{padding-left:26px;max-width:95ch}.report-body>ol>li{padding:8px 0}.report-body :focus-visible{outline:3px solid #087e9c;outline-offset:3px}.report-body [hidden]{display:none!important}.report-body section[id^="direction-"]{margin:28px 0 12px;scroll-margin-top:20px}.report-body button,.report-body input,.report-body select{font-family:inherit}
+.report-body>p{overflow-wrap:anywhere}
+@media(max-width:800px){.option-board{grid-template-columns:1fr}.architecture-map{grid-template-columns:1fr}.score-chart>div{grid-template-columns:1fr 1fr}.score-chart span{grid-column:2}.report-body>table{font-size:.85rem}.report-body>h2{font-size:1.55rem}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important;animation:none!important}}
+@media(forced-colors:active){.option-board article,.architecture-map>div,.report-nav a{border:1px solid CanvasText}.report-body :focus-visible{outline:3px solid Highlight}}
+@media print{body{font-size:10pt}.report-body>table{display:table;font-size:8pt}.report-body>table td,.report-body>table th{min-width:0;padding:5px}.option-board{grid-template-columns:1fr}.report-nav,.direction-index{display:none}.report-body>h2{break-after:avoid}.report-body section[id^="direction-"]{break-inside:avoid}button,input,select{print-color-adjust:exact}}
+
+#direction-a{--a-paper:#fbfaf6;--a-line:#d9dedc;--a-blue:#143d5b;--a-teal:#176f69;color:#203d4e;background:var(--a-paper);border:1px solid #c9d3d6;border-radius:12px;overflow:hidden;font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 18px 45px #16354913}
+#direction-a *{box-sizing:border-box}#direction-a [hidden]{display:none!important}#direction-a button,#direction-a input,#direction-a select{font:inherit}#direction-a button,#direction-a select{border:1px solid #bfcdd0;border-radius:6px;padding:8px 11px;color:var(--a-blue);background:#fff;cursor:pointer}#direction-a button:hover{border-color:var(--a-teal);background:#edf4f1}#direction-a button:disabled{opacity:.48;cursor:not-allowed}#direction-a :focus-visible{outline:3px solid #be8728;outline-offset:3px}#direction-a .a-primary{color:white;background:var(--a-blue);border-color:var(--a-blue)}#direction-a h3,#direction-a p{margin:0}#direction-a .a-titlebar{display:flex;justify-content:space-between;align-items:center;gap:15px;padding:17px 22px;border-bottom:1px solid var(--a-line);background:#f1f2ed}#direction-a .a-titlebar strong{display:block;font-size:18px;margin-top:5px}#direction-a .a-direction{font-size:11px;letter-spacing:.09em;font-weight:800;color:var(--a-teal)}#direction-a .a-subtle{font-weight:400;color:#62727c}#direction-a .a-connection{display:flex;gap:15px;align-items:center;font-size:11px}#direction-a [data-host-label]{color:var(--a-teal);font-weight:650}#direction-a .a-toolbar{display:flex;gap:10px;padding:13px 20px;border-bottom:1px solid var(--a-line)}#direction-a .a-modes{display:flex}#direction-a .a-modes button{border-radius:0;margin-right:-1px}#direction-a .a-modes button:first-child{border-radius:6px 0 0 6px}#direction-a .a-modes button:last-child{border-radius:0 6px 6px 0}#direction-a [data-mode][aria-pressed=true]{background:#deebe8;border-color:#79a6a1;color:#124d48;font-weight:700}#direction-a .a-search{flex:1;min-width:110px}#direction-a .a-search input{width:100%;height:39px;border:1px solid #bfcdd0;background:#fff;border-radius:6px;padding:8px 12px;color:var(--a-blue)}#direction-a .a-toolbar select{max-width:195px}
+#direction-a .a-workspace{display:grid;grid-template-columns:7fr 3fr;min-height:660px}#direction-a .a-results{padding:23px;min-width:0}#direction-a .a-result-heading{display:flex;gap:12px;justify-content:space-between;align-items:flex-start;margin-bottom:19px}#direction-a h3{font-size:17px;font-weight:650;line-height:1.3}#direction-a .a-result-heading p{font-size:12px;color:#687780;margin-top:5px;max-width:430px}#direction-a .a-result-heading label{font-size:11px;white-space:nowrap}#direction-a input[type=checkbox]{accent-color:var(--a-teal);vertical-align:middle}#direction-a .a-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px}#direction-a .a-card{text-align:left;padding:8px 8px 12px;border:1px solid var(--a-line);background:#fff;min-width:0}#direction-a .a-card[aria-pressed=true]{border:2px solid var(--a-teal);padding:7px 7px 11px;box-shadow:0 0 0 2px #176f6913}#direction-a .a-card-title{display:block;font-weight:650;font-size:13px;padding:10px 5px 0}#direction-a .a-meta,#direction-a .a-availability{display:block;padding:3px 5px 0;font-size:10px;color:#687780}#direction-a .a-availability{color:var(--a-teal)}
+#direction-a .a-slide{display:block;aspect-ratio:16/9;padding:16px;overflow:hidden;position:relative;text-align:left;background:#e9f0ed;color:#173f4f}#direction-a .a-slide small{font-size:7px;font-weight:700;letter-spacing:.09em;display:block}#direction-a .a-slide b{display:block;font-size:21px;line-height:1.06;font-weight:650;margin-top:10px;letter-spacing:-.03em}#direction-a .a-route,#direction-a .a-loop,#direction-a .a-bridge,#direction-a .a-trees,#direction-a .a-map,#direction-a .a-ladder{display:block;font-size:21px;position:absolute;right:14px;bottom:8px;color:#288579;line-height:1.1;letter-spacing:2px}#direction-a .a-slide-feedback{background:#173e55;color:#fff}#direction-a .a-loop{font-size:10px;color:#bbd8cd}#direction-a .a-slide-bridge{background:#eee4d2}#direction-a .a-slide-paths{background:linear-gradient(145deg,#c8d8cb 0 48%,#ece3c9 48% 54%,#8fac98 54%);color:#173f35}#direction-a .a-trees{font-size:28px;color:#336751}#direction-a .a-slide-map{background:#e8edf1}#direction-a .a-slide-ladder{background:#f1ead9}#direction-a .a-ladder{color:#ad7a26;font-size:24px}
+#direction-a .a-inspector{padding:22px;border-left:1px solid var(--a-line);background:#f4f6f2;min-width:0}#direction-a .a-inspector-heading{font-size:10px;font-weight:750;letter-spacing:.08em;display:flex;justify-content:space-between;margin-bottom:16px}#direction-a .a-inspector-heading span{letter-spacing:0;background:#e4ece7;color:var(--a-teal);padding:1px 7px;border-radius:3px}#direction-a .a-preview{margin-bottom:18px}#direction-a .a-preview .a-slide{padding:14px}#direction-a .a-preview .a-slide b{font-size:20px}#direction-a .a-summary{font-size:12px;color:#536b75;margin-top:9px}#direction-a dl{font-size:11px;margin:20px 0}#direction-a dt{color:#71818a;margin-top:12px}#direction-a dd{margin:2px 0;color:#264856;overflow-wrap:anywhere}#direction-a .a-source-note{font-size:11px;color:#687780}#direction-a .a-local-state{font-size:12px;background:#e7efea;border-left:3px solid var(--a-teal);padding:11px;margin:18px 0 13px}#direction-a .a-actions{display:grid;gap:8px}#direction-a .a-demo{font-size:10px;color:#73818a;margin-top:21px}#direction-a .a-footer{display:flex;justify-content:space-between;gap:15px;border-top:1px solid var(--a-line);padding:12px 21px;color:#687780;font-size:10px}#direction-a .a-alert{padding:12px;background:#f5ecd7;border-left:3px solid #b08638;font-size:12px;margin-bottom:18px}#direction-a .a-empty{padding:50px 25px;text-align:center;color:#687780}#direction-a .a-empty p{margin-top:10px;font-size:13px}#direction-a .a-seed{display:flex;align-items:center;gap:12px;background:#e7efea;padding:10px;font-size:11px;margin-bottom:16px}#direction-a .a-seed-picture{font-size:15px;color:var(--a-teal)}#direction-a .a-seed button{margin-left:auto}#direction-a .a-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(max-width:850px){#direction-a .a-titlebar,#direction-a .a-connection{align-items:flex-start;flex-wrap:wrap}#direction-a .a-toolbar{flex-wrap:wrap}#direction-a .a-toolbar select{max-width:none}#direction-a .a-workspace{grid-template-columns:65fr 35fr}#direction-a .a-result-heading{display:block}#direction-a .a-result-heading label{display:block;margin-top:12px}#direction-a .a-slide b{font-size:17px}#direction-a .a-results,#direction-a .a-inspector{padding:15px}}
+@media(max-width:620px){#direction-a .a-workspace{grid-template-columns:1fr}#direction-a .a-inspector{border-left:0;border-top:1px solid var(--a-line)}#direction-a .a-preview{max-width:280px}#direction-a .a-footer{display:block}#direction-a .a-seed{flex-wrap:wrap}}
+@media(max-width:460px){#direction-a .a-grid{grid-template-columns:1fr}#direction-a .a-slide{min-height:175px}#direction-a .a-footer span{display:block}}
+
+#direction-b{--b-blue:#153b5a;--b-teal:#246b65;--b-paper:#faf8f2;--b-line:#d8dfdf;color:#233b4c;font:14px/1.5 system-ui,sans-serif;margin:36px 0}
+#direction-b *{box-sizing:border-box}#direction-b [hidden]{display:none!important}
+#direction-b button,#direction-b summary,#direction-b input{cursor:pointer}#direction-b button{font:inherit;border:1px solid var(--b-line);border-radius:6px;padding:7px 11px;background:#fff;color:var(--b-blue)}
+#direction-b button:hover{border-color:var(--b-teal);background:#eef6f3}#direction-b button:disabled{opacity:.5;cursor:default}#direction-b :focus-visible{outline:3px solid #bd8932;outline-offset:3px}
+#direction-b .b-heading{display:flex;justify-content:space-between;align-items:start;gap:20px;margin-bottom:18px}#direction-b .b-heading h2{font-size:28px;margin:10px 0 2px}#direction-b .b-heading p{margin:0;color:#536675}
+#direction-b .b-badge{display:inline-block;font-size:16px;font-weight:750;padding:5px 13px;border-radius:5px;background:var(--b-blue);color:white}#direction-b .b-demo{font-size:12px;padding:6px 9px;border:1px solid #c4cfcf;border-radius:5px;background:#fff;white-space:nowrap}
+#direction-b .b-app{background:var(--b-paper);border:1px solid #cbd4d5;border-radius:11px;overflow:hidden;box-shadow:0 10px 32px #153b5a0a}
+#direction-b .b-titlebar{display:flex;justify-content:space-between;gap:15px;padding:13px 18px;background:var(--b-blue);color:#fff}#direction-b .b-titlebar strong span{font-weight:400;color:#dae6ed}#direction-b .b-local{font-size:12px;color:#e1ece7}
+#direction-b .b-toolbar{display:flex;gap:18px;align-items:center;padding:9px 18px;border-bottom:1px solid var(--b-line);background:#f0f3f2;font-size:12px}#direction-b .b-toolbar>span{margin-right:auto;font-weight:650}#direction-b .b-toolbar label{display:flex;align-items:center;gap:5px;white-space:nowrap}#direction-b .b-toolbar button{padding:4px 9px;font-size:12px}
+#direction-b .b-workspace{display:grid;grid-template-columns:minmax(0,1fr) 365px;min-height:675px}#direction-b .b-outline{padding:23px 28px;display:flex;flex-direction:column;min-width:0}
+#direction-b .b-section-label{font-size:11px;letter-spacing:.11em;font-weight:700;color:#657580;display:flex;justify-content:space-between}#direction-b .b-section-label span{letter-spacing:0;font-weight:400}
+#direction-b .b-slide-nav{display:flex;flex-direction:column;gap:6px;margin:13px 0 25px}#direction-b .b-slide-nav button{text-align:left;background:transparent;border-color:transparent;font-size:13px}#direction-b .b-slide-nav button span{margin-right:10px;color:#73818a}#direction-b .b-slide-nav button[aria-pressed=true]{background:#e6efef;border-color:#bed0d0;font-weight:700}
+#direction-b .b-draft{padding:24px 24px 35px;background:#fff;border:1px solid #e2e4df;border-radius:5px;box-shadow:0 3px 9px #1f3d4d04}#direction-b .b-kicker{color:var(--b-teal);font-size:10px;letter-spacing:.08em;font-weight:750}#direction-b .b-draft h3{font-size:25px;line-height:1.2;margin:15px 0 24px;font-weight:650;max-width:360px}
+#direction-b .b-outline-line{font-size:15px;padding-left:14px;border-left:2px solid #dde6e5;margin:17px 0}#direction-b .b-cursor{border-top:1px dashed #c7d5d4;margin-top:32px;padding-top:12px;font-size:11px;color:#637a7e;display:flex;align-items:center;gap:7px}#direction-b .b-cursor>span{height:16px;width:2px;background:var(--b-teal)}
+#direction-b .b-editor-footer{margin-top:auto;padding-top:25px;display:flex;align-items:center;gap:12px;font-size:11px;color:#63747e}#direction-b .b-editor-footer>span{flex:1}#direction-b .b-editor-footer button{font-size:11px;white-space:nowrap}
+#direction-b .b-panel{background:#f2f5f3;border-left:1px solid var(--b-line);padding:20px 17px}#direction-b .b-panel-title{display:flex;justify-content:space-between;align-items:center}#direction-b .b-panel-title h3{font-size:18px;margin:3px 0 0}#direction-b .b-count{font-size:10px;color:#496763;background:#e0ece7;padding:3px 7px;border-radius:10px}
+#direction-b .b-panel-status{font-size:11px;color:#5b726d;min-height:47px;padding:8px 0}#direction-b .b-panel-status p{margin:0}#direction-b .b-panel-status:has([data-panel-state=offline]:not([hidden])){color:#856020}
+#direction-b .b-candidate{border:1px solid #d0ddda;border-radius:7px;background:white;overflow:hidden}#direction-b .b-mini{height:142px;margin:9px 9px 0;padding:16px 19px;display:flex;flex-direction:column;justify-content:space-between;pointer-events:none}#direction-b .b-mini small{font-size:8px;letter-spacing:.17em}#direction-b .b-mini strong{font-size:18px;line-height:1.15;font-weight:650}#direction-b .b-mini>div{display:flex;align-items:center;gap:9px}#direction-b .b-mini i{font-size:9px;font-style:normal;padding:3px 8px;border:1px solid currentColor;border-radius:3px}
+#direction-b .b-mini-judgement{background:#e9f0ed;color:#204b46}#direction-b .b-mini-analogy{background:#eaf0f5;color:#254f71}#direction-b .b-mini-analogy b{font-size:19px}#direction-b .b-card-body{padding:12px}
+#direction-b h4{font-size:14px;margin:0 0 3px}#direction-b .b-card-body>p,#direction-b .b-secondary p{font-size:11px;color:#64767e;margin:0 0 9px}#direction-b details{font-size:11px;margin:9px 0}#direction-b summary{color:var(--b-teal);font-weight:600}#direction-b details p{color:#4a606a;margin:9px 0}#direction-b dl{display:grid;grid-template-columns:65px 1fr;gap:5px;margin:8px 0}#direction-b dt{font-weight:650}#direction-b dd{margin:0}
+#direction-b .b-asset-status{font-size:10px;color:#64766e;border-top:1px solid #e4eae6;padding-top:10px;margin-top:10px;min-height:27px}#direction-b .b-card-body>button{width:100%;margin-top:7px;background:var(--b-teal);color:white;border-color:var(--b-teal);font-size:12px}#direction-b .b-inserted-label{display:block;font-size:12px;font-weight:700;color:var(--b-teal);margin-top:8px}
+#direction-b .b-secondary{display:flex;gap:11px;padding:14px 0;border-bottom:1px solid var(--b-line)}#direction-b .b-secondary>div:last-child{flex:1}#direction-b .b-secondary h4{font-size:12px}#direction-b .b-tiny{width:74px;height:49px;display:flex;align-items:center;justify-content:center;gap:7px;border-radius:3px;flex:none}#direction-b .b-mini-evidence{background:#ece8db;color:#716044;font-size:20px}#direction-b .b-mini-bridge{background:#dfeae9;color:#366960}
+#direction-b .b-panel-foot{font-size:10px;color:#64776e;margin:16px 0 0}#direction-b .b-caption{font-size:13px;color:#5f707b;margin:13px 0}#direction-b .b-added{margin-top:14px;border:1px solid #bdd4cb;border-left:3px solid var(--b-teal);padding:12px;background:#f3f8f4}#direction-b .b-added>span{font-size:9px;color:var(--b-teal);display:block}#direction-b .b-added strong{display:block;font-size:15px;margin:6px 0}#direction-b .b-added p{font-size:12px;margin:4px 0}#direction-b .b-added small{font-size:10px;color:#607568}
+@media(max-width:850px){#direction-b .b-workspace{grid-template-columns:minmax(0,1fr) 320px}#direction-b .b-outline{padding:18px}#direction-b .b-draft{padding:18px}#direction-b .b-heading{flex-direction:column;gap:10px}}
+@media(max-width:650px){#direction-b .b-workspace{grid-template-columns:1fr}#direction-b .b-panel{border-left:0;border-top:1px solid var(--b-line)}#direction-b .b-toolbar{gap:9px;flex-wrap:wrap}#direction-b .b-toolbar>span{width:100%}#direction-b .b-titlebar{flex-direction:column;gap:3px}#direction-b .b-editor-footer{margin-bottom:12px}#direction-b .b-mini{height:160px}}
+
+#direction-c{--c-blue:#173c59;--c-teal:#27746e;--c-line:#d7d9d3;color:#253b46;background:#faf9f4;border:1px solid #cbd1cc;border-radius:12px;overflow:hidden;font:14px/1.45 system-ui,sans-serif;box-shadow:0 16px 42px #173c5910}
+#direction-c *{box-sizing:border-box}#direction-c [hidden]{display:none!important}#direction-c button,#direction-c input{font:inherit}#direction-c button{border:1px solid #bbc9cd;background:#fffefa;color:var(--c-blue);padding:7px 12px;border-radius:6px;cursor:pointer}#direction-c button:hover{background:#e9f0ed}#direction-c button:disabled{opacity:.55;cursor:default}#direction-c :focus-visible{outline:3px solid #b57c1c;outline-offset:3px}#direction-c input[type=checkbox],#direction-c input[type=radio]{accent-color:var(--c-teal)}
+#direction-c .c-titlebar,#direction-c .c-toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 20px;border-bottom:1px solid var(--c-line)}#direction-c .c-titlebar{background:#edf0eb}#direction-c .c-titlebar>div{display:flex;align-items:center;gap:12px}#direction-c .c-titlebar strong{font-size:18px}#direction-c .c-badge{display:grid;place-items:center;background:var(--c-blue);color:#fff;width:35px;height:35px;border-radius:8px;font-size:22px;font-weight:700}#direction-c .c-app{font-size:12px;color:#5b6d74}#direction-c .c-toolbar{padding-block:9px;font-size:12px}#direction-c .c-toolbar>span{margin-right:auto;color:var(--c-teal)}#direction-c .c-toolbar label{white-space:nowrap}#direction-c .c-toolbar button{font-size:12px;padding:4px 8px}
+#direction-c .c-demo-note{padding:8px 24px;background:#f6efdc;color:#725c2e;font-size:11px}#direction-c main{padding:22px 24px}#direction-c h3,#direction-c h4,#direction-c p{margin:0}#direction-c h3{font-size:25px;line-height:1.2;letter-spacing:-.5px;margin:5px 0 9px}#direction-c h4{font-size:15px;line-height:1.3}#direction-c .c-heading{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:23px}#direction-c .c-heading p:not(.c-eyebrow){color:#627177;font-size:12px}#direction-c .c-eyebrow{font-size:10px;letter-spacing:1.5px;color:var(--c-teal);font-weight:700}#direction-c .c-count{font-size:12px;color:#687879;white-space:nowrap}
+#direction-c .c-lane{display:flex;align-items:center;gap:22px;padding:21px 0;border-top:1px solid var(--c-line)}#direction-c .c-lane-label{flex:0 0 178px;position:relative;padding-left:29px}#direction-c .c-lane-number{position:absolute;left:0;top:0;font-size:11px;color:#83928f}#direction-c .c-lane-label p{color:#637573;font-size:12px;margin:7px 0 12px}#direction-c .c-lane-label button{font-size:12px}#direction-c .c-contact-sheet{display:flex;flex:1;gap:10px;min-width:0}#direction-c .c-mini{aspect-ratio:16/10;border:1px solid #becac5;padding:13px;position:relative;overflow:hidden;flex:1;min-width:0;max-width:235px;box-shadow:0 2px 3px #193b4c10}#direction-c .c-mini small{display:block;letter-spacing:1.5px;font-size:7px;opacity:.7}#direction-c .c-mini b{display:block;font-size:clamp(12px,1.4vw,20px);line-height:1.15;margin-top:10px;letter-spacing:-.3px}#direction-c .c-blue{background:#173e5b;color:#f7f3e8}#direction-c .c-teal{background:#dcebe3;color:#164b4b}#direction-c .c-paper{background:#eee7d7;color:#324d5b}#direction-c .c-dots{display:flex;gap:7px;margin-top:12px}#direction-c .c-dots i{width:13px;height:13px;border:1px solid currentColor;border-radius:50%}#direction-c .c-dots i:nth-child(even){background:#bda45d}#direction-c .c-bars{display:flex;gap:6px;align-items:flex-end;height:30px;margin-top:8px}#direction-c .c-bars i{width:22px;height:45%;background:#739991}#direction-c .c-bars i:nth-child(2){height:70%}#direction-c .c-bars i:nth-child(3){height:100%;background:#315771}#direction-c .c-steps{display:flex;gap:4px;align-items:flex-end;height:28px;margin-top:6px}#direction-c .c-steps i{width:24px;height:12px;background:#47786c}#direction-c .c-steps i:nth-child(2){height:20px}#direction-c .c-steps i:nth-child(3){height:28px;background:#a88735}#direction-c .c-map{display:flex;gap:15px;margin-top:13px}#direction-c .c-map i{width:20px;height:20px;border:2px solid #487b74;transform:rotate(45deg)}
+#direction-c .c-lane-tail{flex:0 0 115px;font-size:11px;color:#6f7978}#direction-c .c-lane-tail strong{display:block;color:#4b6265;margin-bottom:8px}#direction-c .c-secondary .c-mini{max-width:205px}#direction-c .c-muted{font-size:10px;color:#7b8585}#direction-c .c-ungrouped{padding-block:18px;background:#f1f2ec;margin-top:8px}#direction-c .c-ungrouped p{color:#697773;font-size:12px;flex:1}#direction-c .c-tag{display:inline-block;background:#f1e8cb;color:#715d2e;padding:5px 9px;border-radius:4px;font-size:11px;margin-right:14px}#direction-c .c-cache-note{padding:14px;background:#f6efdc;font-size:12px;color:#715d2e}
+#direction-c .c-back{margin-bottom:17px;border:0;background:transparent;padding:0;font-size:12px}#direction-c .c-selection-bar,#direction-c .c-pin-bar{display:flex;align-items:center;justify-content:space-between;gap:15px;font-size:12px;padding:12px 0;border-top:1px solid var(--c-line)}#direction-c .c-selection-bar>div{display:flex;gap:8px}#direction-c .c-theme-sheet{display:flex;gap:18px;padding:10px 0 22px}#direction-c .c-slide-card{flex:1;min-width:0}#direction-c .c-slide-card label{display:block;margin-bottom:8px;font-size:11px}#direction-c .c-slide-card .c-mini{max-width:none;width:100%}#direction-c .c-slide-card h4{margin:12px 0 6px;font-size:13px}#direction-c .c-slide-card p,#direction-c .c-comparison p{font-size:11px;color:#687772;line-height:1.7}#direction-c .c-local,#direction-c .c-remote{display:block;font-size:10px;margin-top:8px;color:#267167}#direction-c .c-remote{color:#8b6b27}#direction-c .c-pin-bar button{background:var(--c-blue);color:white;border-color:var(--c-blue)}
+#direction-c .c-variants,#direction-c .c-save-panel{padding:16px;background:#f2efdf;border:1px solid #ded5b9;margin-bottom:15px;font-size:12px}#direction-c .c-variants p{margin:8px 0 12px;max-width:720px}#direction-c .c-save-panel label{margin-right:12px}#direction-c .c-save-panel input{border:1px solid #bbc9cd;border-radius:4px;padding:7px;margin-left:8px;max-width:250px}#direction-c .c-save-panel p{font-size:11px;color:#6f756a;margin-top:8px}#direction-c .c-comparison{display:flex;gap:24px;margin:5px 0 22px}#direction-c .c-comparison article{flex:1}#direction-c .c-comparison .c-mini{max-width:none;padding:25px}#direction-c .c-comparison .c-mini b{font-size:31px;margin:20px 0 30px}#direction-c .c-comparison .c-mini small{font-size:10px}#direction-c .c-comparison h4{margin:15px 0 5px}#direction-c .c-comparison label{display:block;margin-top:12px;font-size:12px}#direction-c .c-difference{display:flex;gap:22px;background:#eaf0e9;padding:14px;font-size:12px;margin-bottom:18px}#direction-c .c-difference strong{white-space:nowrap}#direction-c .c-saved{border-top:1px solid var(--c-line);padding-top:15px;margin-top:15px;font-size:12px}#direction-c .c-saved>div{display:flex;gap:8px;margin:10px 0}#direction-c .c-saved small{color:#687772}#direction-c .c-status{padding:10px 24px;background:#edf0eb;border-top:1px solid var(--c-line);font-size:11px;color:#42645f}
+@media(max-width:800px){#direction-c .c-app,#direction-c .c-lane-tail{display:none}#direction-c .c-lane-label{flex-basis:155px}#direction-c .c-mini{padding:8px}#direction-c .c-mini b{font-size:13px}#direction-c .c-mini small{font-size:6px}#direction-c .c-toolbar{flex-wrap:wrap;gap:8px}#direction-c .c-heading{align-items:flex-start}#direction-c .c-theme-sheet{flex-wrap:wrap}#direction-c .c-slide-card{flex-basis:43%}#direction-c .c-comparison .c-mini b{font-size:23px}#direction-c .c-comparison .c-mini{padding:16px}#direction-c .c-comparison .c-mini small{font-size:8px}}
+@media(forced-colors:active){#direction-c .c-mini,#direction-c button{border:1px solid CanvasText}#direction-c .c-badge,#direction-c .c-pin-bar button{background:ButtonFace;color:ButtonText}}
+@media(max-width:620px){#direction-c .c-heading,#direction-c .c-lane,#direction-c .c-selection-bar,#direction-c .c-pin-bar,#direction-c .c-comparison,#direction-c .c-difference{display:block}#direction-c .c-lane-label{margin-bottom:14px}#direction-c .c-contact-sheet{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}#direction-c .c-contact-sheet .c-mini{max-width:none;min-height:120px;aspect-ratio:auto}#direction-c .c-heading .c-count{display:block;margin-top:12px}#direction-c .c-slide-card{flex-basis:100%}#direction-c .c-selection-bar>div{flex-wrap:wrap;margin-top:10px}#direction-c .c-pin-bar button{margin-top:10px}#direction-c .c-comparison article{margin-bottom:24px}#direction-c .c-difference strong{display:block;margin-bottom:8px}#direction-c .c-ungrouped>p,#direction-c .c-ungrouped>.c-tag{margin:12px 0 0 29px}#direction-c .c-save-panel label{display:block}#direction-c .c-save-panel input{display:block;margin:8px 0;max-width:100%;width:100%}}
+</style></head><body><main class="report-body"><h1 id="cross-machine-library-discovery" data-source-ref="report.md">Cross-machine library discovery</h1>
+<p data-source-ref="report.md"><strong data-source-ref="report.md">Recommendation: one personal library host, several thin clients, one search contract.</strong> Start with the indexed Pro to make the Air useful in one build run. Move the host role to the personal Mini after reconciling its older archive and proving its model runtime. Keep the shared Oxford Studio outside the personal library boundary. Add authenticated Cloudflare access to the same service; publish selected sharing snapshots separately.</p>
+<p data-source-ref="report.md">This report is a design proposal. No app code, deployment, service installation, Tailscale route, DNS or network configuration was changed. The three mockups use invented material. They demonstrate interaction and geometry; they are not connected to the real archive and do not establish a locked design.</p>
+<nav class="report-nav" aria-label="Report sections"><a href="#inventory" data-source-ref="report.md">Inventory</a><a href="#machines" data-source-ref="report.md">Machines</a><a href="#t3" data-source-ref="report.md">T3 model</a><a href="#options" data-source-ref="report.md">Options</a><a href="#architecture" data-source-ref="report.md">Architecture</a><a href="#directions" data-source-ref="report.md">Try three directions</a><a href="#delivery" data-source-ref="report.md">First build</a><a href="#decisions" data-source-ref="report.md">Owner choices</a><a href="#sources" data-source-ref="report.md">Evidence</a></nav>
+<h2 id="inventory" data-source-ref="report.md#inventory">Inventory</h2>
+<p data-source-ref="report.md#inventory">The missing capability is remote query execution plus safe materialisation of selected results. Moving media to R2 already solves part of storage; it does not make a local SQLite query or Unix socket reachable from the Air.</p>
+<p data-source-ref="report.md#inventory">Measured on 17 November 2026. GiB = 1,048,576 KiB; folder sizes use <code>du -sk</code> allocated space, file sizes use stat. They overlap where stated and must not be summed as independent archives. No raw deck, highlight, transcript or learner content is embedded here. Source identities and hashes are recorded in <code>source-manifest.json</code>.</p>
+<table>
+<thead>
+<tr>
+<th data-source-ref="report.md#inventory">Application / library</th>
+<th data-source-ref="report.md#inventory">Data and authority</th>
+<th data-source-ref="report.md#inventory">Embeddings and index</th>
+<th data-source-ref="report.md#inventory">Existing remote capability / measured footprint</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td data-source-ref="report.md#inventory"><strong data-source-ref="report.md#inventory">SlideWell / Core A</strong></td>
+<td data-source-ref="report.md#inventory"><code>03_presenting-teaching/01_presentation-libraries/ppt-archive</code>: <code>extracted/</code>, <code>media-store/</code>, <code>registry/{slides,images,media}.db</code>. Originals stay in place, referenced by extraction manifests/location records. Added images and decisions: <code>~/SlideWell/well</code>, including <code>well.db</code>, <code>triage.db</code>, image sidecars.</td>
+<td data-source-ref="report.md#inventory">Current SlideWell code pins <code>onnx-community/embeddinggemma-2-ONNX</code>, revision <code>daa72c…</code>, fp16 text + vision, 768 dimensions. <code>picture-search.db</code> stores normalised float32 little-endian BLOBs; in-memory dot-product ranking. Pro main-file snapshot: <strong data-source-ref="report.md#inventory">76,280 vectors</strong>: 61,661 slide, 12,923 triage, 1,696 well-image.</td>
+<td data-source-ref="report.md#inventory">Pro extracted <strong data-source-ref="report.md#inventory">12.98 GiB</strong>, media-store <strong data-source-ref="report.md#inventory">1.73 GiB</strong>, registry <strong data-source-ref="report.md#inventory">0.206 GiB</strong>; well tree <strong data-source-ref="report.md#inventory">0.408 GiB</strong>, including picture DB <strong data-source-ref="report.md#inventory">304.5 MiB</strong>. Model folder <strong data-source-ref="report.md#inventory">0.848 GiB</strong>. Existing query endpoint is a <strong data-source-ref="report.md#inventory">local Unix socket</strong>, returning IDs/scores. R2 fetch-on-miss/upload exists for media; bounded eviction is deferred. [S1–S3]</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#inventory"><strong data-source-ref="report.md#inventory">Core A legacy embeddings</strong></td>
+<td data-source-ref="report.md#inventory">Same archive, older embedding tools.</td>
+<td data-source-ref="report.md#inventory">README describes sqlite-vss <code>embedding_vectors</code>, metadata tables and <code>registry/embeddings.db</code>; OpenAI-compatible endpoint and MLX-CLIP routes. Qwen3-VL client is explicitly a scaffold in that README. No <code>embeddings.db</code> found among Pro registry databases.</td>
+<td data-source-ref="report.md#inventory">Do not mistake this historical scaffold or cached Qwen models for the currently serving SlideWell implementation. No scale run or remote search service established from it. [S4]</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#inventory"><strong data-source-ref="report.md#inventory">MediaWell → MultiWell</strong></td>
+<td data-source-ref="report.md#inventory">Repository remains <code>06_apps-utilities/01_desktop-apps/mediawell</code>. Desktop data: <code>~/Library/Application Support/MediaWell/</code>; one index per vault under <code>vaults/indexes/&lt;vault-id&gt;/</code>. Originals are selected folders; optional managed copies/records. Prototype <code>.data/</code> is separate. Some migrated index content is still authoritative until record export is complete.</td>
+<td data-source-ref="report.md#inventory"><code>google/embeddinggemma-2</code>, desktop revision <code>914f7f…</code>, 768d normalised text/frame vectors in <code>session-search.sqlite3</code> passage BLOBs. Local sentence-transformers/MPS path or explicitly configured matching remote worker. Separate embedding-space compatibility checks.</td>
+<td data-source-ref="report.md#inventory">Private prototype Tailscale Serve on loopback port 8765 is documented; this is not proof that the current installed desktop vault is remotely browsable. Remote inference already exists with consent/model checks; it does <strong data-source-ref="report.md#inventory">not</strong> host the local catalogue. Pro models folder <strong data-source-ref="report.md#inventory">6.64 GiB</strong> (all roles), data <strong data-source-ref="report.md#inventory">8.46 MiB</strong>, vault tree <strong data-source-ref="report.md#inventory">1.24 MiB</strong>. External originals excluded. [S5]</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#inventory"><strong data-source-ref="report.md#inventory">Highlight Scout + Scout</strong></td>
+<td data-source-ref="report.md#inventory">Tauri/Rust app; v2 Markdown archive in <code>01_reading-research/highlights-archive</code>, old seed in <code>99_archive/highlights-archive-v1-readwise-seed</code>. Legacy app FTS: <code>~/.config/highlight-scout/index.sqlite</code>. Multi-corpus Scout stores: platform data folder <code>scout/indexes</code>.</td>
+<td data-source-ref="report.md#inventory">Current default <code>minilm-l12</code>: Xenova multilingual MiniLM ONNX; optional E5 routes. <code>&lt;corpus&gt;.sqlite</code> FTS plus <code>&lt;corpus&gt;.vectors.sqlite</code>, model/dimension/content-generation metadata and per-passage vectors. Text only; not the Gemma image space.</td>
+<td data-source-ref="report.md#inventory">R2 archive/index snapshot push/pull exists; observed Pro <code>r2_enabled=false</code>. No remote query API found in inspected paths. Archive checkout <strong data-source-ref="report.md#inventory">0.627 GiB</strong>; seed <strong data-source-ref="report.md#inventory">0.220 GiB</strong>; app config/index tree <strong data-source-ref="report.md#inventory">0.335 GiB</strong>; <strong data-source-ref="report.md#inventory">all</strong> Scout indexes <strong data-source-ref="report.md#inventory">0.833 GiB</strong>. Highlights vector main file <strong data-source-ref="report.md#inventory">110.4 MiB</strong>; talks <strong data-source-ref="report.md#inventory">97.9 MiB</strong>. WAL-bearing vector counts deliberately not inferred from main files. [S6]</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#inventory"><strong data-source-ref="report.md#inventory">TalkWeaver</strong></td>
+<td data-source-ref="report.md#inventory">Canonical Talk Outlines/assets in <code>03_presenting-teaching/dominiks-presentations-library</code>; multiple Vault handling and cross-vault insertion exist. Authoritative slide history in Vault <code>_SLIDE-VERSIONS/</code>. Local previews and thumbnail caches are derived.</td>
+<td data-source-ref="report.md#inventory">Local Vault text catalogue/slide browser; image provider reads SlideWell/Core A DBs read-only, asks SlideWell’s Unix socket for meaning, resolves results against local sources. It does not own a parallel picture embedder. Scout separately has talk/slide-history text embeddings.</td>
+<td data-source-ref="report.md#inventory">Existing Cloudflare publishing serves produced talk/handout/live outputs, not a cross-machine archive finder. Pro presentation checkout <strong data-source-ref="report.md#inventory">28.18 GiB</strong>, including <strong data-source-ref="report.md#inventory">6.15 GiB Git metadata</strong>; Air copy <strong data-source-ref="report.md#inventory">9.14 GiB</strong>; Mini copy <strong data-source-ref="report.md#inventory">9.22 GiB</strong>. Different sizes do not prove missing authored content; no content-equivalence audit was done. [S7, S8]</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#inventory"><strong data-source-ref="report.md#inventory">LearnWeaver library / current pilot</strong></td>
+<td data-source-ref="report.md#inventory">Current <code>07_webapps-websites/learnweaver-demo</code>; library-folder design uses <code>.learnweaver/library.json</code>, <code>course.md</code>, lesson Outlines and assets. File authority for authored material; published copies and class records have different ownership. Library-service code exists despite an ADR header still saying “accepted-design-not-implemented”.</td>
+<td data-source-ref="report.md#inventory">SQLite/local catalogue plus Cloudflare pilot domain/storage adapters. No embedding/vector integration found in the inspected server paths; report does not claim an exhaustive repository absence proof. Prototype <code>.data/</code> measured <strong data-source-ref="report.md#inventory">0.90 MiB</strong>; actual chosen library size/location not verified.</td>
+<td data-source-ref="report.md#inventory">README names authenticated <strong data-source-ref="report.md#inventory">learnweaver-pilot.czechly.workers.dev</strong>. Do not search class/learner records as slide content. Index authorised authored lessons through a source adapter, with the teacher’s library scope. [S9]</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#inventory"><strong data-source-ref="report.md#inventory">Earlier LearnWeaver web app</strong></td>
+<td data-source-ref="report.md#inventory"><code>07_webapps-websites/02_lovable/learnweaverapp</code>; catalogue identifies frozen Lovable prototype. Its local viewing hook queries Supabase presentation/section/item/content tables; local migrations include public-presentation read policies. Earlier recovery notes supplied the search lead; current remote content was not queried.</td>
+<td data-source-ref="report.md#inventory">No local corpus-size or current vector-store claim.</td>
+<td data-source-ref="report.md#inventory">Cloudflare DNS in front of an app is not proof of Cloudflare-hosted search. This earlier app is not the current file-backed lesson library. Live Supabase data was not queried. [S10]</td>
+</tr>
+</tbody>
+</table>
+<p data-source-ref="report.md#inventory"><strong data-source-ref="report.md#inventory">Coverage caveat:</strong> <code>slides.db</code> has 52,030 slide rows across 1,050 presentations and <code>images.db</code> has 14,700 image rows. Picture-vector slide count is 61,661. Those are different stores/generations, not a coverage percentage. Reconcile roots, generations, missing files and hidden states before advertising “all slides searchable”. Exclude triage Bin/emptied items and unauthorised library scopes before results and counts are returned.</p>
+<h3 id="what-we-already-did-cloudflare-means-here" data-source-ref="report.md#inventory">What “we already did Cloudflare” means here</h3>
+<table>
+<thead>
+<tr>
+<th data-source-ref="report.md#inventory">Existing item</th>
+<th data-source-ref="report.md#inventory">What is established</th>
+<th data-source-ref="report.md#inventory">What it does not establish</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td data-source-ref="report.md#inventory">SlideWell R2 storage</td>
+<td data-source-ref="report.md#inventory">Source implements per-store media upload and read-through. SQLite/JSON structure stays local; no automatic eviction.</td>
+<td data-source-ref="report.md#inventory">A live remotely searchable archive, bounded Air disk use, or current bucket completeness. No bucket inventory performed.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#inventory">Highlight Scout R2</td>
+<td data-source-ref="report.md#inventory">Archive plus legacy <code>index.sqlite</code> transfer code exists.</td>
+<td data-source-ref="report.md#inventory">Multi-corpus Scout vector synchronisation or safe multi-writer SQLite replication. Do not reuse its file-copy path as a live WAL backup design.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#inventory">Highlight Scout Pages, TalkWeaver Worker, SlideWell Pages</td>
+<td data-source-ref="report.md#inventory">Catalogue describes application home/download sites.</td>
+<td data-source-ref="report.md#inventory">Hosted personal libraries or semantic retrieval.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#inventory">Slides gallery on Cloudflare Pages</td>
+<td data-source-ref="report.md#inventory">Catalogue records a published gallery deployment, last recorded 29 Oct.</td>
+<td data-source-ref="report.md#inventory">Search of the complete private well.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#inventory">TalkWeaver publishing / old presentation Worker scaffold</td>
+<td data-source-ref="report.md#inventory">Publication infrastructure and generated bundles exist; <code>dominiks-presentations-library-OLD</code> is paused scaffold.</td>
+<td data-source-ref="report.md#inventory">Library-host execution or current repository synchronisation.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#inventory">LearnWeaver pilot</td>
+<td data-source-ref="report.md#inventory">Authenticated Worker pilot documented in its current README.</td>
+<td data-source-ref="report.md#inventory">Permission to index or share learner records.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="machines" data-source-ref="report.md#machines">Machines</h2>
+<p data-source-ref="report.md#machines">These are fresh read-only observations unless marked catalogue/runbook. SSH used existing routes; no pairing, access grant or configuration change. Process lists are momentary, and an installed app is not proof of a running service.</p>
+<table>
+<thead>
+<tr>
+<th data-source-ref="report.md#machines">Machine</th>
+<th data-source-ref="report.md#machines">Observed apps / library state</th>
+<th data-source-ref="report.md#machines">Design consequence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td data-source-ref="report.md#machines"><strong data-source-ref="report.md#machines">Personal Pro — current research machine</strong></td>
+<td data-source-ref="report.md#machines">SlideWell <strong data-source-ref="report.md#machines">0.4.0-alpha.19</strong>, MultiWell <strong data-source-ref="report.md#machines">0.4.0-alpha.11</strong>, TalkWeaver <strong data-source-ref="report.md#machines">0.45.0-alpha.3</strong>, Highlight Scout <strong data-source-ref="report.md#machines">0.6.0-preview.13</strong> installed. Actual SlideWell checkout package is <strong data-source-ref="report.md#machines">0.4.0-alpha.15</strong>; installed/source parity is unverified. Existing picture vectors and Scout stores measured here.</td>
+<td data-source-ref="report.md#machines">Best temporary seed host. Do not replace the newer installed bundle with this checkout blindly. Source/runtime parity and known queries are first-build gates. Laptop sleep remains a service outage.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#machines"><strong data-source-ref="report.md#machines">Personal Mini — target host</strong></td>
+<td data-source-ref="report.md#machines">External volume about <strong data-source-ref="report.md#machines">642 GiB free</strong>. SlideWell <strong data-source-ref="report.md#machines">0.3.0</strong>, TalkWeaver <strong data-source-ref="report.md#machines">0.42.0-alpha.19</strong>, Highlight Scout <strong data-source-ref="report.md#machines">0.5.4</strong> installed; no matching app processes seen. No default picture-search DB. Core A extracted <strong data-source-ref="report.md#machines">10.02 GiB</strong>, media-store <strong data-source-ref="report.md#machines">9.52 GiB</strong>, registry <strong data-source-ref="report.md#machines">0.209 GiB</strong>. No MultiWell bundle at checked names. Existing T3 link answers now.</td>
+<td data-source-ref="report.md#machines">Suitable personal storage host after reconciliation, verified model runtime, mount/startup and service checks. Its archive is not proven to match Pro. Mini system disk is small; put bulk stores on the external volume. Cold boot/unmounted volume must give an explicit unavailable state, not an empty replacement catalogue.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#machines"><strong data-source-ref="report.md#machines">Air</strong></td>
+<td data-source-ref="report.md#machines">Current hostname differs from catalogue; existing tailnet address resolved and SSH worked. SlideWell <strong data-source-ref="report.md#machines">0.3.0</strong>, TalkWeaver <strong data-source-ref="report.md#machines">0.45.1</strong>, Highlight Scout <strong data-source-ref="report.md#machines">0.5.5</strong> installed; TalkWeaver running. About <strong data-source-ref="report.md#machines">8.6 GiB available</strong>. No conventional Core A folder; default SlideWell tree is only <strong data-source-ref="report.md#machines">40 KiB</strong>. No MultiWell bundle at checked names.</td>
+<td data-source-ref="report.md#machines">A real thin-client need, not a hypothetical future optimisation. Propose <strong data-source-ref="report.md#machines">256 MiB disposable cache</strong>, separate explicit pinned packs; no model download or global index required. No storage cleanup is part of this task.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#machines"><strong data-source-ref="report.md#machines">Shared Oxford Studio / BigMac — catalogue only</strong></td>
+<td data-source-ref="report.md#machines">Catalogue identifies M3 Ultra, 512 GB RAM, filtered development clones, T3 service and model-testing role. Personal library completeness, app versions and disk availability were not inspected.</td>
+<td data-source-ref="report.md#machines">Do not choose it as the personal highlights/library host. Approved code tests or separate institutional libraries can use it within existing boundaries. Another personal Studio would need its own verified record.</td>
+</tr>
+</tbody>
+</table>
+<p data-source-ref="report.md#machines">The existing app-over-Tailscale pattern already works for ReportScout and Dev Traffic Control: loopback gateway, private Serve route, identity checks and pairing. Mini NordVPN/MagicDNS problems are documented, so connection diagnostics must separate DNS, route, authentication, host process and external-volume availability. Reuse the proven app gateway pattern; do not copy its socket-owner assumptions without verifying the installed Tailscale variant. [S11]</p>
+<h2 id="t3" data-source-ref="report.md#t3">T3</h2>
+<p data-source-ref="report.md#t3">Local source found at <code>05_skills/t3code-upstream</code>, commit <strong data-source-ref="report.md#t3">8760d063e903406c8e8f695b0852c0a15fc1e00f</strong>. Local runtime versions 0.1.7–0.1.9 are also present under <code>~/.t3/runtime/versions</code>; installed bundles are supporting evidence, not the source checkout’s version identity. No private T3 database, credentials or thread corpus was inspected for the architecture research.</p>
+<table>
+<thead>
+<tr>
+<th data-source-ref="report.md#t3">T3 mechanism observed in source</th>
+<th data-source-ref="report.md#t3">Borrow for libraries</th>
+<th data-source-ref="report.md#t3">Candidate code / limit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td data-source-ref="report.md#t3">Persistent server environment ID and capability descriptor</td>
+<td data-source-ref="report.md#t3">A library is identified independently of its hostname, IP or current route. Cache keys include library ID and generation.</td>
+<td data-source-ref="report.md#t3"><code>apps/server/src/environment/ServerEnvironment.ts</code>; adapt the small identity/descriptor contract.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#t3">Primary target may be desktop-managed, configured or page origin; local execution can be disabled</td>
+<td data-source-ref="report.md#t3">Air can be a client of another machine without becoming a replica or running the heavy engine. “Primary” means selected client target, not a universal master of all files.</td>
+<td data-source-ref="report.md#t3"><code>apps/web/src/environments/primary/target.ts</code>.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#t3">Projects and project views carry environment identities</td>
+<td data-source-ref="report.md#t3">Bind a chosen library/Vault adapter to its host; resolve paths on that host. Same repository name on two Macs is not proof of same data generation.</td>
+<td data-source-ref="report.md#t3"><code>apps/web/src/hooks/useLogicalProjectEnvironments.ts</code>; use library + corpus IDs rather than host paths in results.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#t3">One environment entry has alternate routes; source ranks loopback/LAN/tailnet before public/SSH/relay</td>
+<td data-source-ref="report.md#t3">Tailscale and Cloudflare are routes to the <strong data-source-ref="report.md#t3">same</strong> library. Reconnect without losing selection or duplicating saved operations.</td>
+<td data-source-ref="report.md#t3"><code>packages/client-runtime/src/connection/{catalog,routes,registry,supervisor}.ts</code>. Borrow concepts and tests; do not import the whole Effect runtime to save a few types.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#t3">Resolver checks environment identity and protocol compatibility after authorisation</td>
+<td data-source-ref="report.md#t3">A fallback route must authenticate the expected library and matching API generation. A reachable wrong host is a refusal, not a successful reconnection.</td>
+<td data-source-ref="report.md#t3"><code>connection/resolver.ts</code>, <code>connection/compatibility.ts</code>.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#t3">Diagnostics name device / relay / tunnel / server hops</td>
+<td data-source-ref="report.md#t3">Show “host asleep”, “sign in again”, “library disk missing”, or “show saved items” as distinct recovery paths.</td>
+<td data-source-ref="report.md#t3"><code>connection/diagnosis.ts</code>; adapt error categories and associated tests.</td>
+</tr>
+</tbody>
+</table>
+<p data-source-ref="report.md#t3">T3’s checkout is <strong data-source-ref="report.md#t3">MIT licensed</strong>, copyright T3 Tools Inc.; substantial copied code needs its licence notice. No T3 code was copied in this research task. Recommended reuse is small types, route-selection rules, failure taxonomy and test cases after dependency review. T3’s managed relay/account system is not an existing generic library service or a free transport to appropriate. The analogy does not transfer T3’s execution permission to read/write archives. [S12]</p>
+<h2 id="options" data-source-ref="report.md#options">Options</h2>
+<p data-source-ref="report.md#options">All effort figures are <strong data-source-ref="report.md#options">planning estimates in agent-hours</strong>, not measured build times or promises. They include focused implementation and verification, exclude unattended transfer/re-embedding time, owner review, account provisioning and subscription charges. Options use the same complete discovery goal, with different routes to first value. A “first build run” means one bounded builder session delivering a usable vertical slice, not one compiler command.</p>
+<div class="option-board">
+<article><h3 data-source-ref="report.md#options">H · Host service over existing stores</h3><p data-source-ref="report.md#options"><strong data-source-ref="report.md#options">First useful finder: 6–10 h</strong><br>Durable host, cache and both routes: 22–38 h cumulative.<br>Full app integrations and richer discovery: 50–85 h cumulative.</p><p data-source-ref="report.md#options">Keep current writers and files. Add read-only search/media adapters on one personal host; a thin finder first, app providers later. Query the host over Tailscale or authenticated Cloudflare. Fuse separate vector spaces initially.</p><p data-source-ref="report.md#options"><strong data-source-ref="report.md#options">First gain:</strong> use the existing Pro picture index from Air without cloning it. <strong data-source-ref="report.md#options">Main risk:</strong> host sleep/missing disk; Cloudflare route alone does not provide host-down search.</p></article>
+<article><h3 data-source-ref="report.md#options">E · Cloudflare read model</h3><p data-source-ref="report.md#options"><strong data-source-ref="report.md#options">First useful finder: 18–30 h</strong><br>Full app integrations and richer discovery: 70–115 h cumulative.</p><p data-source-ref="report.md#options">Canonical local host publishes versioned Worker/D1/Vectorize/R2 read generations. Clients query the cloud copy. Compatible cloud query embeddings or an explicitly approved model change are prerequisites for independence from the host.</p><p data-source-ref="report.md#options"><strong data-source-ref="report.md#options">First gain:</strong> access without Tailscale, then host-down availability. <strong data-source-ref="report.md#options">Main risk:</strong> personal content upload, model mismatch, distributed generation consistency and ongoing service costs.</p></article>
+<article><h3 data-source-ref="report.md#options">F · Selective replicas on each Mac</h3><p data-source-ref="report.md#options"><strong data-source-ref="report.md#options">First useful finder: 10–18 h</strong><br>Full app integrations and richer discovery: 55–95 h cumulative.</p><p data-source-ref="report.md#options">Keep app-local queries; distribute compact database snapshots and selected media. Each client manages generation/model compatibility, indexing state and pin-aware cache limits. Fully offline meaning/image search requires query models too.</p><p data-source-ref="report.md#options"><strong data-source-ref="report.md#options">First gain:</strong> offline lexical search and chosen material. <strong data-source-ref="report.md#options">Main risk:</strong> repeating store management and model/storage costs on the Air; this preserves much of the friction the brief asks to remove.</p></article>
+</div>
+
+<h3 id="independent-architecture-scoring" data-source-ref="scores.md">Independent architecture scoring</h3>
+<p data-source-ref="scores.md">Two fresh Sol seats that did not author the options scored a fixed five-criterion rubric: immediate Air value 30%, footprint 20%, authority/privacy 25%, seamless use/availability 15%, effort/reversibility 10%. Anchors are preserved in <code>architecture-options.md</code>. Scores express judgement of the proposals; they do not validate estimates or performance. Both seats are the same model/family, so agreement is weaker evidence than independent cross-family review. No additional provider was used.</p>
+<div class="score-chart" role="img" aria-label="Architecture scores on a zero to ten scale; Host service 8.15, Cloud read model 6.38, Selective replicas 6.35"><div><strong data-source-ref="scores.md">H · Host service</strong><meter min="0" max="10" value="8.15">8.15</meter><span data-source-ref="scores.md">8.15 · both seats</span></div><div><strong data-source-ref="scores.md">E · Cloud read model</strong><meter min="0" max="10" value="6.375">6.38</meter><span data-source-ref="scores.md">6.25–6.50</span></div><div><strong data-source-ref="scores.md">F · Selective replicas</strong><meter min="0" max="10" value="6.35">6.35</meter><span data-source-ref="scores.md">6.30–6.40</span></div></div>
+
+<table>
+<thead>
+<tr>
+<th data-source-ref="scores.md">Criterion</th>
+<th style="text-align: right;" data-source-ref="scores.md">H seat 1 / 2</th>
+<th style="text-align: right;" data-source-ref="scores.md">E seat 1 / 2</th>
+<th style="text-align: right;" data-source-ref="scores.md">F seat 1 / 2</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td data-source-ref="scores.md">Immediate Air discovery</td>
+<td style="text-align: right;" data-source-ref="scores.md">8 / 8</td>
+<td style="text-align: right;" data-source-ref="scores.md">5 / 5</td>
+<td style="text-align: right;" data-source-ref="scores.md">6 / 6</td>
+</tr>
+<tr>
+<td data-source-ref="scores.md">Small Air footprint</td>
+<td style="text-align: right;" data-source-ref="scores.md">9 / 9</td>
+<td style="text-align: right;" data-source-ref="scores.md">9 / 9</td>
+<td style="text-align: right;" data-source-ref="scores.md">6 / 5</td>
+</tr>
+<tr>
+<td data-source-ref="scores.md">Authority / privacy fit</td>
+<td style="text-align: right;" data-source-ref="scores.md">9 / 9</td>
+<td style="text-align: right;" data-source-ref="scores.md">6 / 6</td>
+<td style="text-align: right;" data-source-ref="scores.md">7 / 8</td>
+</tr>
+<tr>
+<td data-source-ref="scores.md">Seamless use / availability</td>
+<td style="text-align: right;" data-source-ref="scores.md">6 / 6</td>
+<td style="text-align: right;" data-source-ref="scores.md">8 / 7</td>
+<td style="text-align: right;" data-source-ref="scores.md">7 / 6</td>
+</tr>
+<tr>
+<td data-source-ref="scores.md">Effort / reversibility</td>
+<td style="text-align: right;" data-source-ref="scores.md">8 / 8</td>
+<td style="text-align: right;" data-source-ref="scores.md">5 / 4</td>
+<td style="text-align: right;" data-source-ref="scores.md">6 / 6</td>
+</tr>
+<tr>
+<td data-source-ref="scores.md">Weighted overall</td>
+<td style="text-align: right;" data-source-ref="scores.md"><strong data-source-ref="scores.md">8.15 / 8.15</strong></td>
+<td style="text-align: right;" data-source-ref="scores.md"><strong data-source-ref="scores.md">6.50 / 6.25</strong></td>
+<td style="text-align: right;" data-source-ref="scores.md"><strong data-source-ref="scores.md">6.40 / 6.30</strong></td>
+</tr>
+</tbody>
+</table>
+<p data-source-ref="scores.md">Both prefer H over E and F: existing indexes, small client footprint and retained writers outweigh the immediate host dependency. Their strongest objection is identical: Pro availability is temporary and Mini serving readiness is unproven. E/F differences are far smaller than score uncertainty; neither their mean ranking nor the decimal precision should determine that choice. Per-criterion reasons, pairwise comparisons and objections are retained verbatim in <code>judge-one.md</code> and <code>judge-two.md</code>. No iterative climb or owner verdict occurred; costs/tokens per seat were not exposed and remain unknown.</p>
+
+<p data-source-ref="report.md#options"><strong data-source-ref="report.md#options">Proposer’s recommendation: H.</strong> It gives remote search first with existing data, preserves file authority, and leaves E available later for a carefully chosen cloud read model. F remains useful for offline packs, rather than the system’s primary architecture. Private Serve is tailnet-only; Cloudflare Tunnel creates an outbound connection to a local service, so a Cloudflare route can work while the client’s Tailscale is off. Both still need an awake serving host. <a href="https://tailscale.com/docs/features/tailscale-serve" data-source-ref="report.md#options">Tailscale Serve</a>, <a href="https://developers.cloudflare.com/tunnel/" data-source-ref="report.md#options">Cloudflare Tunnel</a>.</p>
+<h2 id="architecture" data-source-ref="report.md#architecture">Architecture</h2>
+<div class="architecture-map" aria-label="Proposed request and data path"><div class="map-clients"><strong data-source-ref="report.md#architecture">Air · thin clients</strong><span data-source-ref="report.md#architecture">TalkWeaver · SlideWell · Highlight Scout · MultiWell</span><span data-source-ref="report.md#architecture">Local Outlines + selected offline packs</span></div><div class="map-routes"><span data-source-ref="report.md#architecture">Private HTTPS over Tailscale</span><span data-source-ref="report.md#architecture">Authenticated Cloudflare route</span><small>Same library ID · same permissions · visible route</small></div><div class="map-host"><strong data-source-ref="report.md#architecture">Personal library host</strong><span data-source-ref="report.md#architecture">Library API · query jobs · generation manifest</span><span data-source-ref="report.md#architecture">Existing writer-owned stores + embedding runtimes</span><span data-source-ref="report.md#architecture">Originals stay in their source locations</span></div><div class="map-share"><strong data-source-ref="report.md#architecture">Explicit sharing</strong><span data-source-ref="report.md#architecture">Selected snapshot → R2 / published view</span><span data-source-ref="report.md#architecture">Revocable scope; never whole private library</span></div></div>
+
+<h3 id="service-boundary-and-ownership" data-source-ref="report.md#architecture">Service boundary and ownership</h3>
+<p data-source-ref="report.md#architecture">The shared service is a <strong data-source-ref="report.md#architecture">query/embedding coordinator with source adapters</strong>, not a demand to merge every app’s database. Start beside SlideWell, which retains sole authority for well/extraction writes and heavy picture work. Initially the host app must run; later an approved host launcher can supervise it. Do not start a second engine writing its live stores. MultiWell retains its vault writer/record authority; Highlight Scout retains imports; TalkWeaver/LearnWeaver retain authored-file writes.</p>
+<p data-source-ref="report.md#architecture">Use stable <code>{libraryId, corpusId, itemId, sourceRevision, indexGeneration}</code> references. Public responses contain descriptive metadata, reason channels, scoped media IDs and availability—not arbitrary host paths. Source file roots are resolved and authorised on the host. Host migration preserves library identity only after a single-writer cutover; a copied host cannot silently become a competing authority.</p>
+<p data-source-ref="report.md#architecture">Accepted ADR-0032 amends ADR-0026: Outline IDs are <code>{id=…}</code>, history lives in Vault <code>_SLIDE-VERSIONS/</code>, SlideWell indexes it. The June/October RESUME and roadmap still describe older ownership and IDs. This proposal follows the later accepted ADR. Automatic suggestions may read current local draft text after an explicit personal-host preference; they never make an authoritative slide-history copy or propagate edits on their own. [S8]</p>
+<h3 id="one-search-contract-compatible-spaces" data-source-ref="report.md#architecture">One search contract, compatible spaces</h3>
+<table>
+<thead>
+<tr>
+<th data-source-ref="report.md#architecture">Proposed content verb</th>
+<th data-source-ref="report.md#architecture">Typed input / output</th>
+<th data-source-ref="report.md#architecture">Posture floor and context</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td data-source-ref="report.md#architecture"><code>library.describe</code></td>
+<td data-source-ref="report.md#architecture">library ID → protocol, capabilities, corpus generations, coverage/freshness, host/disk state</td>
+<td data-source-ref="report.md#architecture">Direct read; enables honest availability.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#architecture"><code>search.query</code></td>
+<td data-source-ref="report.md#architecture">query text or bounded image input, modes, corpus scope, filters, limit, request ID → ranked typed hits + per-channel reasons</td>
+<td data-source-ref="report.md#architecture">Direct read; text/image content leaves Air only for the selected authorised host/route. Query content not logged by default.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#architecture"><code>search.related</code></td>
+<td data-source-ref="report.md#architecture">item reference or draft context hash/text, scope, exclusions → ranked candidates and reason channels</td>
+<td data-source-ref="report.md#architecture">Direct read/proposal display; no insertion. Context follows document privacy boundary.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#architecture"><code>items.resolve</code> / <code>media.read</code></td>
+<td data-source-ref="report.md#architecture">authorised item references + revisions, rendition/range → metadata or checked bytes + content hash</td>
+<td data-source-ref="report.md#architecture">Direct read; recheck visibility and source state at fetch time. No arbitrary-path endpoint.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#architecture"><code>packs.prepare</code> / <code>packs.status</code></td>
+<td data-source-ref="report.md#architecture">chosen refs + byte budget + idempotency key → manifest, progress, verified pack</td>
+<td data-source-ref="report.md#architecture">Direct local pin/download; no deletion of originals; permission refreshed before transfer.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#architecture"><code>talk.insert</code></td>
+<td data-source-ref="report.md#architecture">verified local material + target Outline revision/cursor + operation ID → insertion result and undo</td>
+<td data-source-ref="report.md#architecture">Explicit user intent through existing TalkWeaver writer. Stale Outline/source conflict returns a proposal; no silent retry overwrite.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#architecture"><code>views.save</code> / <code>tags.propose</code></td>
+<td data-source-ref="report.md#architecture">scope + predicate or tagged refs + expected revision → saved view or reviewable tag proposal</td>
+<td data-source-ref="report.md#architecture">Saved search direct; inferred human-tag changes remain proposals. Collections do not move files.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#architecture"><code>shares.prepare</code> / <code>shares.publish</code></td>
+<td data-source-ref="report.md#architecture">selected refs, allowed rendition, audience, expiry → proposed manifest / published scoped snapshot</td>
+<td data-source-ref="report.md#architecture">Preparation direct; publication approval. No share operation in the first slice.</td>
+</tr>
+</tbody>
+</table>
+<p data-source-ref="report.md#architecture">UI chrome such as panel width/theme is excluded from the content-verb table; Settings and command discovery follow existing app conventions when built. No app implementation is specified as accepted by this research report.</p>
+<p data-source-ref="report.md#architecture"><strong data-source-ref="report.md#architecture">Meaning is not one interchangeable vector.</strong> SlideWell ONNX fp16 and MultiWell’s sentence-transformers/worker Gemma route have different revision/runtime/preprocessing identities. MiniLM is another space entirely. Store an embedding identity containing model revision, modality, dimensions, normalisation, task prefix, preprocessing and runtime. “Both 768d” is insufficient. Keep their indexes separate and combine ranks (for example reciprocal-rank fusion); do not average raw cosine values across them.</p>
+<p data-source-ref="report.md#architecture">For genuine cross-embedding, introduce a versioned Gemma space covering slide renders, extracted/added images, associated slide text/notes and authorised highlight/lesson text. Reuse vectors only after a fixed text/image canary set establishes compatible outputs and retrieval. Otherwise build a new generation alongside the old one. Suggested corpus sample: 30 remembered-target queries, text-to-image/image-to-slide cases, Czech/English, near duplicates, sparse-text pictures and deliberately unrelated negatives. Human relevance labels stay separate from automatic similarity. Record top-5/top-20 recall, time to first usable preview and incorrect-family grouping; no quality/latency claim is made before this check.</p>
+<p data-source-ref="report.md#architecture"><strong data-source-ref="report.md#architecture">Search modes:</strong> Words (exact/FTS, names, dates, phrases); Meaning (topic expressed differently); Picture (drop a local image or select an indexed seed); More like this (selected item); Hybrid (merge channels and show why). A text-rich slide can match its render and its words independently. Include optional related highlights/transcript moments without letting numerous text passages drown the slide results. Deduplicate by content/source identity, diversify by Talk family, and offer “show variants”. Emptied/hidden states and permissions constrain candidates and counts before ranking/serving.</p>
+<h3 id="two-routes-and-explicit-sharing" data-source-ref="report.md#architecture">Two routes and explicit sharing</h3>
+<p data-source-ref="report.md#architecture">Tailscale: loopback host API behind a private Serve path, same-user pairing/application credentials and revocation. Tailscale membership alone is not permission to every corpus. Cloudflare: Access-protected hostname plus Tunnel to the same API, with application scope enforcement at origin. Validate origin identity/JWT where applicable; an edge rule alone is not an origin authorisation design. Desktop authentication uses an external browser/short-lived session flow, not long-lived cloud keys embedded in renderer code. <a href="https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/" data-source-ref="report.md#architecture">Cloudflare Access application documentation</a>.</p>
+<p data-source-ref="report.md#architecture">Prefer private route; an approved Cloudflare fallback may reconnect reads after verifying library identity. Show the selected transport. Do not silently send Oxford/private draft text through Cloudflare. A 401/403 is a sign-in or permission problem, not a cue to try a wider scope. Cloudflare handles plaintext HTTP at its edge in this design; it is not end-to-end private merely because the model runs locally. Whole-library cloud access and a selected public/share snapshot are separate user choices.</p>
+<p data-source-ref="report.md#architecture">If host-down browsing becomes a priority, publish a selected generation of metadata/thumbnails first. Fully independent semantic search also needs cloud query embeddings in the same space. Vectorize dimensions/metric follow the chosen model; metadata filter indexes must be designed up front. No account price, throughput or free-tier promise is assumed. <a href="https://developers.cloudflare.com/vectorize/best-practices/create-indexes/" data-source-ref="report.md#architecture">Vectorize index design</a>, <a href="https://developers.cloudflare.com/vectorize/reference/metadata-filtering/" data-source-ref="report.md#architecture">metadata filtering</a>.</p>
+<h3 id="air-cache-and-offline-queue" data-source-ref="report.md#architecture">Air cache and offline queue</h3>
+<p data-source-ref="report.md#architecture">Propose 256 MiB disposable LRU cache, measured bytes with a reserve check; pinned packs have an explicit separate budget and are never silently evicted. At 512×288 previews averaging an <strong data-source-ref="report.md#architecture">assumed</strong> 40 KiB, 256 MiB holds about 6,500 previews before metadata/overhead. This is capacity arithmetic, not a measurement of actual renders. Do not cache full decks or download models merely to show search results. Pinned assets copied into an authored Talk become document assets and leave cache-eviction authority.</p>
+<p data-source-ref="report.md#architecture">Offline shows cached result metadata/thumbnails and pinned packs with their generation/time. Local word filtering works inside that subset; remote Meaning/Picture controls remain visible but unavailable, with “connect to search the full library”. This is not evidence of no match in the full corpus. Precompute neighbours/groups for chosen packs if useful; full fresh offline multimodal querying needs a separately approved model/index budget.</p>
+<p data-source-ref="report.md#architecture">Queue only intent that still makes sense after reconnecting: requested pack downloads, saved-view/tag proposals and explicit user requests to rerun a search. Do not replay keystroke-driven suggestions or silently publish/share. Every durable operation has an operation ID, library ID, source revision and state: waiting → transferring → verified → complete / conflict / failed. On reconnection reauthorise, recheck source revision/visibility, then resume hash-checked bytes. Cancel returns to a usable local state. “Inserted” is shown only after local assets are verified and the target revision-guarded write succeeded. Partial downloads never enter a Talk; queue acknowledgements cannot insert twice.</p>
+<h2 id="directions" data-source-ref="report.md#directions">Directions</h2>
+<p data-source-ref="report.md#directions">Three different discovery journeys are shown below. <strong data-source-ref="report.md#directions">A</strong> makes finding the main activity. <strong data-source-ref="report.md#directions">B</strong> keeps the existing Outline as the main activity and proposes material beside it. <strong data-source-ref="report.md#directions">C</strong> supports browsing when a useful query is hard to formulate. They can share the same service. Prefer A for first remote value, then B; C is a later discovery layer. All shown titles, years, group counts and timings are illustrative, not archive observations.</p>
+<div class="direction-index"><a href="#direction-a" data-source-ref="report.md#directions">A · Find across the library</a><a href="#direction-b" data-source-ref="report.md#directions">B · Find while writing</a><a href="#direction-c" data-source-ref="report.md#directions">C · Rediscover in groups</a></div>
+
+<section id="direction-a" aria-label="Direction A search-first exploration">
+  <header class="a-titlebar"><div><span class="a-direction" data-source-ref="direction-a.md">A · FIND ACROSS THE LIBRARY</span><strong data-source-ref="direction-a.md">SlideWell <span class="a-subtle" data-source-ref="direction-a.md">/ Personal library</span></strong></div><div class="a-connection"><span data-host-label data-source-ref="direction-a.md">● Library host connected</span><label data-source-ref="direction-a.md"><input type="checkbox" data-offline> Simulate host offline</label><button data-reset data-source-ref="direction-a.md">Reset demo</button></div></header>
+  <form class="a-toolbar"><div class="a-modes" role="group" aria-label="Search mode"><button type="button" data-mode="words" aria-pressed="true" data-source-ref="direction-a.md">Words</button><button type="button" data-mode="meaning" aria-pressed="false" data-source-ref="direction-a.md">Meaning</button><button type="button" data-mode="picture" aria-pressed="false" data-source-ref="direction-a.md">Picture</button></div><label class="a-search" data-source-ref="direction-a.md"><span class="a-sr" data-source-ref="direction-a.md">Search the library</span><input type="search" data-query value="learning" placeholder="Remembered words or an idea…"></label><button type="submit" class="a-primary" data-source-ref="direction-a.md">Search</button><select data-scope aria-label="Library scope"><option value="personal">Personal library</option><option value="oxford">Oxford library — separate access</option></select></form>
+  <div class="a-workspace">
+    <main class="a-results"><div class="a-result-heading"><div><h3 data-heading data-source-ref="direction-a.md">Matches for “learning”</h3><p data-explanation data-source-ref="direction-a.md">Words matches slide titles and extracted text.</p></div><label data-source-ref="direction-a.md"><input type="checkbox" data-cached> Cached on this Air only</label></div>
+      <div class="a-seed" data-seed hidden><span class="a-seed-picture" aria-hidden="true" data-source-ref="direction-a.md">◯ ━ ◯ ━ ◯</span><span data-source-ref="direction-a.md">Seed picture: a branching journey diagram</span><button type="button" data-seed-search data-source-ref="direction-a.md">Find pictures like this</button></div>
+      <div class="a-alert" data-banner role="status" hidden></div>
+      <div class="a-grid" data-grid>
+        <button class="a-card" data-item="journey" data-words="learning journey map learning paths" data-cached-item="false" aria-pressed="true" data-source-ref="direction-a.md"><span class="a-slide a-slide-journey" data-source-ref="direction-a.md"><small>LEARNING, RECONSIDERED</small><b>More than one<br>way through</b><span class="a-route" data-source-ref="direction-a.md">● ━ ● ━ ◉<br>　╰ ━ ●</span></span><span class="a-card-title" data-source-ref="direction-a.md">Learning as a journey</span><span class="a-meta" data-source-ref="direction-a.md">Slide · Learning metaphors · 2019</span><span class="a-availability" data-item-status data-source-ref="direction-a.md">Preview cached · original on host</span><template data-details><h3 data-source-ref="direction-a.md">Learning as a journey</h3><p class="a-summary" data-source-ref="direction-a.md">A route diagram with a choice of paths, rather than a single ladder.</p><dl><dt>Source deck</dt><dd>Learning metaphors.pptx</dd><dt>Position</dt><dd>Slide 14 of 32 · 2019</dd><dt>Library</dt><dd>Personal · legacy archive</dd><dt>Provenance</dt><dd>Extracted slide · original preserved on library host</dd><dt>Reuse format</dt><dd>Slide image and extracted text</dd></dl><p class="a-source-note" data-source-ref="direction-a.md">Source and slide reference accompany the local copy.</p></template></button>
+        <button class="a-card" data-item="feedback" data-words="learning feedback feedback loops practice" data-cached-item="true" aria-pressed="false" data-source-ref="direction-a.md"><span class="a-slide a-slide-feedback" data-source-ref="direction-a.md"><small>LEARNING IN PRACTICE</small><b>Feedback changes<br>the next attempt</b><span class="a-loop" data-source-ref="direction-a.md">TRY → NOTICE<br>↑　　↓<br>ADAPT ← REFLECT</span></span><span class="a-card-title" data-source-ref="direction-a.md">Learning through feedback</span><span class="a-meta" data-source-ref="direction-a.md">Slide · Practice and feedback · 2022</span><span class="a-availability" data-item-status data-source-ref="direction-a.md">Available on this Air · 840 KB</span><template data-details><h3 data-source-ref="direction-a.md">Learning through feedback</h3><p class="a-summary" data-source-ref="direction-a.md">A four-stage practice cycle, ready to reuse from the local cache.</p><dl><dt>Source deck</dt><dd>Practice and feedback.pptx</dd><dt>Position</dt><dd>Slide 8 of 24 · 2022</dd><dt>Library</dt><dd>Personal · legacy archive</dd><dt>Provenance</dt><dd>Extracted slide · original preserved on library host</dd><dt>Reuse format</dt><dd>Slide image and extracted text</dd></dl></template></button>
+        <button class="a-card" data-item="bridge" data-words="learning bridge crossing learning metaphor" data-cached-item="false" aria-pressed="false" data-source-ref="direction-a.md"><span class="a-slide a-slide-bridge" data-source-ref="direction-a.md"><small>FROM HERE TO THERE</small><b>Learning connects<br>what we know</b><span class="a-bridge" data-source-ref="direction-a.md">▰ ═════════ ▰<br>　╲　│　│　╱</span></span><span class="a-card-title" data-source-ref="direction-a.md">A bridge into new learning</span><span class="a-meta" data-source-ref="direction-a.md">Slide · Ways of understanding · 2017</span><span class="a-availability" data-item-status data-source-ref="direction-a.md">Preview cached · original on host</span><template data-details><h3 data-source-ref="direction-a.md">A bridge into new learning</h3><p class="a-summary" data-source-ref="direction-a.md">A simple bridge metaphor linking familiar knowledge to unfamiliar ideas.</p><dl><dt>Source deck</dt><dd>Ways of understanding.pptx</dd><dt>Position</dt><dd>Slide 21 of 40 · 2017</dd><dt>Library</dt><dd>Personal · legacy archive</dd><dt>Provenance</dt><dd>Extracted slide · original preserved on library host</dd><dt>Reuse format</dt><dd>Slide image and extracted text</dd></dl></template></button>
+        <button class="a-card" data-item="paths" data-words="paths woodland learning choice photograph" data-cached-item="true" aria-pressed="false" data-source-ref="direction-a.md"><span class="a-slide a-slide-paths" data-source-ref="direction-a.md"><small>FIELD NOTES</small><b>Which path<br>would you take?</b><span class="a-trees" data-source-ref="direction-a.md">♠　♠　♠　♠<br>　╱　　╲</span></span><span class="a-card-title" data-source-ref="direction-a.md">Two paths through woodland</span><span class="a-meta" data-source-ref="direction-a.md">Added image · Visual prompts · 2024</span><span class="a-availability" data-item-status data-source-ref="direction-a.md">Available on this Air · 1.6 MB</span><template data-details><h3 data-source-ref="direction-a.md">Two paths through woodland</h3><p class="a-summary" data-source-ref="direction-a.md">An invented visual prompt representing a choice of routes.</p><dl><dt>Source image</dt><dd>woodland-paths--demo.jpg</dd><dt>Added</dt><dd>2024 · Visual prompts tag</dd><dt>Library</dt><dd>Personal · added images</dd><dt>Provenance</dt><dd>Added image · source reference retained</dd><dt>Reuse format</dt><dd>Image copy</dd></dl></template></button>
+        <button class="a-card" data-item="map" data-words="map navigation route diagram" data-cached-item="false" aria-pressed="false" data-source-ref="direction-a.md"><span class="a-slide a-slide-map" data-source-ref="direction-a.md"><small>MAKING SENSE OF CHANGE</small><b>A map is<br>a useful choice</b><span class="a-map" data-source-ref="direction-a.md">┌── ● ──┐<br>● ──┼── ◉<br>　　●</span></span><span class="a-card-title" data-source-ref="direction-a.md">Maps make some routes visible</span><span class="a-meta" data-source-ref="direction-a.md">Slide · Models and choices · 2020</span><span class="a-availability" data-item-status data-source-ref="direction-a.md">Preview cached · original on host</span><template data-details><h3 data-source-ref="direction-a.md">Maps make some routes visible</h3><p class="a-summary" data-source-ref="direction-a.md">A route diagram related to the journey idea without using the same words.</p><dl><dt>Source deck</dt><dd>Models and choices.pptx</dd><dt>Position</dt><dd>Slide 6 of 28 · 2020</dd><dt>Library</dt><dd>Personal · legacy archive</dd><dt>Provenance</dt><dd>Extracted slide · original preserved on library host</dd><dt>Reuse format</dt><dd>Slide image and extracted text</dd></dl></template></button>
+        <button class="a-card" data-item="ladder" data-words="ladder progress stages steps" data-cached-item="false" aria-pressed="false" data-source-ref="direction-a.md"><span class="a-slide a-slide-ladder" data-source-ref="direction-a.md"><small>PROGRESS IS NOT ALWAYS LINEAR</small><b>Must every step<br>go upwards?</b><span class="a-ladder" data-source-ref="direction-a.md">▰<br>　▰<br>　　▰</span></span><span class="a-card-title" data-source-ref="direction-a.md">Questioning the ladder</span><span class="a-meta" data-source-ref="direction-a.md">Slide · Learning metaphors · 2019</span><span class="a-availability" data-item-status data-source-ref="direction-a.md">Preview cached · original on host</span><template data-details><h3 data-source-ref="direction-a.md">Questioning the ladder</h3><p class="a-summary" data-source-ref="direction-a.md">A contrasting progress metaphor from the same invented source deck.</p><dl><dt>Source deck</dt><dd>Learning metaphors.pptx</dd><dt>Position</dt><dd>Slide 13 of 32 · 2019</dd><dt>Library</dt><dd>Personal · legacy archive</dd><dt>Provenance</dt><dd>Extracted slide · original preserved on library host</dd><dt>Reuse format</dt><dd>Slide image and extracted text</dd></dl></template></button>
+      </div>
+      <div class="a-empty" data-empty hidden><h3 data-source-ref="direction-a.md">No material matches this view.</h3><p data-source-ref="direction-a.md">Try fewer words, change the search mode or reconnect the library host.</p></div>
+    </main>
+    <aside class="a-inspector" aria-label="Selected material"><div class="a-inspector-heading">SELECTED MATERIAL <span data-source-ref="direction-a.md">Personal</span></div><div data-preview class="a-preview"></div><div data-detail></div><div class="a-local-state" data-local-state role="status"></div><div class="a-actions"><button class="a-primary" data-pin data-source-ref="direction-a.md">Pin on this Air</button><button data-reuse data-source-ref="direction-a.md">Prepare local copy for reuse</button><button data-similar data-source-ref="direction-a.md">More like this</button></div><p class="a-demo" data-source-ref="direction-a.md">Invented demonstration data. Actions change this preview only.</p></aside>
+  </div>
+  <footer class="a-footer"><span data-source-ref="direction-a.md">Only chosen material becomes local. The archive stays on the library host.</span><span data-source-ref="direction-a.md">Design exploration · Dedicated window</span></footer>
+  <div hidden data-copy>
+    <span data-copy-key="wordsHeading" data-source-ref="direction-a.md">Matches for remembered words</span><span data-copy-key="wordsExplanation" data-source-ref="direction-a.md">Words matches slide titles and extracted text.</span>
+    <span data-copy-key="meaningHeading" data-source-ref="direction-a.md">Related to your idea</span><span data-copy-key="meaningExplanation" data-source-ref="direction-a.md">Meaning finds related concepts, including material that uses different words. Order is illustrative.</span>
+    <span data-copy-key="pictureHeading" data-source-ref="direction-a.md">Visually related material</span><span data-copy-key="pictureExplanation" data-source-ref="direction-a.md">Picture uses the invented route diagram as its seed. No image is uploaded.</span>
+    <span data-copy-key="similarHeading" data-source-ref="direction-a.md">More like the selected material</span><span data-copy-key="similarExplanation" data-source-ref="direction-a.md">Related diagrams and contrasting metaphors from this invented personal library.</span>
+    <span data-copy-key="connected" data-source-ref="direction-a.md">● Library host connected</span><span data-copy-key="offline" data-source-ref="direction-a.md">○ Library host unavailable</span><span data-copy-key="offlineBanner" data-source-ref="direction-a.md">The host is offline. Cached previews remain searchable by Words; Meaning and Picture require the host. Pinning uncached originals is unavailable.</span>
+    <span data-copy-key="denied" data-source-ref="direction-a.md">Oxford library is a separate boundary. This personal-library connection cannot search it. Choose Personal library to continue.</span>
+    <span data-copy-key="remote" data-source-ref="direction-a.md">Preview cached. The original must be fetched before reuse.</span><span data-copy-key="local" data-source-ref="direction-a.md">Available on this Air, with source reference. Ready to prepare for reuse.</span>
+    <span data-copy-key="pinning" data-source-ref="direction-a.md">Fetching the selected material and source reference…</span><span data-copy-key="pinned" data-source-ref="direction-a.md">Pinned on this Air. The selected material and source reference are available offline.</span><span data-copy-key="pinnedBadge" data-source-ref="direction-a.md">Pinned on this Air · source retained</span>
+    <span data-copy-key="ready" data-source-ref="direction-a.md">Local copy prepared with source reference. Ready to insert explicitly in TalkWeaver; nothing has been inserted.</span><span data-copy-key="unavailable" data-source-ref="direction-a.md">Original unavailable while the library host is offline. Choose a local item or reconnect.</span>
+  </div>
+</section>
+
+<h3 id="a-contract" data-source-ref="report.md#directions">A contract</h3>
+<p data-source-ref="report.md#directions">Dedicated window. Dominik remembers words or a picture; expects matching slides/images and provenance. Search → select → More like this → save locally → reuse. Success: one chosen asset is local and its source remains visible. Try Words/Meaning/Picture, cached-only/offline, a denied scope and reset. Pattern is a contact sheet plus inspector. It replaces local-store assumptions in a finder, not the canonical Outline.</p>
+<section id="direction-b" aria-labelledby="b-title">
+  <header class="b-heading"><div><span class="b-badge" data-source-ref="direction-b.md">Direction B</span><h2 id="b-title" data-source-ref="direction-b.md">Find while writing</h2><p data-source-ref="direction-b.md">Keep the Outline in view. Bring in one useful piece when you choose.</p></div><span class="b-demo" data-source-ref="direction-b.md">Invented demonstration data</span></header>
+  <div class="b-app">
+    <div class="b-titlebar"><strong data-source-ref="direction-b.md">TalkWeaver <span data-source-ref="direction-b.md"> / Judgement and understanding</span></strong><span class="b-local" data-source-ref="direction-b.md">Outline saved locally on Air</span></div>
+    <div class="b-toolbar"><span data-source-ref="direction-b.md">Personal library only</span><label data-source-ref="direction-b.md"><input type="checkbox" data-offline> Host offline</label><label data-source-ref="direction-b.md"><input type="checkbox" data-paused> Pause suggestions</label><button type="button" data-reset data-source-ref="direction-b.md">Reset demo</button></div>
+    <div class="b-workspace">
+      <div class="b-outline">
+        <div class="b-section-label">OUTLINE <span data-source-ref="direction-b.md">2 slides</span></div>
+        <nav class="b-slide-nav" aria-label="Choose the slide to write"><button type="button" data-context="judgement" aria-pressed="true" data-source-ref="direction-b.md"><span data-source-ref="direction-b.md">01</span> Where does judgement sit?</button><button type="button" data-context="analogy" aria-pressed="false" data-source-ref="direction-b.md"><span data-source-ref="direction-b.md">02</span> What makes an analogy useful?</button></nav>
+        <article class="b-draft" data-draft="judgement"><span class="b-kicker" data-source-ref="direction-b.md">SELECTED SLIDE · 01</span><h3 data-source-ref="direction-b.md">Where does judgement sit?</h3><p class="b-outline-line" data-source-ref="direction-b.md">A fluent answer is a starting point.</p><p class="b-outline-line" data-source-ref="direction-b.md">We still choose what evidence matters.</p><div class="b-cursor"><span data-source-ref="direction-b.md"></span>Insertion point after this slide</div><div data-insertions="judgement"></div></article>
+        <article class="b-draft" data-draft="analogy" hidden><span class="b-kicker" data-source-ref="direction-b.md">SELECTED SLIDE · 02</span><h3 data-source-ref="direction-b.md">What makes an analogy useful?</h3><p class="b-outline-line" data-source-ref="direction-b.md">Carry a relationship across, then test its limits.</p><p class="b-outline-line" data-source-ref="direction-b.md">Where does the comparison stop helping?</p><div class="b-cursor"><span data-source-ref="direction-b.md"></span>Insertion point after this slide</div><div data-insertions="analogy"></div></article>
+        <footer class="b-editor-footer"><span data-edit-state="clean" data-source-ref="direction-b.md">Your two original slides stay unchanged.</span><span data-edit-state="edited" hidden data-source-ref="direction-b.md">A materialised copy was added to this demonstration Outline.</span><button type="button" data-undo disabled data-source-ref="direction-b.md">Undo last insertion</button></footer>
+      </div>
+      <aside class="b-panel" aria-label="Related library material">
+        <div class="b-panel-title"><div><span class="b-kicker" data-source-ref="direction-b.md">SLIDEWELL LIBRARY</span><h3 data-source-ref="direction-b.md">Related to this slide</h3></div><span class="b-count" data-live data-source-ref="direction-b.md">2 suggestions</span></div>
+        <div class="b-panel-status" role="status" aria-live="polite"><p data-panel-state="online" data-source-ref="direction-b.md">Host connected. Suggestions use the selected slide.</p><p data-panel-state="offline" hidden data-source-ref="direction-b.md">Host offline. Previews are cached; only material already saved on Air can be inserted.</p><p data-panel-state="paused" hidden data-source-ref="direction-b.md">Suggestions paused. Resume to see material for the selected slide.</p></div>
+        <div data-candidates="judgement">
+          <article class="b-candidate" data-item="judgement-map"><div class="b-mini b-mini-judgement"><small>THE HUMAN CHOICE</small><strong data-source-ref="direction-b.md">Evidence → judgement → action</strong><div><i>Notice</i><i>Weigh</i><i>Choose</i></div></div><div class="b-card-body"><h4 data-source-ref="direction-b.md">Judgement is a decision</h4><p data-source-ref="direction-b.md">Slide · Thinking with AI · 2023</p><details><summary>Why this? View source and variants</summary><p data-source-ref="direction-b.md">Matches your slide’s distinction between generating an answer and choosing evidence.</p><dl><dt>Library</dt><dd>Personal · library host</dd><dt>Source</dt><dd>Thinking with AI.pptx · slide 14</dd><dt>Provenance</dt><dd>Extracted slide preview; original retained on host.</dd><dt>Variants</dt><dd>2 versions. This is the 2023 version; a 2021 version has different wording.</dd></dl></details><div class="b-asset-status" aria-live="polite"><span data-asset-state="remote" data-source-ref="direction-b.md">Preview on Air · full slide on host</span><span data-asset-state="loading" hidden data-source-ref="direction-b.md">Saving slide and source reference to Air…</span><span data-asset-state="local" hidden data-source-ref="direction-b.md">Ready on Air · source reference preserved</span><span data-asset-state="inserted" hidden data-source-ref="direction-b.md">Inserted once · local copy with source reference</span></div><button type="button" data-materialise data-source-ref="direction-b.md">Save slide on Air</button><button type="button" data-insert hidden data-source-ref="direction-b.md">Insert copy after selected slide</button><span class="b-inserted-label" data-inserted hidden data-source-ref="direction-b.md">Added to Outline ✓</span></div><template data-copy><div class="b-added"><span data-source-ref="direction-b.md">INSERTED COPY · SLIDE</span><strong data-source-ref="direction-b.md">Judgement is a decision</strong><p data-source-ref="direction-b.md">Evidence → judgement → action</p><small>From Thinking with AI, slide 14 · material saved on Air</small></div></template></article>
+          <article class="b-secondary"><div class="b-tiny b-mini-evidence"><span data-source-ref="direction-b.md">?</span><span data-source-ref="direction-b.md">✓</span></div><div><h4 data-source-ref="direction-b.md">Checking the claim</h4><p data-source-ref="direction-b.md">Image · Evidence workshop · 2022</p><details><summary>Why this suggestion?</summary><p data-source-ref="direction-b.md">Related to checking evidence before acting. Personal library; added diagram from Evidence workshop, 2022. Preview cached; image remains on host. Select the first suggestion to try reuse in this demo.</p></details></div></article>
+        </div>
+        <div data-candidates="analogy" hidden>
+          <article class="b-candidate" data-item="analogy-bridge"><div class="b-mini b-mini-analogy"><small>A USEFUL COMPARISON</small><strong data-source-ref="direction-b.md">Keep the relationship.<br>Question the match.</strong><div><i>Known</i><b>↔</b><i>New</i></div></div><div class="b-card-body"><h4 data-source-ref="direction-b.md">Analogy has a boundary</h4><p data-source-ref="direction-b.md">Slide · Explaining unfamiliar ideas · 2024</p><details><summary>Why this? View source and variants</summary><p data-source-ref="direction-b.md">Matches relationships carried between ideas, and the limits of a comparison.</p><dl><dt>Library</dt><dd>Personal · library host</dd><dt>Source</dt><dd>Explaining unfamiliar ideas.pptx · slide 8</dd><dt>Provenance</dt><dd>Extracted slide preview; original retained on host.</dd><dt>Variants</dt><dd>1 indexed version. No other variants found.</dd></dl></details><div class="b-asset-status" aria-live="polite"><span data-asset-state="remote" data-source-ref="direction-b.md">Preview on Air · full slide on host</span><span data-asset-state="loading" hidden data-source-ref="direction-b.md">Saving slide and source reference to Air…</span><span data-asset-state="local" hidden data-source-ref="direction-b.md">Ready on Air · source reference preserved</span><span data-asset-state="inserted" hidden data-source-ref="direction-b.md">Inserted once · local copy with source reference</span></div><button type="button" data-materialise data-source-ref="direction-b.md">Save slide on Air</button><button type="button" data-insert hidden data-source-ref="direction-b.md">Insert copy after selected slide</button><span class="b-inserted-label" data-inserted hidden data-source-ref="direction-b.md">Added to Outline ✓</span></div><template data-copy><div class="b-added"><span data-source-ref="direction-b.md">INSERTED COPY · SLIDE</span><strong data-source-ref="direction-b.md">Analogy has a boundary</strong><p data-source-ref="direction-b.md">Keep the relationship. Question the match.</p><small>From Explaining unfamiliar ideas, slide 8 · material saved on Air</small></div></template></article>
+          <article class="b-secondary"><div class="b-tiny b-mini-bridge"><span data-source-ref="direction-b.md">●</span><b>↔</b><span data-source-ref="direction-b.md">○</span></div><div><h4 data-source-ref="direction-b.md">Two systems, one relationship</h4><p data-source-ref="direction-b.md">Image · Teaching through comparison · 2020</p><details><summary>Why this suggestion?</summary><p data-source-ref="direction-b.md">Related to mapping relationships rather than matching appearances. Personal library; added diagram from Teaching through comparison, 2020. Preview cached; image remains on host. Select the first suggestion to try reuse in this demo.</p></details></div></article>
+        </div>
+        <p class="b-panel-foot" data-source-ref="direction-b.md">Suggestions change when you select a slide. Insertion always needs your choice.</p>
+      </aside>
+    </div>
+  </div>
+  <p class="b-caption" data-source-ref="direction-b.md">Best for a talk already taking shape. A narrow panel offers less space for exploring an unfamiliar collection.</p>
+</section>
+
+<h3 id="b-contract" data-source-ref="report.md#directions">B contract</h3>
+<p data-source-ref="report.md#directions">Docked TalkWeaver panel. Dominik is already drafting; expects suggestions tied to the current slide. Select another slide context → inspect why/source → make material local → insert explicitly → undo. Success: a materialised copy is inserted once and works offline. In production trigger on slide selection/save or a short idle interval after an explicit opt-in, cancel superseded requests, use a context hash, suppress already-used items, and keep a quiet “suggestions paused” state. The demonstration’s secondary cards expose provenance only; no reuse implementation is claimed for those cards.</p>
+<section id="direction-c" aria-labelledby="c-title">
+  <header class="c-titlebar"><div><span class="c-badge" data-source-ref="direction-c.md">C</span><strong id="c-title" data-source-ref="direction-c.md">Rediscover in groups</strong><span class="c-app" data-source-ref="direction-c.md">SlideWell / Personal library</span></div><button type="button" data-c-reset data-source-ref="direction-c.md">Reset demo</button></header>
+  <div class="c-toolbar"><span data-c-live data-source-ref="direction-c.md">● Personal library host connected</span><span data-c-cached hidden data-source-ref="direction-c.md">● Host unavailable · cached groups only</span><label data-source-ref="direction-c.md"><input type="checkbox" data-c-offline> Try cached-only</label><button type="button" disabled title="Oxford material requires its own authorised library connection" data-source-ref="direction-c.md">Oxford library unavailable</button></div>
+  <div class="c-demo-note">Invented slides, sources and counts for this design exploration.</div>
+  <main>
+    <section data-c-screen="overview">
+      <div class="c-heading"><div><p class="c-eyebrow" data-source-ref="direction-c.md">SUGGESTED CONNECTIONS</p><h3 data-source-ref="direction-c.md">What have I already made?</h3><p data-source-ref="direction-c.md">Follow a theme across talks and years. Labels are suggestions; your tags stay yours.</p></div><span class="c-count" data-c-live data-source-ref="direction-c.md">2 themes + loose images</span><span class="c-count" data-c-cached hidden data-source-ref="direction-c.md">1 cached theme + loose images</span></div>
+      <article class="c-lane">
+        <div class="c-lane-label"><span class="c-lane-number" data-source-ref="direction-c.md">01</span><h4 data-source-ref="direction-c.md">How learning changes</h4><p data-source-ref="direction-c.md">8 slides · 3 talks<br>2019–2025</p><button type="button" data-c-open data-source-ref="direction-c.md">Open theme →</button></div>
+        <div class="c-contact-sheet">
+          <div class="c-mini c-blue"><small>LEARNING / 2019</small><b>Practice changes<br>what we notice</b><div class="c-dots"><i></i><i></i><i></i><i></i></div></div>
+          <div class="c-mini c-paper"><small>KNOWLEDGE / 2022</small><b>From recall<br>to recognition</b><div class="c-bars"><i></i><i></i><i></i></div></div>
+          <div class="c-mini c-teal"><small>TEACHING / 2025</small><b>Make the next<br>step visible</b><div class="c-steps"><i></i><i></i><i></i></div></div>
+        </div>
+        <div class="c-lane-tail"><strong data-source-ref="direction-c.md">2 variants</strong><span data-source-ref="direction-c.md">Some visual matches<br>need your judgement.</span></div>
+      </article>
+      <article class="c-lane c-secondary" data-c-host-only>
+        <div class="c-lane-label"><span class="c-lane-number" data-source-ref="direction-c.md">02</span><h4 data-source-ref="direction-c.md">Maps, models<br>and decisions</h4><p data-source-ref="direction-c.md">11 slides · 4 talks<br>2020–2024</p><span class="c-muted" data-source-ref="direction-c.md">Preview in this exploration</span></div>
+        <div class="c-contact-sheet"><div class="c-mini c-paper"><small>MODELS / 2020</small><b>A useful model<br>leaves things out</b><div class="c-map"><i></i><i></i><i></i></div></div><div class="c-mini c-blue"><small>DECISIONS / 2024</small><b>Which question<br>comes first?</b><div class="c-dots"><i></i><i></i><i></i></div></div></div>
+        <div class="c-lane-tail"><strong data-source-ref="direction-c.md">On the host</strong><span data-source-ref="direction-c.md">Thumbnails available<br>while connected.</span></div>
+      </article>
+      <article class="c-lane c-ungrouped"><div class="c-lane-label"><span class="c-lane-number" data-source-ref="direction-c.md">03</span><h4 data-source-ref="direction-c.md">Loose connections</h4><p data-source-ref="direction-c.md">5 cached images</p></div><p data-source-ref="direction-c.md">These images do not have a confident theme yet.<br>They remain searchable in the library.</p><span class="c-tag" data-source-ref="direction-c.md">Ungrouped</span></article>
+      <p class="c-cache-note" data-c-cached hidden data-source-ref="direction-c.md">One theme and five loose images are cached on this Air. Host-only groups are hidden until the host reconnects.</p>
+    </section>
+    <section data-c-screen="theme" hidden>
+      <button type="button" class="c-back" data-c-home data-source-ref="direction-c.md">← All themes</button>
+      <div class="c-heading"><div><p class="c-eyebrow" data-source-ref="direction-c.md">SUGGESTED THEME / 2019–2025</p><h3 data-source-ref="direction-c.md">How learning changes</h3><p data-source-ref="direction-c.md">8 slides from 3 talks. Shared ideas and visual similarity; membership is approximate.</p></div><button type="button" data-c-save-open data-source-ref="direction-c.md">Save this group as a view</button></div>
+      <div class="c-save-panel" data-c-save-panel hidden><label data-source-ref="direction-c.md">Name this saved search <input data-c-view-name value="How learning changes"></label><button type="button" data-c-save-confirm data-source-ref="direction-c.md">Save search</button><p data-source-ref="direction-c.md">A revisitable search view. Originals stay in their source locations.</p></div>
+      <div class="c-selection-bar"><span data-source-ref="direction-c.md">Choose material for your talk</span><div><button type="button" data-c-expand aria-expanded="false" data-source-ref="direction-c.md">Expand 2 variants</button><button type="button" data-c-compare data-source-ref="direction-c.md">Compare similar slides</button></div></div>
+      <div class="c-theme-sheet">
+        <article class="c-slide-card"><label data-source-ref="direction-c.md"><input type="checkbox" data-c-select checked> Select practice slide</label><div class="c-mini c-blue"><small>LEARNING / 2019</small><b>Practice changes<br>what we notice</b><div class="c-dots"><i></i><i></i><i></i><i></i></div></div><h4 data-source-ref="direction-c.md">Practice changes what we notice</h4><p data-source-ref="direction-c.md">Learning in practice · 2019 · slide 12<br>Personal library · extracted slide</p><span class="c-local" data-source-ref="direction-c.md">Cached on this Air</span></article>
+        <article class="c-slide-card"><label data-source-ref="direction-c.md"><input type="checkbox" data-c-select> Select recognition slide</label><div class="c-mini c-paper"><small>KNOWLEDGE / 2022</small><b>From recall<br>to recognition</b><div class="c-bars"><i></i><i></i><i></i></div></div><h4 data-source-ref="direction-c.md">From recall to recognition</h4><p data-source-ref="direction-c.md">Making knowledge useful · 2022 · slide 8<br>Personal library · extracted slide</p><span class="c-local" data-source-ref="direction-c.md">Cached on this Air</span></article>
+        <article class="c-slide-card" data-c-host-only><label data-source-ref="direction-c.md"><input type="checkbox" data-c-select> Select next-step slide</label><div class="c-mini c-teal"><small>TEACHING / 2025</small><b>Make the next<br>step visible</b><div class="c-steps"><i></i><i></i><i></i></div></div><h4 data-source-ref="direction-c.md">Make the next step visible</h4><p data-source-ref="direction-c.md">Teaching with examples · 2025 · slide 21<br>Personal library · extracted slide</p><span class="c-remote" data-source-ref="direction-c.md">Original on personal host</span></article>
+      </div>
+      <div class="c-variants" data-c-variants hidden><span class="c-tag" data-source-ref="direction-c.md">Possible variants</span><p data-source-ref="direction-c.md">Learning in practice, slide 12 (2019) and Teaching with examples, slide 6 (2025) share a diagram. Their wording differs; neither is marked as the preferred version.</p><button type="button" data-c-compare data-source-ref="direction-c.md">Compare the pair →</button></div>
+      <div class="c-pin-bar"><span data-source-ref="direction-c.md">Pin selected material for offline reuse</span><button type="button" data-c-pin data-source-ref="direction-c.md">Pin selected to this Air</button></div>
+    </section>
+    <section data-c-screen="compare" hidden>
+      <button type="button" class="c-back" data-c-theme data-source-ref="direction-c.md">← Back to theme</button>
+      <div class="c-heading"><div><p class="c-eyebrow" data-source-ref="direction-c.md">SIDE BY SIDE</p><h3 data-source-ref="direction-c.md">A similar diagram, a different point</h3><p data-source-ref="direction-c.md">Possible variants. Similarity alone does not establish a revision or replace either slide.</p></div><span class="c-tag" data-source-ref="direction-c.md">Your judgement needed</span></div>
+      <div class="c-comparison"><article><div class="c-mini c-blue"><small>LEARNING / 2019</small><b>Practice changes<br>what we notice</b><div class="c-dots"><i></i><i></i><i></i><i></i></div></div><h4 data-source-ref="direction-c.md">Learning in practice</h4><p data-source-ref="direction-c.md">2019 · slide 12 · Personal library<br>Extracted slide · cached on this Air</p><label data-source-ref="direction-c.md"><input type="radio" name="c-choice" value="first" checked> Use the 2019 slide</label></article><article><div class="c-mini c-teal"><small>TEACHING / 2025</small><b>Notice more.<br>Then practise.</b><div class="c-dots"><i></i><i></i><i></i><i></i></div></div><h4 data-source-ref="direction-c.md">Teaching with examples</h4><p data-source-ref="direction-c.md">2025 · slide 6 · Personal library<br>Extracted slide · cached on this Air</p><label data-source-ref="direction-c.md"><input type="radio" name="c-choice" value="second"> Use the 2025 slide</label></article></div>
+      <div class="c-difference"><strong data-source-ref="direction-c.md">Visible differences</strong><span data-source-ref="direction-c.md">The 2025 slide reverses the wording and uses a teal background. Both retain their own source.</span></div>
+      <div class="c-pin-bar"><span data-source-ref="direction-c.md">Choose one version to keep close at hand.</span><button type="button" data-c-pin-compare data-source-ref="direction-c.md">Pin chosen slide to this Air</button></div>
+    </section>
+    <aside class="c-saved" data-c-saved hidden><strong data-source-ref="direction-c.md">Saved searches</strong><div data-c-saved-list></div><small>Views only. No files moved and no human tags changed.</small></aside>
+  </main>
+  <footer class="c-status" aria-live="polite"><span data-c-status-idle data-source-ref="direction-c.md">Personal library only · groups are views, never folders.</span><span data-c-status-saving hidden data-source-ref="direction-c.md">Preparing selected material locally…</span><span data-c-status-ready hidden data-source-ref="direction-c.md">Selected material is pinned on this Air with its source. Ready for offline reuse.</span><span data-c-status-empty hidden data-source-ref="direction-c.md">Select at least one slide to pin.</span><span data-c-status-saved hidden data-source-ref="direction-c.md">Saved search created. Open it below to revisit this theme.</span><span data-c-status-offline hidden data-source-ref="direction-c.md">Cached-only mode. Locally cached slides can still be pinned; the host is unavailable.</span></footer>
+  <template data-c-saved-template><button type="button" data-c-theme data-source-ref="direction-c.md"></button></template>
+</section>
+
+<h3 id="c-contract" data-source-ref="report.md#directions">C contract</h3>
+<p data-source-ref="report.md#directions">Dedicated browsing window. Dominik cannot remember search words; expects themes and visual families. Open group → expand variants → compare → save a named search view → pin selected material. Success: a useful view can be revisited without moving files or rewriting tags. Separate exact copies, near visual matches, conceptual neighbours and real slide lineage. Do not present an embedding cluster as historical proof of reuse. Suggested group labels remain editable proposals.</p>
+<h3 id="surfaces-still-requiring-a-design-lock" data-source-ref="report.md#directions">Surfaces still requiring a design lock</h3>
+<p data-source-ref="report.md#directions">These explorations show connected/results, cached-only/unavailable, provenance, partial-transfer/completion, selection, insertion and undo states. They do not settle complete first-use pairing, expired credentials, host disk failure, source change/conflict, keyboard rebinding, Settings, full accessibility or share-audience/expiry screens. Those states are named for the next design parcel rather than left to a builder. Common app commands/Settings stay in the estate frame; no new production shortcuts are assigned here.</p>
+<h2 id="delivery" data-source-ref="report.md#delivery">Delivery</h2>
+<h3 id="first-usable-slice-a-finder-on-air-using-the-indexed-pro" data-source-ref="report.md#delivery">First usable slice — a finder on Air using the indexed Pro</h3>
+<p data-source-ref="report.md#delivery"><strong data-source-ref="report.md#delivery">A single bounded build run, estimated 6–10 agent-hours:</strong> a small private web finder, hosted beside the running SlideWell engine on the Pro, which the Air opens over an approved existing/new private route. It supports Words + Meaning search across available personal slide renders and well images, thumbnail/detail/source inspection, More like this for indexed items, and download of a chosen full-size image/slide render with provenance. Full archive, embeddings and models stay off Air. Images can be brought into a local Talk through the existing import/paste route. Editable cross-vault slide insertion and automatic suggestions are later parcels; a render download must not be labelled editable slide reuse.</p>
+<p data-source-ref="report.md#delivery">This is usable without rebuilding/installing all four apps or re-embedding the archive. It is also conditional: verify installed/source parity, model readiness and a small set of known matches before claiming the existing index can serve. The current socket contract has only text→IDs/scores; a proper adapter must add authorised metadata resolution, media-by-ID reads, related-item queries and readiness/error responses. Do not expose the socket blindly or proxy arbitrary local paths.</p>
+<p data-source-ref="report.md#delivery">If parity prevents reuse, the run should deliver the verified word-search part with an explicit “meaning unavailable” result and report the blocker; it must not replace the newer bundle or silently launch a full reindex. Route installation remains a deployment step needing its own authorised build/deployment instruction. Today’s research approval is not that instruction.</p>
+<p data-source-ref="report.md#delivery">Acceptance for that build: Air has no archive/model clone; remembered-target Words and Meaning searches return valid visible results; a chosen rendition downloads with a hash and source identity; host-offline/denied/empty states are distinct; no Bin/emptied/Oxford items leak; oversized/expired/arbitrary-path requests are refused; download after a visibility change is rechecked. Measure remote query/preview latency and bytes on a real Air connection. Proposed targets: warm query under 1 s and first usable thumbnail under 2 s on the ordinary tailnet connection—targets, not measured claims.</p>
+<h3 id="parcels-after-first-value" data-source-ref="report.md#delivery">Parcels after first value</h3>
+<table>
+<thead>
+<tr>
+<th data-source-ref="report.md#delivery">Parcel</th>
+<th data-source-ref="report.md#delivery">User-visible result</th>
+<th data-source-ref="report.md#delivery">Estimated additional effort / dependency</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td data-source-ref="report.md#delivery"><strong data-source-ref="report.md#delivery">1 · Stable host and bounded offline packs</strong></td>
+<td data-source-ref="report.md#delivery">Mini stays available; Air reconnects and keeps selected material.</td>
+<td data-source-ref="report.md#delivery"><strong data-source-ref="report.md#delivery">8–14 h</strong> after finder. Reconcile Pro/Mini originals/derivatives and authoritative well/ledger metadata, make verified backups, stage copy without deletions, prove model runtime, then single-writer cutover. Measure fresh disk/mount readiness. Do not sync live SQLite through OneDrive/SMB; use SQLite backup API or a quiesced verified snapshot including committed WAL.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#delivery"><strong data-source-ref="report.md#delivery">2 · Cloudflare private route and selected sharing</strong></td>
+<td data-source-ref="report.md#delivery">Finder works with Air Tailscale off; selected material can be shared explicitly.</td>
+<td data-source-ref="report.md#delivery"><strong data-source-ref="report.md#delivery">8–14 h</strong> after core API. Access/Tunnel, session/origin checks, same library identity, route diagnostics. Sharing gets separate scope/expiry review; R2 snapshot generation can follow. Owner cloud/privacy decision required. First three stages total <strong data-source-ref="report.md#delivery">22–38 h</strong>.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#delivery"><strong data-source-ref="report.md#delivery">3 · TalkWeaver reuse and suggestions</strong></td>
+<td data-source-ref="report.md#delivery">Docked “related to this slide”, genuine editable slide copy where source exists, checked local assets and undo.</td>
+<td data-source-ref="report.md#delivery"><strong data-source-ref="report.md#delivery">10–16 h</strong>. Existing cross-vault insertion adapter, revision checks, provenance/ledger preservation; no automatic propagation. Needs locked B journey and target-state designs.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#delivery"><strong data-source-ref="report.md#delivery">4 · Shared embedding coordinator and app adapters</strong></td>
+<td data-source-ref="report.md#delivery">Related slides, images, highlights and authored lesson text use one service with explicit source permissions.</td>
+<td data-source-ref="report.md#delivery"><strong data-source-ref="report.md#delivery">10–18 h</strong>. Scout and MultiWell adapters first; compatibility canaries then optional new Gemma generation. Source-derived records remain separate; migrated MultiWell indexes preserved as authoritative where needed.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#delivery"><strong data-source-ref="report.md#delivery">5 · Groups, variants and rediscovery</strong></td>
+<td data-source-ref="report.md#delivery">Browse themes/families, compare variants, revisit saved searches and recent rediscovery.</td>
+<td data-source-ref="report.md#delivery"><strong data-source-ref="report.md#delivery">8–13 h</strong>. Uses corpus/generation identity and accepted relevance sample; no folder relocation. Counts/labels distinguish inferred groups and human choices. Full path total <strong data-source-ref="report.md#delivery">50–85 h</strong>, excluding large data jobs and acceptance.</td>
+</tr>
+</tbody>
+</table>
+<p data-source-ref="report.md#delivery">Copy/reindex elapsed times are unknown until inventory manifests reconcile files, source revisions and model identities. Shared service search should work while background indexing is paused; concurrency limits and progress are visible. Keep old stores until verified cutover and recovery proof; a proposed retirement is not permission to delete data.</p>
+<h2 id="decisions" data-source-ref="report.md#decisions">Decisions</h2>
+<p data-source-ref="report.md#decisions">No implementation is authorised by this report. Four owner-level choices remain; technical implementation choices are for the builder once those outcomes are selected.</p>
+<ol>
+<li><strong data-source-ref="report.md#decisions">First useful experience:</strong> A, finding material from Air, or B, suggestions directly beside a TalkWeaver draft? Recommend A first, B next; A avoids a desktop integration before remote value.</li>
+<li><strong data-source-ref="report.md#decisions">Availability:</strong> use the Pro briefly then make the personal Mini the library host, or wait until the Mini is ready before any remote use? Recommend Pro first then verified Mini cutover. Pro sleep temporarily interrupts full-library access.</li>
+<li><strong data-source-ref="report.md#decisions">Cloud reach:</strong> private personal access through Cloudflare only, selected sharing too, or keep all remote use on Tailscale initially? Recommend private Tailscale first, private Cloudflare second; sharing explicit and scoped. Cloudflare access sends query/media traffic through its edge.</li>
+<li><strong data-source-ref="report.md#decisions">Offline promise:</strong> chosen talk packs only, or a larger searchable offline catalogue with local query models? Recommend chosen packs plus cached word search; full offline meaning/image discovery needs a separate disk budget.</li>
+</ol>
+<p data-source-ref="report.md#decisions">The architecture judges score the technical approaches separately above. Their scores do not stand in for Dominik’s judgement of these product/appearance/privacy choices. The coordinator can collect these choices together after inspecting the three directions; this report does not create an unrelated approval workflow.</p>
+<h2 id="sources" data-source-ref="report.md#sources">Sources</h2>
+<p data-source-ref="report.md#sources">Source statements are bounded to inspected paths; current measurements and historical records are labelled separately. Public service documentation checked 17 Nov 2026. Source repository paths are relative to <code>~/gitrepos</code>; personal host addresses, credentials and real content are omitted from this public-repository artefact. The capture record and <code>source-manifest.json</code> preserve reconstruction metadata.</p>
+<table>
+<thead>
+<tr>
+<th data-source-ref="report.md#sources">ID</th>
+<th data-source-ref="report.md#sources">Evidence locator and scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td data-source-ref="report.md#sources"><strong data-source-ref="report.md#sources">S1</strong></td>
+<td data-source-ref="report.md#sources"><code>slidewell/src/main/picture-search/model-manifest.ts:8</code>, <code>vector-store.ts:1</code>, <code>service.ts:1</code>, <code>engine.ts</code>. Model, index and query ownership; source head in manifest.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#sources"><strong data-source-ref="report.md#sources">S2</strong></td>
+<td data-source-ref="report.md#sources"><code>slidewell/src/main/picture-search/query-socket.ts:1</code>; <code>talk-weaver/src/main/image-search/slidewell-query.ts:1</code>, <code>slidewell-provider.ts:1</code>. Local-only contract and metadata/state resolver.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#sources"><strong data-source-ref="report.md#sources">S3</strong></td>
+<td data-source-ref="report.md#sources"><code>slidewell/src/main/storage.ts:1</code>, <code>r2.ts</code>; RESUME R2 increments. Media-only read-through; no eviction. Runtime configuration read through an allowlist of library paths only.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#sources"><strong data-source-ref="report.md#sources">S4</strong></td>
+<td data-source-ref="report.md#sources"><code>03_presenting-teaching/01_presentation-libraries/ppt-archive/tools/embeddings/README.md:1</code>. Legacy index format and scaffold claim; registry stat/schema/count observation today.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#sources"><strong data-source-ref="report.md#sources">S5</strong></td>
+<td data-source-ref="report.md#sources"><code>mediawell/CONTEXT.md:1</code>, <code>oxford_rag/{storage,embeddings,desktop_models,desktop_inference,embedding_space,vault_index}.py</code>; <code>docs/adr/decision-multiwell-vaults.md</code>. Rename, remote consent, same-model checks and index authority.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#sources"><strong data-source-ref="report.md#sources">S6</strong></td>
+<td data-source-ref="report.md#sources"><code>highlight-scout/src-tauri/src/{meaning,config,r2}.rs</code>; <code>06_apps-utilities/03_misc-utilities/scout-core/crates/scout-corpus/src/semantic/{embed,store}.rs</code>. Model choice, index format and R2 scope.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#sources"><strong data-source-ref="report.md#sources">S7</strong></td>
+<td data-source-ref="report.md#sources"><code>talk-weaver/src/main/{vault-index.mjs,cross-vault-insert.ts}</code>, image-search provider files; current presentation-library README. Local Vault handling and materialised reuse.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#sources"><strong data-source-ref="report.md#sources">S8</strong></td>
+<td data-source-ref="report.md#sources"><code>_COORDINATION/presentations/presentation-system/{CONTEXT,ROADMAP}.md</code>, <code>docs/adr/0026-provenance-versioning-external-slidewell-tracking.md</code>, <strong data-source-ref="report.md#sources">0032-slide-ledger-identity-propagation.md</strong>. Accepted later ledger amendment overrides stale resume wording. No direction-layer edits made.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#sources"><strong data-source-ref="report.md#sources">S9</strong></td>
+<td data-source-ref="report.md#sources"><code>07_webapps-websites/learnweaver-demo/{README.md,server/library/library-service.ts,docs/adr/0031-library-folder-is-the-content-authority.md}</code>. Pilot, source authority and class-record separation. ADR implementation status header conflicts with present code; no rollout-completeness claim.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#sources"><strong data-source-ref="report.md#sources">S10</strong></td>
+<td data-source-ref="report.md#sources"><code>_CATALOG/entities/projects/{learnweaverapp,learnweaver-demo,dominiks-presentations-library,dominiks-presentations-library-old}.md</code>; deployment records for Highlight Scout, TalkWeaver, slides gallery and Lovable LearnWeaver. Earlier recovery memory used as a search lead; the legacy app’s <code>src/hooks/usePresentationData.ts</code> and selected Supabase migration statements were rechecked locally. No live legacy content fetched.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#sources"><strong data-source-ref="report.md#sources">S11</strong></td>
+<td data-source-ref="report.md#sources"><code>_CATALOG/entities/machines/</code> personal Pro/Air/Mini and AI-Centre-BigMac; <code>_MACHINECONFIG/{machinesetup_macbook_air,machinesetup_mac-mini,devsetup_apps_over_tailscale}.md</code>; model catalogue. Fresh personal-machine <code>hostname</code>, <code>df</code>, <code>du</code>, installed Info.plist and bounded app-process checks supersede stale machine names/versions.</td>
+</tr>
+<tr>
+<td data-source-ref="report.md#sources"><strong data-source-ref="report.md#sources">S12</strong></td>
+<td data-source-ref="report.md#sources"><code>05_skills/t3code-upstream</code> at pinned head above; <code>LICENSE</code>, server environment identity, primary target, logical-project environments and client-runtime connection modules. Installed runtime paths inspected by filename only. Live T3 environment-links read confirms personal Mini reachable, not that any library service is running.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="verification-and-limits" data-source-ref="report.md#sources">Verification and limits</h3>
+<p data-source-ref="report.md#sources">Research read-only probes include known-path stat/folder allocation, SQLite schema and aggregate row counts, embedding model metadata, app versions and momentary app process checks. For picture vectors, the initial read-only open failed because SQLite wanted side files; after checking that no WAL file existed, a main-file immutable read obtained the aggregate snapshot without writing beside the database. WAL-bearing Scout vector files were not counted this way. No corpus excerpts, secret values, full settings dumps or credentials were read into the report.</p>
+<p data-source-ref="report.md#sources">The counts, file sizes and versions are a point-in-time inventory, not a full source audit, cross-Mac equality proof, restoration test, retrieval-quality evaluation or running-service certification. External originals, remote bucket completeness, chosen LearnWeaver library, app permissions, full model serving on Mini and current legacy Supabase content remain unverified. No inference or paid model experiment was run. Two fresh same-model judges assess options; their agreement is weaker evidence than cross-family review and is not a factual audit.</p>
+<p data-source-ref="report.md#sources">Build the report with <code>python3 docs/plans/cross-machine-discovery-2026-11/build-report.py</code>. Markdown files own all authored narrative and mockup copy; CSS and JavaScript remain separate author-time files. The generated HTML embeds them and loads without network access. Verification results and remaining proof limits follow, from <code>verification.md</code>.</p>
+<h3 id="actual-verification" data-source-ref="verification.md">Actual verification</h3>
+<ul>
+<li><strong data-source-ref="verification.md">Packaged report:</strong> Python-Markdown build succeeded; strict single-HTML audit reports no structural blockers or warnings. No external scripts, styles, fonts, runtime data fetches or adjacent assets. External links are citations only. Final file is about 0.14 MB.</li>
+<li><strong data-source-ref="verification.md">Source round trip:</strong> changed one recommendation phrase in <code>report.md</code>, rebuilt and confirmed it appeared in HTML, restored the source and confirmed a byte-identical rebuild. Markdown drives the output; it is not a detached export.</li>
+<li><strong data-source-ref="verification.md">Browser journeys:</strong> <code>verify-report.cjs</code> passed from <code>file://</code> in bundled headless Chromium at 1280, 728 and 390 CSS pixels. Words/Meaning/Picture mode, selection, related view, empty result, denied scope, host-offline state, pin/preparation, materialise → offline insert → undo, pause, group expansion, variant comparison, saved search, pinning and resets were exercised. No page JavaScript errors and no HTTP(S) resource requests occurred.</li>
+<li><strong data-source-ref="verification.md">Visual inspection:</strong> inspected actual captures of all three directions at desktop and phone widths. Fixed long-hash page overflow, mobile thumbnail overlap in A and clipped theme previews in C. Re-ran browser checks after repairs. Screenshots were confirming scratch and removed after inspection; the clickable HTML is the retained design artefact.</li>
+<li><strong data-source-ref="verification.md">Browser availability change:</strong> a later default launch failed because expected headless-shell revision 1223 was no longer in the cache. The cache then held revision 1228; the final check selected that existing headless test binary explicitly. No browser download or configuration change was made. Earlier successful checks and this launch failure are distinct outcomes.</li>
+<li><strong data-source-ref="verification.md">Scoring:</strong> two fresh same-model seats; every criterion and option scored. Weighted arithmetic independently recomputed. No owner acceptance, quality benchmark, cost measurement or iterative optimisation implied.</li>
+<li><strong data-source-ref="verification.md">Application build — NOT RUN:</strong> requested <code>agent-run --scope changed --timeout 300 --wait 30 -- npm run build</code>. Runner returned <strong data-source-ref="verification.md">75</strong>, <code>NOT RUN: machine busy</code>, while another TalkWeaver verification held the shared slot. No bypass or retry. This is an execution limit, not a product failure or a passing build. No application source changed, no app launched, installed or released by this task.</li>
+</ul>
+<p data-source-ref="verification.md">Research and design deliverables are verified at the report level. App/runtime compatibility, real remote retrieval quality/latency, full library equality, Mini serving readiness, Cloudflare origin authorisation and production offline/retry guarantees remain build gates. Mockups simulate those behaviours with invented material.</p></main><script>(() => {
+  const root = document.querySelector('#direction-a');
+  if (!root) return;
+  const $ = selector => root.querySelector(selector);
+  const cards = [...root.querySelectorAll('[data-item]')];
+  const copy = key => root.querySelector(`[data-copy-key="${key}"]`).textContent;
+  let mode = 'words', selected = cards[0], similar = false, timer;
+  const pinned = new Set();
+  const offline = () => $('[data-offline]').checked;
+  const local = card => card.dataset.cachedItem === 'true' || pinned.has(card.dataset.item);
+  function inspect() {
+    cards.forEach(card => card.setAttribute('aria-pressed', String(card === selected)));
+    $('[data-preview]').replaceChildren(selected.querySelector('.a-slide').cloneNode(true));
+    $('[data-detail]').replaceChildren(selected.querySelector('template').content.cloneNode(true));
+    $('[data-local-state]').textContent = copy(local(selected) ? 'local' : offline() ? 'unavailable' : 'remote');
+    $('[data-pin]').disabled = local(selected) || offline();
+    $('[data-reuse]').disabled = !local(selected);
+  }
+  function render() {
+    const denied = $('[data-scope]').value !== 'personal';
+    const blocked = offline() && mode !== 'words';
+    $('[data-host-label]').textContent = copy(offline() ? 'offline' : 'connected');
+    $('[data-banner]').hidden = !offline() && !denied;
+    $('[data-banner]').textContent = copy(denied ? 'denied' : 'offlineBanner');
+    $('[data-heading]').textContent = copy(similar ? 'similarHeading' : `${mode}Heading`);
+    $('[data-explanation]').textContent = copy(similar ? 'similarExplanation' : `${mode}Explanation`);
+    $('[data-seed]').hidden = mode !== 'picture';
+    root.querySelectorAll('[data-mode]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.mode === mode)));
+    const query = $('[data-query]').value.toLocaleLowerCase().trim();
+    cards.forEach(card => {
+      const matches = mode !== 'words' || similar || !query || query.split(/\s+/).every(word => card.dataset.words.includes(word));
+      card.hidden = denied || blocked || !matches || ($('[data-cached]').checked && !local(card));
+      if (pinned.has(card.dataset.item)) card.querySelector('[data-item-status]').textContent = copy('pinnedBadge');
+    });
+    const visible = cards.filter(card => !card.hidden);
+    $('[data-empty]').hidden = visible.length > 0;
+    $('.a-inspector').hidden = !visible.length;
+    if (visible.length) {
+      if (selected.hidden) selected = visible[0];
+      inspect();
+    }
+  }
+  cards.forEach(card => card.addEventListener('click', () => { clearTimeout(timer); selected = card; inspect(); }));
+  root.querySelectorAll('[data-mode]').forEach(button => button.addEventListener('click', () => { mode = button.dataset.mode; similar = false; render(); }));
+  $('.a-toolbar').addEventListener('submit', event => { event.preventDefault(); similar = false; render(); });
+  $('[data-offline]').addEventListener('change', () => { clearTimeout(timer); render(); });
+  $('[data-cached]').addEventListener('change', render);
+  $('[data-scope]').addEventListener('change', () => { clearTimeout(timer); render(); });
+  $('[data-similar]').addEventListener('click', () => { mode = 'meaning'; similar = true; render(); });
+  $('[data-seed-search]').addEventListener('click', render);
+  $('[data-pin]').addEventListener('click', () => {
+    const target = selected;
+    $('[data-pin]').disabled = true;
+    $('[data-local-state]').textContent = copy('pinning');
+    timer = setTimeout(() => {
+      pinned.add(target.dataset.item);
+      render();
+      if (selected === target) $('[data-local-state]').textContent = copy('pinned');
+    }, 700);
+  });
+  $('[data-reuse]').addEventListener('click', () => { if (local(selected)) $('[data-local-state]').textContent = copy('ready'); });
+  $('[data-reset]').addEventListener('click', () => {
+    clearTimeout(timer); pinned.clear(); mode = 'words'; similar = false; selected = cards[0];
+    $('[data-query]').value = $('[data-query]').defaultValue;
+    $('[data-scope]').selectedIndex = 0;
+    $('[data-offline]').checked = false; $('[data-cached]').checked = false;
+    cards.forEach(card => { card.querySelector('[data-item-status]').textContent = card.dataset.originalStatus; });
+    render();
+  });
+  cards.forEach(card => { card.dataset.originalStatus = card.querySelector('[data-item-status]').textContent; });
+  render();
+})();
+
+(() => {
+  const root = document.querySelector('#direction-b');
+  if (!root) return;
+  const all = (s) => [...root.querySelectorAll(s)];
+  const one = (s) => root.querySelector(s);
+  const cards = all('[data-item]');
+  const offline = one('[data-offline]');
+  const paused = one('[data-paused]');
+  let context = all('[data-context]')[0].dataset.context;
+  const local = new Set(), inserted = new Set(), loading = new Set(), history = [];
+  let generation = 0;
+  function render() {
+    all('[data-context]').forEach(b => b.setAttribute('aria-pressed', b.dataset.context === context));
+    all('[data-draft]').forEach(e => e.hidden = e.dataset.draft !== context);
+    all('[data-candidates]').forEach(e => e.hidden = paused.checked || e.dataset.candidates !== context);
+    all('[data-panel-state]').forEach(e => e.hidden = e.dataset.panelState !== (paused.checked ? 'paused' : offline.checked ? 'offline' : 'online'));
+    one('[data-live]').hidden = paused.checked;
+    cards.forEach(card => {
+      const id = card.dataset.item;
+      const state = inserted.has(id) ? 'inserted' : loading.has(id) ? 'loading' : local.has(id) ? 'local' : 'remote';
+      [...card.querySelectorAll('[data-asset-state]')].forEach(e => e.hidden = e.dataset.assetState !== state);
+      card.querySelector('[data-materialise]').hidden = local.has(id) || inserted.has(id);
+      card.querySelector('[data-materialise]').disabled = offline.checked || paused.checked || loading.has(id);
+      card.querySelector('[data-insert]').hidden = !local.has(id) || inserted.has(id);
+      card.querySelector('[data-insert]').disabled = paused.checked;
+      card.querySelector('[data-inserted]').hidden = !inserted.has(id);
+    });
+    one('[data-undo]').disabled = history.length === 0;
+    all('[data-edit-state]').forEach(e => e.hidden = e.dataset.editState !== (history.length ? 'edited' : 'clean'));
+  }
+  all('[data-context]').forEach(b => b.addEventListener('click', () => { context = b.dataset.context; render(); }));
+  cards.forEach(card => {
+    const id = card.dataset.item;
+    card.querySelector('[data-materialise]').addEventListener('click', () => {
+      if (offline.checked || paused.checked || loading.has(id) || local.has(id)) return;
+      const requestedGeneration = generation;
+      loading.add(id); render();
+      setTimeout(() => {
+        if (generation !== requestedGeneration || !loading.has(id)) return;
+        loading.delete(id); local.add(id); render();
+      }, 750);
+    });
+    card.querySelector('[data-insert]').addEventListener('click', () => {
+      if (!local.has(id) || inserted.has(id) || paused.checked) return;
+      const fragment = card.querySelector('[data-copy]').content.cloneNode(true);
+      const node = fragment.firstElementChild;
+      const target = all('[data-insertions]').find(e => e.dataset.insertions === context);
+      target.append(fragment); inserted.add(id); history.push({id, node}); render();
+    });
+  });
+  one('[data-undo]').addEventListener('click', () => {
+    const last = history.pop(); if (!last) return;
+    last.node.remove(); inserted.delete(last.id); render();
+  });
+  offline.addEventListener('change', () => { generation++; loading.clear(); render(); });
+  paused.addEventListener('change', render);
+  one('[data-reset]').addEventListener('click', () => {
+    generation++; loading.clear(); local.clear(); inserted.clear(); history.length = 0;
+    all('[data-insertions]').forEach(e => e.replaceChildren());
+    all('details').forEach(e => e.open = false);
+    offline.checked = false; paused.checked = false;
+    context = all('[data-context]')[0].dataset.context; render();
+  });
+  render();
+})();
+
+(() => {
+  const root = document.querySelector('#direction-c');
+  if (!root) return;
+  const all = selector => [...root.querySelectorAll(selector)];
+  const one = selector => root.querySelector(selector);
+  let pending;
+  function status(name) {
+    all('.c-status > span').forEach(node => { node.hidden = !node.hasAttribute(`data-c-status-${name}`); });
+  }
+  function screen(name) {
+    all('[data-c-screen]').forEach(node => { node.hidden = node.dataset.cScreen !== name; });
+  }
+  function connection() {
+    clearTimeout(pending);
+    all('[data-c-pin], [data-c-pin-compare]').forEach(button => { button.disabled = false; });
+    const offline = one('[data-c-offline]').checked;
+    all('[data-c-live]').forEach(node => { node.hidden = offline; });
+    all('[data-c-cached]').forEach(node => { node.hidden = !offline; });
+    all('[data-c-host-only]').forEach(node => {
+      node.hidden = offline;
+      node.querySelectorAll('input').forEach(input => { input.disabled = offline; if (offline) input.checked = false; });
+    });
+    status(offline ? 'offline' : 'idle');
+  }
+  function pin(hasSelection) {
+    clearTimeout(pending);
+    if (!hasSelection) { status('empty'); return; }
+    status('saving');
+    all('[data-c-pin], [data-c-pin-compare]').forEach(button => { button.disabled = true; });
+    pending = setTimeout(() => {
+      status('ready');
+      all('[data-c-pin], [data-c-pin-compare]').forEach(button => { button.disabled = false; });
+    }, 650);
+  }
+  root.addEventListener('click', event => {
+    const button = event.target.closest('button');
+    if (!button || !root.contains(button)) return;
+    if (button.hasAttribute('data-c-open') || button.hasAttribute('data-c-theme')) screen('theme');
+    if (button.hasAttribute('data-c-home')) screen('overview');
+    if (button.hasAttribute('data-c-compare')) screen('compare');
+    if (button.hasAttribute('data-c-expand')) {
+      const expanded = button.getAttribute('aria-expanded') !== 'true';
+      button.setAttribute('aria-expanded', String(expanded));
+      one('[data-c-variants]').hidden = !expanded;
+    }
+    if (button.hasAttribute('data-c-save-open')) {
+      one('[data-c-save-panel]').hidden = !one('[data-c-save-panel]').hidden;
+      if (!one('[data-c-save-panel]').hidden) one('[data-c-view-name]').focus();
+    }
+    if (button.hasAttribute('data-c-save-confirm')) {
+      const input = one('[data-c-view-name]');
+      if (!input.value.trim()) { input.focus(); return; }
+      const fragment = one('[data-c-saved-template]').content.cloneNode(true);
+      fragment.querySelector('button').textContent = input.value.trim();
+      one('[data-c-saved-list]').replaceChildren(fragment);
+      one('[data-c-saved]').hidden = false;
+      one('[data-c-save-panel]').hidden = true;
+      status('saved');
+    }
+    if (button.hasAttribute('data-c-pin')) pin(all('[data-c-select]').some(input => input.checked && !input.disabled));
+    if (button.hasAttribute('data-c-pin-compare')) pin(Boolean(one('input[name="c-choice"]:checked')));
+    if (button.hasAttribute('data-c-reset')) {
+      clearTimeout(pending);
+      one('[data-c-offline]').checked = false;
+      one('[data-c-view-name]').value = one('[data-c-view-name]').defaultValue;
+      all('[data-c-select]').forEach(input => { input.checked = input.defaultChecked; });
+      all('input[name="c-choice"]').forEach(input => { input.checked = input.defaultChecked; });
+      all('[data-c-variants], [data-c-save-panel], [data-c-saved]').forEach(node => { node.hidden = true; });
+      all('[data-c-pin], [data-c-pin-compare]').forEach(node => { node.disabled = false; });
+      one('[data-c-expand]').setAttribute('aria-expanded', 'false');
+      one('[data-c-saved-list]').replaceChildren();
+      connection();
+      screen('overview');
+    }
+  });
+  one('[data-c-offline]').addEventListener('change', connection);
+})();
+</script></body></html>
