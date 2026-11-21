@@ -1,41 +1,21 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage, safeStorage, powerMonitor } from 'electron'
-import sharp from 'sharp'
+import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, safeStorage, powerMonitor } from 'electron'
 import { join, basename } from 'path'
-import { homedir, tmpdir } from 'os'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, watch as fsWatch } from 'fs'
+import { homedir } from 'os'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, watch as fsWatch } from 'fs'
 import { pathToFileURL } from 'url'
-import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
-import { planSources, matchesFromKind, countFrom, type FilterableResult, type FromCounts, type SourcePlan } from './searchfilters'
-import { matchedSearch, rowIds, type MatchCluster, type MatchRow } from './matched-search'
 import { startSettings, type SaveResult, type SettingsApp } from './settings-host'
-import { ARCHIVE_DEFAULT, foldersOverlap, OTHERS_DEFAULT, OVERLAP_REASON } from './settings-rules'
+import { ARCHIVE_DEFAULT, OTHERS_DEFAULT } from './settings-rules'
 import { keySlots } from './key-slots'
 import { legacyFromPrefs, splitLegacyPatch } from '../shared/settings-schema'
 import { saveR2 } from './r2-save'
 import { MAIN_COMMANDS, registry, type CommandContext } from '../shared/commands'
-import { mergeLookAlikeClusters } from './look-alike/merge-clusters'
-import { cachedDHash } from './look-alike/fingerprint'
-import { runMoreLikeThis } from './more-like-this'
-import type { MatchMode } from './match-bands'
-import { applyFilters, combinedDateFilter, parseQuery, resolveOwnershipFilter } from './searchlib'
-import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
-import { loadDeckMeta, categoryList, invalidateDeckMeta, setOwnerNames, type DeckMetaIndex } from './deckmeta'
-import { resolveOwnerNames, cleanOwnerNames } from './owners'
-import { ensureWell, drainInbox, INBOX_SETTLE_MS, scanVault, searchWell, wellByIds, wellAbsPath, ingestScreenshot, findFfmpeg, type WellRow } from './well'
-import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow, type ScanOptions } from './triage'
-import { cleanShotFolder, cleanShotNameTemplate } from './cleanshot-folder'
-import { captureDownloadRoot } from './online-only'
-import { createCaptureDownloads } from './capture-downloads'
-import { realpath } from 'node:fs/promises'
-import { createSourceWatcher } from './source-watcher'
-import { registerBacklogIpc } from './backlog-ipc'
-import { talkAbsPath, isVaultChangeRelevant } from './talk-usage'
+import { setOwnerNames } from './deckmeta'
+import { resolveOwnerNames } from './owners'
+import { ensureWell, drainInbox, INBOX_SETTLE_MS, scanVault, findFfmpeg } from './well'
+import { isVaultChangeRelevant } from './talk-usage'
 import { createTalkUsageService } from './talk-usage-service'
-import { createImportRunner } from './triage-import-run'
-import { runIngest, cancelIngest, detectPython, findRenderTools } from './ingest'
-import { convertPptxToOutline } from './convert'
-import { slugify } from './outline'
+import { detectPython, findRenderTools } from './ingest'
 import { testR2, type R2Settings, type R2Creds } from './r2'
 import { pickStore, keyForPath, fetchFromR2, syncDirToR2, type StoreName } from './storage'
 import { PictureSearchService, registerPictureSearchIpc, type PictureSearchSettings } from './picture-search/service'
@@ -55,7 +35,6 @@ import { registerTeachIpc } from './sorter/teach-ipc'
 import { whyReader } from './sorter/why'
 import type { SorterLearning, SorterRetrain } from '../preload'
 import type { AppRule } from './sorter/app-rules'
-import { appCounts, cleanAppList, decideAllFromApps } from './triage-apps'
 import { ReviewService } from './review/service'
 import { registerReviewIpc } from './review/ipc'
 import { decodeSwUrlPath as decodeSwPath, resolveSwUrlReal as resolveSwReal, serveSwFile, swUrlOf } from './swarchive-guard'
@@ -64,8 +43,11 @@ import { ApiKeyStore } from './sorter/cloud/key-store'
 import { shrinkForLuna } from './sorter/cloud/images'
 import type { HttpPost } from './sorter/cloud/client'
 import { PROVIDERS } from './sorter/cloud/provider'
-import { guardedHandle } from './ipc-guard'
-import { pileOf, type ProposalLabel } from './review/piles'
+
+import { install as installArchiveSearch } from './archive-search-ipc'
+import { install as installArchiveStreams } from './archive-streams-ipc'
+import { createCaptureSources, type CaptureSource } from './capture-sources-ipc'
+import { install as installOthersLibrary } from './others-library-ipc'
 
 const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
 
@@ -87,9 +69,6 @@ protocol.registerSchemesAsPrivileged([
   // the hidden picture-search window's page + ONNX Runtime Web files (picture-search/webgpu-embedder.ts)
   { scheme: EMBED_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }
 ])
-
-// An extra folder watched for screenshots. namedOnly = only files named like screenshots, top level only (the Desktop).
-type CaptureSource = { path: string; namedOnly: boolean }
 
 // Simple JSON config — avoids ESM/CJS issues with electron-store (same call TalkWeaver made).
 type Config = {
@@ -290,49 +269,7 @@ function screenshotRootResolved(): string | null {
   return r && existsSync(r) ? r : null
 }
 
-// Defaults offered in Settings. The Desktop is namedOnly so other Desktop files are never read.
-// CleanShot's folder is read from its own preferences; null (not offered) when unset or missing.
-async function captureDefaults(): Promise<{ desktop: CaptureSource; cleanshot: CaptureSource | null }> {
-  const cs = await cleanShotFolder()
-  return {
-    desktop: { path: join(homedir(), 'Desktop'), namedOnly: true },
-    cleanshot: cs ? { path: cs, namedOnly: false } : null
-  }
-}
-
-// Every folder the capture inbox reads: the primary screenshotRoot plus configured extras that exist.
-function triageSources(): CaptureSource[] {
-  const out: CaptureSource[] = []
-  const primary = screenshotRootResolved()
-  if (primary) out.push({ path: primary, namedOnly: false })
-  for (const s of readConfig().captureSources ?? []) {
-    if (s && typeof s.path === 'string' && existsSync(s.path) && !out.some((o) => o.path === s.path)) out.push({ path: s.path, namedOnly: Boolean(s.namedOnly) })
-  }
-  return out
-}
-
-// Capture-watcher downloads are owned here: quitting SlideWell or pressing Stop on the backlog import
-// aborts them (the active download child is killed) and they stay off until the next explicit user
-// action (Scan, a new backlog run) or app start (capture-downloads.ts).
-const captureDownloads = createCaptureDownloads()
-
-// How one capture source is scanned (ticket 15). Names are read with CleanShot's own template.
-// Download authority is decided on canonical paths (captureDownloadRoot), never from namedOnly: only a
-// source that IS the Desktop (scanned screenshot names only) or CleanShot's export folder may download
-// online-only files; the primary Triage folder never does, under any alias (it can hold thousands).
-// Every other source skips the primary folder's subtree (walk and download) when it is nested inside.
-async function scanOptionsFor(s: CaptureSource, o: { downloads?: boolean } = {}): Promise<ScanOptions> {
-  const [nameTemplate, cleanshotExport] = await Promise.all([cleanShotNameTemplate(), cleanShotFolder()])
-  const desktop = join(homedir(), 'Desktop')
-  const primary = screenshotRootResolved()
-  let downloadRoot = await captureDownloadRoot(s.path, { desktop, cleanshotExport, primary })
-  // the whole Desktop is never downloaded: only when the source is scanned for screenshot names alone
-  if (downloadRoot && !s.namedOnly && downloadRoot === (await captureDownloadRoot(desktop, { desktop, cleanshotExport: null, primary: null }))) downloadRoot = null
-  const [src, primaryReal] = await Promise.all([s.path, primary].map((p) => (p ? realpath(p).catch(() => null) : Promise.resolve(null))))
-  const excludeDir = primaryReal && src !== primaryReal ? primaryReal : null
-  const dl = captureDownloads.options(o.downloads === false ? null : downloadRoot)
-  return { namedOnly: s.namedOnly, nameTemplate, excludeDir, ...dl }
-}
+const { captureDefaults, triageSources, install: installCaptureSources } = createCaptureSources({ readConfig, screenshotRootResolved })
 
 // The default destination for throwaway conversions (Settings-chosen). Pre-fills the save dialog;
 // any single conversion can still redirect elsewhere. Returned even if missing — the convert
@@ -349,7 +286,6 @@ function allowedRoots(): string[] {
 
 let mainWindow: BrowserWindow | null = null
 let pictureSearch: PictureSearchService | null = null
-let launchScanHook: () => void = () => undefined
 let refreshWatchers: () => void = () => undefined
 // The Triage folder the watcher was last pointed at, so a settings change elsewhere re-points it (settings `changed`).
 let lastWatchedRoot = ''
@@ -818,406 +754,11 @@ app.whenReady().then(async () => {
     }
   })
 
-  // Read-only search over Core A. Returns [] when the archive isn't present (UI degrades gracefully).
-  // renderAbsPath is converted to a renderable swarchive:// URL here; the renderer never sees raw paths.
   const cacheDir = (): string => app.getPath('userData')
   setOwnerNames(resolveOwnerNames(readConfig().ownerNames).names)
-  // Which archive store holds this deck's extraction — mine first, else the Others' Library. Lets
-  // inspect/context actions resolve a result to the right store without threading library everywhere.
-  const rootForDeck = (deck: string): string => {
-    if (deck && existsSync(join(archiveRoot(), 'extracted', deck))) return archiveRoot()
-    if (deck && existsSync(join(othersArchiveRootResolved(), 'extracted', deck))) return othersArchiveRootResolved()
-    return archiveRoot()
-  }
-  const toWire = (h: EnrichedHit, library: 'mine' | 'others' = 'mine'): Record<string, unknown> => {
-    const { renderAbsPath, ...rest } = h
-    return { ...rest, thumbUrl: swThumb(renderAbsPath), library }
-  }
-
-  // A well image → the same wire shape as an archive hit, so the grid renders it uniformly.
-  const wellToWire = (r: WellRow): Record<string, unknown> => {
-    const abs = wellAbsPath(wellRootResolved(), detectVaultRoot(), r)
-    const sourceLabel = r.source === 'talkweaver' ? 'TalkWeaver' : 'Screenshot'
-    return {
-      kind: 'well-image',
-      title: r.slug ? r.slug.replace(/-/g, ' ') : sourceLabel,
-      snippet: (r.ocr_text || r.notes || '').slice(0, 160),
-      text: r.ocr_text || '',
-      rank: 0,
-      deck: r.source,
-      deckTitle: sourceLabel,
-      filename: `${r.slug}--${r.id}.${r.ext}`,
-      category: r.tags || '',
-      date: r.added_at || null,
-      slideOrder: null,
-      usedInDecks: 1,
-      usedInTalks: (talkUsage.usage().get(r.id) ?? []).length,
-      talkUses: talkUsage.usage().get(r.id) ?? [],
-      reference: `![](img-${r.id})`,
-      thumbUrl: swThumb(abs),
-      library: 'mine',
-      ownership: 'mine', // the well is the user's own content → author renders as "me"
-      author: ''
-    }
-  }
-
-  // An extracted-from-a-deck image → the wire shape, as a standalone image card.
-  const archiveImageToWire = (im: ImageHit, idx: DeckMetaIndex, library: 'mine' | 'others' = 'mine'): Record<string, unknown> => {
-    const m = idx[im.deck]
-    return {
-      library,
-      kind: 'archive-image',
-      title: m?.title || im.deck || '(image)',
-      snippet: (im.snippet || '').slice(0, 160),
-      text: im.snippet || '',
-      rank: 0,
-      deck: im.deck,
-      deckTitle: m?.title || im.deck,
-      filename: `${im.sha256}.${im.format}`,
-      category: m?.category || '',
-      date: m?.date ?? null,
-      slideOrder: null,
-      usedInDecks: im.usedInDecks,
-      reference: im.reference,
-      thumbUrl: swThumb(im.fileAbsPath),
-      ownership: m?.ownership || 'unknown',
-      author: m?.author || ''
-    }
-  }
-
-  // Collect the wire rows for each store the plan asks for (ADR-0031 library choice applies to all).
-  const collectResults = async (query: string, filters: SearchFilters, plan: SourcePlan): Promise<Array<Record<string, unknown>>> => {
-    // Which store(s) to search: the user's archive, the separate Others' Library, or both.
-    const lib = filters?.library ?? 'mine'
-    const includeMine = lib !== 'others'
-    const includeOthers = lib !== 'mine'
-    const out: Array<Record<string, unknown>> = []
-
-    // The others store has no "mine" decks, so the owner filter (default 'mine') would exclude
-    // everything — neutralize it to 'all' there. Author is the lens for the Others' Library.
-    const forStore = (library: 'mine' | 'others'): SearchFilters => (library === 'others' ? { ...filters, owner: 'all' } : filters)
-    const pushSlides = async (root: string, library: 'mine' | 'others'): Promise<void> => {
-      const clusters = await archiveResults(root, cacheDir(), query, forStore(library))
-      for (const c of clusters) out.push({ representative: toWire(c.representative, library), members: c.members.map((m) => toWire(m, library)), size: c.size, deckCount: c.deckCount })
-    }
-    const pushImages = async (root: string, library: 'mine' | 'others'): Promise<void> => {
-      const idx = loadDeckMeta(root, cacheDir())
-      const deckNeedle = (filters.deck || '').toLowerCase()
-      for (const im of await searchImages(root, query, 120)) {
-        if (deckNeedle) {
-          const m = idx[im.deck]
-          if (!`${im.deck} ${m?.title || ''} ${m?.filename || ''}`.toLowerCase().includes(deckNeedle)) continue
-        }
-        const w = archiveImageToWire(im, idx, library)
-        out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
-      }
-    }
-
-    if (plan.slides) {
-      if (includeMine && archiveAvailable()) {
-        try { await pushSlides(archiveRoot(), 'mine') } catch { /* mine search failed */ }
-      }
-      if (includeOthers && othersArchiveAvailable()) {
-        try { await pushSlides(othersArchiveRootResolved(), 'others') } catch { /* others search failed */ }
-      }
-    }
-    if (plan.archiveImages) {
-      if (includeMine && archiveAvailable()) {
-        try { await pushImages(archiveRoot(), 'mine') } catch { /* mine images failed */ }
-      }
-      if (includeOthers && othersArchiveAvailable()) {
-        try { await pushImages(othersArchiveRootResolved(), 'others') } catch { /* others images failed */ }
-      }
-    }
-    // the well is the user's own — shown for Mine/All, not when searching Others only
-    if (plan.well && includeMine) {
-      try {
-        const wellRows = await searchWell(wellRootResolved(), query, 60)
-        // pictures talks use always get their chance, even past the first 60 words-matches
-        const seen = new Set(wellRows.map((r) => r.id))
-        const used = [...talkUsage.usage().keys()].slice(0, 900)
-        for (const r of await searchWell(wellRootResolved(), query, 60, used).catch(() => [] as WellRow[])) if (!seen.has(r.id)) wellRows.push(r)
-        for (const r of wellRows) {
-          const w = wellToWire(r)
-          out.push({ representative: w, members: [w], size: 1, deckCount: 1 })
-        }
-      } catch { /* no well yet */ }
-    }
-    return out
-  }
-  const rep = (c: Record<string, unknown>): FilterableResult => c.representative as FilterableResult
-
-  /** Picture-search ids to wire rows (a size-1 cluster each), through the same Library/Owner/Date/Category/From/Kind filters as word hits. */
-  async function resolvePictureIds(ids: string[], filters: SearchFilters, query: string): Promise<Map<string, MatchCluster>> {
-    const from = filters?.from ?? 'all'
-    const kind = filters?.kind ?? 'all'
-    const lib = filters?.library ?? 'mine'
-    const parsed = parseQuery(query ?? '')
-    const out = new Map<string, MatchCluster>()
-    const single = (w: Record<string, unknown>): MatchCluster => ({ representative: w as never, members: [w as never], size: 1, deckCount: 1 })
-    const slidesByPid = new Map<string, Record<string, unknown>[]>()
-    const wellIds: string[] = []
-    for (const id of ids) {
-      const m = id.match(/^slide:(.+)#(\d+)$/)
-      if (m) {
-        const pid = m[1]
-        const root = rootForDeck(pid)
-        const library: 'mine' | 'others' = root === othersArchiveRootResolved() && root !== archiveRoot() ? 'others' : 'mine'
-        if ((library === 'mine' && lib === 'others') || (library === 'others' && lib === 'mine')) continue
-        if (!slidesByPid.has(pid)) {
-          try {
-            slidesByPid.set(pid, (await deckSlides(root, cacheDir(), pid)).map((h) => toWire(h, library)))
-          } catch {
-            slidesByPid.set(pid, [])
-          }
-        }
-        const w = slidesByPid.get(pid)!.find((r) => r.slideOrder === Number(m[2]))
-        if (!w) continue
-        const forLib = library === 'others' ? { ...filters, owner: 'all' as const } : filters
-        const idx = loadDeckMeta(root, cacheDir())
-        const subs = (f: string): string[] => (f ? [f.toLowerCase()] : [])
-        const kept = applyFilters(
-          [w as { deck: string }],
-          idx,
-          combinedDateFilter(parsed, filters.era),
-          [...parsed.deckSubstrings, ...subs(filters.deck)],
-          resolveOwnershipFilter(parsed.owner, forLib.owner),
-          [...subs(filters.category), ...parsed.categorySubstrings]
-        )
-        if (kept.length && matchesFromKind(w as unknown as FilterableResult, from, kind)) out.set(id, single(w))
-      } else if (id.startsWith('well:') && lib !== 'others') {
-        wellIds.push(id.slice(5))
-      }
-    }
-    if (wellIds.length) {
-      for (const r of await wellByIds(wellRootResolved(), wellIds).catch(() => [] as WellRow[])) {
-        const w = wellToWire(r)
-        if (matchesFromKind(w as unknown as FilterableResult, from, kind)) out.set(`well:${r.id}`, single(w))
-      }
-    }
-    return out
-  }
-
-  /** Group result clusters by appearance ("N versions") when grouping is on; items with no embedding keep their text clusters. */
-  async function groupByLook<C>(clusters: C[], filters: SearchFilters): Promise<C[]> {
-    if (!filters?.cluster || clusters.length < 2) return clusters
-    try {
-      return (await mergeLookAlikeClusters(clusters as never, {
-        idOf: (row: MatchRow) => rowIds(row)[0] ?? null,
-        vectorsOf: (ids: string[]) => pictureSearch?.lookAlikeInputs(ids).vectors ?? new Map(),
-        fingerprints: async (ids: string[]) => {
-          const paths = pictureSearch?.lookAlikeInputs(ids).paths() ?? new Map<string, string>()
-          const out = new Map<string, bigint>()
-          for (const id of ids.slice(0, 80)) {
-            const p = paths.get(id)
-            const h = p ? await cachedDHash(p) : null
-            if (h !== null) out.set(id, h)
-          }
-          return out
-        }
-      } as never)) as unknown as C[]
-    } catch {
-      return clusters // grouping is a nicety: never lose results to it
-    }
-  }
-
-  appHandle('archive:search', async (_e, query: string, filters: SearchFilters) => {
-    const from = filters?.from ?? 'all'
-    const kind = filters?.kind ?? 'all'
-    const plan = planSources(filters?.type ?? 'slides', from, kind)
-    const rows = await collectResults(query ?? '', filters, plan)
-    return groupByLook(rows.filter((c) => matchesFromKind(rep(c), from, kind)), filters)
-  })
-
-  // Search with the Match switch (Words / Meaning / Both): word hits, picture hits, two bands.
-  // Picture hits are resolved to the same wire rows and pass the same Library/Owner/Date/Category/
-  // Presentation/From/Kind filters as word hits. Words mode never runs a picture query.
-  appHandle('archive:search-matched', async (_e, query: string, filters: SearchFilters, mode: MatchMode) => {
-    const from = filters?.from ?? 'all'
-    const kind = filters?.kind ?? 'all'
-    const resolve = (ids: string[]): Promise<Map<string, MatchCluster>> => resolvePictureIds(ids, filters, query)
-    const result = await matchedSearch(
-      {
-        words: async (q) => {
-          const plan = planSources(filters?.type ?? 'slides', from, kind)
-          const rows = await collectResults(q ?? '', filters, plan)
-          return (await groupByLook(rows.filter((c) => matchesFromKind(rep(c), from, kind)), filters)) as unknown as MatchCluster[]
-        },
-        modelReady: () => pictureSearch?.status().model === 'ready',
-        pictureQuery: (text, opts) => pictureSearch!.pictureQuery({ text }, opts),
-        resolve
-      },
-      query ?? '',
-      filters ?? {},
-      mode === 'words' || mode === 'meaning' ? mode : 'both'
-    )
-    return { ...result, related: await groupByLook(result.related, filters) }
-  })
-
-  // More like this (inspector): the six most similar items from other presentations and the well, by
-  // stored vectors (no model run, but the model must be downloaded). Any Library, Owner and date.
-  appHandle('archive:more-like-this', async (_e, row: { kind: string; deck: string; slideOrder: number | null; reference: string }) => {
-    const open = { library: 'all', owner: 'all', era: 'all', category: '', deck: '', role: 'all', from: 'all', kind: 'all' } as unknown as SearchFilters
-    return runMoreLikeThis<MatchCluster['representative']>(
-      {
-        modelReady: () => pictureSearch?.status().model === 'ready',
-        query: (imageId, opts) => pictureSearch!.pictureQuery({ imageId }, opts),
-        resolve: async (ids) => {
-          const clusters = await resolvePictureIds(ids, open, '')
-          return new Map([...clusters].map(([id, c]) => [id, c.representative]))
-        }
-      },
-      row as never
-    )
-  })
-
-  // Counts for the From chips: the current query over every store, Kind applied, From ignored.
-  appHandle('archive:from-counts', async (_e, query: string, filters: SearchFilters): Promise<FromCounts> => {
-    const kind = filters?.kind ?? 'all'
-    const rows = await collectResults(query ?? '', filters, { slides: true, archiveImages: true, well: true })
-    return countFrom(rows.map(rep), kind)
-  })
-
-  // Distinct deck categories (with counts) for the Category filter dropdown.
-  appHandle('archive:categories', () => {
-    if (!archiveAvailable()) return []
-    try {
-      return categoryList(loadDeckMeta(archiveRoot(), cacheDir()))
-    } catch {
-      return []
-    }
-  })
-
-  // All decks (id, title, date) newest-first, for the Deck filter picker.
-  appHandle('archive:decks', () => {
-    if (!archiveAvailable()) return []
-    try {
-      const idx = loadDeckMeta(archiveRoot(), cacheDir())
-      return Object.entries(idx)
-        .map(([id, m]) => ({ id, title: m.title || id, date: m.date }))
-        .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
-    } catch {
-      return []
-    }
-  })
-
-  // Deck MODE: one card per presentation (title-slide cover), filtered like the slide search.
-  appHandle('archive:list-decks', async (_e, filters: SearchFilters) => {
-    const lib = filters?.library ?? 'mine'
-    const out: Array<Record<string, unknown>> = []
-    const add = async (root: string, library: 'mine' | 'others'): Promise<void> => {
-      const f = library === 'others' ? { ...filters, owner: 'all' as const } : filters
-      const decks = await listDecks(root, cacheDir(), f)
-      for (const { coverAbsPath, ...d } of decks) out.push({ ...d, coverThumbUrl: swThumb(coverAbsPath), library })
-    }
-    if (lib !== 'others' && archiveAvailable()) {
-      try { await add(archiveRoot(), 'mine') } catch { /* mine decks failed */ }
-    }
-    if (lib !== 'mine' && othersArchiveAvailable()) {
-      try { await add(othersArchiveRootResolved(), 'others') } catch { /* others decks failed */ }
-    }
-    return out
-  })
-  // Full metadata for one deck (for the sidebar). Resolves to whichever store holds the deck.
-  appHandle('archive:deck-detail', (_e, pid: string) => {
-    if (!archiveAvailable() && !othersArchiveAvailable()) return null
-    try {
-      const root = rootForDeck(pid)
-      const d = deckDetail(root, cacheDir(), pid)
-      if (!d) return null
-      const library = root === othersArchiveRootResolved() && root !== archiveRoot() ? 'others' : 'mine'
-      return { ...d, library }
-    } catch {
-      return null
-    }
-  })
-
-  // Stats bundle (timeline of "my" PowerPoint history) for the Stats view.
-  appHandle('archive:stats', async () => {
-    if (!archiveAvailable()) return null
-    try {
-      return await archiveStats(archiveRoot(), cacheDir())
-    } catch {
-      return null
-    }
-  })
-
-  // The structured content (presentation.json node) of one slide — for "Copy structure".
-  appHandle('archive:slide-structure', (_e, deck: string, slideOrder: number | null) => {
-    if (!archiveAvailable() && !othersArchiveAvailable()) return null
-    try {
-      return slideStructure(rootForDeck(deck), deck, slideOrder)
-    } catch {
-      return null
-    }
-  })
-
-  // The embedded image assets on one slide → renderable swarchive:// thumbnails (for the inspector).
-  appHandle('archive:slide-images', (_e, deck: string, slideOrder: number | null) => {
-    if (!archiveAvailable() && !othersArchiveAvailable()) return []
-    try {
-      return slideImages(rootForDeck(deck), deck, slideOrder).map((im) => ({ thumbUrl: swThumb(im.absPath) }))
-    } catch {
-      return []
-    }
-  })
-
-  // All slides of one presentation, in order — for "See in context". Tagged with the store it came from.
-  appHandle('archive:deck-slides', async (_e, deck: string) => {
-    if (!archiveAvailable() && !othersArchiveAvailable()) return []
-    try {
-      const root = rootForDeck(deck)
-      const library = root === othersArchiveRootResolved() && root !== archiveRoot() ? 'others' : 'mine'
-      return (await deckSlides(root, cacheDir(), deck)).map((h) => toWire(h, library))
-    } catch {
-      return []
-    }
-  })
-
-  // Copy an image FILE (WebP) to the clipboard — TalkWeaver's paste reads an image/webp file item
-  // and keeps it as-is (no PNG round-trip). Resolves the file from its thumbnail URL, so the same
-  // path works for archive renders, well images, and vault images. macOS file pasteboard via osascript.
-  const copyFileToClipboard = (abs: string): Promise<boolean> =>
-    new Promise((resolve) =>
-      execFile('osascript', ['-e', `set the clipboard to POSIX file ${JSON.stringify(abs)}`], (err) => resolve(!err))
-    )
-  appHandle('clipboard:copy-image', async (_e, thumbUrl: string) => {
-    const abs = resolveSwUrlReal(thumbUrl)
-    return abs ? copyFileToClipboard(abs) : false
-  })
-  // Copy as a PNG raster bitmap (for Keynote / Slack / web that want a pasted image, not a file).
-  appHandle('clipboard:copy-image-png', async (_e, thumbUrl: string) => {
-    const abs = resolveSwUrlReal(thumbUrl)
-    if (!abs) return false
-    try {
-      const img = abs.toLowerCase().endsWith('.webp')
-        ? nativeImage.createFromBuffer(await sharp(abs).png().toBuffer())
-        : nativeImage.createFromPath(abs)
-      if (img.isEmpty()) return false
-      clipboard.writeImage(img)
-      return true
-    } catch {
-      return false
-    }
-  })
-
-  // Reveal an image in Finder ("open containing deck/folder").
-  appHandle('shell:reveal', (_e, thumbUrl: string) => {
-    const abs = resolveSwUrlReal(thumbUrl) // a link inside a root that leads outside every root is not revealed
-    if (!abs) return false
-    shell.showItemInFolder(abs)
-    return true
-  })
-
-  // TalkWeaver registers no URL scheme and no document type, so the nearest thing to "open the talk"
-  // is showing its outline file in Finder. The path is vault-relative and must stay inside the vault.
-  appHandle('talks:reveal', (_e, relPath: string) => {
-    const vr = detectVaultRoot()
-    if (!vr || typeof relPath !== 'string') return false
-    const abs = talkAbsPath(vr, relPath)
-    if (!abs) return false
-    shell.showItemInFolder(abs)
-    return true
+  installArchiveSearch({
+    appHandle, archiveRoot, archiveAvailable, othersArchiveRootResolved, othersArchiveAvailable,
+    wellRootResolved, detectVaultRoot, cacheDir, swThumb, resolveSwUrlReal, pictureSearch, talkUsage
   })
 
   // --- well / import paths ---
@@ -1244,228 +785,12 @@ app.whenReady().then(async () => {
     }
   })
 
-  // --- triage (ADR-0029): scan a source folder, browse/decide, promote keepers into the well ---
-  appHandle('settings:choose-screenshot-folder', async () => {
-    const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
-    if (r.canceled || !r.filePaths[0]) return null
-    writeConfig({ screenshotRoot: r.filePaths[0] })
-    refreshWatchers()
-    return r.filePaths[0]
+  const capture = installCaptureSources({
+    appHandle, getMainWindow: () => mainWindow,
+    fromMainWindow: (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents),
+    fromAppWindow, archiveRoot, wellRootResolved, writeConfig, swThumb, pictureSearch, review, retrainer
   })
-  // Capture inbox extras: 'desktop' | 'cleanshot' add the offered defaults; 'folder' asks for a folder.
-  appHandle('settings:add-capture-source', async (_e, which: 'desktop' | 'cleanshot' | 'folder') => {
-    let src: CaptureSource | null = null
-    if (which === 'desktop' || which === 'cleanshot') src = (await captureDefaults())[which]
-    else {
-      const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
-      if (!r.canceled && r.filePaths[0]) src = { path: r.filePaths[0], namedOnly: false }
-    }
-    if (!src) return false
-    const cur = readConfig().captureSources ?? []
-    if (!cur.some((c) => c.path === src!.path)) writeConfig({ captureSources: [...cur, src] })
-    refreshWatchers()
-    return true
-  })
-  appHandle('settings:remove-capture-source', (_e, path: string) => {
-    writeConfig({ captureSources: (readConfig().captureSources ?? []).filter((c) => c.path !== path) })
-    refreshWatchers()
-    return true
-  })
-  // Review pile of a triage row the sorter proposed something for: a throwaway shows 'bin in N days'.
-  const reviewLabel = (r: TriageRow): { pile: string | null; binInDays: number | null } => {
-    if (!r.proposal) return { pile: null, binInDays: null }
-    const v = pileOf(
-      {
-        proposal: r.proposal as ProposalLabel,
-        proposedAt: r.proposed_at ?? null,
-        throwawaySince: r.throwaway_since ?? null,
-        decision: r.state && r.state !== 'undecided' ? { state: r.state, decidedAt: r.decided_at ?? null } : null
-      },
-      Date.now()
-    )
-    return { pile: v.pile === 'gone' ? null : v.pile, binInDays: v.binInDays }
-  }
-  // One row → renderable wire shape. Images render from the source file; videos from a cached poster,
-  // with mediaUrl pointing at the source file so the renderer can play it inline.
-  const triageToWire = (r: TriageRow, sourceRoot: string, wellR: string): Record<string, unknown> => {
-    const isVideo = r.kind === 'video'
-    const offline = r.offline === '1'
-    const fileAbs = join(r.source || sourceRoot, r.rel_path)
-    const posterAbs = r.poster_rel ? join(wellR, r.poster_rel) : null
-    const sizeBytes = Number(r.size) || 0
-    const mtime = Number(r.mtime) || 0
-    let date = r.taken_at ? r.taken_at.slice(0, 10) : ''
-    if (!date) try {
-      date = new Date(mtime).toISOString().slice(0, 10)
-    } catch {
-      /* bad mtime → no date */
-    }
-    // Never point a thumbnail/media URL at an online-only placeholder — loading it would force a download.
-    return {
-      hash: r.hash,
-      relPath: join(r.source || sourceRoot, r.rel_path), // unique per file across sources (the hash is the CONTENT hash and repeats for duplicates)
-      source: r.source || sourceRoot,
-      takenAt: r.taken_at || null,
-      app: r.app || null,
-      windowTitle: r.window_title || null,
-      kind: r.kind,
-      filename: r.filename,
-      ext: r.ext,
-      state: r.state,
-      offline,
-      mtime,
-      date,
-      sizeMB: Math.round((sizeBytes / 1048576) * 10) / 10,
-      large: isVideo && sizeBytes > VIDEO_GATE_BYTES,
-      snippet: (r.ocr_text || '').replace(/\s+/g, ' ').trim().slice(0, 160),
-      thumbUrl: offline ? null : swThumb(isVideo ? posterAbs : fileAbs),
-      mediaUrl: offline || !isVideo ? null : swThumb(fileAbs),
-      ...reviewLabel(r)
-    }
-  }
-  // Triage IPC answers the main window only
-  const fromMainWindow = (sender: Electron.WebContents): boolean => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents)
-  const onTriageProgress = (m: string): void => void mainWindow?.webContents.send('triage:progress', m)
-  guardedHandle(ipcMain, fromMainWindow, 'triage:scan', async () => {
-    captureDownloads.resume() // an explicit Scan turns downloading back on after a Stop
-    return scanAllSources()
-  })
-  // One scan of every capture source, through the one-at-a-time scan queue. `downloads: false` = this
-  // scan never downloads (the follow-up of a stopped backlog run), whatever the gate says.
-  async function scanAllSources(o: { downloads?: boolean } = {}): Promise<{ ok: boolean; indexed: number; total: number; offline?: number }> {
-    const sources = triageSources()
-    if (sources.length === 0) return { ok: false, indexed: 0, total: 0 }
-    const sum = { indexed: 0, total: 0, offline: 0 }
-    try {
-      for (const s of sources) {
-        const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, await scanOptionsFor(s, o))
-        review.filesChanged() // Review's Not on this Mac answers are worked out again (review/not-on-mac-cache.ts)
-        sum.indexed += res.indexed
-        sum.total += res.total
-        sum.offline += res.offline
-      }
-      return { ok: true, ...sum }
-    } catch {
-      return { ok: false, indexed: 0, total: 0 }
-    }
-  }
-  // Capture-and-forget: files added while SlideWell was closed are picked up shortly after launch.
-  const launchScan = (): void => {
-    setTimeout(() => void scanAllSources().then(() => mainWindow?.webContents.send('triage:changed')), 2500)
-  }
-  launchScanHook = launchScan
-  // Capture inbox: a debounced watcher per source runs the same scan for just that source, then tells
-  // the Triage panel to re-list. Originals are only read.
-  const watcher = createSourceWatcher((path) => {
-    const s = triageSources().find((x) => x.path === path)
-    if (!s) return
-    void scanOptionsFor(s)
-      .then((o) => scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, o))
-      .then(() => {
-        review.filesChanged()
-        mainWindow?.webContents.send('triage:changed')
-      })
-      .catch(() => undefined)
-  })
-  refreshWatchers = (): void => watcher.setSources(triageSources().map((s) => ({ path: s.path, recursive: !s.namedOnly })))
-  refreshWatchers()
-  app.on('will-quit', () => {
-    watcher.close()
-    captureDownloads.stop() // kill any active download child
-  })
-  // One-off backlog import (Desktop + CleanShot history → the Triage source folder). After a run,
-  // one explicit scan; the import itself never waits on watcher events from the (OneDrive) folder.
-  registerBacklogIpc({
-    watchedFolder: screenshotRootResolved,
-    stateDir: () => join(app.getPath('userData'), 'backlog-import'),
-    isMainWindow: fromAppWindow,
-    afterRun: ({ stopped }) => void scanAllSources({ downloads: !stopped }).then(() => mainWindow?.webContents.send('triage:changed')),
-    captureDownloads
-  })
-  guardedHandle(ipcMain, fromMainWindow, 'triage:list', async (_e, q: string, state: string, sort?: string, limit?: number, offset?: number, apps?: unknown) => {
-    const src = triageSources()[0]?.path ?? null
-    const wellR = wellRootResolved()
-    const empty = { items: [], counts: { undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }
-    if (!src) return empty
-    try {
-      const s = sort === 'date-desc' || sort === 'date-asc' ? sort : 'scanned'
-      const lim = typeof limit === 'number' && limit > 0 ? Math.min(limit, 500) : 150
-      const off = typeof offset === 'number' && offset > 0 ? offset : 0
-      // the app filter (ticket 20): absent = every app; a list that is not a list of names lists nothing
-      const only = apps === undefined || apps === null ? null : cleanAppList(apps)
-      if (apps !== undefined && apps !== null && !only) return { ...empty, counts: await triageCounts(wellR) }
-      const rows = await listTriage(wellR, q ?? '', state ?? 'undecided', s, lim, off, Date.now(), only)
-      const counts = await triageCounts(wellR)
-      return { items: rows.map((r) => triageToWire(r, src, wellR)), counts, hasMore: rows.length === lim }
-    } catch {
-      return empty
-    }
-  })
-  guardedHandle(ipcMain, fromMainWindow, 'triage:decide', async (_e, hash: string, action: 'select' | 'exclude' | 'reset', force?: boolean) => {
-    const src = triageSources()[0]?.path ?? null
-    if (!src) return { state: 'undecided' }
-    try {
-      const r = await setTriageDecision(archiveRoot(), wellRootResolved(), src, hash, action, Boolean(force))
-      retrainer.noteAnswer() // a throw-away in Triage is a choice the sorter learns from (a keep counts once imported)
-      return r
-    } catch {
-      return { state: 'undecided' }
-    }
-  })
-  // The App menu (ticket 20): each app with its count in this state tab and his kept share for it.
-  const LIST_STATES = new Set(['undecided', 'selected', 'included', 'excluded', 'all'])
-  guardedHandle(ipcMain, fromMainWindow, 'triage:apps', async (_e, state: unknown) => {
-    try {
-      return appCounts(wellRootResolved(), typeof state === 'string' && LIST_STATES.has(state) ? state : 'undecided')
-    } catch {
-      return []
-    }
-  })
-  // Exclude all / select all undecided from the ticked apps: his decision for many at once (triage-apps.ts
-  // decideAllFromApps: one transaction, counted again inside it, refused when the count is not the one he saw).
-  guardedHandle(ipcMain, fromMainWindow, 'triage:decide-all', async (_e, apps: unknown, action: unknown, expected: unknown) => {
-    const list = cleanAppList(apps)
-    if (!list || !list.length || (action !== 'select' && action !== 'exclude') || typeof expected !== 'number' || !Number.isSafeInteger(expected) || expected < 0) return { ok: false, changed: 0, count: 0, refused: 'bad-arguments' }
-    if (!triageSources()[0]) return { ok: false, changed: 0, count: 0, refused: 'count-changed' }
-    const r = await decideAllFromApps(wellRootResolved(), list, action, expected)
-    retrainer.noteAnswer()
-    return r
-  })
-  // One Triage import run at a time; a second click (or a reopened panel) joins the run that is going.
-  const triageImport = createImportRunner({
-    emit: (snap) => void mainWindow?.webContents.send('triage:import-progress', snap),
-    work: async (onStep, forceHashes) => {
-      const src = triageSources()[0]?.path ?? null
-      if (!src) return { imported: 0, skipped: 0, gated: 0 }
-      try {
-        return await importSelectedTriage(archiveRoot(), wellRootResolved(), src, forceHashes, onStep)
-      } finally {
-        pictureSearch?.poke()
-      }
-    }
-  })
-  guardedHandle(ipcMain, fromMainWindow, 'triage:import-selected', async (_e, forceHashes?: string[]) => {
-    const r = await triageImport.start(Array.isArray(forceHashes) ? forceHashes : [])
-    if (!r.error) mainWindow?.webContents.send('triage:changed')
-    retrainer.noteAnswer() // imported keeps are now choices the sorter learns from
-    return r
-  })
-  guardedHandle(ipcMain, fromMainWindow, 'triage:import-status', async () => triageImport.status())
-  // Paste-to-include: read an image off the clipboard and ingest it straight into the well (the paste
-  // IS the keep decision, ADR-0029). Returns the new well id or null when the clipboard has no image.
-  guardedHandle(ipcMain, fromMainWindow, 'well:add-from-clipboard', async () => {
-    const img = clipboard.readImage()
-    if (img.isEmpty()) return null
-    const tmp = join(tmpdir(), `sw-paste-${Date.now()}.png`)
-    try {
-      writeFileSync(tmp, img.toPNG())
-      const res = await ingestScreenshot(archiveRoot(), wellRootResolved(), tmp, 'screenshot')
-      if (res) pictureSearch?.poke()
-      return res ? { id: res.id } : null
-    } catch {
-      return null
-    }
-  })
+  refreshWatchers = capture.refreshWatchers
 
   // --- R2 backend (spec 2026-06-24): config + credentials (safeStorage) + connection test ---
   appHandle('settings:get-r2', () => {
@@ -1520,231 +845,20 @@ app.whenReady().then(async () => {
     return { ok: res.failed === 0, ...res }
   })
 
-  // --- Others' Library (Scenario A, ADR-0031): a separate store for other people's decks ---
-  appHandle('settings:choose-others-folder', async () => {
-    const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
-    if (r.canceled || !r.filePaths[0]) return null
-    const picked = r.filePaths[0]
-    // Never let the Others' Library overlap the personal archive — that would defeat the separation.
-    if (foldersOverlap(picked, archiveRoot())) {
-      await dialog.showMessageBox({ type: 'warning', buttons: ['OK'], message: "That folder overlaps your own archive.", detail: 'Pick a separate location for the Others’ Library so other people’s slides never mix into your archive.' })
-      return readConfig().othersArchiveRoot ?? null
-    }
-    writeConfig({ othersArchiveRoot: picked })
-    return picked
-  })
-  // Purge the whole Others' Library (its built store only) — never touches the personal archive.
-  appHandle('settings:clear-others-library', async () => {
-    const root = othersArchiveRootResolved()
-    if (foldersOverlap(root, archiveRoot())) return { ok: false }
-    const res = await dialog.showMessageBox({
-      type: 'warning',
-      buttons: ['Cancel', 'Clear it'],
-      defaultId: 0,
-      cancelId: 0,
-      message: 'Clear the Others’ Library?',
-      detail: `Deletes everything imported into ${root}. Your own archive is untouched.`
-    })
-    if (res.response !== 1) return { ok: false, cancelled: true }
-    for (const sub of ['extracted', 'registry', 'media-store']) {
-      try { rmSync(join(root, sub), { recursive: true, force: true }) } catch { /* best-effort */ }
-    }
-    return { ok: true }
-  })
-
-  // --- archive ingest (Core A pipeline as streamed subprocesses) ---
-  const sendLine = (s: string): void => mainWindow?.webContents.send('ingest:line', s)
   const python = (): string => detectPython(readConfig().pythonPath)
-  // Streamed feedback when import can't even start — otherwise the button "does nothing".
-  const archiveMissingLine = (): void =>
-    sendLine(`✕ No archive found at ${archiveRoot()} — it must contain a "registry" folder. Set a valid archive in Settings (⚙ → Archive).`)
-  appHandle('ingest:pending', async () => {
-    if (!archiveAvailable()) {
-      archiveMissingLine()
-      return { ok: false }
-    }
-    const r = await runIngest({ engineRoot: archiveRoot(), dataRoot: archiveRoot(), python: python(), mode: 'pending' }, sendLine)
-    invalidateDeckMeta(cacheDir())
-    pictureSearch?.pokeArchive()
-    return r
+  const sendConvertLine = (line: string): void => mainWindow?.webContents.send('convert:line', line)
+  installOthersLibrary({
+    appHandle, dialog, archiveRoot, archiveAvailable, othersArchiveRootResolved, othersArchiveAvailable,
+    readConfig, writeConfig, cacheDir, python, sendConvertLine
   })
-  // Pick the file/folder to import (returns the path so the panel can SHOW it before committing).
-  appHandle('ingest:choose-path', async () => {
-    const r = await dialog.showOpenDialog({
-      properties: ['openFile', 'openDirectory'],
-      filters: [{ name: 'PowerPoint', extensions: ['pptx', 'ppt'] }]
-    })
-    return r.canceled || !r.filePaths[0] ? null : r.filePaths[0]
-  })
-  // Run the import against an already-chosen path (no dialog — the panel confirmed what + where).
-  // library 'others' routes the data into the separate Others' Library store (Scenario A); the
-  // ENGINE is always the user's ppt-archive (that's where Core A's tools/ live).
-  appHandle('ingest:run-path', async (_e, targetPath: string, library?: 'mine' | 'others') => {
-    if (!archiveAvailable()) {
-      archiveMissingLine()
-      return { ok: false }
-    }
-    if (!targetPath) {
-      sendLine('✕ Pick a file or folder to import first.')
-      return { ok: false }
-    }
-    const dataRoot = library === 'others' ? othersArchiveRootResolved() : archiveRoot()
-    // checked again on use: the Others' Library never shares a folder with your own archive, however it was set
-    if (library === 'others' && foldersOverlap(dataRoot, archiveRoot())) {
-      sendLine(`✕ ${OVERLAP_REASON}`)
-      return { ok: false }
-    }
-    if (library === 'others') sendLine(`→ Importing into your Others' Library (kept separate from your archive): ${dataRoot}`)
-    const r = await runIngest({ engineRoot: archiveRoot(), dataRoot, python: python(), mode: 'path', targetPath }, sendLine)
-    invalidateDeckMeta(cacheDir()) // new decks added → drop the cached index so they show without restart
-    if (library !== 'others') pictureSearch?.pokeArchive()
-    return r
-  })
-  appHandle('ingest:cancel', () => {
-    cancelIngest()
-    return true
-  })
-
-  // --- convert (sideband, throwaway): someone else's .pptx → a mechanical Outline folder,
-  //     saved wherever the user picks. Never touches the archive registry or the vault. ---
-  const sendConvertLine = (s: string): void => mainWindow?.webContents.send('convert:line', s)
-  appHandle('settings:choose-conversions-folder', async () => {
-    const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
-    if (r.canceled || !r.filePaths[0]) return null
-    writeConfig({ conversionsRoot: r.filePaths[0] })
-    return r.filePaths[0]
-  })
-  appHandle('settings:set-convert-ocr', (_e, on: boolean) => {
-    writeConfig({ convertOcrByDefault: Boolean(on) })
-    return Boolean(on)
-  })
-  // "My decks" owner names. Unset → computed from the OS account (never written until the user saves).
-  appHandle('settings:get-owner-names', () => resolveOwnerNames(readConfig().ownerNames))
-  appHandle('settings:set-owner-names', (_e, names: unknown) => {
-    const cleaned = cleanOwnerNames(names)
-    writeConfig({ ownerNames: cleaned.length > 0 ? cleaned : undefined }) // empty → back to the account default
-    const resolved = resolveOwnerNames(readConfig().ownerNames)
-    setOwnerNames(resolved.names) // ownership is part of the deck index → next load rescans
-    return resolved
-  })
-  // Step 1: pick the source .pptx — returns its path so the panel SHOWS it before converting.
-  appHandle('convert:choose-source', async () => {
-    const pick = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'PowerPoint', extensions: ['pptx', 'ppt'] }] })
-    return pick.canceled || !pick.filePaths[0] ? null : pick.filePaths[0]
-  })
-  // Step 2: pick the destination folder, pre-filled from the source name + the conversionsRoot default.
-  appHandle('convert:choose-dest', async (_e, sourcePath: string) => {
-    const suggested = slugify(basename(sourcePath || '').replace(/\.(pptx|ppt)$/i, '')) || 'converted'
-    const defDir = conversionsRootResolved()
-    const defaultPath = join(defDir && existsSync(defDir) ? defDir : homedir(), suggested)
-    const save = await dialog.showSaveDialog({ title: 'Save the converted Outline folder as…', buttonLabel: 'Choose', defaultPath })
-    return save.canceled || !save.filePath ? null : save.filePath
-  })
-  // Step 3: run the conversion against the already-chosen source + destination (no dialogs here).
-  appHandle('convert:run', async (_e, opts: { pptxPath: string; outDir: string; ocr: boolean }) => {
-    if (!archiveAvailable()) {
-      sendConvertLine('✕ Archive engine not found — set it in Settings (extraction needs Core A).')
-      return { ok: false, error: 'archive unavailable' }
-    }
-    if (!opts?.pptxPath || !opts?.outDir) return { ok: false, error: 'pick a PowerPoint and a destination first' }
-    try {
-      if (existsSync(opts.outDir) && readdirSync(opts.outDir).length > 0) {
-        const res = await dialog.showMessageBox({
-          type: 'warning',
-          buttons: ['Cancel', 'Write here anyway'],
-          defaultId: 0,
-          cancelId: 0,
-          message: `“${basename(opts.outDir)}” already exists and isn't empty. Write the converted Outline into it anyway?`
-        })
-        if (res.response !== 1) return { ok: false, cancelled: true }
-      }
-    } catch {
-      /* stat race → proceed */
-    }
-    const r = await convertPptxToOutline({ archiveRoot: archiveRoot(), python: python(), pptxPath: opts.pptxPath, outDir: opts.outDir, ocr: Boolean(opts?.ocr) }, sendConvertLine)
-    if (r.ok && r.outDir) {
-      const outlineFile = join(r.outDir, `${slugify(basename(r.outDir)) || 'converted'}-outline.md`)
-      shell.showItemInFolder(existsSync(outlineFile) ? outlineFile : r.outDir)
-    }
-    return r
-  })
-
-  // Delete-by-filter (ADR-0031): remove every Others' Library deck matching the current query +
-  // filters, then rebuild the index from what remains. No filter → deletes the whole library.
-  // Scoped to the Others' Library only — never the personal archive.
-  appHandle('others:delete-matching', async (_e, query: string, filters: SearchFilters) => {
-    const root = othersArchiveRootResolved()
-    if (!othersArchiveAvailable()) return { ok: false, deleted: 0 }
-    const f: SearchFilters = { ...filters, owner: 'all', library: 'others' }
-    // Decks matching the deck-level filters; narrowed to those with matching content when there's free text.
-    const ids = new Set<string>()
-    try {
-      for (const d of await listDecks(root, cacheDir(), f)) ids.add(d.id)
-    } catch {
-      /* none */
-    }
-    const q = (query ?? '').trim()
-    if (q.length >= 2 && ids.size) {
-      const hit = new Set<string>()
-      try {
-        for (const c of await archiveResults(root, cacheDir(), q, f)) {
-          if (c.representative.deck) hit.add(c.representative.deck)
-          for (const m of c.members) if (m.deck) hit.add(m.deck)
-        }
-      } catch {
-        /* none */
-      }
-      try {
-        for (const im of await searchImages(root, q, 1000)) if (im.deck) hit.add(im.deck)
-      } catch {
-        /* none */
-      }
-      for (const id of [...ids]) if (!hit.has(id)) ids.delete(id)
-    }
-    const idList = [...ids].filter(Boolean)
-    if (idList.length === 0) return { ok: false, deleted: 0 }
-    const res = await dialog.showMessageBox({
-      type: 'warning',
-      buttons: ['Cancel', `Delete ${idList.length}`],
-      defaultId: 0,
-      cancelId: 0,
-      message: `Delete ${idList.length} presentation${idList.length === 1 ? '' : 's'} from your Others' Library?`,
-      detail: 'Removed from this separate store only — your own archive and the source files are untouched.'
-    })
-    if (res.response !== 1) return { ok: false, cancelled: true }
-    for (const id of idList) {
-      try {
-        rmSync(join(root, 'extracted', id), { recursive: true, force: true })
-      } catch {
-        /* best-effort */
-      }
-    }
-    // Rebuild the index from what's left (registry/media-store are derived, so wipe + reindex).
-    try {
-      rmSync(join(root, 'registry'), { recursive: true, force: true })
-    } catch {
-      /* */
-    }
-    try {
-      rmSync(join(root, 'media-store'), { recursive: true, force: true })
-    } catch {
-      /* */
-    }
-    let remaining = 0
-    try {
-      remaining = readdirSync(join(root, 'extracted')).length
-    } catch {
-      remaining = 0
-    }
-    if (remaining > 0 && archiveAvailable()) {
-      await runIngest({ engineRoot: archiveRoot(), dataRoot: root, python: python(), mode: 'reindex' }, sendConvertLine)
-    }
-    invalidateDeckMeta(cacheDir()) // the deck set changed; drop the cached index so search reflects it
-    return { ok: true, deleted: idList.length }
+  installArchiveStreams({
+    appHandle, archiveRoot, archiveAvailable, othersArchiveRootResolved, conversionsRootResolved,
+    readConfig, writeConfig, cacheDir, python, pictureSearch, sendConvertLine,
+    sendLine: (line) => mainWindow?.webContents.send('ingest:line', line)
   })
 
   void startWell().finally(() => pictureSearch?.start())
-  createWindow().webContents.once('did-finish-load', () => launchScanHook())
+  createWindow().webContents.once('did-finish-load', () => capture.launchScan())
 
   app.on('activate', () => {
     // not getAllWindows(): the hidden picture-search window would keep that non-empty
