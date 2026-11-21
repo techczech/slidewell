@@ -1,9 +1,14 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
 import { drainInbox, searchWell } from '../src/main/well'
+
+vi.mock('node:fs', async (loadOriginal) => {
+  const fs = await loadOriginal<typeof import('node:fs')>()
+  return { ...fs, renameSync: vi.fn(fs.renameSync) }
+})
 
 let root: string
 let archive: string
@@ -22,7 +27,10 @@ beforeEach(() => {
   mkdirSync(inbox, { recursive: true })
 })
 
-afterEach(() => rmSync(root, { force: true, recursive: true }))
+afterEach(() => {
+  vi.mocked(renameSync).mockRestore()
+  rmSync(root, { force: true, recursive: true })
+})
 
 function ready(path: string): void {
   const then = new Date(Date.now() - 10_000)
@@ -125,6 +133,7 @@ it('leaves a zero-byte or recent capture in the inbox for another pass', async (
   expect(await drainInbox(archive, well)).toBe(0)
   expect(readdirSync(inbox).sort()).toEqual(['empty.png', 'recent.png'])
   ready(recent)
+  expect(await drainInbox(archive, well)).toBe(0)
   expect(await drainInbox(archive, well)).toBe(1)
   expect(readdirSync(inbox)).toEqual(['empty.png'])
 })
@@ -161,4 +170,55 @@ it('retains an original replaced while OCR is reading it', async () => {
   const rows = await searchWell(well, 'screenshot')
   expect(rows).toHaveLength(1)
   expect(readFileSync(join(well, rows[0].rel_path)).equals(first)).toBe(true)
+})
+
+
+it('imports a future-dated capture once two passes see it unchanged', async () => {
+  const original = join(inbox, 'future.png')
+  const bytes = Buffer.from('synthetic future-dated screenshot')
+  writeFileSync(original, bytes)
+  const future = new Date(Date.now() + 3_600_000)
+  utimesSync(original, future, future)
+  const retry = vi.fn()
+
+  expect(await drainInbox(archive, well, retry)).toBe(0)
+  expect(existsSync(original)).toBe(true)
+  expect(retry).toHaveBeenCalledTimes(1)
+
+  expect(await drainInbox(archive, well, retry)).toBe(1)
+  expect(existsSync(original)).toBe(false)
+  expect(retry).toHaveBeenCalledTimes(1)
+})
+
+it('preserves one recovery copy and logs once when a sync client rewrites the destination', async () => {
+  const source = Buffer.from('synthetic source bytes')
+  const original = join(inbox, 'sync.png')
+  const store = join(well, 'images')
+  const dest = join(store, `screenshot--${digest(source).slice(0, 7)}.png`)
+  const edit = Buffer.from('earlier owner edit')
+  const rewritten = Buffer.from('sync-client rewrite')
+  mkdirSync(store)
+  writeFileSync(original, source)
+  ready(original)
+  writeFileSync(dest, edit)
+
+  const fs = await vi.importActual<typeof import('node:fs')>('node:fs')
+  vi.mocked(renameSync).mockImplementation((from, to) => {
+    fs.renameSync(from, to)
+    if (to === dest) writeFileSync(dest, rewritten)
+  })
+  const log = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    for (let pass = 0; pass < 3; pass++) expect(await drainInbox(archive, well)).toBe(0)
+
+    const backups = readdirSync(store).filter((name) => name.includes('.recovered-'))
+    expect(backups).toHaveLength(1)
+    expect(readFileSync(join(store, backups[0]))).toEqual(edit)
+    expect(readFileSync(dest)).toEqual(rewritten)
+    expect(readFileSync(original)).toEqual(source)
+    expect(log).toHaveBeenCalledTimes(1)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Recovery copy already exists'))
+  } finally {
+    log.mockRestore()
+  }
 })

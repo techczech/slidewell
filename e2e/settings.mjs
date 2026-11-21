@@ -27,7 +27,7 @@ const config = {
 writeFileSync(join(userData, 'config.json'), JSON.stringify(config), 'utf8')
 process.on('exit', () => rmSync(work, { recursive: true, force: true }))
 const version = JSON.parse(readFileSync('package.json', 'utf8')).version
-const env = { ...process.env, HOME: home, SLIDEWELL_E2E_HIDDEN: '1' }
+const env = { ...process.env, HOME: home, SLIDEWELL_DATA_DIR: userData, SLIDEWELL_E2E_HIDDEN: '1' }
 delete env.ELECTRON_RUN_AS_NODE
 
 const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env })
@@ -66,6 +66,7 @@ try {
   settingsWin.on('pageerror', (e) => console.error('[settings error]', e.message))
   await settingsWin.waitForSelector('.bsw-root', { timeout: 10000 })
   r.ownWindow = settingsWin.url().endsWith('settings.html')
+  r.hiddenWindows = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().every((w) => !w.isVisible()))
   await win.locator('.titlebar-actions .tb-btn', { hasText: '⚙' }).click()
   await win.waitForTimeout(300)
   r.singleInstance = app.windows().filter((w) => w.url().endsWith('settings.html')).length === 1

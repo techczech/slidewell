@@ -156,6 +156,8 @@ type Ingested = {
 
 const OWNED_TEMP_NAME = /^\.slidewell-[0-9a-f-]{36}\.tmp(?:\.[^.]+)?$/
 const activeWellTemps = new Set<string>()
+const reportedRecoveryLimits = new Set<string>()
+const unsettledInboxes = new Map<string, Map<string, BigIntStats>>()
 export const INBOX_SETTLE_MS = 3000
 const INBOX_VIDEOS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv'])
 
@@ -177,10 +179,25 @@ function syncPath(path: string): void {
   }
 }
 
+function assertRecoveryAvailable(dest: string, id: string): void {
+  const root = dirname(dirname(dest))
+  const saved = ['images', 'videos'].some((kind) => {
+    const dir = join(root, kind)
+    return existsSync(dir) && readdirSync(dir).some((name) => name.includes(`--${id}.recovered-`))
+  })
+  if (!saved) return
+  const key = join(root, id)
+  if (!reportedRecoveryLimits.has(key)) {
+    reportedRecoveryLimits.add(key)
+    console.warn(`[well] Recovery copy already exists for ${basename(dest)}. The original and current well file were kept.`)
+  }
+  throw new Error('The well already holds a recovery copy for this ID.')
+}
+
 async function publishWellFile(
   dest: string,
   write: (tmp: string) => void | boolean | Promise<boolean>,
-  verify?: { temp: (tmp: string) => Promise<void>; previous: BigIntStats | undefined }
+  verify?: { temp: (tmp: string) => Promise<void>; previous: BigIntStats | undefined; id: string }
 ): Promise<void> {
   const directory = dirname(dest)
   const tmp = join(directory, `.slidewell-${randomUUID()}.tmp${extname(dest)}`)
@@ -192,6 +209,7 @@ async function publishWellFile(
       await verify.temp(tmp)
       if (!sameFile(verify.previous, fileStat(dest))) throw new Error('The well destination changed during the write.')
       if (verify.previous) {
+        assertRecoveryAvailable(dest, verify.id)
         const ext = extname(dest)
         const date = nowIso().replace(/[:.]/g, '-')
         const recovery = join(directory, `${basename(dest, ext)}.recovered-${date}-${randomUUID()}${ext}`)
@@ -221,6 +239,7 @@ async function storeCopy(
   write: (tmp: string) => void
 ): Promise<{ created: boolean; stored: BigIntStats }> {
   const before = fileStat(dest)
+  const id = digest.slice(0, 7)
   if (before && !before.isFile()) throw new Error('The well copy path is not a regular file.')
   if (before) {
     const existing = await inspectCopy(dest, before)
@@ -230,11 +249,13 @@ async function storeCopy(
       return { created: false, stored: before }
     }
     // A genuine collision under the existing short filename must not destroy another complete copy.
-    if (existing.startsWith(digest.slice(0, 7))) throw new Error('Two different well files have the same short ID.')
+    if (existing.startsWith(id)) throw new Error('Two different well files have the same short ID.')
+    assertRecoveryAvailable(dest, id)
   }
 
   await publishWellFile(dest, write, {
     previous: before,
+    id,
     async temp(tmp) {
       const candidate = fileStat(tmp)
       if (!candidate || candidate.size !== size || await inspectCopy(tmp, candidate) !== digest) {
@@ -497,8 +518,14 @@ export function wellAbsPath(root: string, vaultRoot: string | null, row: WellRow
 /** Process any files sitting in the inbox: ingest each, then remove the inbox copy. */
 export async function drainInbox(archiveRoot: string, root: string, retryWhenSettled?: () => void): Promise<number> {
   const inbox = join(root, '_inbox')
-  if (!existsSync(inbox)) return 0
+  if (!existsSync(inbox)) {
+    unsettledInboxes.delete(inbox)
+    return 0
+  }
   cleanStaleWellTemps(root)
+  const previous = unsettledInboxes.get(inbox)
+  const observed = new Map<string, BigIntStats>()
+  let deferred = false
   let n = 0
   for (const f of readdirSync(inbox)) {
     if (f.startsWith('.')) continue
@@ -506,19 +533,29 @@ export async function drainInbox(archiveRoot: string, root: string, retryWhenSet
     try {
       const original = fileStat(p)
       if (!original?.isFile() || original.size === 0n) continue
-      if (Date.now() - Number(original.mtimeMs) < INBOX_SETTLE_MS) {
-        retryWhenSettled?.()
+      const age = Date.now() - Number(original.mtimeMs)
+      const last = previous?.get(f)
+      const changed = last && (original.size !== last.size || original.mtimeNs !== last.mtimeNs)
+      // A future timestamp cannot age reliably; one unchanged observation is enough to proceed.
+      if (changed || (age >= 0 && age < INBOX_SETTLE_MS) || (age < 0 && !last)) {
+        observed.set(f, original)
+        deferred = true
         continue
       }
+      if (age < 0) observed.set(f, original)
       const res = await ingestScreenshot(archiveRoot, root, p, 'screenshot')
       if (res && sameFile(res.stored, fileStat(join(root, res.relPath))) && sameFile(original, fileStat(p))) {
         rmSync(p, { force: true })
+        observed.delete(f)
         n++
       }
     } catch {
       /* leave it for next pass */
     }
   }
+  if (observed.size > 0) unsettledInboxes.set(inbox, observed)
+  else unsettledInboxes.delete(inbox)
+  if (deferred) retryWhenSettled?.()
   return n
 }
 

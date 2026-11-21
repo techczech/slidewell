@@ -107,7 +107,12 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
     sendCommand: wiring.sendCommand,
     menuContext: () => ctx,
     extraSections: [...CUSTOM_PAGES],
-    window: { preload: join(__dirname, '../preload/settings.js'), url: settingsPageUrl(), title: 'SlideWell Settings' },
+    window: {
+      preload: join(__dirname, '../preload/settings.js'),
+      url: settingsPageUrl(),
+      title: 'SlideWell Settings',
+      showOnReady: process.env['SLIDEWELL_E2E_HIDDEN'] !== '1'
+    },
     appInfo: { icon: 'gallery-vertical-end', cli: APP_ID }
   })
 
