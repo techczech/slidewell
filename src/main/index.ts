@@ -22,7 +22,7 @@ import { applyFilters, combinedDateFilter, parseQuery, resolveOwnershipFilter } 
 import { archiveResults, deckSlides, slideStructure, slideImages, searchImages, listDecks, deckDetail, archiveStats, type SearchFilters, type EnrichedHit, type ImageHit } from './archive'
 import { loadDeckMeta, categoryList, invalidateDeckMeta, setOwnerNames, type DeckMetaIndex } from './deckmeta'
 import { resolveOwnerNames, cleanOwnerNames } from './owners'
-import { ensureWell, drainInbox, scanVault, searchWell, wellByIds, wellAbsPath, ingestScreenshot, findFfmpeg, type WellRow } from './well'
+import { ensureWell, drainInbox, INBOX_SETTLE_MS, scanVault, searchWell, wellByIds, wellAbsPath, ingestScreenshot, findFfmpeg, type WellRow } from './well'
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow, type ScanOptions } from './triage'
 import { cleanShotFolder, cleanShotNameTemplate } from './cleanshot-folder'
 import { captureDownloadRoot } from './online-only'
@@ -1776,26 +1776,47 @@ async function startWell(): Promise<void> {
   try {
     const root = wellRootResolved()
     await ensureWell(root)
-    await drainInbox(archiveRoot(), root)
+    const inbox = join(root, '_inbox')
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let busy = false
+    let retry = false
+    let closed = false
+    const schedule = (): void => {
+      if (closed) return
+      if (busy) {
+        retry = true
+        return
+      }
+      clearTimeout(timer)
+      timer = setTimeout(() => void drain(), INBOX_SETTLE_MS)
+    }
+    const drain = async (): Promise<void> => {
+      busy = true
+      try {
+        if ((await drainInbox(archiveRoot(), root, schedule)) > 0) pictureSearch?.poke()
+      } catch {
+        /* leave the inbox for the next pass */
+      } finally {
+        busy = false
+        if (retry) {
+          retry = false
+          schedule()
+        }
+      }
+    }
+    const watcher = fsWatch(inbox, schedule)
+    app.once('will-quit', () => {
+      closed = true
+      watcher.close()
+      clearTimeout(timer)
+    })
+    await drain()
     const vr = detectVaultRoot()
     if (vr) {
       void scanVault(archiveRoot(), root, vr).then((n) => n > 0 && pictureSearch?.poke(), () => undefined)
     }
     // read-only scan of the vault's talks on launch and whenever the vault changes
     await talkUsage.sync()
-    const inbox = join(root, '_inbox')
-    let busy = false
-    fsWatch(inbox, async () => {
-      if (busy) return
-      busy = true
-      setTimeout(async () => {
-        try {
-          if ((await drainInbox(archiveRoot(), root)) > 0) pictureSearch?.poke()
-        } finally {
-          busy = false
-        }
-      }, 400)
-    })
   } catch {
     /* well unavailable (e.g. archive root missing) — search just shows no well results */
   }

@@ -674,8 +674,14 @@ export async function promoteTriageHashes(
   )
   const enriched = staged.map((s) => {
     const abs = join(s.source || sourceRoot, s.rel_path)
-    const missing = !existsSync(abs)
-    const sizeBytes = missing ? 0 : statSync(abs).size
+    let size: number | undefined
+    try {
+      size = statSync(abs, { throwIfNoEntry: false })?.size
+    } catch {
+      console.error(`[triage] import failed for ${abs} — could not read the file; left staged`)
+    }
+    const missing = size === undefined
+    const sizeBytes = size ?? 0
     // offline = OneDrive online-only placeholder (stored as '1' at scan time). It can't be ingested
     // (no local bytes), so it is skipped — a keyboard-select bypasses the card's offline-disabled button.
     return { hash: s.hash, kind: s.kind, offline: s.offline === '1', missing, sizeBytes, abs }
@@ -688,30 +694,35 @@ export async function promoteTriageHashes(
   for (const hash of plan.toImport) {
     const row = enriched.find((e) => e.hash === hash)
     if (!row) continue
-    const res = row.kind === 'video' ? await ingestVideo(archiveRoot, wellRoot, row.abs) : await ingestScreenshot(archiveRoot, wellRoot, row.abs, 'screenshot')
-    if (res?.id) {
-      // Link this well copy to its triage decision key only when that key is the hash ingest computed
-      // from the bytes it actually imported. A stale scan hash (file replaced since its scan) would
-      // otherwise let emptying the old content hide this different content. Ingest has already
-      // recorded the real hash either way.
-      const matches = res.sourceHash === hash
-      if (matches) await recordWellSource(wellRoot, res.id, hash)
-      else console.error(`[triage] ${row.abs}: scanned as ${hash} but imported as ${res.sourceHash || 'unknown'} — the file changed since its scan; not linked to the old hash`)
-      // Ingest is async: the item may have been emptied from the Bin meanwhile. Like every other
-      // decision write, this one never replaces an 'emptied' marker; such an item counts as skipped
-      // (its well copy, if one was just made, is hidden by content identity — well.ts hiddenWellIds).
-      await run(
-        db,
-        `INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, 'included', ?, ?)
-         ON CONFLICT(hash) DO UPDATE SET state = excluded.state, decided_at = excluded.decided_at, well_id = excluded.well_id WHERE triage_decisions.state != 'emptied'`,
-        // the decision names the well copy only when its key is the imported content; otherwise no well id
-        [hash, new Date().toISOString(), matches ? res.id : null]
-      )
-      const now = await query<{ state: string }>(db, 'SELECT state FROM triage_decisions WHERE hash = ?', [hash])
-      if (now[0]?.state === 'included') imported.push({ hash, wellId: res.id, relPath: res.relPath, created: res.created })
-      else failed++
-    } else {
-      console.error(`[triage] import failed for ${row.abs} — ingest returned no id; left staged`)
+    try {
+      const res = row.kind === 'video' ? await ingestVideo(archiveRoot, wellRoot, row.abs) : await ingestScreenshot(archiveRoot, wellRoot, row.abs, 'screenshot')
+      if (res?.id) {
+        // Link this well copy to its triage decision key only when that key is the hash ingest computed
+        // from the bytes it actually imported. A stale scan hash (file replaced since its scan) would
+        // otherwise let emptying the old content hide this different content. Ingest has already
+        // recorded the real hash either way.
+        const matches = res.sourceHash === hash
+        if (matches) await recordWellSource(wellRoot, res.id, hash)
+        else console.error(`[triage] ${row.abs}: scanned as ${hash} but imported as ${res.sourceHash || 'unknown'} — the file changed since its scan; not linked to the old hash`)
+        // Ingest is async: the item may have been emptied from the Bin meanwhile. Like every other
+        // decision write, this one never replaces an 'emptied' marker; such an item counts as skipped
+        // (its well copy, if one was just made, is hidden by content identity — well.ts hiddenWellIds).
+        await run(
+          db,
+          `INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, 'included', ?, ?)
+           ON CONFLICT(hash) DO UPDATE SET state = excluded.state, decided_at = excluded.decided_at, well_id = excluded.well_id WHERE triage_decisions.state != 'emptied'`,
+          // the decision names the well copy only when its key is the imported content; otherwise no well id
+          [hash, new Date().toISOString(), matches ? res.id : null]
+        )
+        const now = await query<{ state: string }>(db, 'SELECT state FROM triage_decisions WHERE hash = ?', [hash])
+        if (now[0]?.state === 'included') imported.push({ hash, wellId: res.id, relPath: res.relPath, created: res.created })
+        else failed++
+      } else {
+        console.error(`[triage] import failed for ${row.abs} — ingest returned no id; left staged`)
+        failed++
+      }
+    } catch {
+      console.error(`[triage] import failed for ${row.abs} — the copy or index could not be saved`)
       failed++
     }
     onStep?.(++handled, plan.toImport.length)

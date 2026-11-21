@@ -156,6 +156,7 @@ type Ingested = {
 
 const OWNED_TEMP_NAME = /^\.slidewell-[0-9a-f-]{36}\.tmp(?:\.[^.]+)?$/
 const activeWellTemps = new Set<string>()
+export const INBOX_SETTLE_MS = 3000
 const INBOX_VIDEOS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv'])
 
 function fileStat(path: string): BigIntStats | undefined {
@@ -190,6 +191,12 @@ async function publishWellFile(
     if (verify) {
       await verify.temp(tmp)
       if (!sameFile(verify.previous, fileStat(dest))) throw new Error('The well destination changed during the write.')
+      if (verify.previous) {
+        const ext = extname(dest)
+        const date = nowIso().replace(/[:.]/g, '-')
+        const recovery = join(directory, `${basename(dest, ext)}.recovered-${date}-${randomUUID()}${ext}`)
+        renameSync(dest, recovery)
+      }
     } else if (fileStat(dest)) {
       return // a concurrent import already published this sidecar or poster
     }
@@ -279,14 +286,17 @@ export async function ingestScreenshot(
   const sourceHash = createHash('sha256').update(orig).digest('hex').slice(0, 12)
   let buf: Buffer = orig
   let ext = (extname(srcPath).slice(1) || 'png').toLowerCase()
-  try {
-    const webp = await sharp(orig).webp({ quality: 82 }).toBuffer()
-    if (webp.length > 0 && webp.length <= orig.length) {
-      buf = webp
-      ext = 'webp'
+  // Inbox videos keep their original searchable well row and must keep their original bytes.
+  if (!INBOX_VIDEOS.has(`.${ext}`)) {
+    try {
+      const webp = await sharp(orig).webp({ quality: 82 }).toBuffer()
+      if (webp.length > 0 && webp.length <= orig.length) {
+        buf = webp
+        ext = 'webp'
+      }
+    } catch {
+      /* keep original */
     }
-  } catch {
-    /* keep original */
   }
   const digest = createHash('sha256').update(buf).digest('hex')
   const id = digest.slice(0, 7)
@@ -485,7 +495,7 @@ export function wellAbsPath(root: string, vaultRoot: string | null, row: WellRow
 }
 
 /** Process any files sitting in the inbox: ingest each, then remove the inbox copy. */
-export async function drainInbox(archiveRoot: string, root: string): Promise<number> {
+export async function drainInbox(archiveRoot: string, root: string, retryWhenSettled?: () => void): Promise<number> {
   const inbox = join(root, '_inbox')
   if (!existsSync(inbox)) return 0
   cleanStaleWellTemps(root)
@@ -495,10 +505,12 @@ export async function drainInbox(archiveRoot: string, root: string): Promise<num
     const p = join(inbox, f)
     try {
       const original = fileStat(p)
-      if (!original?.isFile()) continue
-      const res = INBOX_VIDEOS.has(extname(p).toLowerCase())
-        ? await ingestVideo(archiveRoot, root, p)
-        : await ingestScreenshot(archiveRoot, root, p, 'screenshot')
+      if (!original?.isFile() || original.size === 0n) continue
+      if (Date.now() - Number(original.mtimeMs) < INBOX_SETTLE_MS) {
+        retryWhenSettled?.()
+        continue
+      }
+      const res = await ingestScreenshot(archiveRoot, root, p, 'screenshot')
       if (res && sameFile(res.stored, fileStat(join(root, res.relPath))) && sameFile(original, fileStat(p))) {
         rmSync(p, { force: true })
         n++
