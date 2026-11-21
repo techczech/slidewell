@@ -154,12 +154,11 @@ try {
     await win.keyboard.press('Escape')
     await win.waitForTimeout(200)
 
-    // Triage screen opens from the toolbar and renders (deeper scan/include flow: e2e/triage.mjs)
-    await win.locator('.titlebar-actions .tb-btn', { hasText: 'Triage' }).click()
-    await win.waitForTimeout(300)
+    // Triage is a main tab. Return to Search before checking its selection and action menu again.
+    await win.getByRole('tab', { name: 'Triage', exact: true }).click()
+    await win.waitForSelector('.triage-panel')
     triageOpensOk = (await win.locator('.triage-panel').count()) === 1
-    await win.keyboard.press('Escape')
-    await win.waitForTimeout(200)
+    await win.getByRole('tab', { name: 'Search', exact: true }).click()
 
     // Settings: the shared Settings window (own window, single instance) with the app's Requirements page;
     // the first launch moved config.json's folders into settings.json (config.json is left as the old version's file)

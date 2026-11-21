@@ -1,11 +1,11 @@
-// End-to-end: screenshot sorter, local part (ticket 06), on a COPY of a real well.
+// End-to-end: screenshot sorter, local part (ticket 06), on a prepared fixture with labelled history.
 // Trains on the labelled history (well screenshots + triage included = keep, triage excluded =
 // throwaway), writes the held-back accuracy report, sorts undecided screenshots, and checks that
 // his decisions and his files are untouched and that no network request was made (every http(s)
 // request is cancelled, so the run also proves the sorter works offline).
 //
 // Run after `npm run build` (or `npx electron-vite build`):
-//   SLIDEWELL_SORTER_SOURCE_WELL=<a well folder: triage.db, well.db, images/>   (read only)
+//   SLIDEWELL_SORTER_SOURCE_WELL=<fixture>/well   (triage.db, well.db, images/; source folders inside <fixture>)
 //   SLIDEWELL_SORTER_MODEL_DIR=<an existing embeddinggemma-2-onnx-fp16 folder>  (read only; cloned)
 //   node e2e/sorter.mjs
 // Optional: SLIDEWELL_SORTER_LIMIT (default 200; 'all' for every undecided screenshot).
@@ -13,8 +13,8 @@
 import { createScratch, launchHidden, copyFixture } from './support/scratch.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 
 const sourceWell = process.env.SLIDEWELL_SORTER_SOURCE_WELL
 const modelSrc = process.env.SLIDEWELL_SORTER_MODEL_DIR
@@ -41,6 +41,30 @@ for (const f of ['triage.db', 'well.db']) {
   if (existsSync(join(sourceWell, f))) execFileSync('/usr/bin/sqlite3', [`file:${join(sourceWell, f)}?mode=ro`, `.backup '${join(well, f)}'`])
 }
 if (existsSync(join(sourceWell, 'images'))) copyFixture(join(sourceWell, 'images'), join(well, 'images'))
+const fixtureRoot = dirname(realpathSync(sourceWell))
+const triage = new DatabaseSync(join(well, 'triage.db'))
+try {
+  const inside = (root, path) => {
+    const rel = relative(root, path)
+    return Boolean(rel && rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel))
+  }
+  const inputs = triage.prepare('SELECT DISTINCT source FROM triage_fts').all()
+  const paths = triage.prepare('SELECT DISTINCT rel_path FROM triage_fts').all()
+  if (paths.some(({ rel_path }) => typeof rel_path !== 'string' || isAbsolute(rel_path) || rel_path.split(sep).includes('..'))) {
+    throw new Error('Fixture contains a non-relative screenshot path')
+  }
+  const repoint = triage.prepare('UPDATE triage_fts SET source = ? WHERE source = ?')
+  for (const [i, { source }] of inputs.entries()) {
+    if (typeof source !== 'string' || !isAbsolute(source) || !inside(fixtureRoot, realpathSync(source))) {
+      throw new Error('Every sorter screenshot source must be inside the fixture folder')
+    }
+    const target = join(scratch, 'inputs', String(i))
+    copyFixture(source, target)
+    repoint.run(target, source)
+  }
+} finally {
+  triage.close()
+}
 // no archive, no triage sources, no vault: the app only has the copied well; background indexing paused
 writeFileSync(
   join(userData, 'config.json'),

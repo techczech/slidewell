@@ -11,7 +11,7 @@ import sharp from 'sharp'
 const scratch = createScratch('review')
 const userData = join(scratch, 'userData')
 const well = join(scratch, 'well')
-const source = join(scratch, 'source')
+const source = join(well, 'source')
 const screens = join(scratch, 'screens')
 for (const dir of [userData, well, source, screens]) mkdirSync(dir)
 writeFileSync(join(userData, 'config.json'), JSON.stringify({ wellRoot: well }))
