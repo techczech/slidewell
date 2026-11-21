@@ -8,28 +8,12 @@ import type { CloudProviderId } from '../../preload'
 import { useCloudStatus } from './sorter-hooks'
 import { day, n } from './sorter-format'
 
-export function SorterServiceSettings({ onOpenAutoSorting }: { onOpenAutoSorting: () => void }): JSX.Element {
+// Keys are added, replaced and removed in Settings › Accounts and keys (main/key-slots.ts, the same save and
+// remove as before); this page shows whether each is saved and opens that section.
+export function SorterServiceSettings({ onOpenAutoSorting, onOpenKeys }: { onOpenAutoSorting: () => void; onOpenKeys: () => void }): JSX.Element {
   const [st, setSt] = useCloudStatus()
-  const [typed, setTyped] = useState<Record<CloudProviderId, string>>({ openai: '', anthropic: '' })
-  const [keyMsg, setKeyMsg] = useState<{ provider: CloudProviderId; text: string } | null>(null)
   const [secondError, setSecondError] = useState<string | null>(null)
 
-  const saveKey = useCallback(
-    async (provider: CloudProviderId) => {
-      const r = await window.sw.cloud.setKey(provider, typed[provider])
-      setTyped((t) => ({ ...t, [provider]: '' })) // the field never keeps the key
-      setKeyMsg({ provider, text: r.ok ? 'Key saved, encrypted in the macOS keychain.' : (r.error ?? 'The key was not saved.') })
-      setSt(r.status)
-    },
-    [typed, setSt]
-  )
-  const removeKey = useCallback(
-    async (provider: CloudProviderId) => {
-      setSt(await window.sw.cloud.clearKey(provider))
-      setKeyMsg({ provider, text: 'Key removed.' })
-    },
-    [setSt]
-  )
   // Off keeps the last provider, both keys and both agreements; a provider turns the service on for it
   const choose = useCallback(async (value: 'off' | CloudProviderId) => setSt(await window.sw.cloud.setSettings(value === 'off' ? { enabled: false } : { provider: value, enabled: true })), [setSt])
   const setSecond = useCallback(
@@ -76,33 +60,12 @@ export function SorterServiceSettings({ onOpenAutoSorting }: { onOpenAutoSorting
           <div className="sr-lab">{p.company} key</div>
           <div>
             <div className="sr-row">
-              {p.hasKey ? (
-                <>
-                  <span className="pic-ready">Saved, encrypted on this Mac</span>
-                  <button className="copyref" onClick={() => void removeKey(p.id)}>
-                    Remove key
-                  </button>
-                </>
-              ) : (
-                <>
-                  <input
-                    type="password"
-                    className="sorter-cloud-key-input"
-                    autoComplete="off"
-                    spellCheck={false}
-                    placeholder={`Paste your ${p.company} API key`}
-                    value={typed[p.id]}
-                    onChange={(e) => setTyped((t) => ({ ...t, [p.id]: e.target.value }))}
-                    onKeyDown={(e) => e.key === 'Enter' && typed[p.id] && void saveKey(p.id)}
-                  />
-                  <button className="copyref" disabled={!typed[p.id].trim() || !st.encryptionAvailable} onClick={() => void saveKey(p.id)}>
-                    Save key
-                  </button>
-                </>
-              )}
+              <span className={p.hasKey ? 'pic-ready' : 'sr-help sr-none'}>{p.hasKey ? 'Saved, encrypted on this Mac' : 'No key yet'}</span>
+              <button className="copyref sorter-open-keys" onClick={onOpenKeys}>
+                {p.hasKey ? 'Replace or remove…' : 'Add key…'}
+              </button>
             </div>
             {p.id === 'anthropic' && <div className="sr-help">Haiku calls draw on the free monthly Anthropic API credits where they are available.</div>}
-            {keyMsg?.provider === p.id && <div className="sr-help sorter-cloud-key-msg">{p.company} key: {keyMsg.text}</div>}
           </div>
         </div>
       ))}

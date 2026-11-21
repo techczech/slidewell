@@ -71,7 +71,7 @@ export function installMock(): void {
   }
   const review = reviewMock()
   const mock: SwApi = {
-    app: { onOpenSettings: () => () => {} },
+    app: { onCommand: () => () => {}, runCommand: async () => {}, showInMain: async () => {}, openSettings: async () => {}, setContext: async () => {}, bindings: async () => ({}), onSettingsChanged: () => () => {} },
     picture: {
       status: async () => pictureStatus,
       estimate: async () => null,

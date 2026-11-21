@@ -77,10 +77,20 @@ const status = (win) => win.evaluate(() => window.sw.picture.status())
 // hidden run: no window visible or focused, ever (sampled at each checkpoint and on every status poll)
 let windowShown = null
 async function noteVisibility(app) {
-  const ws = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map((w) => ({ url: w.webContents.getURL().slice(0, 40), visible: w.isVisible(), focused: w.isFocused() }))).catch(() => [])
-  const bad = ws.find((w) => w.visible || w.focused)
+  const ws = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map((w) => ({ url: w.webContents.getURL(), visible: w.isVisible(), focused: w.isFocused() }))).catch(() => [])
+  // the Settings window is the one window a test opens on purpose (it has no hidden mode); the main window must stay hidden
+  const bad = ws.find((w) => (w.visible || w.focused) && !w.url.endsWith('settings.html'))
   if (bad && !windowShown) windowShown = bad
 }
+// The gear opens the one Settings window (as e2e/settings.mjs does); returns it at the Picture search page.
+async function openSettings(app, win) {
+  const [sw] = await Promise.all([app.waitForEvent('window', { timeout: 10000 }), win.locator('.titlebar-actions .tb-btn', { hasText: '⚙' }).click()])
+  await sw.waitForSelector('.bsw-root', { timeout: 10000 })
+  await sw.locator('button.bsw-nav[data-section="picture-search"]').click()
+  await sw.locator('.pic-settings h3').waitFor()
+  return sw
+}
+const closeSettings = (app) => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.webContents.getURL().endsWith('settings.html') && w.close())).catch(() => {})
 const requests = (app) => app.evaluate(() => globalThis.__requests)
 let currentApp = null
 async function waitFor(win, pred, timeoutMs, label) {
@@ -131,21 +141,20 @@ try {
     check('no model before Download', st0.model === 'absent' && !existsSync(modelDir), st0.model)
     check('no network call before Download', (await requests(app)).length === 0, JSON.stringify(await requests(app)))
   }
-  await win.locator('button[title^="Settings"]').click()
-  await win.locator('.pic-settings h3').waitFor()
+  const sw = await openSettings(app, win)
   await sleep(800) // estimate
-  const note = (await win.locator('.pic-note').textContent())?.trim()
+  const note = (await sw.locator('.pic-note').textContent())?.trim()
   out('settings note', note)
-  check('well images on by default', await win.locator('.pic-check input').isChecked())
+  check('well images on by default', await sw.locator('.pic-check input').isChecked())
   if (!keepModel) {
-    const label = (await win.locator('.pic-primary').textContent())?.trim()
+    const label = (await sw.locator('.pic-primary').textContent())?.trim()
     out('download button', label)
     check('download button', /^Download model \(\d+ MB\)$/.test(label ?? ''), label)
-    await win.screenshot({ path: join(screens, 'S2-settings-before-download.png') })
+    await sw.screenshot({ path: join(screens, 'S2-settings-before-download.png') })
     const t0 = Date.now()
-    await win.locator('.pic-primary').click()
+    await sw.locator('.pic-primary').click()
     await waitFor(win, (s) => s.model === 'downloading' && s.download?.receivedBytes > 50e6, 120000, 'download progress')
-    await win.screenshot({ path: join(screens, 'S2-settings-downloading.png') })
+    await sw.screenshot({ path: join(screens, 'S2-settings-downloading.png') })
     const reqs = await requests(app)
     // Requests: the pinned revision's resolve URLs, plus Hugging Face's own redirects/CDN (same family of hosts).
     const hfHost = (u) => /(^|\.)(huggingface\.co|hf\.co)$/.test(new URL(u).hostname)
@@ -160,7 +169,7 @@ try {
   }
   // indexing starts by itself; pause from the status bar once a few are done
   await waitFor(win, (s) => s.index.phase === 'indexing' && s.index.done >= 5, 120000, 'indexing under way')
-  await win.locator('button.copyref', { hasText: 'close' }).click()
+  await closeSettings(app) // the Settings window was left open so far; indexing carries on in the main window
   out('status bar while indexing', await statusBar(win))
   results.busyMs = await wordSearchMs(win)
   out('word search ms during indexing (median of 5)', results.busyMs)
@@ -240,15 +249,14 @@ try {
   check('more-like-this query by image id', sim.ok && sim.results.length === 3 && !sim.results.some((r) => r.id === q.results[0].id))
 
   if (!keepModel) {
-    await win.locator('button[title^="Settings"]').click()
-    await win.locator('.pic-settings h3').waitFor()
-    await win.screenshot({ path: join(screens, 'S2-settings-ready.png') })
-    await win.locator('.pic-settings button', { hasText: 'Delete model' }).click()
-    await win.locator('.pic-settings button.pic-danger').click()
+    const sw2 = await openSettings(app, win)
+    await sw2.screenshot({ path: join(screens, 'S2-settings-ready.png') })
+    await sw2.locator('.pic-settings button', { hasText: 'Delete model' }).click()
+    await sw2.locator('.pic-settings button.pic-danger').click()
     const gone = await waitFor(win, (s) => s.model === 'absent', 30000, 'model deleted')
     check('delete model from Settings', gone.model === 'absent' && !existsSync(modelDir))
     check('vectors kept after delete', vectorRows().length === rows.length + 1)
-    await win.screenshot({ path: join(screens, 'S2-settings-after-delete.png') })
+    await sw2.screenshot({ path: join(screens, 'S2-settings-after-delete.png') })
   }
 } finally {
   await app.close()

@@ -1,7 +1,9 @@
-// Triage as a main tab, the Auto sorting tab and the shortened Settings › Screenshot sorter, through the
+// Triage as a main tab, the Auto sorting tab and the Settings window's Sorting help page, through the
 // renderer mock (no Electron, no real data). The renderer runs under plain Vite in chrome-headless-shell;
 // window.sw.sorter, .cloud and .triage.list are replaced by a stateful fake with invented numbers, so the
 // tab can be shown trained, never trained and during a sort, and every command it sends can be counted.
+// The Settings window is its own page (settings.html) in the same Vite server, with the same fake and a stand-in
+// for the Settings bridge (window.bridleSettings), opened at the Sorting help page; its calls are counted on its own fake.
 //
 // Run: node e2e/auto-sorting-ui.mjs      Screenshots: only when SLIDEWELL_AUTOSORT_SCREENS names a folder
 import { createServer } from 'vite'
@@ -57,7 +59,7 @@ function installFake() {
     nightlyLimit: 300, leftTonight: 300, nextRunAt: new Date(Date.now() + 86400000).toISOString(), model: 'claude-haiku-5-5', name: 'Haiku', company: 'Anthropic', longEdge: 1456, providers, period: '30d', periods: PERIODS,
     lastRun: { at: today(14, 21), trigger: 'manual', provider: 'anthropic', local: null, asked: 58, answered: 58, keep: 10, throwaway: 7, stayedDoubtful: 41, sent: 58, settled: 17, stillUnsure: 41, skipped: null, error: null, message: 'Asked Haiku about 58 screenshots.' }
   }
-  const calls = { setAutoRetrain: [], retrainNow: [], sort: 0, train: 0, prepare: 0, send: [], cancel: 0, cloudCancel: 0, decide: 0, setSettings: [], setNightly: [], setSecond: [], list: [], decideAll: [], setAppRule: [], runPiles: [], runPage: [] }
+  const calls = { setAutoRetrain: [], retrainNow: [], sort: 0, train: 0, prepare: 0, send: [], cancel: 0, cloudCancel: 0, decide: 0, setSettings: [], setNightly: [], setSecond: [], list: [], decideAll: [], setAppRule: [], runPiles: [], runPage: [], openSettings: [], showInMain: [] }
   // --- ticket 20 (main) for ticket 21 (renderer): apps, per-app rules, sort runs. Invented numbers and titles. ---
   // one row per app: his kept / thrown away / still undecided, the built-in rule for the app name, his rule ('' = app not known)
   const apps = [
@@ -208,6 +210,8 @@ function installFake() {
         cancel: async () => { calls.cloudCancel++ },
         onStatus: (cb) => { subs.cloud.add(cb); return () => subs.cloud.delete(cb) }
       }
+      sw.app.openSettings = async (section) => { calls.openSettings.push(section) }
+      sw.app.showInMain = async (id) => { calls.showInMain.push(id) }
       const list = sw.triage.list
       // the sixth argument is the app filter (calls.list keeps every call's arguments)
       sw.triage.list = async (...a) => { calls.list.push(a); return { ...(await list(...a)), counts: { undecided: 1530, selected: 96, included: 0, excluded: 2310, total: 3888 } } }
@@ -656,28 +660,56 @@ try {
   check('"Review what it sorted" switches to Review', (await page.locator('.view-switch .scope-tab.active').innerText()).startsWith('Review'))
   await page.locator('.view-switch .scope-tab', { hasText: 'Triage' }).click()
   await page.locator('.as-side .as-link').click()
-  await page.waitForSelector('.settings-modal')
-  check('"Change in Settings" opens Settings', (await page.locator('.settings-modal').count()) === 1)
+  // "Change in Settings" asks main (window.sw.app.openSettings) to open the Settings window at a page; main is not here, so the request is what is checked
+  const asked = await fake(() => window.__fake.calls.openSettings)
+  check('"Change in Settings" opens the Settings window', asked.length === 1, JSON.stringify(asked))
+  check('"Change in Settings" opens it at Sorting help (sorter-service), where the service is chosen', asked[0] === 'sorter-service', JSON.stringify(asked))
 
-  // --- Settings › Screenshot sorter (frame S4) ---
-  const sec = page.locator('.settings-modal .sorter-settings')
+  // --- Settings window › Sorting help (frame S4): its own page, opened at that page ---
+  const sp = await browser.newPage({ viewport: { width: 1100, height: 800 } })
+  const spErrors = []
+  sp.on('pageerror', (e) => { spErrors.push(e.message); console.error('[settings error]', e.message) })
+  sp.on('console', (m) => process.env.SW_DEBUG && console.error('[settings console]', m.text()))
+  await sp.addInitScript(installFake)
+  await sp.addInitScript(() => {
+    let real
+    Object.defineProperty(window, 'sw', { configurable: true, get: () => real, set: (v) => { real = v; window.__fake.install(v) } })
+    // stand-in for the preload's bridge: the view (opened at Sorting help), no slots, and every action answering ok
+    const view = { state: { format: 'bridle-settings', version: 2, app: 'slidewell', settings: {}, keys: {}, changes: [] }, slots: [], appInfo: { name: 'SlideWell', version: 'test' }, request: { section: 'sorter-service' } }
+    window.bridleSettings = new Proxy({ view: async () => view, onChanged: () => () => {}, onSection: () => () => {} }, { get: (t, k) => (k in t ? t[k] : async () => ({ ok: true })) })
+  })
+  // the Settings page does not install the renderer mock itself (Electron's preload gives it window.sw): do it before the page's own script
+  await sp.route('**/settings.html', async (route) => {
+    const res = await route.fetch()
+    // the page's own CSP (script-src 'self') would block the inline boot line below, so the test page drops it
+    const html = (await res.text()).replace(/<meta\s+http-equiv="Content-Security-Policy"[^>]*>/, '').replace('<script type="module" src="./src/settings-main.tsx"></script>', `<script type="module">import { installMock } from '/src/sw-mock.ts'; installMock()</script><script type="module" src="./src/settings-main.tsx"></script>`)
+    await route.fulfill({ response: res, body: html })
+  })
+  await sp.goto(url + 'settings.html')
+  await sp.waitForSelector('.bsw-root')
+  const sec = sp.locator('.sorter-settings')
+  await sec.waitFor()
   await sec.scrollIntoViewIfNeeded()
   const st = await sec.innerText()
+  check('Settings window opens at Sorting help', (await sp.locator('button.bsw-nav[data-section="sorter-service"][aria-current="page"]').count()) === 1)
   check('Settings: intro, service choice, agreement, second opinions, pointer', st.includes('The sorter runs on this Mac.') && st.includes('Off') && st.includes('Luna from OpenAI') && st.includes('Haiku from Anthropic') && /You agreed on 3 Oct/.test(st) && st.includes('Second opinions') && st.includes('Training, sorting and the nightly run are in Triage → Auto sorting.'), st)
   check('Settings no longer holds training, period, sort buttons or nightly', (await sec.locator('select, .pic-primary:not(.nothing), input[type=time]').count()) === 0 && !/Train |Sort now|Sort undecided|every night/.test(st))
   check('the service control shows Haiku selected', await sec.locator('input.sorter-cloud-provider-anthropic').isChecked())
-  await shoot(page, 'auto-sorting-4-settings-full.png')
+  await shoot(sp, 'auto-sorting-4-settings-full.png')
   await sec.screenshot({ path: screens ? join(screens, 'auto-sorting-4-settings.png') : undefined })
+  const sfake = (fn, arg) => sp.evaluate(fn, arg)
   await sec.locator('input.sorter-cloud-provider-off').click()
-  check('Off is one setSettings({enabled:false})', JSON.stringify(await fake(() => window.__fake.calls.setSettings.at(-1))) === '{"enabled":false}' && !(await fake(() => window.__fake.cloud.settings.enabled)))
+  check('Off is one setSettings({enabled:false})', JSON.stringify(await sfake(() => window.__fake.calls.setSettings.at(-1))) === '{"enabled":false}' && !(await sfake(() => window.__fake.cloud.settings.enabled)))
   await sec.locator('input.sorter-cloud-provider-openai').click()
-  check('Luna is one setSettings({provider, enabled})', JSON.stringify(await fake(() => window.__fake.calls.setSettings.at(-1))) === '{"provider":"openai","enabled":true}')
+  check('Luna is one setSettings({provider, enabled})', JSON.stringify(await sfake(() => window.__fake.calls.setSettings.at(-1))) === '{"provider":"openai","enabled":true}')
   await sec.locator('input.sorter-cloud-provider-anthropic').click()
   await sec.locator('.as-switch').click()
-  check('second opinions go to setSecondOpinions', JSON.stringify(await fake(() => window.__fake.calls.setSecond)) === '[false]')
+  check('second opinions go to setSecondOpinions', JSON.stringify(await sfake(() => window.__fake.calls.setSecond)) === '[false]')
   await sec.locator('.sorter-open-auto').click()
-  await page.waitForSelector('.as-tab')
-  check('the pointer closes Settings and opens Auto sorting', (await page.locator('.settings-modal').count()) === 0 && (await page.locator('.triage-controls .scope-tab.new.active').count()) === 1)
+  // the pointer asks main to show Auto sorting in the main window (the main window's handler is App.tsx's 'open-auto-sorting' command)
+  check('the pointer asks the main window to open Auto sorting', JSON.stringify(await sfake(() => window.__fake.calls.showInMain)) === '["open-auto-sorting"]')
+  check('no page errors in the Settings window', spErrors.length === 0, spErrors.join(' | '))
+  await sp.close()
 
   // --- never trained (frame S2) ---
   await fake(() => { Object.assign(window.__fake.sorter, { report: null, canRunUnattended: false, lastRun: null, pending: { keep: 0, throwaway: 0, doubtful: 0, lastProposedAt: null } }); window.__fake.push() })

@@ -352,10 +352,10 @@ export class PictureSearchService {
 }
 
 /** IPC for Settings, the status bar and (ticket 04) the search surface. Types: src/preload/index.ts. */
-export function registerPictureSearchIpc(svc: PictureSearchService, allowed: (sender: Electron.WebContents) => boolean): void {
+export function registerPictureSearchIpc(svc: PictureSearchService, allowed: (e: Electron.IpcMainInvokeEvent) => boolean): void {
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
     ipcMain.handle(channel, (e, ...args) => {
-      if (!allowed(e.sender)) throw new Error(`${channel}: not allowed from this window`)
+      if (!allowed(e)) throw new Error(`${channel}: not allowed from this window`)
       return fn(...args)
     })
   }

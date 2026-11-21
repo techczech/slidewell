@@ -8,7 +8,7 @@
 // false). To exercise the archive features, point SLIDEWELL_SMOKE_ARCHIVE at a Core A archive; the
 // app only reads it here (search/browse/stats; the import panel is opened but never run).
 import { _electron as electron } from 'playwright'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -161,14 +161,27 @@ try {
     await win.keyboard.press('Escape')
     await win.waitForTimeout(200)
 
-    // Settings panel: lists dependency status + a link to the requirements guide
+    // Settings: the shared Settings window (own window, single instance) with the app's Requirements page;
+    // the first launch moved config.json's folders into settings.json (config.json is left as the old version's file)
+    const [settingsWin] = await Promise.all([
+      app.waitForEvent('window', { timeout: 10000 }),
+      win.locator('.titlebar-actions .tb-btn', { hasText: '⚙' }).click()
+    ])
+    await settingsWin.waitForSelector('.bsw-root', { timeout: 10000 })
+    await settingsWin.locator('[data-section="requirements"]').click()
+    await settingsWin.waitForTimeout(400)
+    const depRows = await settingsWin.locator('.sw-page-row').count()
+    const migrated = JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8'))
+    settingsOk =
+      depRows >= 4 &&
+      migrated.format === 'bridle-settings' &&
+      migrated.settings['library.wellRoot'] === config.wellRoot &&
+      existsSync(join(userData, 'settings-migration.json'))
+    // ⌘, again focuses the same window rather than opening a second
     await win.locator('.titlebar-actions .tb-btn', { hasText: '⚙' }).click()
     await win.waitForTimeout(300)
-    settingsOk =
-      (await win.locator('.settings-modal').count()) === 1 &&
-      (await win.locator('.settings-row.dep').count()) >= 4 &&
-      (await win.locator('.settings-reqlink').count()) === 1
-    await win.keyboard.press('Escape')
+    settingsOk = settingsOk && app.windows().filter((w) => w.url().endsWith('settings.html')).length === 1
+    await settingsWin.close()
     await win.waitForTimeout(200)
 
     // action menu — includes the new "See in context"

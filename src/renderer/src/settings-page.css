@@ -1,0 +1,22 @@
+/* Frame of the Settings window: a drag strip under the hidden-inset title bar, then the shared window. */
+html, body, #root { height: 100%; margin: 0; overflow: hidden; background: #ececf0; }
+#root { display: flex; flex-direction: column; }
+.sw-titlebar {
+  height: 40px; flex: none; display: flex; align-items: center; justify-content: center;
+  background: #f6f6f8; border-bottom: 1px solid #cfd1d8; -webkit-app-region: drag;
+  font: 600 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; color: #1d1d1f; user-select: none;
+}
+.bsw-root.sw-settings { flex: 1; height: auto; min-height: 0; }
+/* SlideWell's Oxford blue, from the main window's palette */
+.bsw-root.sw-settings {
+  --bsw-accent: #002147; --bsw-accent-dark: #001833; --bsw-accent-tint: #d6dde8;
+  --bsw-accent-ink: #002147; --bsw-accent-wash: #f2f5f9; --bsw-accent-hover: #e4e9f1;
+}
+/* the app's own pages (custom pages) reuse the main window's components inside the shared pane */
+.sw-page { font: 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; color: #1d1d1f; padding: 4px 2px 24px; }
+.sw-page .pic-settings { margin: 0 0 14px; }
+.sw-page-note { color: #6e6e73; margin: 0 0 12px; }
+.sw-page-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #e5e5ea; }
+.sw-page-row .grow { flex: 1; min-width: 0; }
+.sw-page-row .sub { color: #6e6e73; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-page-row.bad .sub { color: #b42318; }

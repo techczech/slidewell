@@ -1,4 +1,4 @@
-// Backlog import e2e (ticket 13, copy only): Settings → "Show what would be copied" (dry run, nothing
+// Backlog import e2e (ticket 13, copy only): Settings window › Older screenshots → "Show what would be copied" (dry run, nothing
 // changes) → "Bring them in" → copies verified; every original (Desktop and CleanShot history) untouched.
 // Everything runs under a scratch HOME in ~/Library/Caches/slidewell-dev-13/ (Desktop and CleanShot
 // history are fixtures there), with a scratch userData. Never clicks "Point CleanShot here".
@@ -44,6 +44,7 @@ const snap = (dir) => {
   const walk = (d) => {
     for (const e of readdirSync(d, { withFileTypes: true })) {
       const p = join(d, e.name)
+      if (p === userData) continue // the app's own live state (settings.json, sockets, Chromium's Singleton* links), not a user folder
       if (e.isDirectory()) walk(p)
       else o[relative(work, p)] = createHash('sha256').update(readFileSync(p)).digest('hex') + ':' + statSync(p).mtimeMs
     }
@@ -62,32 +63,35 @@ try {
   await win.waitForTimeout(800)
   r.runWithoutPlanRefused = Boolean((await win.evaluate(() => window.sw.backlog.run('not-a-plan')))?.refused)
 
-  await win.locator('.tb-btn[title^="Settings"]').click()
-  await win.waitForSelector('.settings-modal')
+  // the gear opens the one Settings window (as e2e/settings.mjs does); the backlog page is "Older screenshots"
+  const [sw] = await Promise.all([app.waitForEvent('window', { timeout: 10000 }), win.locator('.titlebar-actions .tb-btn', { hasText: '⚙' }).click()])
+  await sw.waitForSelector('.bsw-root', { timeout: 10000 })
+  await sw.locator('button.bsw-nav[data-section="backlog-import"]').click()
+  await sw.waitForSelector('button:has-text("Show what would be copied")')
   const before = snap(work)
-  await win.locator('button', { hasText: 'Show what would be copied' }).click()
-  await win.waitForSelector('[data-testid="backlog-plan"]', { timeout: 10000 })
-  const planText = await win.locator('[data-testid="backlog-plan"]').innerText()
+  await sw.locator('button', { hasText: 'Show what would be copied' }).click()
+  await sw.waitForSelector('[data-testid="backlog-plan"]', { timeout: 10000 })
+  const planText = await sw.locator('[data-testid="backlog-plan"]').innerText()
   r.planShowsCounts = planText.includes('5 files to copy') && planText.includes('Desktop screenshots') && planText.includes('CleanShot history')
   r.planShowsExamples = planText.includes('Screenshot 2026-10-08 at 10.05.01.png')
   r.planShowsRecopy = planText.includes('1 file copied before, but the copy is missing or changed')
   r.dryRunChangedNothing = JSON.stringify(snap(work)) === JSON.stringify(before)
-  await win.locator('[data-testid="backlog-plan"]').scrollIntoViewIfNeeded()
-  if (process.argv[2]) await win.locator('.settings-modal').screenshot({ path: process.argv[2].replace(/\.png$/, '-plan.png') })
+  await sw.locator('[data-testid="backlog-plan"]').scrollIntoViewIfNeeded()
+  if (process.argv[2]) await sw.locator('.bsw-root').screenshot({ path: process.argv[2].replace(/\.png$/, '-plan.png') })
 
   const csBefore = snap(media)
   const desktopBefore = snap(desktop)
-  await win.locator('button', { hasText: 'Bring them in' }).click()
-  await win.waitForSelector('[data-testid="backlog-result"]', { timeout: 20000 })
-  r.resultText = (await win.locator('[data-testid="backlog-result"]').innerText()).replace(/\s+/g, ' ')
+  await sw.locator('button', { hasText: 'Bring them in' }).click()
+  await sw.waitForSelector('[data-testid="backlog-result"]', { timeout: 20000 })
+  r.resultText = (await sw.locator('[data-testid="backlog-result"]').innerText()).replace(/\s+/g, ' ')
   r.watched = watchedFiles()
   r.noMovedFolder = !readdirSync(watched).some((n) => n.startsWith('Moved by SlideWell'))
   r.stagingEmpty = readdirSync(join(watched, '.slidewell-staging')).length === 0
   r.desktopUntouched = JSON.stringify(snap(desktop)) === JSON.stringify(desktopBefore)
-  r.desktopNote = (await win.locator('[data-testid="backlog-desktop-note"]').innerText().catch(() => '')).includes('3 originals are still on your Desktop')
+  r.desktopNote = (await sw.locator('[data-testid="backlog-desktop-note"]').innerText().catch(() => '')).includes('3 originals are still on your Desktop')
   r.cleanshotUntouched = JSON.stringify(snap(media)) === JSON.stringify(csBefore)
-  r.cleanshotOffer = (await win.locator('[data-testid="backlog-cleanshot"]').count()) === 1
-  if (process.argv[2]) await win.locator('.settings-modal').screenshot({ path: process.argv[2] })
+  r.cleanshotOffer = (await sw.locator('[data-testid="backlog-cleanshot"]').count()) === 1
+  if (process.argv[2]) await sw.locator('.bsw-root').screenshot({ path: process.argv[2] })
 
   // Triage indexes the five copies and nothing from the hidden staging folder (the post-run scan is explicit, not watcher-driven)
   let tri = []
@@ -101,9 +105,9 @@ try {
   r.cleanshotRefusesOtherFolder = Boolean((await win.evaluate((p) => window.sw.backlog.setCleanShot(p), join(work, 'elsewhere')))?.refused)
 
   // second dry run: nothing left
-  await win.locator('button', { hasText: 'Show what would be copied' }).click()
-  await win.waitForSelector('[data-testid="backlog-plan"]')
-  r.secondPlanEmpty = (await win.locator('[data-testid="backlog-plan"]').innerText()).includes('Nothing left to bring in')
+  await sw.locator('button', { hasText: 'Show what would be copied' }).click()
+  await sw.waitForSelector('[data-testid="backlog-plan"]')
+  r.secondPlanEmpty = (await sw.locator('[data-testid="backlog-plan"]').innerText()).includes('Nothing left to bring in')
 
   pass =
     r.runWithoutPlanRefused &&
@@ -122,7 +126,7 @@ try {
     r.cleanshotRefusesOtherFolder &&
     r.secondPlanEmpty
 } catch (e) {
-  r.error = String(e)
+  r.error = String(e.stack ?? e)
 } finally {
   await app.close()
   if (pass) rmSync(work, { recursive: true, force: true })
