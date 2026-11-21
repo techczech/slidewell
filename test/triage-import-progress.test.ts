@@ -1,15 +1,17 @@
 // The Triage import control's state (idle → working → done/failed), the main-side runner that emits it,
 // and the real promote loop's progress order on scratch folders with invented file names.
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest'
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { IDLE, adoptStatus, applySnapshot, failureMessage, importButtonLabel, importLine, startClick, type ImportSnapshot } from '../src/main/triage-import-progress'
 import { createImportRunner } from '../src/main/triage-import-run'
 
 vi.mock('../src/main/well', () => ({
   ocrImage: async () => '',
-  ingestScreenshot: async (_a: string, _w: string, p: string) => (p.includes('broken') ? null : { id: `id-${p.slice(-6)}`, relPath: `images/${p.slice(-6)}`, created: true, sourceHash: 'x' }),
+  ingestScreenshot: async (_a: string, _w: string, p: string) => {
+    if (p.includes('throws')) throw new Error('synthetic disk failure')
+    return p.includes('broken') ? null : { id: `id-${p.slice(-6)}`, relPath: `images/${p.slice(-6)}`, created: true, sourceHash: 'x' }
+  },
   ingestVideo: async () => null,
   makePoster: async () => false,
   recordWellSource: async () => undefined
@@ -104,16 +106,16 @@ describe('import runner (main)', () => {
   })
 })
 
-const SCRATCH = join(homedir(), 'Library', 'Caches', 'slidewell-dev-triage-progress', 'vitest')
-let n = 0
+const dirs: string[] = []
 let dir = ''
 beforeEach(() => {
-  dir = join(SCRATCH, `${process.pid}-${n++}`)
-  rmSync(dir, { recursive: true, force: true })
-  mkdirSync(join(dir, 'Shots'), { recursive: true })
-  mkdirSync(join(dir, 'well'), { recursive: true })
+  mkdirSync('out', { recursive: true })
+  dir = mkdtempSync(join(process.cwd(), 'out', 'triage-progress-test-'))
+  dirs.push(dir)
+  mkdirSync(join(dir, 'Shots'))
+  mkdirSync(join(dir, 'well'))
 })
-afterAll(() => rmSync(SCRATCH, { recursive: true, force: true }))
+afterAll(() => { for (const path of dirs) rmSync(path, { recursive: true, force: true }) })
 
 describe('promote loop progress (real triage db, fake files)', () => {
   it('reports 0 then one step per file, in order, and the counts match', async () => {
@@ -131,3 +133,27 @@ describe('promote loop progress (real triage db, fake files)', () => {
     expect(r).toEqual({ imported: 3, skipped: 1, gated: 0 })
   }, 30_000)
 })
+
+it('counts and names a failed item and continues the rest of the batch', async () => {
+  const src = realpathSync(join(dir, 'Shots'))
+  const well = join(dir, 'well')
+  const failed = join(src, 'throws.png')
+  const good = join(src, 'good.png')
+  writeFileSync(failed, 'failed media')
+  // Make the failing row sort first by content hash.
+  writeFileSync(good, 'healthy media 0')
+  await scanTriageSource('/nonexistent', well, src)
+  const { query } = await import('../src/main/sqlite')
+  const hashes = (await query<{ hash: string; rel_path: string }>(join(well, 'triage.db'), 'SELECT hash, rel_path FROM triage_fts ORDER BY hash'))
+  expect(hashes[0].rel_path).toBe('throws.png')
+  for (const row of hashes) await setTriageDecision('/nonexistent', well, src, row.hash, 'select')
+  const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    expect(await importSelectedTriage('/nonexistent', well, src)).toEqual({ imported: 1, skipped: 1, gated: 0 })
+    expect(log.mock.calls.some(([line]) => typeof line === 'string' && line.includes('import failed') && line.includes('throws.png'))).toBe(true)
+    expect(existsSync(failed)).toBe(true)
+    expect(existsSync(good)).toBe(true)
+  } finally {
+    log.mockRestore()
+  }
+}, 30_000)
