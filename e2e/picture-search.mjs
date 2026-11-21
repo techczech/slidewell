@@ -6,28 +6,25 @@
 //   SLIDEWELL_PICTURE_SAMPLE=<a Core A archive folder, e.g. a 50-slide sample> \
 //   SLIDEWELL_PICTURE_EXPECT='slide:<presentation id>#<order>' \   (optional: must rank first)
 //   node e2e/picture-search.mjs
-// Optional: SLIDEWELL_PICTURE_QUERY (default 'robots in a classroom'), SLIDEWELL_PICTURE_SCRATCH
-// (default ~/Library/Caches/slidewell-e2e-picture-search), SLIDEWELL_PICTURE_KEEP_MODEL=1 (reuse a model
-// already in the scratch profile: skips the download and delete steps).
-//
-// Isolation: own --user-data-dir, own HOME, own well folder, all under the scratch folder. The
-// sample archive is only read. The first run downloads the real model (~910 MB) into the scratch
-// profile; nothing is written anywhere else.
-import { _electron as electron } from 'playwright'
+// Optional: SLIDEWELL_PICTURE_QUERY and SLIDEWELL_PICTURE_MODEL_DIR (a verified model fixture;
+// supplying one skips download and delete). The archive and model are copied into the temporary run.
+import { createScratch, launchHidden, copyFixture } from './support/scratch.mjs'
 import { DatabaseSync } from 'node:sqlite'
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync, copyFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, writeFileSync, copyFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
 
-const sample = process.env.SLIDEWELL_PICTURE_SAMPLE
-if (!sample || !existsSync(join(sample, 'extracted'))) {
+const fixture = process.env.SLIDEWELL_PICTURE_SAMPLE
+if (!fixture || !existsSync(join(fixture, 'extracted'))) {
   console.error('Set SLIDEWELL_PICTURE_SAMPLE to an archive folder that has extracted/<id>/renders/.')
   process.exit(2)
 }
 const expectId = process.env.SLIDEWELL_PICTURE_EXPECT || null
 const queryText = process.env.SLIDEWELL_PICTURE_QUERY || 'robots in a classroom'
-const keepModel = process.env.SLIDEWELL_PICTURE_KEEP_MODEL === '1'
-const scratch = process.env.SLIDEWELL_PICTURE_SCRATCH || join(homedir(), 'Library', 'Caches', 'slidewell-e2e-picture-search')
+const modelFixture = process.env.SLIDEWELL_PICTURE_MODEL_DIR
+const keepModel = Boolean(modelFixture)
+const scratch = createScratch('picture')
+const sample = join(scratch, 'archive')
+copyFixture(fixture, sample)
 const userData = join(scratch, 'userData')
 const home = join(scratch, 'home')
 const well = join(scratch, 'well')
@@ -35,12 +32,8 @@ const screens = join(scratch, 'screens')
 const modelDir = join(userData, 'models', 'embeddinggemma-2-onnx-fp16')
 const storeFile = join(well, 'picture-search.db')
 
-// fresh profile and store every run (the model folder survives only with KEEP_MODEL)
-rmSync(well, { recursive: true, force: true })
-rmSync(home, { recursive: true, force: true })
-rmSync(join(userData, 'config.json'), { force: true })
-if (!keepModel) rmSync(join(userData, 'models'), { recursive: true, force: true })
 for (const d of [userData, home, well, screens]) mkdirSync(d, { recursive: true })
+if (modelFixture) copyFixture(modelFixture, modelDir)
 writeFileSync(join(userData, 'config.json'), JSON.stringify({ archiveRoot: sample, wellRoot: well, othersArchiveRoot: join(scratch, 'others') }), 'utf8')
 
 const results = {}
@@ -53,25 +46,30 @@ const FILTERS = { owner: 'all', era: 'all', category: '', deck: '', role: 'conte
 
 async function launch() {
   // SLIDEWELL_E2E_HIDDEN: no window is shown and nothing takes focus (screenshots still render)
-  const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home, SLIDEWELL_E2E_HIDDEN: '1' } })
-  // Record every http(s) request the app makes from here on (net.fetch goes through this session).
-  await app.evaluate(({ session }) => {
-    globalThis.__requests = []
-    session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (d, cb) => {
-      globalThis.__requests.push(d.url)
-      cb({})
+  const app = await launchHidden(userData, home)
+  try {
+    // Record every http(s) request the app makes from here on (net.fetch goes through this session).
+    await app.evaluate(({ session }) => {
+      globalThis.__requests = []
+      session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (d, cb) => {
+        globalThis.__requests.push(d.url)
+        cb({})
+      })
     })
-  })
-  // the main window, not the hidden picture-search window (swembed://), which may open first
-  let win = null
-  for (let i = 0; i < 300 && !win; i++) {
-    win = app.windows().find((w) => !w.url().startsWith('swembed:') && w.url() !== 'about:blank') ?? null
-    if (!win) await sleep(100)
+    // the main window, not the hidden picture-search window (swembed://), which may open first
+    let win = null
+    for (let i = 0; i < 300 && !win; i++) {
+      win = app.windows().find((w) => !w.url().startsWith('swembed:') && w.url() !== 'about:blank') ?? null
+      if (!win) await sleep(100)
+    }
+    if (!win) throw new Error('main window did not open')
+    currentApp = app
+    await win.waitForLoadState('domcontentloaded')
+    return { app, win }
+  } catch (error) {
+    await app.close().catch(() => undefined)
+    throw error
   }
-  if (!win) throw new Error('main window did not open')
-  currentApp = app
-  await win.waitForLoadState('domcontentloaded')
-  return { app, win }
 }
 const status = (win) => win.evaluate(() => window.sw.picture.status())
 // hidden run: no window visible or focused, ever (sampled at each checkpoint and on every status poll)

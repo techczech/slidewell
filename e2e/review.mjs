@@ -1,36 +1,48 @@
-// End-to-end: the Review tab in the real app, hidden, against a scratch profile + scratch well (a copy
-// of a triage.db that holds sorter proposals). Keep / undo / Throwaway / undo / both piles, checking the
-// scratch database after each step and that the original file behind the card is untouched.
-//
-// Run after `npm run build`:
-//   SLIDEWELL_REVIEW_SCRATCH=<folder holding userData/config.json (wellRoot inside it), well/, home/> node e2e/review.mjs
-// Screenshots go to <scratch>/screens. Every launch is SLIDEWELL_E2E_HIDDEN=1 with its own user-data-dir;
-// never touches the installed app. Originals are only read (stat + hash).
-import { _electron as electron } from 'playwright'
+// End-to-end: Review in the real app with three synthetic screenshot proposals.
+// Keep, Throwaway, Undo and both piles, checking the scratch database and original bytes.
+// Run: npm run test:review
+import { createScratch, launchHidden } from './support/scratch.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import sharp from 'sharp'
 
-const scratch = process.env.SLIDEWELL_REVIEW_SCRATCH && resolve(process.env.SLIDEWELL_REVIEW_SCRATCH)
-const cfgPath = scratch && join(scratch, 'userData', 'config.json')
-if (!scratch || !existsSync(cfgPath)) {
-  console.error('Set SLIDEWELL_REVIEW_SCRATCH to a folder with userData/config.json, well/ and home/.')
-  process.exit(2)
-}
-const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
-if (!cfg.wellRoot || !resolve(cfg.wellRoot).startsWith(scratch + '/')) {
-  console.error('Refusing: the scratch config must point wellRoot inside the scratch folder.')
-  process.exit(2)
-}
-if (cfg.screenshotRoot || (cfg.captureSources ?? []).length) {
-  console.error('Refusing: the scratch config must name no source folders (the app would scan them).')
-  process.exit(2)
-}
-const well = cfg.wellRoot
+const scratch = createScratch('review')
+const userData = join(scratch, 'userData')
+const well = join(scratch, 'well')
+const source = join(scratch, 'source')
 const screens = join(scratch, 'screens')
-mkdirSync(screens, { recursive: true })
-mkdirSync(join(scratch, 'home'), { recursive: true })
+for (const dir of [userData, well, source, screens]) mkdirSync(dir)
+writeFileSync(join(userData, 'config.json'), JSON.stringify({ wellRoot: well }))
+const fixtureDb = new DatabaseSync(join(well, 'triage.db'))
+try {
+  fixtureDb.exec(`
+    CREATE VIRTUAL TABLE triage_fts USING fts5(hash UNINDEXED, kind UNINDEXED, rel_path UNINDEXED, filename, ext UNINDEXED,
+      size UNINDEXED, mtime UNINDEXED, poster_rel UNINDEXED, offline UNINDEXED, ocr_text, scanned_at UNINDEXED,
+      source UNINDEXED, taken_at UNINDEXED, app, window_title);
+    CREATE TABLE triage_decisions (hash TEXT PRIMARY KEY, state TEXT NOT NULL, decided_at TEXT, well_id TEXT);
+    CREATE TABLE sorter_proposals (hash TEXT PRIMARY KEY, proposal TEXT NOT NULL, confidence REAL NOT NULL, p_keep REAL NOT NULL,
+      reason TEXT NOT NULL, rule TEXT, sorter_version TEXT NOT NULL, model_id TEXT, proposed_at TEXT NOT NULL,
+      throwaway_since TEXT, answered_at TEXT, answer TEXT, decided_by TEXT);
+  `)
+  const addShot = fixtureDb.prepare(`INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, offline, source, taken_at)
+    VALUES (?, 'image', ?, ?, 'png', ?, ?, '0', ?, ?)`)
+  const propose = fixtureDb.prepare(`INSERT INTO sorter_proposals (hash, proposal, confidence, p_keep, reason, sorter_version, proposed_at)
+    VALUES (?, 'doubtful', 0.6, 0.4, 'Synthetic proposal for Review', 'fixture', ?)`)
+  for (const [index, colour] of ['#1e40af', '#9a3412', '#047857'].entries()) {
+    const name = `sample-${index}.png`
+    const path = join(source, name)
+    const bytes = await sharp({ create: { width: 640, height: 400, channels: 3, background: colour } }).png().toBuffer()
+    writeFileSync(path, bytes)
+    const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 12)
+    const when = new Date(Date.now() - index * 60_000).toISOString()
+    addShot.run(hash, name, name, String(bytes.length), String(Math.round(statSync(path).mtimeMs)), source, when)
+    propose.run(hash, when)
+  }
+} finally {
+  fixtureDb.close()
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failed = 0
 const check = (name, ok, detail = '') => {
@@ -54,7 +66,7 @@ const fingerprint = (p) => {
 }
 const decisionsBefore = db((d) => d.prepare('SELECT COUNT(*) AS n FROM triage_decisions').get().n)
 
-const app = await electron.launch({ args: ['.', `--user-data-dir=${join(scratch, 'userData')}`], env: { ...process.env, HOME: join(scratch, 'home'), SLIDEWELL_E2E_HIDDEN: '1' } })
+const app = await launchHidden(userData, join(scratch, 'home'))
 try {
   let win = null
   for (let i = 0; i < 300 && !win; i++) {

@@ -1,19 +1,23 @@
 // End-to-end: look-alike groups in search ("N versions" cards, collapsed and expanded).
-// Needs a scratch profile (copies only): <scratch>/userData/config.json pointing at <scratch>/well, whose
-// picture-search.db already holds well-image vectors (the model is not needed for grouping).
+// Needs a fixture folder with well/picture-search.db holding well-image vectors.
+// The model is not needed for grouping.
 //
 // Run after `npm run build`:
 //   SLIDEWELL_LA_SCRATCH=<scratch> [SLIDEWELL_LA_QUERY=drop] node e2e/look-alike.mjs
 // Hidden run (SLIDEWELL_E2E_HIDDEN=1); screenshots go to <scratch>/screens. Never touches the installed app.
-import { _electron as electron } from 'playwright'
-import { existsSync, mkdirSync } from 'node:fs'
+import { createScratch, launchHidden, copyFixture } from './support/scratch.mjs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const scratch = process.env.SLIDEWELL_LA_SCRATCH
-if (!scratch || !existsSync(join(scratch, 'userData', 'config.json'))) {
-  console.error('Set SLIDEWELL_LA_SCRATCH to a folder with userData/config.json, well/ and home/.')
+const fixture = process.env.SLIDEWELL_LA_SCRATCH
+if (!fixture || !existsSync(join(fixture, 'well', 'picture-search.db'))) {
+  console.error('Set SLIDEWELL_LA_SCRATCH to a fixture folder with well/picture-search.db.')
   process.exit(2)
 }
+const scratch = createScratch('look')
+copyFixture(join(fixture, 'well'), join(scratch, 'well'))
+mkdirSync(join(scratch, 'userData'))
+writeFileSync(join(scratch, 'userData', 'config.json'), JSON.stringify({ wellRoot: join(scratch, 'well') }))
 const query = process.env.SLIDEWELL_LA_QUERY || 'drop'
 const screens = join(scratch, 'screens')
 mkdirSync(screens, { recursive: true })
@@ -24,7 +28,7 @@ const check = (name, ok, detail = '') => {
   if (!ok) failed++
 }
 
-const app = await electron.launch({ args: ['.', `--user-data-dir=${join(scratch, 'userData')}`], env: { ...process.env, HOME: join(scratch, 'home'), SLIDEWELL_E2E_HIDDEN: '1' } })
+const app = await launchHidden(join(scratch, 'userData'), join(scratch, 'home'))
 try {
   let win = null
   for (let i = 0; i < 300 && !win; i++) {

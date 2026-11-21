@@ -38,17 +38,16 @@
 // interception installed from this script in the main process (protocol.handle); main's native
 // consent dialog (dialog.showMessageBox) is replaced the same way, answering from a queue and
 // recording what it showed. The app's own code has no stub switch. Nothing goes to the real network.
-import { _electron as electron } from 'playwright'
+import { createScratch, launchHidden } from './support/scratch.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { homedir } from 'node:os'
 import sharp from 'sharp'
 
 const repo = resolve(import.meta.dirname, '..')
-const scratch = resolve(process.env.SLIDEWELL_CLOUD_SCRATCH || join(homedir(), 'Library', 'Caches', 'slidewell-e2e-sorter-cloud'))
+const scratch = createScratch('cloud')
 const screens = resolve(process.env.SLIDEWELL_CLOUD_SCREENS || join(scratch, 'screens'))
 const FAKE_KEY = 'sk-test-E2ELEAKCHECK-0123456789abcdefghijklmnopqrstuv'
 const FAKE_ANT_KEY = 'sk-ant-api03-E2EANTLEAKCHECK-0123456789abcdefghijklmn'
@@ -62,7 +61,6 @@ const check = (name, ok, detail = '') => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // --- scratch profile + synthetic well ---
-for (const d of ['userData', 'home', 'well', 'source']) rmSync(join(scratch, d), { recursive: true, force: true })
 const userData = join(scratch, 'userData')
 const well = join(scratch, 'well')
 const source = join(scratch, 'source')
@@ -183,10 +181,9 @@ const stubUrl = `http://127.0.0.1:${server.address().port}`
 console.log(`stub: ${stubUrl}`)
 
 const output = []
-const app = await electron.launch({
-  args: ['.', `--user-data-dir=${userData}`, '--use-mock-keychain'],
-  cwd: repo,
-  env: { ...process.env, HOME: join(scratch, 'home'), SLIDEWELL_E2E_HIDDEN: '1' }
+const app = await launchHidden(userData, join(scratch, 'home'), { cwd: repo, args: ['--use-mock-keychain'] }).catch((error) => {
+  server.close()
+  throw error
 })
 app.process().stdout?.on('data', (d) => output.push(String(d)))
 app.process().stderr?.on('data', (d) => output.push(String(d)))

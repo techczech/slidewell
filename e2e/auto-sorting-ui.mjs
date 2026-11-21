@@ -248,11 +248,12 @@ function installFake() {
 }
 
 const server = await createServer({ configFile: false, root, plugins: [react()], logLevel: 'error', server: { host: '127.0.0.1', port: 0 } })
-await server.listen()
-const url = server.resolvedUrls.local[0]
-const browser = await chromium.launch({ headless: true }) // Playwright's chrome-headless-shell, never an installed Chrome
-console.log(`browser: ${browser.version()} (headless shell)`)
+let browser
 try {
+  await server.listen()
+  const url = server.resolvedUrls.local[0]
+  browser = await chromium.launch({ headless: true })
+  console.log(`browser: ${browser.version()} (headless shell)`)
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 })
   const errors = []
   page.on('pageerror', (e) => errors.push(e.message))
@@ -734,8 +735,11 @@ try {
 
   check('no page errors', errors.length === 0, errors.join(' | '))
 } finally {
-  await browser.close()
-  await server.close()
+  try {
+    await browser?.close()
+  } finally {
+    await server.close()
+  }
 }
 console.log(failed ? `${failed} FAILED` : 'ALL PASSED')
 process.exit(failed ? 1 : 0)

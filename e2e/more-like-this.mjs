@@ -4,17 +4,21 @@
 // Run after `npm run build`:
 //   SLIDEWELL_MLT_SCRATCH=<folder holding userData/ (with models/), well/, home/ and sample-archive/> \
 //   node e2e/more-like-this.mjs
-// Screenshots go to <scratch>/screens (hidden run). Every launch is SLIDEWELL_E2E_HIDDEN=1 with its own
+// Screenshots use the temporary run folder (hidden run). Every launch is SLIDEWELL_E2E_HIDDEN=1 with its own
 // user-data-dir; never touches the installed app.
-import { _electron as electron } from 'playwright'
-import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { createScratch, launchHidden, copyFixture } from './support/scratch.mjs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const scratch = process.env.SLIDEWELL_MLT_SCRATCH
-if (!scratch || !existsSync(join(scratch, 'userData', 'models'))) {
+const fixture = process.env.SLIDEWELL_MLT_SCRATCH
+if (!fixture || !existsSync(join(fixture, 'userData', 'models'))) {
   console.error('Set SLIDEWELL_MLT_SCRATCH to a folder with userData/models, well/ and sample-archive/.')
   process.exit(2)
 }
+const scratch = createScratch('more')
+copyFixture(join(fixture, 'well'), join(scratch, 'well'))
+copyFixture(join(fixture, 'userData', 'models'), join(scratch, 'userData', 'models'))
+copyFixture(join(fixture, 'sample-archive'), join(scratch, 'sample-archive'))
 const query = process.env.SLIDEWELL_MLT_QUERY || 'research'
 const screens = join(scratch, 'screens')
 mkdirSync(screens, { recursive: true })
@@ -26,25 +30,27 @@ const check = (name, ok, detail = '') => {
 }
 function profile(name) {
   const userData = join(scratch, name === 'main' ? 'userData' : name)
-  if (name !== 'main') {
-    rmSync(userData, { recursive: true, force: true })
-    mkdirSync(userData, { recursive: true })
-  }
+  mkdirSync(userData, { recursive: true })
   writeFileSync(join(userData, 'config.json'), JSON.stringify({ archiveRoot: join(scratch, 'sample-archive'), wellRoot: join(scratch, 'well'), othersArchiveRoot: join(scratch, 'others') }), 'utf8')
   return userData
 }
 async function launch(userData) {
   const home = join(scratch, 'home')
   mkdirSync(home, { recursive: true })
-  const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home, SLIDEWELL_E2E_HIDDEN: '1' } })
-  let win = null
-  for (let i = 0; i < 300 && !win; i++) {
-    win = app.windows().find((w) => !w.url().startsWith('swembed:') && w.url() !== 'about:blank') ?? null
-    if (!win) await sleep(100)
+  const app = await launchHidden(userData, home)
+  try {
+    let win = null
+    for (let i = 0; i < 300 && !win; i++) {
+      win = app.windows().find((w) => !w.url().startsWith('swembed:') && w.url() !== 'about:blank') ?? null
+      if (!win) await sleep(100)
+    }
+    if (!win) throw new Error('main window did not open')
+    await win.waitForLoadState('domcontentloaded')
+    return { app, win }
+  } catch (error) {
+    await app.close().catch(() => undefined)
+    throw error
   }
-  if (!win) throw new Error('main window did not open')
-  await win.waitForLoadState('domcontentloaded')
-  return { app, win }
 }
 async function openInspectorOnFirstSlide(win) {
   await win.locator('.filterbar select').nth(0).selectOption('all') // the sample's presentations have no owner recorded

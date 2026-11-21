@@ -30,12 +30,13 @@ const dayWord = (iso) => {
 }
 
 const server = await createServer({ configFile: false, root, plugins: [react()], logLevel: 'error', server: { host: '127.0.0.1', port: 0 } })
-await server.listen()
-const url = server.resolvedUrls.local[0]
 // headless: true runs Playwright's chrome-headless-shell build, never an installed Chrome
-const browser = await chromium.launch({ headless: true })
-console.log(`browser: ${browser.version()} (headless shell)`)
+let browser
 try {
+  await server.listen()
+  const url = server.resolvedUrls.local[0]
+  browser = await chromium.launch({ headless: true })
+  console.log(`browser: ${browser.version()} (headless shell)`)
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
   const errors = []
   page.on('pageerror', (e) => errors.push(e.message))
@@ -1046,8 +1047,11 @@ try {
   check('Empty Bin hid all 602', (await big.evaluate(() => window.sw.review.piles())).bin.total === 0)
   check('no page errors at scale', errors.length === 0, errors.join(' | '))
 } finally {
-  await browser.close()
-  await server.close()
+  try {
+    await browser?.close()
+  } finally {
+    await server.close()
+  }
 }
 console.log(failed ? `${failed} FAILED` : 'all passed')
 process.exit(failed ? 1 : 0)

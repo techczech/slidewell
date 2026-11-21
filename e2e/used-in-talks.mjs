@@ -2,20 +2,14 @@
 // SlideWell on a scratch profile, adds an image reference to the talk, relaunches, and checks the
 // From chip, the card line and the inspector's Used in box. The fixture vault is the only thing written.
 //
-// Run after `npm run build`:
-//   SLIDEWELL_UIT_SCRATCH=<empty scratch folder outside the repo> node e2e/used-in-talks.mjs
-// Screenshots go to <scratch>/screens. Hidden run (SLIDEWELL_E2E_HIDDEN=1), own HOME and user-data-dir.
-import { _electron as electron } from 'playwright'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+// Run: npm run test:used-in-talks. Hidden run with a temporary HOME and userData.
+import { createScratch, launchHidden } from './support/scratch.mjs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import sharp from 'sharp'
 
-const scratch = process.env.SLIDEWELL_UIT_SCRATCH
-if (!scratch) {
-  console.error('Set SLIDEWELL_UIT_SCRATCH to a scratch folder outside the repo.')
-  process.exit(2)
-}
-const archive = process.env.SLIDEWELL_UIT_ARCHIVE || join(scratch, 'no-archive')
+const scratch = createScratch('talks')
+const archive = join(scratch, 'no-archive')
 const screens = join(scratch, 'screens')
 const vault = join(scratch, 'vault')
 const userData = join(scratch, 'userData')
@@ -27,7 +21,6 @@ const check = (name, ok, detail = '') => {
   if (!ok) failed++
 }
 
-for (const d of [vault, userData, home, join(scratch, 'well')]) rmSync(d, { recursive: true, force: true })
 for (const d of [join(vault, '_assets'), join(vault, 'sample-talk'), userData, home, screens]) mkdirSync(d, { recursive: true })
 for (const [id, rgb] of [['aaaaaaa', '#2b6cb0'], ['bbbbbbb', '#c05621']]) {
   await sharp({ create: { width: 640, height: 400, channels: 3, background: rgb } }).webp().toFile(join(vault, '_assets', `img-${id}.webp`))
@@ -39,15 +32,20 @@ writeFileSync(talk, talkText(''))
 writeFileSync(join(userData, 'config.json'), JSON.stringify({ archiveRoot: archive, wellRoot: join(scratch, 'well'), othersArchiveRoot: join(scratch, 'others'), vaultRoot: vault }), 'utf8')
 
 async function launch() {
-  const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home, SLIDEWELL_E2E_HIDDEN: '1' } })
-  let win = null
-  for (let i = 0; i < 300 && !win; i++) {
-    win = app.windows().find((w) => !w.url().startsWith('swembed:') && w.url() !== 'about:blank') ?? null
-    if (!win) await sleep(100)
+  const app = await launchHidden(userData, home)
+  try {
+    let win = null
+    for (let i = 0; i < 300 && !win; i++) {
+      win = app.windows().find((w) => !w.url().startsWith('swembed:') && w.url() !== 'about:blank') ?? null
+      if (!win) await sleep(100)
+    }
+    if (!win) throw new Error('main window did not open')
+    await win.waitForLoadState('domcontentloaded')
+    return { app, win }
+  } catch (error) {
+    await app.close().catch(() => undefined)
+    throw error
   }
-  if (!win) throw new Error('main window did not open')
-  await win.waitForLoadState('domcontentloaded')
-  return { app, win }
 }
 const filters = { owner: 'all', era: 'all', category: '', deck: '', role: 'content', cluster: true, from: 'all', kind: 'all', type: 'images', library: 'mine' }
 async function untilCounts(win, pred, ms = 60000) {

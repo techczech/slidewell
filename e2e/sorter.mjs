@@ -8,20 +8,13 @@
 //   SLIDEWELL_SORTER_SOURCE_WELL=<a well folder: triage.db, well.db, images/>   (read only)
 //   SLIDEWELL_SORTER_MODEL_DIR=<an existing embeddinggemma-2-onnx-fp16 folder>  (read only; cloned)
 //   node e2e/sorter.mjs
-// Optional: SLIDEWELL_SORTER_SCRATCH (default ~/Library/Caches/slidewell-e2e-sorter),
-//   SLIDEWELL_SORTER_LIMIT (undecided screenshots to sort; default 200; 'all' for every one),
-//   SLIDEWELL_SORTER_RECOPY=0 (keep the scratch databases from the last run).
-//
-// Isolation: own --user-data-dir, own HOME, own well folder under the scratch folder. The source
-// well's databases are copied with sqlite3 .backup on a read-only connection; its images are cloned.
-// Triage screenshots are read in place (their source folder is only read). Picture vectors are kept
-// in the scratch well between runs as a cache.
-import { _electron as electron } from 'playwright'
+// Optional: SLIDEWELL_SORTER_LIMIT (default 200; 'all' for every undecided screenshot).
+// Databases, images and the model are copied into a temporary run folder. Use disposable fixtures.
+import { createScratch, launchHidden, copyFixture } from './support/scratch.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
 
 const sourceWell = process.env.SLIDEWELL_SORTER_SOURCE_WELL
 const modelSrc = process.env.SLIDEWELL_SORTER_MODEL_DIR
@@ -29,10 +22,9 @@ if (!sourceWell || !existsSync(join(sourceWell, 'triage.db'))) {
   console.error('Set SLIDEWELL_SORTER_SOURCE_WELL to a well folder with triage.db.')
   process.exit(2)
 }
-const scratch = process.env.SLIDEWELL_SORTER_SCRATCH || join(homedir(), 'Library', 'Caches', 'slidewell-e2e-sorter')
+const scratch = createScratch('sorter')
 const limitEnv = process.env.SLIDEWELL_SORTER_LIMIT || '200'
 const limit = limitEnv === 'all' ? undefined : Number(limitEnv)
-const recopy = process.env.SLIDEWELL_SORTER_RECOPY !== '0'
 const userData = join(scratch, 'userData')
 const home = join(scratch, 'home')
 const well = join(scratch, 'well')
@@ -40,21 +32,15 @@ const screens = join(scratch, 'screens')
 const modelDir = join(userData, 'models', 'embeddinggemma-2-onnx-fp16')
 
 for (const d of [userData, home, well, screens, join(userData, 'models')]) mkdirSync(d, { recursive: true })
-if (!existsSync(join(modelDir, 'verified.json'))) {
-  if (!modelSrc || !existsSync(join(modelSrc, 'verified.json'))) {
-    console.error('Set SLIDEWELL_SORTER_MODEL_DIR to a verified embeddinggemma-2-onnx-fp16 folder (nothing is downloaded).')
-    process.exit(2)
-  }
-  execFileSync('cp', ['-cR', modelSrc, join(userData, 'models')]) // APFS clone, no extra space
+if (!modelSrc || !existsSync(join(modelSrc, 'verified.json'))) {
+  console.error('Set SLIDEWELL_SORTER_MODEL_DIR to a verified embeddinggemma-2-onnx-fp16 folder (nothing is downloaded).')
+  process.exit(2)
 }
-if (recopy) {
-  for (const f of ['triage.db', 'well.db']) {
-    rmSync(join(well, f), { force: true })
-    if (existsSync(join(sourceWell, f))) execFileSync('/usr/bin/sqlite3', [`file:${join(sourceWell, f)}?mode=ro`, `.backup '${join(well, f).replace(/'/g, "''")}'`])
-  }
-  rmSync(join(well, 'images'), { recursive: true, force: true })
-  if (existsSync(join(sourceWell, 'images'))) execFileSync('cp', ['-cR', join(sourceWell, 'images'), well])
+copyFixture(modelSrc, modelDir)
+for (const f of ['triage.db', 'well.db']) {
+  if (existsSync(join(sourceWell, f))) execFileSync('/usr/bin/sqlite3', [`file:${join(sourceWell, f)}?mode=ro`, `.backup '${join(well, f)}'`])
 }
+if (existsSync(join(sourceWell, 'images'))) copyFixture(join(sourceWell, 'images'), join(well, 'images'))
 // no archive, no triage sources, no vault: the app only has the copied well; background indexing paused
 writeFileSync(
   join(userData, 'config.json'),
@@ -84,7 +70,7 @@ const readDb = (sql) => {
 
 const decisionsBefore = JSON.stringify(readDb('SELECT hash, state, decided_at, well_id FROM triage_decisions ORDER BY hash'))
 
-const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home, SLIDEWELL_E2E_HIDDEN: '1' } })
+const app = await launchHidden(userData, home)
 try {
   // offline: record and CANCEL every http(s) request from here on
   await app.evaluate(({ session }) => {

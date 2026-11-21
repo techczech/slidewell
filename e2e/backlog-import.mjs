@@ -1,19 +1,16 @@
 // Backlog import e2e (ticket 13, copy only): Settings window › Older screenshots → "Show what would be copied" (dry run, nothing
 // changes) → "Bring them in" → copies verified; every original (Desktop and CleanShot history) untouched.
-// Everything runs under a scratch HOME in ~/Library/Caches/slidewell-dev-13/ (Desktop and CleanShot
-// history are fixtures there), with a scratch userData. Never clicks "Point CleanShot here".
+// Desktop and CleanShot history are fixtures under a temporary HOME and userData. Never clicks "Point CleanShot here".
 // Run: `npx electron-vite build && node e2e/backlog-import.mjs [screenshot.png]`.
-import { _electron as electron } from 'playwright'
+import { createScratch, launchHidden } from './support/scratch.mjs'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 
 const out = (o) => console.log(JSON.stringify(o))
 const PNG = (seed) => Buffer.concat([Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'), Buffer.from(seed)])
 
-const work = join(homedir(), 'Library', 'Caches', 'slidewell-dev-13', `e2e-${process.pid}`)
-rmSync(work, { recursive: true, force: true })
+const work = createScratch('backlog-import')
 const home = join(work, 'home')
 const desktop = join(home, 'Desktop')
 const media = join(home, 'Library', 'Application Support', 'CleanShot', 'media')
@@ -54,7 +51,7 @@ const snap = (dir) => {
 }
 const watchedFiles = () => readdirSync(watched, { withFileTypes: true }).filter((e) => e.isFile() && !e.name.startsWith('.')).map((e) => e.name).sort()
 
-const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home, SLIDEWELL_E2E_HIDDEN: '1' } })
+const app = await launchHidden(userData, home)
 const r = {}
 let pass = false
 try {
@@ -129,7 +126,6 @@ try {
   r.error = String(e.stack ?? e)
 } finally {
   await app.close()
-  if (pass) rmSync(work, { recursive: true, force: true })
 }
 out({ pass, ...r })
 process.exit(pass ? 0 : 1)

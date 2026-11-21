@@ -1,10 +1,9 @@
 // Isolated triage e2e (ADR-0029). Runs the real scan → list → select → importSelected flow through
 // the app's IPC, against throwaway dirs (temp userData + temp well + a fixture source folder), so it
 // never touches the user's real well/config. Run: `node e2e/triage.mjs` (after `npm run build`).
-import { _electron as electron } from 'playwright'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs'
+import { createScratch, launchHidden } from './support/scratch.mjs'
+import { mkdirSync, writeFileSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 
 const out = (o) => console.log(JSON.stringify(o))
 
@@ -12,7 +11,7 @@ const out = (o) => console.log(JSON.stringify(o))
 const RED = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 const BLUE = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
 
-const work = mkdtempSync(join(tmpdir(), 'sw-triage-'))
+const work = createScratch('triage')
 const userData = join(work, 'userData')
 const wellRoot = join(work, 'well')
 const source = join(work, 'source')
@@ -38,7 +37,7 @@ utimesSync(join(second, PRE), new Date('2010-01-01'), new Date('2010-01-01')) //
 writeFileSync(join(userData, 'config.json'), JSON.stringify({ wellRoot, screenshotRoot: source, captureSources: [{ path: second, namedOnly: false }, { path: desk, namedOnly: true }] }), 'utf8')
 
 // SLIDEWELL_E2E_HIDDEN: runs in the background — no window shown, no Dock icon, no focus taken
-const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, SLIDEWELL_E2E_HIDDEN: '1' } })
+const app = await launchHidden(userData, join(work, 'home'))
 let pass = false
 const result = {}
 try {
@@ -173,7 +172,6 @@ try {
   result.error = String(e)
 } finally {
   await app.close()
-  rmSync(work, { recursive: true, force: true })
 }
 out({ ...result, pass })
 process.exit(pass ? 0 : 1)

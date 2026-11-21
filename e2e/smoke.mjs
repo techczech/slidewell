@@ -6,25 +6,26 @@
 // default archive/well/others folders and TalkWeaver's config from HOME), so it can never read or
 // write a real SlideWell profile. With no archive the run covers the shell only (archiveConnected:
 // false). To exercise the archive features, point SLIDEWELL_SMOKE_ARCHIVE at a Core A archive; the
-// app only reads it here (search/browse/stats; the import panel is opened but never run).
-import { _electron as electron } from 'playwright'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs'
+// spec copies it into scratch before launching the app.
+import { copyFixture, createScratch, launchHidden } from './support/scratch.mjs'
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 
 const out = (o) => console.log(JSON.stringify(o))
-const work = mkdtempSync(join(tmpdir(), 'sw-smoke-'))
+const work = createScratch('smoke')
 const userData = join(work, 'userData')
 const home = join(work, 'home')
 mkdirSync(userData, { recursive: true })
 mkdirSync(home, { recursive: true })
 const config = { wellRoot: join(work, 'well'), othersArchiveRoot: join(work, 'others-library') }
-if (process.env.SLIDEWELL_SMOKE_ARCHIVE) config.archiveRoot = process.env.SLIDEWELL_SMOKE_ARCHIVE
+if (process.env.SLIDEWELL_SMOKE_ARCHIVE) {
+  config.archiveRoot = join(work, 'archive')
+  copyFixture(process.env.SLIDEWELL_SMOKE_ARCHIVE, config.archiveRoot)
+}
 writeFileSync(join(userData, 'config.json'), JSON.stringify(config), 'utf8')
-process.on('exit', () => rmSync(work, { recursive: true, force: true }))
 
 // SLIDEWELL_E2E_HIDDEN: runs in the background — no window shown, no Dock icon, no focus taken
-const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home, SLIDEWELL_E2E_HIDDEN: '1' } })
+const app = await launchHidden(userData, home)
 try {
   const win = await app.firstWindow({ timeout: 20000 })
   await win.waitForLoadState('domcontentloaded')
@@ -83,8 +84,7 @@ try {
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1440, 900))
     await win.fill('.search-input', 'classroom')
     await win.waitForTimeout(1500)
-    mkdirSync('e2e/out', { recursive: true })
-    await win.screenshot({ path: 'e2e/out/search-filters-1440.png' })
+    if (process.env.SLIDEWELL_SMOKE_SCREEN) await win.screenshot({ path: process.env.SLIDEWELL_SMOKE_SCREEN })
     filterLayoutOk = await win.evaluate(() => {
       const bottom = (sel) => Math.max(0, ...[...document.querySelectorAll(sel)].map((e) => e.getBoundingClientRect().bottom))
       const head = document.querySelector('.results-head')
