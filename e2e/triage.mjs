@@ -124,7 +124,7 @@ try {
   // capture inbox: files dropped into the extra sources appear WITHOUT pressing Scan (watcher), carrying
   // the app/window parsed from the name; non-screenshot Desktop files are ignored.
   const CS = 'CleanShot 2026-10-08 at 0801 from Google Chrome with TalkWeaver Layout Showcase.png'
-  const GREEN = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkaGj4DwAEQAIAvFrtDAAAAABJRU5ErkJggg=='
+  const GREEN = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg+M/wHwAEAQH/cetH5QAAAABJRU5ErkJggg=='
   const YELLOW = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg=='
   writeFileSync(join(second, CS), Buffer.from(GREEN, 'base64'))
   writeFileSync(join(desk, 'Screenshot 2026-10-09 at 10.05.01.png'), Buffer.from(YELLOW, 'base64'))
