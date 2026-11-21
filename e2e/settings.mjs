@@ -68,6 +68,7 @@ try {
   settingsWin.on('pageerror', (e) => console.error('[settings error]', e.message))
   await settingsWin.waitForSelector('.bsw-root', { timeout: 10000 })
   r.ownWindow = settingsWin.url().endsWith('settings.html')
+  r.hiddenWindows = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().every((w) => !w.isVisible()))
   await win.locator('.titlebar-actions .tb-btn', { hasText: '⚙' }).click()
   await win.waitForTimeout(300)
   r.singleInstance = app.windows().filter((w) => w.url().endsWith('settings.html')).length === 1
