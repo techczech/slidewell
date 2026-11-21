@@ -155,6 +155,7 @@ type Ingested = {
 }
 
 const OWNED_TEMP_NAME = /^\.slidewell-[0-9a-f-]{36}\.tmp(?:\.[^.]+)?$/
+const activeWellTemps = new Set<string>()
 const INBOX_VIDEOS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv'])
 
 function fileStat(path: string): BigIntStats | undefined {
@@ -182,6 +183,7 @@ async function publishWellFile(
 ): Promise<void> {
   const directory = dirname(dest)
   const tmp = join(directory, `.slidewell-${randomUUID()}.tmp${extname(dest)}`)
+  activeWellTemps.add(tmp)
   try {
     if ((await write(tmp)) === false) return
     syncPath(tmp)
@@ -194,6 +196,7 @@ async function publishWellFile(
     renameSync(tmp, dest)
     syncPath(directory)
   } finally {
+    activeWellTemps.delete(tmp)
     rmSync(tmp, { force: true })
   }
 }
@@ -242,11 +245,17 @@ async function storeCopy(
 function cleanStaleWellTemps(root: string): void {
   const cutoff = Date.now() - 60_000
   for (const directory of [join(root, 'images'), join(root, 'videos')]) {
-    if (!existsSync(directory)) continue
-    if (!fileStat(directory)?.isDirectory()) continue
-    for (const name of readdirSync(directory)) {
+    let names: string[]
+    try {
+      if (!fileStat(directory)?.isDirectory()) continue
+      names = readdirSync(directory)
+    } catch {
+      continue
+    }
+    for (const name of names) {
       if (!OWNED_TEMP_NAME.test(name)) continue
       const path = join(directory, name)
+      if (activeWellTemps.has(path)) continue
       try {
         const entry = fileStat(path)
         if (entry?.isFile() && Number(entry.mtimeMs) < cutoff) rmSync(path, { force: true })
