@@ -142,8 +142,10 @@ try {
   check('search still returns word results', n > 0, `${n} cards`)
   check('no picture query ran', (await queries(win)) === 0)
   await win.screenshot({ path: join(screens, 'match-no-model.png') })
-  await win.locator('.match-settings').click()
-  check('the link opens Settings', (await win.locator('.pic-settings h3').count()) === 1)
+  const [sw] = await Promise.all([app.waitForEvent('window', { timeout: 10000 }), win.locator('.match-settings').click()])
+  await sw.waitForSelector('.bsw-root', { timeout: 10000 })
+  await sw.locator('.pic-settings h3').waitFor({ timeout: 10000 })
+  check('the link opens the Settings window at Picture search', sw.url().endsWith('settings.html') && (await sw.locator('.pic-settings h3').count()) === 1)
 } finally {
   await app.close()
 }

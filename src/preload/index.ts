@@ -616,12 +616,26 @@ const api = {
       return () => ipcRenderer.removeListener('cloud:status', handler)
     }
   },
-  // Main-process menu events (⌘, → Settings). Subscribe once; call the returned function to unsubscribe.
+  // The command registry's main-process side (shared/commands.ts): menu-bar commands arrive here, the
+  // Settings window commands run in main, the menu greys commands out by the context, and the effective
+  // chords (with the user's own shortcuts) follow every settings change. Subscribers return an unsubscribe.
   app: {
-    onOpenSettings: (cb: () => void): (() => void) => {
-      const handler = (): void => cb()
-      ipcRenderer.on('app:open-settings', handler)
-      return () => ipcRenderer.removeListener('app:open-settings', handler)
+    onCommand: (cb: (id: string) => void): (() => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, id: string): void => cb(id)
+      ipcRenderer.on('app:command', handler)
+      return () => ipcRenderer.removeListener('app:command', handler)
+    },
+    runCommand: (id: string): Promise<void> => ipcRenderer.invoke('app:run-command', id),
+    /** Shows the main window and runs a registry command there (from the Settings window). */
+    showInMain: (id: string): Promise<void> => ipcRenderer.invoke('app:show-in-main', id),
+    /** Opens the Settings window, at a section or custom page when named. */
+    openSettings: (section?: string): Promise<void> => ipcRenderer.invoke('app:open-settings-at', section),
+    setContext: (ctx: { view: 'search' | 'review' | 'triage'; hasItems: boolean; hasActive: boolean }): Promise<void> => ipcRenderer.invoke('app:set-context', ctx),
+    bindings: (): Promise<Record<string, string>> => ipcRenderer.invoke('app:bindings'),
+    onSettingsChanged: (cb: (bindings: Record<string, string>) => void): (() => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, b: Record<string, string>): void => cb(b)
+      ipcRenderer.on('app:settings-changed', handler)
+      return () => ipcRenderer.removeListener('app:settings-changed', handler)
     }
   },
   archive: {

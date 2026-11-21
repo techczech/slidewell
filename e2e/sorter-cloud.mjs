@@ -2,7 +2,7 @@
 // the OpenAI Responses API. Synthetic data only: a scratch well whose triage.db holds five generated
 // screenshots with sorter proposals (three doubtful, one keep, one throwaway).
 //
-//   1. Settings › Screenshot sorter: save a made-up key; config.json holds only ciphertext; saving the key
+//   1. Settings window › Sorting help and Accounts and keys: save a made-up key (in Accounts and keys); config.json holds only ciphertext; saving the key
 //      does not turn asking Luna on; a send from the renderer without a prepared batch is refused;
 //      turning it on raises main's own native dialog (count, cost, what is sent); declined, nothing is
 //      recorded; confirmed, main records the time.
@@ -233,9 +233,41 @@ try {
   await win.waitForLoadState('domcontentloaded')
   await win.setViewportSize({ width: 1440, height: 900 })
   await win.waitForFunction(() => Boolean(window.sw?.cloud))
-  // Settings holds the service, the keys and the agreements; Sort now and the period are in Triage > Auto sorting
-  const closeSettings = async () => {
-    if (await win.locator('.settings-modal').count()) await win.locator('.settings-modal .modal-head button', { hasText: 'close' }).click()
+  // The one Settings window (as e2e/settings.mjs drives it) holds the service (Sorting help), the keys (Accounts and keys)
+  // and the agreements; Sort now and the period are in Triage > Auto sorting
+  const isSettings = (w) => w.url().endsWith('settings.html')
+  const settingsWin = async (sectionId) => {
+    let sw = app.windows().find(isSettings)
+    if (!sw) [sw] = await Promise.all([app.waitForEvent('window', { timeout: 10000 }), win.locator('.titlebar-actions .tb-btn', { hasText: '⚙' }).click()])
+    await sw.waitForSelector('.bsw-root', { timeout: 10000 })
+    await sw.locator(`button.bsw-nav[data-section="${sectionId}"]`).click()
+    return sw
+  }
+  const closeSettings = () => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.webContents.getURL().endsWith('settings.html') && w.close()))
+  // the Sorting help page: the service choice, one row per key and one per agreement
+  let section, openaiRow, anthropicRow
+  const gotoSorter = async () => {
+    const sw = await settingsWin('sorter-service')
+    section = sw.locator('.sorter-cloud')
+    await section.waitFor()
+    await section.scrollIntoViewIfNeeded()
+    openaiRow = section.locator('.sorter-cloud-key-openai')
+    anthropicRow = section.locator('.sorter-cloud-key-anthropic')
+    return sw
+  }
+  // Accounts and keys: the slot's "Add key…" form (a password field, cleared when handed over); the value never shown again.
+  // Returns the slot row; the form stays open if main refuses the key (a notice appears instead).
+  const openKeyForm = async (slotId) => {
+    const sw = await settingsWin('accounts')
+    const row = sw.locator(`[data-slot="${slotId}"]`)
+    await row.getByRole('button', { name: /^(Add|Replace) key…$/ }).click()
+    return { sw, row, input: row.locator('input[type=password]') }
+  }
+  const saveKey = async (slotId, key) => {
+    const { row, input } = await openKeyForm(slotId)
+    await input.fill(key)
+    await row.getByRole('button', { name: 'Add key', exact: true }).click()
+    await row.getByText(/Key saved/).waitFor({ timeout: 10000 })
   }
   const openAuto = async () => {
     await closeSettings()
@@ -255,18 +287,15 @@ try {
   }
 
   // 1. the key
-  await win.locator('button.tb-btn[title^="Settings"]').click()
-  const section = win.locator('.sorter-cloud')
-  await section.waitFor()
-  await section.scrollIntoViewIfNeeded()
-  const openaiRow = section.locator('.sorter-cloud-key-openai')
-  const anthropicRow = section.locator('.sorter-cloud-key-anthropic')
-  check('Settings shows the Luna section with no key yet, and a key field for each provider', (await openaiRow.locator('.sorter-cloud-key-input').count()) === 1 && (await anthropicRow.locator('.sorter-cloud-key-input').count()) === 1)
+  await gotoSorter()
+  check('Settings shows the Luna section with no key yet, and a way to add a key for each provider (Add key… opens Accounts and keys)', /No key yet/.test(await openaiRow.innerText()) && /No key yet/.test(await anthropicRow.innerText()) && (await openaiRow.locator('button.sorter-open-keys', { hasText: 'Add key…' }).count()) === 1 && (await anthropicRow.locator('button.sorter-open-keys', { hasText: 'Add key…' }).count()) === 1)
   check('Settings says the other provider can be asked once about what the first left unsure', /If Luna was unsure about a screenshot, Haiku can be asked about it once/.test(await section.innerText()) && !/is not sent to the other/.test(await section.innerText()))
   check('the service is Off until he chooses one, Luna being the provider kept', (await section.locator('input.sorter-cloud-provider-off').isChecked()) && !(await section.locator('input.sorter-cloud-provider-anthropic').isChecked()) && (await win.evaluate(() => window.sw.cloud.status())).settings.provider === 'openai')
   await section.screenshot({ path: join(screens, 'sorter-cloud-settings-no-key.png') })
-  await openaiRow.locator('.sorter-cloud-key-input').fill(FAKE_KEY)
-  await openaiRow.locator('button', { hasText: 'Save key' }).click()
+  await openaiRow.locator('button.sorter-open-keys').click()
+  check('Add key… on the Sorting help page opens Accounts and keys', await app.windows().find(isSettings).locator('[data-slot="sorting.openaiKey"]').waitFor({ timeout: 5000 }).then(() => true, () => false))
+  await saveKey('sorting.openaiKey', FAKE_KEY)
+  await gotoSorter()
   await openaiRow.locator('.pic-ready', { hasText: 'Saved' }).waitFor({ timeout: 10000 })
   const st = await win.evaluate(() => window.sw.cloud.status())
   check('status says a key is saved (and carries no key)', st.hasKey === true && !JSON.stringify(st).includes(FAKE_KEY))
@@ -371,9 +400,7 @@ try {
     }
     t.close()
   }
-  await win.locator('button.tb-btn[title^="Settings"]').click()
-  await section.waitFor()
-  await section.scrollIntoViewIfNeeded()
+  await gotoSorter()
   const readCfg = () => JSON.parse(readFileSync(join(userData, 'config.json'), 'utf8')).sorterCloud ?? {}
   const lunaCalls = seen.length
   const shownBefore = (await dialogsShown()).length
@@ -392,12 +419,15 @@ try {
   check('confirmed: Haiku is the provider and Anthropic’s own opt-in is recorded beside OpenAI’s', cfgSwitched.provider === 'anthropic' && Number.isFinite(Date.parse(cfgSwitched.anthropicOptedInAt)) && cfgSwitched.optedInAt === optedIn, JSON.stringify({ ...cfgSwitched, keyEnc: undefined, lastRun: undefined }))
   const noKeyPrep = await win.evaluate(() => window.sw.cloud.prepare())
   check('Haiku without an Anthropic key sends nothing, though an OpenAI key is saved', noKeyPrep.blocked === 'no-key' && noKeyPrep.token === null && noKeyPrep.provider === 'anthropic', JSON.stringify(noKeyPrep))
-  await anthropicRow.locator('.sorter-cloud-key-input').fill(FAKE_KEY) // the OpenAI-shaped key, in the wrong field
-  await anthropicRow.locator('button', { hasText: 'Save key' }).click()
-  await section.locator('.sorter-cloud-key-msg', { hasText: 'does not look like an Anthropic API key' }).waitFor({ timeout: 10000 })
-  check('an OpenAI-shaped key is refused as the Anthropic key', !readCfg().anthropicKeyEnc)
-  await anthropicRow.locator('.sorter-cloud-key-input').fill(FAKE_ANT_KEY)
-  await anthropicRow.locator('button', { hasText: 'Save key' }).click()
+  const antForm = await openKeyForm('sorting.anthropicKey')
+  await antForm.input.fill(FAKE_KEY) // the OpenAI-shaped key, in the wrong field
+  await antForm.row.getByRole('button', { name: 'Add key', exact: true }).click()
+  await antForm.sw.locator('[role="alert"]').waitFor({ timeout: 10000 }) // the window's notice (main's exact words are not shown any more)
+  check('an OpenAI-shaped key is refused as the Anthropic key', !readCfg().anthropicKeyEnc && (await antForm.row.getByText(/Key saved/).count()) === 0)
+  await antForm.input.fill(FAKE_ANT_KEY)
+  await antForm.row.getByRole('button', { name: 'Add key', exact: true }).click()
+  await antForm.row.getByText(/Key saved/).waitFor({ timeout: 10000 })
+  await gotoSorter()
   await anthropicRow.locator('.pic-ready', { hasText: 'Saved' }).waitFor({ timeout: 10000 })
   const cfgBothText = readFileSync(join(userData, 'config.json'), 'utf8')
   const cfgBoth = readCfg()
@@ -488,7 +518,8 @@ try {
     }
     t.close()
   }
-  const storedPeriod = () => JSON.parse(readFileSync(join(userData, 'config.json'), 'utf8')).sorterPeriod
+  // the period is a shared setting now (sorting.period in settings.json); unset while it is the default
+  const storedPeriod = () => JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8')).settings?.['sorting.period']
   await win.evaluate(() => window.sw.cloud.setSettings({ provider: 'openai' }))
   const everything = await win.evaluate(() => window.sw.cloud.prepare())
   check('with no period chosen, Sort now takes everything, as before', everything.period === 'all' && everything.toSend === 2 && everything.message === 'Ask Luna about 2 screenshots?' && storedPeriod() === undefined, JSON.stringify(everything))
@@ -504,7 +535,7 @@ try {
   await selects.first().selectOption('7d')
   await win.waitForFunction(async () => (await window.sw.cloud.status()).period === '7d')
   await sleep(300)
-  check('choosing Last 7 days is stored in config', storedPeriod() === '7d' && (await selects.nth(0).inputValue()) === '7d' && (await win.evaluate(() => window.sw.sorter.status())).period === '7d', String(storedPeriod()))
+  check('choosing Last 7 days is stored in settings.json', storedPeriod() === '7d' && (await selects.nth(0).inputValue()) === '7d' && (await win.evaluate(() => window.sw.sorter.status())).period === '7d', String(storedPeriod()))
   check('the batch prepared under Everything can no longer be sent', (await win.evaluate((token) => window.sw.cloud.send(token), everything.token)).skipped === 'not-prepared' && seen.length + seenHaiku.length === stubCalls)
   await win.locator('.as-sort').screenshot({ path: join(screens, 'sorter-period-sort-now.png') })
 

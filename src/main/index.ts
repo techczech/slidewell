@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage, safeStorage, powerMonitor } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, clipboard, nativeImage, safeStorage, powerMonitor } from 'electron'
 import sharp from 'sharp'
 import { join, basename } from 'path'
 import { homedir, tmpdir } from 'os'
@@ -8,7 +8,12 @@ import { execFile } from 'node:child_process'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { planSources, matchesFromKind, countFrom, type FilterableResult, type FromCounts, type SourcePlan } from './searchfilters'
 import { matchedSearch, rowIds, type MatchCluster, type MatchRow } from './matched-search'
-import { appMenuTemplate } from './app-menu'
+import { startSettings, type SaveResult, type SettingsApp } from './settings-host'
+import { ARCHIVE_DEFAULT, foldersOverlap, OTHERS_DEFAULT, OVERLAP_REASON } from './settings-rules'
+import { keySlots } from './key-slots'
+import { legacyFromPrefs, splitLegacyPatch } from '../shared/settings-schema'
+import { saveR2 } from './r2-save'
+import { MAIN_COMMANDS, registry, type CommandContext } from '../shared/commands'
 import { mergeLookAlikeClusters } from './look-alike/merge-clusters'
 import { cachedDHash } from './look-alike/fingerprint'
 import { runMoreLikeThis } from './more-like-this'
@@ -54,7 +59,7 @@ import { appCounts, cleanAppList, decideAllFromApps } from './triage-apps'
 import { ReviewService } from './review/service'
 import { registerReviewIpc } from './review/ipc'
 import { decodeSwUrlPath as decodeSwPath, resolveSwUrlReal as resolveSwReal, serveSwFile, swUrlOf } from './swarchive-guard'
-import { CloudSorter, KEY_FIELD, normaliseCloudSettings, registerCloudIpc, type CloudRunSummary, type CloudSettings, type StoredCloudSettings } from './sorter/cloud/service'
+import { CloudSorter, KEY_FIELD, normaliseCloudSettings, registerCloudIpc, saveCloudKey, removeCloudKey, type CloudRunSummary, type CloudSettings, type StoredCloudSettings } from './sorter/cloud/service'
 import { ApiKeyStore } from './sorter/cloud/key-store'
 import { shrinkForLuna } from './sorter/cloud/images'
 import type { HttpPost } from './sorter/cloud/client'
@@ -67,6 +72,8 @@ const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUI
 // Test-only: SLIDEWELL_E2E_HIDDEN=1 keeps automated runs in the background (no window shown, no
 // Dock icon, nothing takes focus). Honoured only when set to exactly '1'; unset changes nothing.
 const E2E_HIDDEN = process.env['SLIDEWELL_E2E_HIDDEN'] === '1'
+// Tests and the settings CLI can point the app at a throwaway data folder (the CLI reads the same variable).
+if (process.env['SLIDEWELL_DATA_DIR']) app.setPath('userData', process.env['SLIDEWELL_DATA_DIR'])
 if (E2E_HIDDEN && process.platform === 'darwin') app.dock?.hide()
 
 // Custom schemes must be registered as privileged BEFORE app ready so the renderer treats them
@@ -131,22 +138,90 @@ type Config = {
 function configPath(): string {
   return join(app.getPath('userData'), 'config.json')
 }
-function readConfig(): Config {
+// The preferences moved to the shared settings file (settings-host.ts, shared/settings-schema.ts). Readers
+// here still see config.json's old shape: readConfig() lays the current settings over config.json, and
+// writeConfig() sends preference fields to the settings store (who: you) and the rest to config.json.
+// Until the settings start, and when the move could not be made safely, config.json is read as before.
+let settings: SettingsApp | null = null
+let prefsInStore = false
+function rawConfig(): Config {
   try {
     return JSON.parse(readFileSync(configPath(), 'utf8'))
   } catch {
     return {}
   }
 }
-function writeConfig(patch: Partial<Config>): void {
+function readConfig(): Config {
+  const raw = rawConfig()
+  if (!settings || !prefsInStore) return raw
+  const p = legacyFromPrefs(settings.values())
+  return {
+    ...raw,
+    ...p,
+    r2: { ...(raw.r2 ?? {}), ...p.r2 },
+    pictureSearch: { ...(raw.pictureSearch ?? {}), ...p.pictureSearch }
+  }
+}
+/**
+ * Resolves once every preference in `patch` reached the settings file (or config.json); a failure is returned,
+ * never thrown. Callers that only fire and forget may ignore it: a failure is logged by the settings host.
+ */
+function writeConfig(patch: Partial<Config>): Promise<SaveResult> {
   const dir = app.getPath('userData')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  writeFileSync(configPath(), JSON.stringify({ ...readConfig(), ...patch }, null, 2), 'utf8')
+  let rest: Partial<Config> = patch
+  let prefs: Promise<SaveResult> = Promise.resolve({ ok: true })
+  if (settings && prefsInStore) {
+    const split = splitLegacyPatch(patch as Record<string, unknown>)
+    const s = settings
+    const writes = Object.entries(split.prefs).map(([key, value]) => s.set(key, value))
+    prefs = Promise.all(writes).then((rs) => rs.find((r) => !r.ok) ?? { ok: true })
+    rest = split.rest as Partial<Config>
+    if (Object.keys(rest).length === 0) return prefs
+    // config.json stays the older version's file: its own preference fields inside r2 and pictureSearch are kept
+    const raw = rawConfig()
+    if (rest.r2 && raw.r2) rest = { ...rest, r2: { ...pickLegacy(raw.r2, ['accountId', 'endpoint', 'bucket', 'prefix']), ...rest.r2 } }
+    if (rest.pictureSearch && raw.pictureSearch) rest = { ...rest, pictureSearch: { ...pickLegacy(raw.pictureSearch, ['includeWell']), ...rest.pictureSearch } }
+  }
+  writeRawConfig(rest)
+  return prefs
+}
+/** Writes state fields (and the key ciphertext) to config.json as they are, without touching its preferences. */
+function writeRawConfig(patch: Partial<Config>): void {
+  const dir = app.getPath('userData')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  writeFileSync(configPath(), JSON.stringify({ ...rawConfig(), ...patch }, null, 2), 'utf8')
+}
+function pickLegacy<T extends object>(o: T, keys: string[]): Partial<T> {
+  return Object.fromEntries(Object.entries(o).filter(([k]) => keys.includes(k))) as Partial<T>
+}
+
+/**
+ * The main window or the Settings window (whose custom pages use the app's own IPC); nothing else. The Settings
+ * window is judged by the whole event (its own page in its top frame), as the shared package judges its own IPC.
+ */
+function fromAppWindow(e: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean {
+  if (mainWindow && !mainWindow.isDestroyed() && e.sender === mainWindow.webContents) return true
+  return Boolean(settings?.isSettingsSender(e))
+}
+/**
+ * ipcMain.handle answered only for the main window or the Settings window (fromAppWindow): the Settings window
+ * carries the app's whole bridge, so every handler it can reach checks the event, never only the channel.
+ */
+function appHandle(channel: string, fn: (e: Electron.IpcMainInvokeEvent, ...args: any[]) => unknown): void { // eslint-disable-line @typescript-eslint/no-explicit-any
+  ipcMain.handle(channel, (e, ...args) => {
+    if (!fromAppWindow(e)) throw new Error(`${channel}: not allowed from this window`)
+    return fn(e, ...args)
+  })
+}
+/** Sends a status push to the main window and an open Settings window. */
+function toAppWindows(channel: string, payload: unknown): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)
+  settings?.settingsWebContents()?.send(channel, payload)
 }
 
 // Core A (ppt-archive) is the engine SlideWell sits on. Default to its conventional location;
 // the user can repoint it in Settings. The archive is "present" when its registry/ exists.
-const ARCHIVE_DEFAULT = join(homedir(), 'gitrepos', '05_ppt-tools', 'ppt-archive')
 function archiveRoot(): string {
   return readConfig().archiveRoot ?? ARCHIVE_DEFAULT
 }
@@ -165,7 +240,6 @@ function wellRootResolved(): string {
 // The Others' Library (Scenario A, ADR-0031): a SEPARATE Core A archive store for other people's
 // decks — built by the same engine (ppt-archive's tools/), never merged into the personal archive.
 // Default to a dedicated user folder; configurable in Settings; created on first import.
-const OTHERS_DEFAULT = join(homedir(), 'SlideWell', 'others-library')
 function othersArchiveRootResolved(): string {
   return readConfig().othersArchiveRoot ?? OTHERS_DEFAULT
 }
@@ -277,11 +351,15 @@ let mainWindow: BrowserWindow | null = null
 let pictureSearch: PictureSearchService | null = null
 let launchScanHook: () => void = () => undefined
 let refreshWatchers: () => void = () => undefined
+// The Triage folder the watcher was last pointed at, so a settings change elsewhere re-points it (settings `changed`).
+let lastWatchedRoot = ''
 
-// ⌘, (the app menu's Settings… item) opens the Settings overlay in the renderer. Nothing happens
-// when the main window is missing or destroyed.
-function openSettingsFromMenu(): void {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app:open-settings')
+function openMain(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow()
+  else {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+  }
 }
 
 function createWindow(): BrowserWindow {
@@ -371,8 +449,76 @@ else
     mainWindow.focus()
   })
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (!singleInstance) return
+  // --- shared settings (settings-host.ts): store + migration from config.json, Settings window, menu bar, key slots ---
+  // The cloud step's two keys are wired once the cloud service exists (below); until then they read as missing.
+  let cloudKeyOps: { has(p: 'openai' | 'anthropic'): boolean; set(p: 'openai' | 'anthropic', k: string): { ok: boolean; error?: string; shape?: boolean }; remove(p: 'openai' | 'anthropic'): void } | null = null
+  const r2Key = (field: 'accessKeyIdEnc' | 'secretEnc', label: string) => ({
+    label,
+    has: () => Boolean(rawConfig().r2?.[field]),
+    set(value: string) {
+      if (!value || value.length > 512 || !safeStorage.isEncryptionAvailable()) return { ok: false }
+      writeRawConfig({ r2: { ...(rawConfig().r2 ?? {}), [field]: safeStorage.encryptString(value).toString('base64') } })
+      return { ok: true }
+    },
+    remove() {
+      const { [field]: _gone, ...rest } = rawConfig().r2 ?? {}
+      writeRawConfig({ r2: rest })
+    }
+  })
+  const cloudKey = (p: 'openai' | 'anthropic', label: string) => ({
+    label,
+    has: () => cloudKeyOps?.has(p) ?? false,
+    set: (value: string) => cloudKeyOps?.set(p, value) ?? { ok: false },
+    remove: () => cloudKeyOps?.remove(p)
+  })
+  const started = await startSettings({
+    openMain,
+    sendCommand: (id) => mainWindow?.webContents.send('app:command', id),
+    changed: () => {
+      setOwnerNames(resolveOwnerNames(readConfig().ownerNames).names)
+      // the Triage folder changed from the window, the CLI or an import: the watcher follows it at once
+      const watched = readConfig().screenshotRoot ?? ''
+      if (watched !== lastWatchedRoot) {
+        lastWatchedRoot = watched
+        refreshWatchers()
+      }
+      mainWindow?.webContents.send('app:settings-changed', settings?.bindings() ?? {})
+    },
+    slots: keySlots(
+      {
+        'storage.r2AccessKeyId': r2Key('accessKeyIdEnc', 'R2 access key ID'),
+        'storage.r2SecretAccessKey': r2Key('secretEnc', 'R2 secret access key'),
+        'sorting.openaiKey': cloudKey('openai', 'OpenAI key'),
+        'sorting.anthropicKey': cloudKey('anthropic', 'Anthropic key')
+      },
+      () => safeStorage.isEncryptionAvailable()
+    ),
+    log: (line) => console.warn(line)
+  })
+  settings = started.settings
+  prefsInStore = !started.legacy
+  lastWatchedRoot = readConfig().screenshotRoot ?? ''
+  app.on('will-quit', () => settings?.dispose())
+  ipcMain.handle('app:bindings', (e) => (fromAppWindow(e) ? (settings?.bindings() ?? {}) : {}))
+  ipcMain.handle('app:run-command', (e, id: unknown) => {
+    if (fromAppWindow(e) && typeof id === 'string' && MAIN_COMMANDS.has(id)) settings?.runMainCommand(id)
+  })
+  ipcMain.handle('app:show-in-main', (e, id: unknown) => {
+    if (!fromAppWindow(e) || typeof id !== 'string' || !registry.byId(id) || MAIN_COMMANDS.has(id)) return
+    openMain()
+    mainWindow?.webContents.send('app:command', id)
+  })
+  ipcMain.handle('app:open-settings-at', (e, section: unknown) => {
+    if (fromAppWindow(e)) settings?.openSettings(typeof section === 'string' ? section : undefined)
+  })
+  ipcMain.handle('app:set-context', (e, c: Partial<CommandContext> | null) => {
+    if (!fromAppWindow(e)) return
+    const view = c?.view === 'review' || c?.view === 'triage' ? c.view : 'search'
+    settings?.setContext({ view, hasItems: c?.hasItems === true, hasActive: c?.hasActive === true })
+  })
+
   protocol.handle('swarchive', async (request) => {
     const abs = decodeSwUrlPath(request.url)
     // a fetch from R2 writes only under an allowed root's real path, and the file served passes the real-path check:
@@ -398,11 +544,11 @@ app.whenReady().then(() => {
     fetch: picFetch,
     makeEmbedder: (dir) => new WebGpuEmbedder(dir, electronEmbedHost(join(__dirname, '../preload/embedder.js'))),
     broadcast: (st) => {
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('picture:status', st)
+      toAppWindows('picture:status', st)
     }
   })
   // picture IPC answers the main window only (never the hidden picture-search window)
-  registerPictureSearchIpc(pictureSearch, (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+  registerPictureSearchIpc(pictureSearch, fromAppWindow)
   app.on('will-quit', () => pictureSearch?.dispose())
 
   // --- local picture query for TalkWeaver (picture-search/query-socket.ts, contract v1) ---
@@ -510,7 +656,7 @@ app.whenReady().then(() => {
   // Each provider's key is stored like the R2 credentials: safeStorage ciphertext in config.json, never returned or
   // logged. One store per provider, each with its own field, and no other source: no environment variable is read.
   const cloudCfg = (): NonNullable<Config['sorterCloud']> => readConfig().sorterCloud ?? {}
-  const saveCloudCfg = (patch: Partial<NonNullable<Config['sorterCloud']>>): void => writeConfig({ sorterCloud: { ...cloudCfg(), ...patch } })
+  const saveCloudCfg = (patch: Partial<NonNullable<Config['sorterCloud']>>): void => void writeConfig({ sorterCloud: { ...cloudCfg(), ...patch } })
   const keychain = { available: () => safeStorage.isEncryptionAvailable(), encrypt: (k: string) => safeStorage.encryptString(k), decrypt: (b: Buffer) => safeStorage.decryptString(b) }
   const cloudKeys = {
     openai: new ApiKeyStore(() => cloudCfg()[KEY_FIELD.openai], (enc) => saveCloudCfg({ [KEY_FIELD.openai]: enc }), keychain, PROVIDERS.openai.keyRule),
@@ -535,7 +681,7 @@ app.whenReady().then(() => {
     },
     saveState: (patch) => saveCloudCfg(patch),
     broadcast: (st) => {
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('cloud:status', st)
+      toAppWindows('cloud:status', st)
     },
     // consent is main's own native dialog, raised on the main window; no window, no consent
     confirm: async (p) => {
@@ -545,7 +691,14 @@ app.whenReady().then(() => {
     },
     log: (line) => console.warn(line)
   })
-  registerCloudIpc(cloud, cloudKeys, (s) => saveCloudCfg(s), () => cloudCfg(), (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents))
+  registerCloudIpc(cloud, cloudKeys, (s) => saveCloudCfg(s), () => cloudCfg(), fromAppWindow)
+  // Settings › Accounts and keys: the same save and remove as the cloud IPC (removing withdraws the agreement)
+  cloudKeyOps = {
+    has: (p) => Boolean(cloudCfg()[KEY_FIELD[p]]),
+    set: (p, k) => saveCloudKey(cloud, cloudKeys, p, k),
+    remove: (p) => removeCloudKey(cloud, (s) => saveCloudCfg(s), () => cloudCfg(), p)
+  }
+  settings?.slotsChanged()
   // the nightly batch runs only while the app is open: checked shortly after launch (a missed night runs then) and every minute
   const cloudTick = (): void => void cloud.tick().catch((e) => console.warn(`[sorter-cloud] nightly check failed: ${(e as Error)?.name ?? 'error'}`))
   const cloudFirst = setTimeout(cloudTick, 30_000)
@@ -603,8 +756,8 @@ app.whenReady().then(() => {
   })
 
   // --- IPC: the typed contract lives in src/preload/index.ts ---
-  ipcMain.handle('archive:available', () => archiveAvailable())
-  ipcMain.handle('settings:get-paths', async () => ({
+  appHandle('archive:available', () => archiveAvailable())
+  appHandle('settings:get-paths', async () => ({
     archiveRoot: readConfig().archiveRoot ?? null,
     archiveDefault: ARCHIVE_DEFAULT,
     archiveAvailable: archiveAvailable(),
@@ -620,7 +773,7 @@ app.whenReady().then(() => {
     othersArchiveRoot: othersArchiveRootResolved(),
     othersArchiveAvailable: othersArchiveAvailable()
   }))
-  ipcMain.handle('settings:choose-archive', async () => {
+  appHandle('settings:choose-archive', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     const picked = r.filePaths[0]
@@ -641,12 +794,12 @@ app.whenReady().then(() => {
     pictureSearch?.pokeArchive() // index the newly chosen archive's renders
     return picked
   })
-  ipcMain.handle('shell:open-path', (_e, p: string) => shell.openPath(p).then((err) => err === ''))
-  ipcMain.handle('shell:open-external', (_e, url: string) => shell.openExternal(url).then(() => true))
+  appHandle('shell:open-path', (_e, p: string) => shell.openPath(p).then((err) => err === ''))
+  appHandle('shell:open-external', (_e, url: string) => shell.openExternal(url).then(() => true))
 
   // Detected status of the external tools SlideWell leans on — surfaced in Settings so users know
   // what to install. `required` deps gate core features; the rest degrade gracefully when absent.
-  ipcMain.handle('settings:dependencies', () => {
+  appHandle('settings:dependencies', () => {
     const py = detectPython(readConfig().pythonPath)
     const ocrBin = join(archiveRoot(), 'tools', 'ocr', 'vision_ocr')
     const ocrSwift = join(archiveRoot(), 'tools', 'ocr', 'vision_ocr.swift')
@@ -868,7 +1021,7 @@ app.whenReady().then(() => {
     }
   }
 
-  ipcMain.handle('archive:search', async (_e, query: string, filters: SearchFilters) => {
+  appHandle('archive:search', async (_e, query: string, filters: SearchFilters) => {
     const from = filters?.from ?? 'all'
     const kind = filters?.kind ?? 'all'
     const plan = planSources(filters?.type ?? 'slides', from, kind)
@@ -879,7 +1032,7 @@ app.whenReady().then(() => {
   // Search with the Match switch (Words / Meaning / Both): word hits, picture hits, two bands.
   // Picture hits are resolved to the same wire rows and pass the same Library/Owner/Date/Category/
   // Presentation/From/Kind filters as word hits. Words mode never runs a picture query.
-  ipcMain.handle('archive:search-matched', async (_e, query: string, filters: SearchFilters, mode: MatchMode) => {
+  appHandle('archive:search-matched', async (_e, query: string, filters: SearchFilters, mode: MatchMode) => {
     const from = filters?.from ?? 'all'
     const kind = filters?.kind ?? 'all'
     const resolve = (ids: string[]): Promise<Map<string, MatchCluster>> => resolvePictureIds(ids, filters, query)
@@ -903,7 +1056,7 @@ app.whenReady().then(() => {
 
   // More like this (inspector): the six most similar items from other presentations and the well, by
   // stored vectors (no model run, but the model must be downloaded). Any Library, Owner and date.
-  ipcMain.handle('archive:more-like-this', async (_e, row: { kind: string; deck: string; slideOrder: number | null; reference: string }) => {
+  appHandle('archive:more-like-this', async (_e, row: { kind: string; deck: string; slideOrder: number | null; reference: string }) => {
     const open = { library: 'all', owner: 'all', era: 'all', category: '', deck: '', role: 'all', from: 'all', kind: 'all' } as unknown as SearchFilters
     return runMoreLikeThis<MatchCluster['representative']>(
       {
@@ -919,14 +1072,14 @@ app.whenReady().then(() => {
   })
 
   // Counts for the From chips: the current query over every store, Kind applied, From ignored.
-  ipcMain.handle('archive:from-counts', async (_e, query: string, filters: SearchFilters): Promise<FromCounts> => {
+  appHandle('archive:from-counts', async (_e, query: string, filters: SearchFilters): Promise<FromCounts> => {
     const kind = filters?.kind ?? 'all'
     const rows = await collectResults(query ?? '', filters, { slides: true, archiveImages: true, well: true })
     return countFrom(rows.map(rep), kind)
   })
 
   // Distinct deck categories (with counts) for the Category filter dropdown.
-  ipcMain.handle('archive:categories', () => {
+  appHandle('archive:categories', () => {
     if (!archiveAvailable()) return []
     try {
       return categoryList(loadDeckMeta(archiveRoot(), cacheDir()))
@@ -936,7 +1089,7 @@ app.whenReady().then(() => {
   })
 
   // All decks (id, title, date) newest-first, for the Deck filter picker.
-  ipcMain.handle('archive:decks', () => {
+  appHandle('archive:decks', () => {
     if (!archiveAvailable()) return []
     try {
       const idx = loadDeckMeta(archiveRoot(), cacheDir())
@@ -949,7 +1102,7 @@ app.whenReady().then(() => {
   })
 
   // Deck MODE: one card per presentation (title-slide cover), filtered like the slide search.
-  ipcMain.handle('archive:list-decks', async (_e, filters: SearchFilters) => {
+  appHandle('archive:list-decks', async (_e, filters: SearchFilters) => {
     const lib = filters?.library ?? 'mine'
     const out: Array<Record<string, unknown>> = []
     const add = async (root: string, library: 'mine' | 'others'): Promise<void> => {
@@ -966,7 +1119,7 @@ app.whenReady().then(() => {
     return out
   })
   // Full metadata for one deck (for the sidebar). Resolves to whichever store holds the deck.
-  ipcMain.handle('archive:deck-detail', (_e, pid: string) => {
+  appHandle('archive:deck-detail', (_e, pid: string) => {
     if (!archiveAvailable() && !othersArchiveAvailable()) return null
     try {
       const root = rootForDeck(pid)
@@ -980,7 +1133,7 @@ app.whenReady().then(() => {
   })
 
   // Stats bundle (timeline of "my" PowerPoint history) for the Stats view.
-  ipcMain.handle('archive:stats', async () => {
+  appHandle('archive:stats', async () => {
     if (!archiveAvailable()) return null
     try {
       return await archiveStats(archiveRoot(), cacheDir())
@@ -990,7 +1143,7 @@ app.whenReady().then(() => {
   })
 
   // The structured content (presentation.json node) of one slide — for "Copy structure".
-  ipcMain.handle('archive:slide-structure', (_e, deck: string, slideOrder: number | null) => {
+  appHandle('archive:slide-structure', (_e, deck: string, slideOrder: number | null) => {
     if (!archiveAvailable() && !othersArchiveAvailable()) return null
     try {
       return slideStructure(rootForDeck(deck), deck, slideOrder)
@@ -1000,7 +1153,7 @@ app.whenReady().then(() => {
   })
 
   // The embedded image assets on one slide → renderable swarchive:// thumbnails (for the inspector).
-  ipcMain.handle('archive:slide-images', (_e, deck: string, slideOrder: number | null) => {
+  appHandle('archive:slide-images', (_e, deck: string, slideOrder: number | null) => {
     if (!archiveAvailable() && !othersArchiveAvailable()) return []
     try {
       return slideImages(rootForDeck(deck), deck, slideOrder).map((im) => ({ thumbUrl: swThumb(im.absPath) }))
@@ -1010,7 +1163,7 @@ app.whenReady().then(() => {
   })
 
   // All slides of one presentation, in order — for "See in context". Tagged with the store it came from.
-  ipcMain.handle('archive:deck-slides', async (_e, deck: string) => {
+  appHandle('archive:deck-slides', async (_e, deck: string) => {
     if (!archiveAvailable() && !othersArchiveAvailable()) return []
     try {
       const root = rootForDeck(deck)
@@ -1028,12 +1181,12 @@ app.whenReady().then(() => {
     new Promise((resolve) =>
       execFile('osascript', ['-e', `set the clipboard to POSIX file ${JSON.stringify(abs)}`], (err) => resolve(!err))
     )
-  ipcMain.handle('clipboard:copy-image', async (_e, thumbUrl: string) => {
+  appHandle('clipboard:copy-image', async (_e, thumbUrl: string) => {
     const abs = resolveSwUrlReal(thumbUrl)
     return abs ? copyFileToClipboard(abs) : false
   })
   // Copy as a PNG raster bitmap (for Keynote / Slack / web that want a pasted image, not a file).
-  ipcMain.handle('clipboard:copy-image-png', async (_e, thumbUrl: string) => {
+  appHandle('clipboard:copy-image-png', async (_e, thumbUrl: string) => {
     const abs = resolveSwUrlReal(thumbUrl)
     if (!abs) return false
     try {
@@ -1049,7 +1202,7 @@ app.whenReady().then(() => {
   })
 
   // Reveal an image in Finder ("open containing deck/folder").
-  ipcMain.handle('shell:reveal', (_e, thumbUrl: string) => {
+  appHandle('shell:reveal', (_e, thumbUrl: string) => {
     const abs = resolveSwUrlReal(thumbUrl) // a link inside a root that leads outside every root is not revealed
     if (!abs) return false
     shell.showItemInFolder(abs)
@@ -1058,7 +1211,7 @@ app.whenReady().then(() => {
 
   // TalkWeaver registers no URL scheme and no document type, so the nearest thing to "open the talk"
   // is showing its outline file in Finder. The path is vault-relative and must stay inside the vault.
-  ipcMain.handle('talks:reveal', (_e, relPath: string) => {
+  appHandle('talks:reveal', (_e, relPath: string) => {
     const vr = detectVaultRoot()
     if (!vr || typeof relPath !== 'string') return false
     const abs = talkAbsPath(vr, relPath)
@@ -1068,7 +1221,7 @@ app.whenReady().then(() => {
   })
 
   // --- well / import paths ---
-  ipcMain.handle('settings:choose-vault', async () => {
+  appHandle('settings:choose-vault', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     writeConfig({ vaultRoot: r.filePaths[0] })
@@ -1076,7 +1229,7 @@ app.whenReady().then(() => {
     return r.filePaths[0]
   })
   // Re-scan the TalkWeaver vault for new images and index them; returns count added.
-  ipcMain.handle('well:scan-vault', async () => {
+  appHandle('well:scan-vault', async () => {
     const vr = detectVaultRoot()
     if (!vr) return 0
     try {
@@ -1092,7 +1245,7 @@ app.whenReady().then(() => {
   })
 
   // --- triage (ADR-0029): scan a source folder, browse/decide, promote keepers into the well ---
-  ipcMain.handle('settings:choose-screenshot-folder', async () => {
+  appHandle('settings:choose-screenshot-folder', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     writeConfig({ screenshotRoot: r.filePaths[0] })
@@ -1100,7 +1253,7 @@ app.whenReady().then(() => {
     return r.filePaths[0]
   })
   // Capture inbox extras: 'desktop' | 'cleanshot' add the offered defaults; 'folder' asks for a folder.
-  ipcMain.handle('settings:add-capture-source', async (_e, which: 'desktop' | 'cleanshot' | 'folder') => {
+  appHandle('settings:add-capture-source', async (_e, which: 'desktop' | 'cleanshot' | 'folder') => {
     let src: CaptureSource | null = null
     if (which === 'desktop' || which === 'cleanshot') src = (await captureDefaults())[which]
     else {
@@ -1113,7 +1266,7 @@ app.whenReady().then(() => {
     refreshWatchers()
     return true
   })
-  ipcMain.handle('settings:remove-capture-source', (_e, path: string) => {
+  appHandle('settings:remove-capture-source', (_e, path: string) => {
     writeConfig({ captureSources: (readConfig().captureSources ?? []).filter((c) => c.path !== path) })
     refreshWatchers()
     return true
@@ -1225,7 +1378,7 @@ app.whenReady().then(() => {
   registerBacklogIpc({
     watchedFolder: screenshotRootResolved,
     stateDir: () => join(app.getPath('userData'), 'backlog-import'),
-    isMainWindow: (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents),
+    isMainWindow: fromAppWindow,
     afterRun: ({ stopped }) => void scanAllSources({ downloads: !stopped }).then(() => mainWindow?.webContents.send('triage:changed')),
     captureDownloads
   })
@@ -1315,56 +1468,50 @@ app.whenReady().then(() => {
   })
 
   // --- R2 backend (spec 2026-06-24): config + credentials (safeStorage) + connection test ---
-  ipcMain.handle('settings:get-r2', () => {
+  appHandle('settings:get-r2', () => {
     const s = r2Settings()
     return { accountId: s.accountId, endpoint: s.endpoint ?? '', bucket: s.bucket, prefix: s.prefix, hasCreds: Boolean(r2Creds()) }
   })
-  ipcMain.handle('settings:set-r2', (_e, patch: { accountId?: string; endpoint?: string; bucket?: string; prefix?: string; accessKeyId?: string; secretAccessKey?: string }) => {
-    const r = { ...(readConfig().r2 ?? {}) }
-    if (patch.accountId !== undefined) r.accountId = patch.accountId.trim()
-    if (patch.endpoint !== undefined) r.endpoint = patch.endpoint.trim()
-    if (patch.bucket !== undefined) r.bucket = patch.bucket.trim()
-    if (patch.prefix !== undefined) r.prefix = patch.prefix.trim()
-    // Secret is write-only: only update creds when both are supplied; encrypt at rest. Report the
-    // truth so the UI can't show a false "saved" (the earlier bug) — and so we can diagnose.
-    const gotKeys = Boolean(patch.accessKeyId && patch.secretAccessKey)
-    const encAvailable = safeStorage.isEncryptionAvailable()
-    let savedCreds = false
-    let error: string | undefined
-    if (gotKeys) {
-      if (!encAvailable) {
-        error = 'OS keychain (safeStorage) unavailable'
-      } else {
+  // The endpoint, bucket and account (settings.json) and the key ciphertext (config.json) describe one connection, so
+  // they change together or not at all (r2-save.ts). Report the truth so the UI can't show a false "saved".
+  appHandle('settings:set-r2', (_e, patch: unknown) =>
+    saveR2(patch, {
+      encAvailable: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (plain) => safeStorage.encryptString(plain).toString('base64'),
+      snapshot: (fields) => {
+        const r = readConfig().r2 ?? {}
+        return Object.fromEntries(fields.map((f) => [f, r[f]]))
+      },
+      async writePrefs(prefs) {
+        if (settings && prefsInStore) return writeConfig({ r2: prefs })
         try {
-          r.accessKeyIdEnc = safeStorage.encryptString(patch.accessKeyId as string).toString('base64')
-          r.secretEnc = safeStorage.encryptString(patch.secretAccessKey as string).toString('base64')
-          savedCreds = true
+          writeRawConfig({ r2: { ...(rawConfig().r2 ?? {}), ...prefs } }) // preferences still in config.json
+          return { ok: true }
         } catch (e) {
-          error = (e as Error).message
+          return { ok: false, error: `The R2 settings were not saved (${(e as NodeJS.ErrnoException)?.code ?? 'error'}).` }
         }
-      }
-    }
-    writeConfig({ r2: r })
-    return { ok: true, gotKeys, encAvailable, savedCreds, error }
-  })
-  ipcMain.handle('settings:test-r2', async () => {
+      },
+      writeCiphertext: (enc) => writeRawConfig({ r2: { ...(rawConfig().r2 ?? {}), ...enc } })
+    })
+  )
+  appHandle('settings:test-r2', async () => {
     const creds = r2Creds()
     if (!creds) return { ok: false, error: 'No credentials saved' }
     return testR2(r2Settings(), creds)
   })
   // Per-store backend (Local | R2) + a media sync (upload) to R2.
-  ipcMain.handle('settings:get-storage', () => ({
+  appHandle('settings:get-storage', () => ({
     archive: storeBackend('archive'),
     others: storeBackend('others'),
     well: storeBackend('well')
   }))
-  ipcMain.handle('settings:set-store-backend', (_e, store: StoreName, backend: 'local' | 'r2') => {
+  appHandle('settings:set-store-backend', (_e, store: StoreName, backend: 'local' | 'r2') => {
     const s = { ...(readConfig().storage ?? {}) }
     s[store] = { ...(s[store] ?? {}), backend: backend === 'r2' ? 'r2' : 'local' }
     writeConfig({ storage: s })
     return { ok: true }
   })
-  ipcMain.handle('settings:sync-store', async (_e, store: StoreName) => {
+  appHandle('settings:sync-store', async (_e, store: StoreName) => {
     const creds = r2Creds()
     if (!creds) return { ok: false, error: 'No R2 credentials saved' }
     const root = storageRoots()[store]
@@ -1374,12 +1521,12 @@ app.whenReady().then(() => {
   })
 
   // --- Others' Library (Scenario A, ADR-0031): a separate store for other people's decks ---
-  ipcMain.handle('settings:choose-others-folder', async () => {
+  appHandle('settings:choose-others-folder', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     const picked = r.filePaths[0]
     // Never let the Others' Library overlap the personal archive — that would defeat the separation.
-    if (within(picked, archiveRoot()) || within(archiveRoot(), picked) || resolvePath(picked) === resolvePath(archiveRoot())) {
+    if (foldersOverlap(picked, archiveRoot())) {
       await dialog.showMessageBox({ type: 'warning', buttons: ['OK'], message: "That folder overlaps your own archive.", detail: 'Pick a separate location for the Others’ Library so other people’s slides never mix into your archive.' })
       return readConfig().othersArchiveRoot ?? null
     }
@@ -1387,9 +1534,9 @@ app.whenReady().then(() => {
     return picked
   })
   // Purge the whole Others' Library (its built store only) — never touches the personal archive.
-  ipcMain.handle('settings:clear-others-library', async () => {
+  appHandle('settings:clear-others-library', async () => {
     const root = othersArchiveRootResolved()
-    if (resolvePath(root) === resolvePath(archiveRoot()) || within(archiveRoot(), root)) return { ok: false }
+    if (foldersOverlap(root, archiveRoot())) return { ok: false }
     const res = await dialog.showMessageBox({
       type: 'warning',
       buttons: ['Cancel', 'Clear it'],
@@ -1411,7 +1558,7 @@ app.whenReady().then(() => {
   // Streamed feedback when import can't even start — otherwise the button "does nothing".
   const archiveMissingLine = (): void =>
     sendLine(`✕ No archive found at ${archiveRoot()} — it must contain a "registry" folder. Set a valid archive in Settings (⚙ → Archive).`)
-  ipcMain.handle('ingest:pending', async () => {
+  appHandle('ingest:pending', async () => {
     if (!archiveAvailable()) {
       archiveMissingLine()
       return { ok: false }
@@ -1422,7 +1569,7 @@ app.whenReady().then(() => {
     return r
   })
   // Pick the file/folder to import (returns the path so the panel can SHOW it before committing).
-  ipcMain.handle('ingest:choose-path', async () => {
+  appHandle('ingest:choose-path', async () => {
     const r = await dialog.showOpenDialog({
       properties: ['openFile', 'openDirectory'],
       filters: [{ name: 'PowerPoint', extensions: ['pptx', 'ppt'] }]
@@ -1432,7 +1579,7 @@ app.whenReady().then(() => {
   // Run the import against an already-chosen path (no dialog — the panel confirmed what + where).
   // library 'others' routes the data into the separate Others' Library store (Scenario A); the
   // ENGINE is always the user's ppt-archive (that's where Core A's tools/ live).
-  ipcMain.handle('ingest:run-path', async (_e, targetPath: string, library?: 'mine' | 'others') => {
+  appHandle('ingest:run-path', async (_e, targetPath: string, library?: 'mine' | 'others') => {
     if (!archiveAvailable()) {
       archiveMissingLine()
       return { ok: false }
@@ -1442,13 +1589,18 @@ app.whenReady().then(() => {
       return { ok: false }
     }
     const dataRoot = library === 'others' ? othersArchiveRootResolved() : archiveRoot()
+    // checked again on use: the Others' Library never shares a folder with your own archive, however it was set
+    if (library === 'others' && foldersOverlap(dataRoot, archiveRoot())) {
+      sendLine(`✕ ${OVERLAP_REASON}`)
+      return { ok: false }
+    }
     if (library === 'others') sendLine(`→ Importing into your Others' Library (kept separate from your archive): ${dataRoot}`)
     const r = await runIngest({ engineRoot: archiveRoot(), dataRoot, python: python(), mode: 'path', targetPath }, sendLine)
     invalidateDeckMeta(cacheDir()) // new decks added → drop the cached index so they show without restart
     if (library !== 'others') pictureSearch?.pokeArchive()
     return r
   })
-  ipcMain.handle('ingest:cancel', () => {
+  appHandle('ingest:cancel', () => {
     cancelIngest()
     return true
   })
@@ -1456,19 +1608,19 @@ app.whenReady().then(() => {
   // --- convert (sideband, throwaway): someone else's .pptx → a mechanical Outline folder,
   //     saved wherever the user picks. Never touches the archive registry or the vault. ---
   const sendConvertLine = (s: string): void => mainWindow?.webContents.send('convert:line', s)
-  ipcMain.handle('settings:choose-conversions-folder', async () => {
+  appHandle('settings:choose-conversions-folder', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     writeConfig({ conversionsRoot: r.filePaths[0] })
     return r.filePaths[0]
   })
-  ipcMain.handle('settings:set-convert-ocr', (_e, on: boolean) => {
+  appHandle('settings:set-convert-ocr', (_e, on: boolean) => {
     writeConfig({ convertOcrByDefault: Boolean(on) })
     return Boolean(on)
   })
   // "My decks" owner names. Unset → computed from the OS account (never written until the user saves).
-  ipcMain.handle('settings:get-owner-names', () => resolveOwnerNames(readConfig().ownerNames))
-  ipcMain.handle('settings:set-owner-names', (_e, names: unknown) => {
+  appHandle('settings:get-owner-names', () => resolveOwnerNames(readConfig().ownerNames))
+  appHandle('settings:set-owner-names', (_e, names: unknown) => {
     const cleaned = cleanOwnerNames(names)
     writeConfig({ ownerNames: cleaned.length > 0 ? cleaned : undefined }) // empty → back to the account default
     const resolved = resolveOwnerNames(readConfig().ownerNames)
@@ -1476,12 +1628,12 @@ app.whenReady().then(() => {
     return resolved
   })
   // Step 1: pick the source .pptx — returns its path so the panel SHOWS it before converting.
-  ipcMain.handle('convert:choose-source', async () => {
+  appHandle('convert:choose-source', async () => {
     const pick = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'PowerPoint', extensions: ['pptx', 'ppt'] }] })
     return pick.canceled || !pick.filePaths[0] ? null : pick.filePaths[0]
   })
   // Step 2: pick the destination folder, pre-filled from the source name + the conversionsRoot default.
-  ipcMain.handle('convert:choose-dest', async (_e, sourcePath: string) => {
+  appHandle('convert:choose-dest', async (_e, sourcePath: string) => {
     const suggested = slugify(basename(sourcePath || '').replace(/\.(pptx|ppt)$/i, '')) || 'converted'
     const defDir = conversionsRootResolved()
     const defaultPath = join(defDir && existsSync(defDir) ? defDir : homedir(), suggested)
@@ -1489,7 +1641,7 @@ app.whenReady().then(() => {
     return save.canceled || !save.filePath ? null : save.filePath
   })
   // Step 3: run the conversion against the already-chosen source + destination (no dialogs here).
-  ipcMain.handle('convert:run', async (_e, opts: { pptxPath: string; outDir: string; ocr: boolean }) => {
+  appHandle('convert:run', async (_e, opts: { pptxPath: string; outDir: string; ocr: boolean }) => {
     if (!archiveAvailable()) {
       sendConvertLine('✕ Archive engine not found — set it in Settings (extraction needs Core A).')
       return { ok: false, error: 'archive unavailable' }
@@ -1520,7 +1672,7 @@ app.whenReady().then(() => {
   // Delete-by-filter (ADR-0031): remove every Others' Library deck matching the current query +
   // filters, then rebuild the index from what remains. No filter → deletes the whole library.
   // Scoped to the Others' Library only — never the personal archive.
-  ipcMain.handle('others:delete-matching', async (_e, query: string, filters: SearchFilters) => {
+  appHandle('others:delete-matching', async (_e, query: string, filters: SearchFilters) => {
     const root = othersArchiveRootResolved()
     if (!othersArchiveAvailable()) return { ok: false, deleted: 0 }
     const f: SearchFilters = { ...filters, owner: 'all', library: 'others' }
@@ -1591,7 +1743,6 @@ app.whenReady().then(() => {
     return { ok: true, deleted: idList.length }
   })
 
-  Menu.setApplicationMenu(Menu.buildFromTemplate(appMenuTemplate(openSettingsFromMenu)))
   void startWell().finally(() => pictureSearch?.start())
   createWindow().webContents.once('did-finish-load', () => launchScanHook())
 
