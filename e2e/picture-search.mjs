@@ -8,6 +8,7 @@
 //   node e2e/picture-search.mjs
 // Optional: SLIDEWELL_PICTURE_QUERY and SLIDEWELL_PICTURE_MODEL_DIR (a verified model fixture;
 // supplying one skips download and delete). The archive and model are copied into the temporary run.
+import { finish, recordFailure } from './support/result.mjs'
 import { createScratch, launchHidden, copyFixture } from './support/scratch.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync, readdirSync, writeFileSync, copyFileSync } from 'node:fs'
@@ -16,7 +17,7 @@ import { join } from 'node:path'
 const fixture = process.env.SLIDEWELL_PICTURE_SAMPLE
 if (!fixture || !existsSync(join(fixture, 'extracted'))) {
   console.error('Set SLIDEWELL_PICTURE_SAMPLE to an archive folder that has extracted/<id>/renders/.')
-  process.exit(2)
+  finish('Set SLIDEWELL_PICTURE_SAMPLE to an archive folder that has extracted/<id>/renders/.', 2)
 }
 const expectId = process.env.SLIDEWELL_PICTURE_EXPECT || null
 const queryText = process.env.SLIDEWELL_PICTURE_QUERY || 'robots in a classroom'
@@ -127,7 +128,10 @@ async function wordSearchMs(win, n = 5) {
 let failed = false
 const check = (name, ok, detail) => {
   out(`check ${name}`, ok ? 'pass' : `FAIL ${detail ?? ''}`)
-  if (!ok) failed = true
+  if (!ok) {
+    recordFailure(name)
+    failed = true
+  }
 }
 
 // ---------- run 1: switch on from Settings ----------
@@ -262,4 +266,4 @@ try {
 check('no window shown or focused during the run', windowShown === null, JSON.stringify(windowShown))
 out('screenshots', screens)
 console.log(failed ? 'PICTURE SEARCH E2E: FAILED' : 'PICTURE SEARCH E2E: PASSED')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)

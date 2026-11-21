@@ -1,6 +1,7 @@
 // Isolated triage e2e (ADR-0029). Runs the real scan → list → select → importSelected flow through
 // the app's IPC, against throwaway dirs (temp userData + temp well + a fixture source folder), so it
 // never touches the user's real well/config. Run: `node e2e/triage.mjs` (after `npm run build`).
+import { finish, failedChecks } from './support/result.mjs'
 import { createScratch, launchHidden } from './support/scratch.mjs'
 import { mkdirSync, writeFileSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
@@ -174,4 +175,4 @@ try {
   await app.close()
 }
 out({ ...result, pass })
-process.exit(pass ? 0 : 1)
+finish(pass ? null : result.error || failedChecks(result) || 'Triage fixture assertions failed')

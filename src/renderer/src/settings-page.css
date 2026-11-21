@@ -6,6 +6,10 @@ html, body, #root { height: 100%; margin: 0; overflow: hidden; background: #ecec
   background: #f6f6f8; border-bottom: 1px solid #cfd1d8; -webkit-app-region: drag;
   font: 600 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; color: #1d1d1f; user-select: none;
 }
+.sw-config-problem {
+  margin: 0; padding: 10px 14px; background: #fff4e4; color: #64370a; border-bottom: 1px solid #e4cda8;
+  font: 13px -apple-system, BlinkMacSystemFont, sans-serif;
+}
 .bsw-root.sw-settings { flex: 1; height: auto; min-height: 0; }
 /* SlideWell's Oxford blue, from the main window's palette */
 .bsw-root.sw-settings {

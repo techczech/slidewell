@@ -10,6 +10,7 @@
 //   node e2e/sorter.mjs
 // Optional: SLIDEWELL_SORTER_LIMIT (default 200; 'all' for every undecided screenshot).
 // Databases, images and the model are copied into a temporary run folder. Use disposable fixtures.
+import { finish, recordFailure } from './support/result.mjs'
 import { createScratch, launchHidden, copyFixture } from './support/scratch.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { execFileSync } from 'node:child_process'
@@ -20,7 +21,7 @@ const sourceWell = process.env.SLIDEWELL_SORTER_SOURCE_WELL
 const modelSrc = process.env.SLIDEWELL_SORTER_MODEL_DIR
 if (!sourceWell || !existsSync(join(sourceWell, 'triage.db'))) {
   console.error('Set SLIDEWELL_SORTER_SOURCE_WELL to a well folder with triage.db.')
-  process.exit(2)
+  finish('Set SLIDEWELL_SORTER_SOURCE_WELL to a well folder with triage.db.', 2)
 }
 const scratch = createScratch('sorter')
 const limitEnv = process.env.SLIDEWELL_SORTER_LIMIT || '200'
@@ -34,7 +35,7 @@ const modelDir = join(userData, 'models', 'embeddinggemma-2-onnx-fp16')
 for (const d of [userData, home, well, screens, join(userData, 'models')]) mkdirSync(d, { recursive: true })
 if (!modelSrc || !existsSync(join(modelSrc, 'verified.json'))) {
   console.error('Set SLIDEWELL_SORTER_MODEL_DIR to a verified embeddinggemma-2-onnx-fp16 folder (nothing is downloaded).')
-  process.exit(2)
+  finish('Set SLIDEWELL_SORTER_MODEL_DIR to a verified embeddinggemma-2-onnx-fp16 folder (nothing is downloaded).', 2)
 }
 copyFixture(modelSrc, modelDir)
 for (const f of ['triage.db', 'well.db']) {
@@ -80,7 +81,10 @@ const out = (k, v) => {
 const fails = []
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`)
-  if (!ok) fails.push(name)
+  if (!ok) {
+    recordFailure(name)
+    fails.push(name)
+  }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const readDb = (sql) => {
@@ -228,4 +232,4 @@ if (rep) {
 out('sample reasons', readDb("SELECT proposal, ROUND(confidence, 2) AS confidence, reason FROM sorter_proposals GROUP BY proposal, reason ORDER BY proposal LIMIT 20"))
 writeFileSync(join(scratch, 'sorter-e2e-results.json'), JSON.stringify(results, null, 2))
 console.log(fails.length ? `\n${fails.length} FAILED: ${fails.join('; ')}` : '\nALL PASSED')
-process.exit(fails.length ? 1 : 0)
+finish(fails.length ? 'assertion failed' : null)

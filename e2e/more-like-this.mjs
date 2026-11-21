@@ -6,6 +6,7 @@
 //   node e2e/more-like-this.mjs
 // Screenshots use the temporary run folder (hidden run). Every launch is SLIDEWELL_E2E_HIDDEN=1 with its own
 // user-data-dir; never touches the installed app.
+import { finish, recordFailure } from './support/result.mjs'
 import { createScratch, launchHidden, copyIndexedSearchFixture } from './support/scratch.mjs'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -13,7 +14,7 @@ import { join } from 'node:path'
 const fixture = process.env.SLIDEWELL_MLT_SCRATCH
 if (!fixture || !existsSync(join(fixture, 'userData', 'models'))) {
   console.error('Set SLIDEWELL_MLT_SCRATCH to a folder with userData/models, well/ and sample-archive/.')
-  process.exit(2)
+  finish('Set SLIDEWELL_MLT_SCRATCH to a folder with userData/models, well/ and sample-archive/.', 2)
 }
 const scratch = createScratch('more')
 copyIndexedSearchFixture(fixture, scratch)
@@ -24,7 +25,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failed = 0
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : ' - ' + detail}`)
-  if (!ok) failed++
+  if (!ok) {
+    recordFailure(name)
+    failed++
+  }
 }
 function profile(name) {
   const userData = join(scratch, name === 'main' ? 'userData' : name)
@@ -151,4 +155,4 @@ try {
   await app.close()
 }
 console.log(failed ? `${failed} FAILED` : 'ALL PASS')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)

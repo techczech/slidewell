@@ -7,6 +7,7 @@
 // Optional: SLIDEWELL_MATCH_WORDS (default 'research'), SLIDEWELL_MATCH_NOWORDS (default
 // 'an inverted pyramid hierarchy diagram'). Screenshots use the temporary run folder (hidden run).
 // Never touches the installed app; every launch is SLIDEWELL_E2E_HIDDEN=1 with its own user-data-dir.
+import { finish, recordFailure } from './support/result.mjs'
 import { createScratch, launchHidden, copyIndexedSearchFixture } from './support/scratch.mjs'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -14,7 +15,7 @@ import { join } from 'node:path'
 const fixture = process.env.SLIDEWELL_MATCH_SCRATCH
 if (!fixture || !existsSync(join(fixture, 'userData', 'models'))) {
   console.error('Set SLIDEWELL_MATCH_SCRATCH to a folder with userData/models, well/ and sample-archive/.')
-  process.exit(2)
+  finish('Set SLIDEWELL_MATCH_SCRATCH to a folder with userData/models, well/ and sample-archive/.', 2)
 }
 const scratch = createScratch('match')
 copyIndexedSearchFixture(fixture, scratch)
@@ -26,7 +27,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failed = 0
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : ' - ' + detail}`)
-  if (!ok) failed++
+  if (!ok) {
+    recordFailure(name)
+    failed++
+  }
 }
 
 function profile(name, withModel) {
@@ -154,4 +158,4 @@ try {
   await app.close()
 }
 console.log(failed ? 'MATCH SWITCH E2E: FAILED' : 'MATCH SWITCH E2E: PASSED')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)

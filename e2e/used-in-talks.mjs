@@ -3,6 +3,7 @@
 // From chip, the card line and the inspector's Used in box. The fixture vault is the only thing written.
 //
 // Run: npm run test:used-in-talks. Hidden run with a temporary HOME and userData.
+import { finish, recordFailure } from './support/result.mjs'
 import { createScratch, launchHidden } from './support/scratch.mjs'
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -18,7 +19,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failed = 0
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : ' - ' + detail}`)
-  if (!ok) failed++
+  if (!ok) {
+    recordFailure(name)
+    failed++
+  }
 }
 
 for (const d of [join(vault, '_assets'), join(vault, 'sample-talk'), userData, home, screens]) mkdirSync(d, { recursive: true })
@@ -120,4 +124,4 @@ const talkNow = readFileSync(talk, 'utf8')
 check('the talk file is exactly what the user wrote (SlideWell never writes to the vault)', talkNow === talkText('![A friendly robot](img-aaaaaaa)'))
 if (existsSync(join(vault, 'well.db')) || existsSync(join(vault, 'sample-talk', 'well.db'))) check('no database in the vault', false)
 console.log(failed ? `${failed} FAILED` : 'ALL PASSED')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)

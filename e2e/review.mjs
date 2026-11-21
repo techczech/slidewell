@@ -1,6 +1,7 @@
 // End-to-end: Review in the real app with three synthetic screenshot proposals.
 // Keep, Throwaway, Undo and both piles, checking the scratch database and original bytes.
 // Run: npm run test:review
+import { finish, recordFailure } from './support/result.mjs'
 import { createScratch, launchHidden } from './support/scratch.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
@@ -47,7 +48,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failed = 0
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : ' - ' + detail}`)
-  if (!ok) failed++
+  if (!ok) {
+    recordFailure(name)
+    failed++
+  }
 }
 const db = (fn) => {
   const d = new DatabaseSync(join(well, 'triage.db'), { readOnly: true })
@@ -124,4 +128,4 @@ try {
   await app.close()
 }
 console.log(failed ? `${failed} FAILED` : 'all passed')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)

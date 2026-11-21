@@ -7,6 +7,7 @@
 // write a real SlideWell profile. With no archive the run covers the shell only (archiveConnected:
 // false). To exercise the archive features, point SLIDEWELL_SMOKE_ARCHIVE at a Core A archive; the
 // spec copies it into scratch before launching the app.
+import { finish, failedChecks } from './support/result.mjs'
 import { copyFixture, createScratch, launchHidden } from './support/scratch.mjs'
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -280,18 +281,19 @@ try {
     // No ppt-archive store here: only the shell loaded, so the feature checks did not run. Report SKIPPED, never pass.
     out({ launched: true, title, archiveConnected, pass: null, skipped: true, reason: 'archive not connected' })
     await app.close()
-    process.exit(0)
+    finish('archive not connected (SLIDEWELL_SMOKE_ARCHIVE is required)', 2)
   }
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
     (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && noDeckWord && filterLayoutOk && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk && roleAllOk && selectionOk && rowNavOk && clickSelectsOk && inspectorOk && paletteOk && lightboxPaletteOk && helpOk && triageOpensOk && settingsOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, noDeckWord, filterLayoutOk, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, rowNavOk, clickSelectsOk, inspectorOk, paletteOk, lightboxPaletteOk, helpOk, triageOpensOk, settingsOk, imgCards, imgTags, pass })
+  const report = { launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, noDeckWord, filterLayoutOk, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, rowNavOk, clickSelectsOk, inspectorOk, paletteOk, lightboxPaletteOk, helpOk, triageOpensOk, settingsOk, imgCards, imgTags, pass }
+  out(report)
   await app.close()
-  process.exit(pass ? 0 : 2)
+  finish(pass ? null : failedChecks(report) || 'smoke assertions failed', 2)
 } catch (e) {
   out({ launched: false, error: String(e) })
   await app.close().catch(() => {})
-  process.exit(1)
+  finish(String(e))
 }

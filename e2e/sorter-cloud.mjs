@@ -38,6 +38,7 @@
 // interception installed from this script in the main process (protocol.handle); main's native
 // consent dialog (dialog.showMessageBox) is replaced the same way, answering from a queue and
 // recording what it showed. The app's own code has no stub switch. Nothing goes to the real network.
+import { finish, recordFailure } from './support/result.mjs'
 import { createScratch, launchHidden } from './support/scratch.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { createServer } from 'node:http'
@@ -56,7 +57,10 @@ const SORTER_VERSION = /SORTER_VERSION = '([^']+)'/.exec(readFileSync(join(repo,
 let failed = 0
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : ' - ' + detail}`)
-  if (!ok) failed++
+  if (!ok) {
+    recordFailure(name)
+    failed++
+  }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -561,6 +565,7 @@ try {
   const in90 = await win.evaluate(() => window.sw.cloud.prepare())
   check('Last 90 days does not reach it either', in90.period === '90d' && in90.blocked === 'nothing-doubtful' && in90.message === 'Nothing doubtful from the last 90 days is waiting for Luna.', JSON.stringify(in90))
 } catch (e) {
+  recordFailure(String(e))
   failed++
   console.log(`FAIL  ${e?.stack ?? e}`)
 } finally {
@@ -585,4 +590,4 @@ if (existsSync(userData)) walk(userData)
 check('no file in the profile holds either key in plain text', hits.length === 0, hits.join(', '))
 console.log(`screens: ${screens}`)
 console.log(failed ? `${failed} FAILED` : 'ALL PASSED')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)

@@ -3,20 +3,24 @@
 // and is driven in chrome-headless-shell. No Electron, no real data.
 //
 // Run: node e2e/review-ui.mjs        Screenshots: only when SLIDEWELL_REVIEW_SCREENS names a folder
+import { finish, recordFailure } from './support/result.mjs'
 import { createServer } from 'vite'
 import react from '@vitejs/plugin-react'
 import { chromium } from 'playwright'
 import { mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
-const root = resolve(import.meta.dirname, '..', 'src', 'renderer')
+const root = resolve(process.env.SLIDEWELL_TEST_APP_ROOT ?? resolve(import.meta.dirname, '..'), 'src', 'renderer')
 const screens = process.env.SLIDEWELL_REVIEW_SCREENS ? resolve(process.env.SLIDEWELL_REVIEW_SCREENS) : null
 if (screens) mkdirSync(screens, { recursive: true })
 const shoot = (page, name) => (screens ? page.screenshot({ path: join(screens, name) }) : Promise.resolve())
 let failed = 0
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : ' - ' + detail}`)
-  if (!ok) failed++
+  if (!ok) {
+    recordFailure(name)
+    failed++
+  }
 }
 
 // "today" or "yesterday" as whenWords says it for this time: the mock's times are relative to now, so just after
@@ -1054,4 +1058,4 @@ try {
   }
 }
 console.log(failed ? `${failed} FAILED` : 'all passed')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)

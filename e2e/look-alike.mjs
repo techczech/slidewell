@@ -1,5 +1,6 @@
 // End-to-end: two synthetic well images group into one card and expand again.
 // Run: npm run test:look-alike
+import { finish, recordFailure } from './support/result.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -48,7 +49,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failed = 0
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : ' - ' + detail}`)
-  if (!ok) failed++
+  if (!ok) {
+    recordFailure(name)
+    failed++
+  }
 }
 
 const app = await launchHidden(userData, join(scratch, 'home'))
@@ -104,4 +108,4 @@ try {
   await app.close()
 }
 console.log(failed ? `${failed} FAILED` : 'ALL PASS')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)

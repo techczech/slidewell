@@ -6,20 +6,24 @@
 // for the Settings bridge (window.bridleSettings), opened at the Sorting help page; its calls are counted on its own fake.
 //
 // Run: node e2e/auto-sorting-ui.mjs      Screenshots: only when SLIDEWELL_AUTOSORT_SCREENS names a folder
+import { finish, recordFailure } from './support/result.mjs'
 import { createServer } from 'vite'
 import react from '@vitejs/plugin-react'
 import { chromium } from 'playwright'
 import { mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
-const root = resolve(import.meta.dirname, '..', 'src', 'renderer')
+const root = resolve(process.env.SLIDEWELL_TEST_APP_ROOT ?? resolve(import.meta.dirname, '..'), 'src', 'renderer')
 const screens = process.env.SLIDEWELL_AUTOSORT_SCREENS ? resolve(process.env.SLIDEWELL_AUTOSORT_SCREENS) : null
 if (screens) mkdirSync(screens, { recursive: true })
 const shoot = (page, name) => (screens ? page.screenshot({ path: join(screens, name) }) : Promise.resolve())
 let failed = 0
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : ' - ' + detail}`)
-  if (!ok) failed++
+  if (!ok) {
+    recordFailure(name)
+    failed++
+  }
 }
 
 // The fake, installed before the app's own mock so that every hook (title bar, tab, Settings) sees it.
@@ -742,4 +746,4 @@ try {
   }
 }
 console.log(failed ? `${failed} FAILED` : 'ALL PASSED')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)

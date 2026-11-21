@@ -5,8 +5,9 @@
 // Settings window's custom pages still reach the app's own IPC (judged by frame), and a Triage folder set
 // by the CLI is watched at once (a screenshot dropped there is picked up without a Scan).
 // Needs no archive. Run: npm run test:settings (builds first).
+import { finish, failedChecks } from './support/result.mjs'
 import { createScratch, launchHidden } from './support/scratch.mjs'
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 
@@ -16,6 +17,7 @@ const userData = join(work, 'userData')
 const home = join(work, 'home')
 mkdirSync(userData, { recursive: true })
 mkdirSync(home, { recursive: true })
+const configPath = join(userData, 'config.json')
 const config = {
   wellRoot: join(work, 'well'),
   othersArchiveRoot: join(work, 'others-library'),
@@ -23,18 +25,19 @@ const config = {
   r2: { accountId: 'acc-e2e', accessKeyIdEnc: 'not-a-real-ciphertext' },
   windowBounds: { width: 1300, height: 860 }
 }
-writeFileSync(join(userData, 'config.json'), JSON.stringify(config), 'utf8')
+writeFileSync(configPath, JSON.stringify(config), 'utf8')
 const version = JSON.parse(readFileSync('package.json', 'utf8')).version
-
-const app = await launchHidden(userData, home)
+const launch = () => launchHidden(userData, home)
+const app = await launch()
 const r = {}
+const damaged = Buffer.from('{"windowBounds":')
 try {
   const win = await app.firstWindow({ timeout: 20000 })
   await win.waitForLoadState('domcontentloaded')
   await win.waitForTimeout(1500)
 
   const settingsFile = JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8'))
-  const cfg = JSON.parse(readFileSync(join(userData, 'config.json'), 'utf8'))
+  const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
   r.migrated = settingsFile.settings['library.wellRoot'] === config.wellRoot && settingsFile.settings['library.convertOcr'] === true && settingsFile.settings['storage.r2AccountId'] === 'acc-e2e'
   r.appUpdateEntries = settingsFile.changes.length === 4 && settingsFile.changes.every((e) => e.who.kind === 'app-update' && e.who.version === version)
   r.configUntouched = JSON.stringify(cfg) === JSON.stringify(config) // the old version's file stays as it was
@@ -46,16 +49,31 @@ try {
   r.menuFrame = menu.map((m) => m.label).join(' | ')
   r.menuSettings = appMenu.some((i) => i.label.startsWith('Settings') && i.accel) && appMenu.some((i) => i.label.startsWith('Export Settings')) && appMenu.some((i) => i.label.startsWith('Import Settings'))
 
-  await win.keyboard.press('Escape') // leave the search field
-  await win.waitForTimeout(150)
-  await win.keyboard.press('?')
-  await win.waitForTimeout(300)
-  const rows = await win.locator('.help-modal .drow[data-command]').count()
+  const focus = await win.evaluate(() => ({
+    hasFocus: document.hasFocus(),
+    activeElement: document.activeElement?.tagName ?? null,
+    activeClass: document.activeElement?.className ?? null
+  }))
+  const hidden = await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows().every((window) => !window.isVisible()))
+  out({ cheatSheetFocus: focus, hidden })
+  if (hidden) {
+    // A hidden BrowserWindow does not receive physical keypresses on macOS.
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].webContents.send('app:command', 'cheat')
+    })
+  } else {
+    await win.keyboard.press('Escape')
+    await win.keyboard.press('?')
+  }
+  const rows = win.locator('.help-modal .drow[data-command]')
+  await rows.first().waitFor({ state: 'attached', timeout: 5000 }).catch(() => undefined)
+  const rowCount = await rows.count()
   const none = await win.locator('.help-modal .help-none').count()
-  r.cheatSheet = rows >= 30 && none >= 3
-  r.cheatRows = rows
-  await win.keyboard.press('Escape')
-  await win.waitForTimeout(200)
+  out({ cheatSheetRows: rowCount, cheatSheetUnbound: none })
+  if (hidden && rowCount === 0) throw new Error('cheat sheet has 0 rows after app:command')
+  r.cheatSheet = rowCount >= 30 && none >= 3
+  if (r.cheatSheet) await win.getByRole('dialog', { name: 'Keyboard shortcuts' }).getByRole('button', { name: /close/i }).click()
 
   const [settingsWin] = await Promise.all([app.waitForEvent('window', { timeout: 10000 }), win.locator('.titlebar-actions .tb-btn', { hasText: '⚙' }).click()])
   settingsWin.on('console', (m) => console.error('[settings console]', m.text()))
@@ -96,9 +114,32 @@ try {
     seen = (await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0))).items.filter((x) => x.filename.includes('Watched'))
   }
   r.watcherFollowsCli = seen.length === 1
+
+  // Settings explains an unreadable config without exposing its contents, and the resize save on close refuses it.
+  writeFileSync(configPath, damaged)
+  await settingsWin.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await settingsWin.getByRole('alert').filter({ hasText: 'SlideWell could not read your saved state.' }).waitFor()
+  r.configProblemShown = true
 } finally {
   await app.close()
 }
+const reopened = await launch()
+try {
+  const win = await reopened.firstWindow({ timeout: 20000 })
+  const paths = await win.evaluate(() => window.sw.settings.getPaths())
+  r.sharedSettingsLoadedAfterRestart = paths.wellRoot === config.wellRoot && paths.convertOcrDefault === true
+  const [settingsWin] = await Promise.all([reopened.waitForEvent('window', { timeout: 10000 }), win.locator('.titlebar-actions .tb-btn', { hasText: '⚙' }).click()])
+  await settingsWin.getByRole('alert').filter({ hasText: 'SlideWell could not read your saved state.' }).waitFor()
+  r.sharedSettingsWriteAccepted = await settingsWin.evaluate(async () =>
+    (await window.bridleSettings.set('library.convertOcr', false)).ok)
+  await win.waitForFunction(async () => !(await window.sw.settings.getPaths()).convertOcrDefault)
+  r.sharedSettingsSavedAfterRestart = JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8')).settings['library.convertOcr'] !== true
+} finally {
+  await reopened.close()
+}
+const copies = readdirSync(userData).filter((name) => name.startsWith('config.json.unreadable-'))
+r.damagedConfigPreserved = readFileSync(configPath).equals(damaged) &&
+  copies.length === 1 && readFileSync(join(userData, copies[0])).equals(damaged)
 const pass = Object.entries(r).every(([k, v]) => k === 'menuFrame' || k === 'cheatRows' || v === true)
 out({ ...r, pass })
-process.exit(pass ? 0 : 1)
+finish(pass ? null : failedChecks(r) || 'Settings fixture assertions failed')

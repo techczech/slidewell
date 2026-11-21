@@ -2,6 +2,7 @@
 // changes) → "Bring them in" → copies verified; every original (Desktop and CleanShot history) untouched.
 // Desktop and CleanShot history are fixtures under a temporary HOME and userData. Never clicks "Point CleanShot here".
 // Run: `npx electron-vite build && node e2e/backlog-import.mjs [screenshot.png]`.
+import { finish, failedChecks } from './support/result.mjs'
 import { createScratch, launchHidden } from './support/scratch.mjs'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
@@ -128,4 +129,4 @@ try {
   await app.close()
 }
 out({ pass, ...r })
-process.exit(pass ? 0 : 1)
+finish(pass ? null : r.error || failedChecks(r) || 'backlog copy count did not match the fixture')
