@@ -37,8 +37,6 @@ export function install(deps: Dependencies): void {
   const { appHandle, archiveRoot, archiveAvailable, othersArchiveRootResolved, othersArchiveAvailable, wellRootResolved, detectVaultRoot, cacheDir, swThumb, resolveSwUrlReal, pictureSearch, talkUsage } = deps
   // Read-only search over Core A. Returns [] when the archive isn't present (UI degrades gracefully).
   // renderAbsPath is converted to a renderable swarchive:// URL here; the renderer never sees raw paths.
-  const cacheDir = (): string => app.getPath('userData')
-  setOwnerNames(resolveOwnerNames(readConfig().ownerNames).names)
   // Which archive store holds this deck's extraction — mine first, else the Others' Library. Lets
   // inspect/context actions resolve a result to the right store without threading library everywhere.
   const rootForDeck = (deck: string): string => {

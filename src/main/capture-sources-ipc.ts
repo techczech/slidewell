@@ -43,7 +43,7 @@ interface InstallDependencies {
   swThumb: (abs: string | null) => string | null
   pictureSearch: PictureSearchService | null
   review: ReviewService
-  retrainer: Retrainer
+  retrainer: Pick<Retrainer, 'noteAnswer'>
 }
 
 export function createCaptureSources({ readConfig, screenshotRootResolved }: SourceDependencies) {

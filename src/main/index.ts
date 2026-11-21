@@ -13,6 +13,7 @@ import { MAIN_COMMANDS, registry, type CommandContext } from '../shared/commands
 import { setOwnerNames } from './deckmeta'
 import { resolveOwnerNames } from './owners'
 import { ensureWell, drainInbox, INBOX_SETTLE_MS, scanVault, findFfmpeg } from './well'
+import { createSourceWatcher } from './source-watcher'
 import { isVaultChangeRelevant } from './talk-usage'
 import { createTalkUsageService } from './talk-usage-service'
 import { detectPython, findRenderTools } from './ingest'
