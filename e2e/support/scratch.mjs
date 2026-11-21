@@ -25,9 +25,11 @@ export function copyFixture(source, target) {
 
 export function launchHidden(userData, home, { args = [], ...options } = {}) {
   mkdirSync(home, { recursive: true })
+  const env = { ...process.env, HOME: home, SLIDEWELL_DATA_DIR: userData, SLIDEWELL_E2E_HIDDEN: '1' }
+  delete env.ELECTRON_RUN_AS_NODE
   return electron.launch({
     ...options,
-    args: ['.', `--user-data-dir=${userData}`, ...args],
-    env: { ...process.env, HOME: home, SLIDEWELL_DATA_DIR: userData, SLIDEWELL_E2E_HIDDEN: '1' }
+    args: ['.', `--user-data-dir=${userData}`, '--use-mock-keychain', ...args],
+    env
   })
 }

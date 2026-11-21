@@ -181,7 +181,7 @@ const stubUrl = `http://127.0.0.1:${server.address().port}`
 console.log(`stub: ${stubUrl}`)
 
 const output = []
-const app = await launchHidden(userData, join(scratch, 'home'), { cwd: repo, args: ['--use-mock-keychain'] }).catch((error) => {
+const app = await launchHidden(userData, join(scratch, 'home'), { cwd: repo }).catch((error) => {
   server.close()
   throw error
 })

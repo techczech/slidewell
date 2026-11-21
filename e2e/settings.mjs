@@ -25,7 +25,6 @@ const config = {
 }
 writeFileSync(join(userData, 'config.json'), JSON.stringify(config), 'utf8')
 const version = JSON.parse(readFileSync('package.json', 'utf8')).version
-delete env.ELECTRON_RUN_AS_NODE
 
 const app = await launchHidden(userData, home)
 const r = {}
