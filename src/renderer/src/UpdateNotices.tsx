@@ -159,7 +159,6 @@ export function AboutUpdates(): JSX.Element {
   }
   return (
     <section className="sw-page sw-about-updates">
-      <h2>About and updates</h2>
       <p><strong>SlideWell · {about.version}</strong><br />{about.where}</p>
       {!store && (
         <>
