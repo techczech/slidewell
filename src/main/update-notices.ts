@@ -70,7 +70,10 @@ export function installUpdateNotices(ports: Ports) {
   const fetchReleaseFeed = createElectronFeedFetcher(UPDATE_IDENTITY, { net, session })
   const statePath = join(app.getPath('userData'), 'update-notices.json')
   let state = readUpdateState(undefined, feedUrl)
-  try { state = readUpdateState(JSON.parse(readFileSync(statePath, 'utf8')), feedUrl) } catch { /* state can be rebuilt */ }
+  try {
+    state = readUpdateState(JSON.parse(readFileSync(statePath, 'utf8')), feedUrl)
+    if (state.latest && !hasSlideWellLinks(state.latest)) state.latest = undefined
+  } catch { /* state can be rebuilt */ }
   let enabled = ports.enabled()
   const checker = createUpdateChecker({
     identity: UPDATE_IDENTITY,
@@ -83,8 +86,7 @@ export function installUpdateNotices(ports: Ports) {
       if (!answer.ok) return answer
       const validated = validateFeed(answer.text, feedUrl)
       if (!validated.ok) return answer
-      const { notes, download } = validated.latest
-      return [notes, download.mac, download.windows].every(onSlideWellSite)
+      return hasSlideWellLinks(validated.latest)
         ? answer : { ok: false, reason: 'unreadable' }
     },
     readState: () => state,
@@ -152,4 +154,8 @@ export function installUpdateNotices(ports: Ports) {
 function onSlideWellSite(link: string): boolean {
   const url = new URL(link)
   return url.origin === new URL(UPDATE_IDENTITY.feedUrl).origin && url.pathname.startsWith('/slidewell/')
+}
+
+function hasSlideWellLinks({ notes, download }: { notes: string; download: { mac: string; windows: string } }): boolean {
+  return [notes, download.mac, download.windows].every(onSlideWellSite)
 }

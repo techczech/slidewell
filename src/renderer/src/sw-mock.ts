@@ -1,3 +1,5 @@
+import type { UpdateSnapshot } from '@app-patterns/updates'
+import { UPDATE_IDENTITY } from '../../shared/update-identity'
 import type { SwApi } from '../../preload'
 import { reviewMock } from './review-mock'
 import { sorterMock } from './sorter-mock'
@@ -70,7 +72,18 @@ export function installMock(): void {
     estimate: null
   }
   const review = reviewMock()
+  const updateSnapshot: UpdateSnapshot = {
+    identity: UPDATE_IDENTITY, running: '0.4.0-alpha.19', platform: 'darwin', source: 'development',
+    enabled: true, checking: false, state: {}, mark: null, whatsNew: null, busy: false, waiting: false
+  }
+  const currentUpdates = async () => updateSnapshot
   const mock: SwApi = {
+    updates: {
+      get: currentUpdates, check: currentUpdates, notNow: currentUpdates, skip: currentUpdates, stopSkipping: currentUpdates,
+      download: async () => false, releaseNotes: async () => false, store: async () => false,
+      whatsNew: async () => ({ version: updateSnapshot.running, items: [] }),
+      onChanged: () => () => {}, onAnswer: () => () => {}, onShowNotes: () => () => {}
+    },
     app: { onCommand: () => () => {}, runCommand: async () => {}, showInMain: async () => {}, openSettings: async () => {}, setContext: async () => {}, bindings: async () => ({}), onSettingsChanged: () => () => {} },
     picture: {
       status: async () => pictureStatus,
