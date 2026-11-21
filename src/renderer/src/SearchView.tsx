@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import type { SlideResult, SlideClusterResult, SearchFilters, CategoryCount, DeckInfo, DeckCard, DeckDetail, FromFilter, KindFilter, FromCounts, MatchMode } from '../../preload'
 import { commandForEvent, MAIN_COMMANDS } from '../../shared/commands'
+import { CHECK_UPDATES, WHATS_NEW } from '../../shared/update-identity'
 import { usePictureStatus } from './PictureSearch'
 import { RELATED_SHOWN, relatedFold } from './match-fold'
 import { Card, DeckCardView } from './SearchCards'
@@ -59,7 +60,7 @@ const ERA_OPTIONS: { value: string; label: string }[] = [
 ]
 
 /** The settings frame's commands: they work on every screen and over any overlay. */
-export const FRAME_COMMANDS: ReadonlySet<string> = new Set(['settings', 'cheat', 'export-settings', 'import-settings'])
+export const FRAME_COMMANDS: ReadonlySet<string> = new Set(['settings', 'cheat', 'export-settings', 'import-settings', CHECK_UPDATES, WHATS_NEW])
 
 export type AppView = 'search' | 'review' | 'triage'
 
@@ -420,10 +421,8 @@ export function useSearchView({
         case 'find': return searchRef.current?.focus()
         case 'actions':
           // works over the lightbox too — acts on the image on screen, not the grid selection
-          if (lightbox || navCount > 0) {
-            if (!lightbox && sel < 0) setSel(0)
-            setPaletteOpen(true)
-          }
+          if (!lightbox && navCount > 0 && sel < 0) setSel(0)
+          setPaletteOpen(true)
           return
         case 'dismiss':
           if (paletteOpen) setPaletteOpen(false)
@@ -927,14 +926,15 @@ export function useSearchView({
               />
             ))}
 
-      {paletteOpen && activeItem && (
+      {paletteOpen && (
         <CommandPalette
           item={activeItem}
           deckMode={deckMode && !lightbox}
           onClose={() => setPaletteOpen(false)}
           onRun={(a) => {
             setPaletteOpen(false)
-            runAction(a)
+            if (a === CHECK_UPDATES || a === WHATS_NEW) runCommand(a)
+            else runAction(a)
           }}
         />
       )}

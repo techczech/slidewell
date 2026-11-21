@@ -8,6 +8,7 @@ import { commandsAdapter, type SettingValue, type SettingsState } from '@app-pat
 import { SettingsStore } from '@app-patterns/settings/node'
 import { installSettings, type SecretSlots, type SettingsHost } from '@app-patterns/settings-electron/main'
 import { MAIN_COMMANDS, MENUS, NO_CONTEXT, registry, type CommandContext } from '../shared/commands'
+import { CHECK_UPDATES, WHATS_NEW } from '../shared/update-identity'
 import { APP_ID, migrateLegacy, schema } from '../shared/settings-schema'
 import { CONFIG_UNREADABLE } from './config-file'
 import { migrateFromConfig, stampMigration } from './settings-migration'
@@ -43,6 +44,7 @@ export type SaveResult = { ok: true } | { ok: false; error: string }
 type Wiring = {
   openMain(): void
   sendCommand(id: string): void
+  runUpdateCommand(id: string): void
   /** Settings changed from anywhere (this app, the window, the CLI, an import). */
   changed(state: SettingsState): void
   slots: SecretSlots
@@ -106,6 +108,10 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
     schema,
     registry,
     menus: MENUS,
+    appItems: {
+      app: [{ label: registry.byId(CHECK_UPDATES)!.label, click: () => { wiring.openMain(); wiring.runUpdateCommand(CHECK_UPDATES) } }],
+      help: [{ label: registry.byId(WHATS_NEW)!.label, click: () => { wiring.openMain(); wiring.runUpdateCommand(WHATS_NEW) } }]
+    },
     slots: wiring.slots,
     openMain: wiring.openMain,
     sendCommand: wiring.sendCommand,
@@ -141,7 +147,8 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
     bindings: () => registry.bindingsOf(store.view().keys),
     runMainCommand(id) {
       if (!MAIN_COMMANDS.has(id)) return
-      if (id === 'export-settings') void host?.exportSettings()
+      if (id === CHECK_UPDATES || id === WHATS_NEW) wiring.runUpdateCommand(id)
+      else if (id === 'export-settings') void host?.exportSettings()
       else if (id === 'import-settings') host?.startImport()
       else host?.openSettingsWindow()
     },

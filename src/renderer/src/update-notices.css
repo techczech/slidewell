@@ -1,0 +1,63 @@
+.sw-update-status {
+  position: relative;
+  display: inline-flex;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.sw-update-mark {
+  white-space: nowrap;
+}
+
+.sw-update-popover,
+.sw-update-answer {
+  z-index: 20;
+  width: min(380px, calc(100vw - 32px));
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 6px 24px #0002;
+}
+
+.sw-update-popover {
+  position: absolute;
+  bottom: calc(100% + 12px);
+  right: 0;
+}
+
+.sw-update-answer {
+  position: fixed;
+  right: 16px;
+  bottom: 38px;
+}
+
+.sw-update-close {
+  float: right;
+}
+
+.sw-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.sw-update-actions:empty {
+  display: none;
+}
+
+.sw-update-settings-answer {
+  margin-top: 12px;
+}
+
+.sw-about-updates p,
+.sw-update-popover p,
+.sw-update-answer p {
+  margin: 8px 0;
+}
+
+.sw-update-notes li + li {
+  margin-top: 8px;
+}

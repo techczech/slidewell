@@ -10,6 +10,7 @@ import { FRAME_COMMANDS, useSearchView, type AppView } from './SearchView'
 import { ImportPanel } from './ImportPanel'
 import { ConvertPanel } from './ConvertPanel'
 import { StatsPanel } from './StatsPanel'
+import { UpdateStatus } from './UpdateNotices'
 
 export default function App(): JSX.Element {
   const [toast, setToastMsg] = useState<string | null>(null)
@@ -147,6 +148,7 @@ export default function App(): JSX.Element {
         )}
         <PictureSearchStatusBar />
         <span className="path" title={archivePath}>{archivePath}</span>
+        <UpdateStatus />
       </footer>
 
       {overlays}
