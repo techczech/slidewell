@@ -110,6 +110,7 @@ export function installMock(): void {
       deleteOthersMatching: async () => ({ ok: false })
     },
     settings: {
+      configProblem: async () => null,
       getPaths: async () => ({
         archiveRoot: null,
         archiveDefault: '~/ppt-archive',

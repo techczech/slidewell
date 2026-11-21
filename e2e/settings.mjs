@@ -6,7 +6,7 @@
 // by the CLI is watched at once (a screenshot dropped there is picked up without a Scan).
 // Needs no archive. Run: npm run test:settings (builds first).
 import { _electron as electron } from 'playwright'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -17,6 +17,7 @@ const userData = join(work, 'userData')
 const home = join(work, 'home')
 mkdirSync(userData, { recursive: true })
 mkdirSync(home, { recursive: true })
+const configPath = join(userData, 'config.json')
 const config = {
   wellRoot: join(work, 'well'),
   othersArchiveRoot: join(work, 'others-library'),
@@ -24,21 +25,23 @@ const config = {
   r2: { accountId: 'acc-e2e', accessKeyIdEnc: 'not-a-real-ciphertext' },
   windowBounds: { width: 1300, height: 860 }
 }
-writeFileSync(join(userData, 'config.json'), JSON.stringify(config), 'utf8')
+writeFileSync(configPath, JSON.stringify(config), 'utf8')
 process.on('exit', () => rmSync(work, { recursive: true, force: true }))
 const version = JSON.parse(readFileSync('package.json', 'utf8')).version
 const env = { ...process.env, HOME: home, SLIDEWELL_DATA_DIR: userData, SLIDEWELL_E2E_HIDDEN: '1' }
 delete env.ELECTRON_RUN_AS_NODE
 
-const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env })
+const launch = () => electron.launch({ args: ['.', `--user-data-dir=${userData}`], env })
+const app = await launch()
 const r = {}
+const damaged = Buffer.from('{"windowBounds":')
 try {
   const win = await app.firstWindow({ timeout: 20000 })
   await win.waitForLoadState('domcontentloaded')
   await win.waitForTimeout(1500)
 
   const settingsFile = JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8'))
-  const cfg = JSON.parse(readFileSync(join(userData, 'config.json'), 'utf8'))
+  const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
   r.migrated = settingsFile.settings['library.wellRoot'] === config.wellRoot && settingsFile.settings['library.convertOcr'] === true && settingsFile.settings['storage.r2AccountId'] === 'acc-e2e'
   r.appUpdateEntries = settingsFile.changes.length === 4 && settingsFile.changes.every((e) => e.who.kind === 'app-update' && e.who.version === version)
   r.configUntouched = JSON.stringify(cfg) === JSON.stringify(config) // the old version's file stays as it was
@@ -75,14 +78,14 @@ try {
   await settingsWin.waitForTimeout(300)
   const accounts = await settingsWin.locator('.bsw-root').innerText()
   r.slots = accounts.includes('R2 access key ID') && accounts.includes('OpenAI key') && !accounts.includes('not-a-real-ciphertext')
-  await settingsWin.screenshot({ path: join(tmpdir(), 'sw-settings-accounts.png') }).catch(() => {})
+  await settingsWin.screenshot({ path: join(work, 'sw-settings-accounts.png') }).catch(() => {})
 
   // the agent path writes through the same store; the open window shows it within a second
   await settingsWin.locator('[data-section="sorting"]').click()
   execFileSync('bun', ['bin/slidewell.mjs', 'settings', 'set', 'sorting.period', '30d', '--agent', 'e2e'], { env: { ...process.env, SLIDEWELL_DATA_DIR: userData } })
   await settingsWin.waitForTimeout(1200)
   r.liveFromCli = (await settingsWin.locator('.bsw-root').innerText()).includes('Last 30 days')
-  await settingsWin.screenshot({ path: join(tmpdir(), 'sw-settings-sorting.png') }).catch(() => {})
+  await settingsWin.screenshot({ path: join(work, 'sw-settings-sorting.png') }).catch(() => {})
 
   // the app's own IPC answers the Settings window's page (top frame, its own page)
   r.customIpcFromSettings = await settingsWin.evaluate(() => window.sw.picture.status().then(() => true, () => false))
@@ -100,9 +103,32 @@ try {
     seen = (await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0))).items.filter((x) => x.filename.includes('Watched'))
   }
   r.watcherFollowsCli = seen.length === 1
+
+  // Settings explains an unreadable config without exposing its contents, and the resize save on close refuses it.
+  writeFileSync(configPath, damaged)
+  await settingsWin.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await settingsWin.getByRole('alert').filter({ hasText: 'SlideWell could not read your saved state.' }).waitFor()
+  r.configProblemShown = true
 } finally {
   await app.close()
 }
+const reopened = await launch()
+try {
+  const win = await reopened.firstWindow({ timeout: 20000 })
+  const paths = await win.evaluate(() => window.sw.settings.getPaths())
+  r.sharedSettingsLoadedAfterRestart = paths.wellRoot === config.wellRoot && paths.convertOcrDefault === true
+  const [settingsWin] = await Promise.all([reopened.waitForEvent('window', { timeout: 10000 }), win.locator('.titlebar-actions .tb-btn', { hasText: '⚙' }).click()])
+  await settingsWin.getByRole('alert').filter({ hasText: 'SlideWell could not read your saved state.' }).waitFor()
+  r.sharedSettingsWriteAccepted = await settingsWin.evaluate(async () =>
+    (await window.bridleSettings.set('library.convertOcr', false)).ok)
+  await win.waitForFunction(async () => !(await window.sw.settings.getPaths()).convertOcrDefault)
+  r.sharedSettingsSavedAfterRestart = JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8')).settings['library.convertOcr'] !== true
+} finally {
+  await reopened.close()
+}
+const copies = readdirSync(userData).filter((name) => name.startsWith('config.json.unreadable-'))
+r.damagedConfigPreserved = readFileSync(configPath).equals(damaged) &&
+  copies.length === 1 && readFileSync(join(userData, copies[0])).equals(damaged)
 const pass = Object.entries(r).every(([k, v]) => k === 'menuFrame' || k === 'cheatRows' || v === true)
 out({ ...r, pass })
 process.exit(pass ? 0 : 1)
