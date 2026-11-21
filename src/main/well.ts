@@ -308,7 +308,8 @@ export async function ingestScreenshot(
   let buf: Buffer = orig
   let ext = (extname(srcPath).slice(1) || 'png').toLowerCase()
   // Inbox videos keep their original searchable well row and must keep their original bytes.
-  if (!INBOX_VIDEOS.has(`.${ext}`)) {
+  const isVideo = INBOX_VIDEOS.has(`.${ext}`)
+  if (!isVideo) {
     try {
       const webp = await sharp(orig).webp({ quality: 82 }).toBuffer()
       if (webp.length > 0 && webp.length <= orig.length) {
@@ -323,15 +324,17 @@ export async function ingestScreenshot(
   const id = digest.slice(0, 7)
   const text = await ocrImage(archiveRoot, srcPath)
   const slug = slugify(text, 'screenshot')
+  // Most videos have no OCR text. Index their capture name without changing the stored path.
+  const notes = isVideo ? `Captured file: ${basename(srcPath)}` : ''
   const relPath = join('images', `${slug}--${id}.${ext}`)
   const dest = join(root, relPath)
   const { created, stored } = await storeCopy(dest, BigInt(buf.length), digest, (tmp) => writeFileSync(tmp, buf, { flag: 'wx' }))
   const sidecar = join(root, 'images', `${slug}--${id}.yml`)
   if (!existsSync(sidecar)) {
-    const yaml = [`id: ${id}`, `created: ${nowIso().slice(0, 10)}`, 'provenance: added', `source: ${source}`, 'alt: ""', 'caption: ""', 'tags: []', 'notes: ""'].join('\n') + '\n'
+    const yaml = [`id: ${id}`, `created: ${nowIso().slice(0, 10)}`, 'provenance: added', `source: ${source}`, 'alt: ""', 'caption: ""', 'tags: []', `notes: ${JSON.stringify(notes)}`].join('\n') + '\n'
     await publishWellFile(sidecar, (tmp) => writeFileSync(tmp, yaml, { flag: 'wx' }))
   }
-  await upsert(root, { id, slug, ext, relPath, storeRoot: 'well', source, tags: '', notes: '', ocr: text })
+  await upsert(root, { id, slug, ext, relPath, storeRoot: 'well', source, tags: '', notes, ocr: text })
   await recordSource(root, id, sourceHash)
   return { id, relPath, created, sourceHash, stored }
 }

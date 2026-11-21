@@ -109,14 +109,14 @@ it('cleans only stale ingest temp files', async () => {
   expect(readdirSync(store).sort()).toEqual([other, fresh].sort())
 })
 
-it('indexes an inbox video under its original capture source before deleting it', async () => {
-  const original = join(inbox, 'clip.mp4')
+it('finds an inbox video by its capture filename after its verified copy is stored', async () => {
+  const original = join(inbox, 'Exit interview clip.mp4')
   const bytes = Buffer.from('synthetic video bytes')
   writeFileSync(original, bytes)
   ready(original)
 
   expect(await drainInbox(archive, well)).toBe(1)
-  const rows = await searchWell(well, 'screenshot')
+  const rows = await searchWell(well, 'interview clip')
   expect(rows).toHaveLength(1)
   expect(rows[0]).toMatchObject({ source: 'screenshot', ext: 'mp4' })
   expect(readFileSync(join(well, rows[0].rel_path)).equals(bytes)).toBe(true)
@@ -167,7 +167,7 @@ it('retains an original replaced while OCR is reading it', async () => {
 
   expect(await drainInbox(archive, well)).toBe(0)
   expect(readFileSync(original).equals(Buffer.concat([first, Buffer.from('updated')]))).toBe(true)
-  const rows = await searchWell(well, 'screenshot')
+  const rows = await searchWell(well, '')
   expect(rows).toHaveLength(1)
   expect(readFileSync(join(well, rows[0].rel_path)).equals(first)).toBe(true)
 })
