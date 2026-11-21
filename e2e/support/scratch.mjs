@@ -1,4 +1,6 @@
 import { constants, cpSync, lstatSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { _electron as electron } from 'playwright'
 
 // A short path leaves room for the app's Unix socket beneath userData.
