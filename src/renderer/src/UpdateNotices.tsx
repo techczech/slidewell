@@ -44,7 +44,7 @@ export function UpdateStatus(): JSX.Element | null {
   const [open, setOpen] = useState(false)
   const [answer, setAnswer] = useState<AnswerView | null>(null)
   const [notes, setNotes] = useState<UpdateNotes | null>(null)
-  const anchor = useRef<HTMLSpanElement>(null)
+  const anchor = useRef<HTMLDivElement>(null)
   const markButton = useRef<HTMLButtonElement>(null)
   const latest = snapshot?.mark
   const api = window.sw?.updates
@@ -82,7 +82,8 @@ export function UpdateStatus(): JSX.Element | null {
   if (!snapshot || !api) return null
   return (
     <>
-      <span className="sw-update-status" ref={anchor}>
+      <div className="sw-update-status" ref={anchor}>
+        <span title={aboutLines(snapshot).version}>v{snapshot.running}</span>
         {latest && (
           <button ref={markButton} className="link sw-update-mark" data-update-mark aria-expanded={open} onClick={() => setOpen(!open)}>
             ↑ {availableMarkText(latest)}
@@ -105,7 +106,7 @@ export function UpdateStatus(): JSX.Element | null {
             <button className="link" onClick={() => void api.releaseNotes()}>What’s new in {latest.version}</button>
           </div>
         )}
-      </span>
+      </div>
       {answer && (
         <div className="sw-update-answer" role="status">
           <button className="copyref sw-update-close" aria-label="Dismiss update message" onClick={() => setAnswer(null)}>×</button>
