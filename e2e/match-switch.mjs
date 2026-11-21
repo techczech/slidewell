@@ -7,7 +7,7 @@
 // Optional: SLIDEWELL_MATCH_WORDS (default 'research'), SLIDEWELL_MATCH_NOWORDS (default
 // 'an inverted pyramid hierarchy diagram'). Screenshots use the temporary run folder (hidden run).
 // Never touches the installed app; every launch is SLIDEWELL_E2E_HIDDEN=1 with its own user-data-dir.
-import { createScratch, launchHidden, copyFixture } from './support/scratch.mjs'
+import { createScratch, launchHidden, copyIndexedSearchFixture } from './support/scratch.mjs'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -17,9 +17,7 @@ if (!fixture || !existsSync(join(fixture, 'userData', 'models'))) {
   process.exit(2)
 }
 const scratch = createScratch('match')
-copyFixture(join(fixture, 'well'), join(scratch, 'well'))
-copyFixture(join(fixture, 'userData', 'models'), join(scratch, 'userData', 'models'))
-copyFixture(join(fixture, 'sample-archive'), join(scratch, 'sample-archive'))
+copyIndexedSearchFixture(fixture, scratch)
 const wordsQuery = process.env.SLIDEWELL_MATCH_WORDS || 'research'
 const noWordsQuery = process.env.SLIDEWELL_MATCH_NOWORDS || 'an inverted pyramid hierarchy diagram'
 const screens = join(scratch, 'screens')

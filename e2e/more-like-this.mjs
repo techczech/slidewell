@@ -6,7 +6,7 @@
 //   node e2e/more-like-this.mjs
 // Screenshots use the temporary run folder (hidden run). Every launch is SLIDEWELL_E2E_HIDDEN=1 with its own
 // user-data-dir; never touches the installed app.
-import { createScratch, launchHidden, copyFixture } from './support/scratch.mjs'
+import { createScratch, launchHidden, copyIndexedSearchFixture } from './support/scratch.mjs'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -16,9 +16,7 @@ if (!fixture || !existsSync(join(fixture, 'userData', 'models'))) {
   process.exit(2)
 }
 const scratch = createScratch('more')
-copyFixture(join(fixture, 'well'), join(scratch, 'well'))
-copyFixture(join(fixture, 'userData', 'models'), join(scratch, 'userData', 'models'))
-copyFixture(join(fixture, 'sample-archive'), join(scratch, 'sample-archive'))
+copyIndexedSearchFixture(fixture, scratch)
 const query = process.env.SLIDEWELL_MLT_QUERY || 'research'
 const screens = join(scratch, 'screens')
 mkdirSync(screens, { recursive: true })

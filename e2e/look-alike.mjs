@@ -25,7 +25,7 @@ try {
     embedded_at TEXT NOT NULL, vector BLOB NOT NULL
   )`)
   const addRecord = records.prepare("INSERT INTO well_fts VALUES (?, ?, 'webp', ?, 'well', 'screenshot', '', 'fixture', '', ?)")
-  const addVector = vectors.prepare("INSERT INTO vectors VALUES (?, 'well', NULL, NULL, ?, ?, ?, ?, ?, ?)")
+  const addVector = vectors.prepare("INSERT INTO vectors VALUES (?, 'well-image', NULL, NULL, ?, ?, ?, ?, ?, ?)")
   const vector = new Float32Array(768)
   vector[0] = 1
   const now = new Date().toISOString()
