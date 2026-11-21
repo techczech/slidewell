@@ -8,8 +8,11 @@
  * macOS Vision binary. Tiny well.db (FTS5, no native module — sqlite3 CLI).
  */
 import { execFile } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, copyFileSync, createReadStream } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import {
+  closeSync, constants, copyFileSync, createReadStream, existsSync, fsyncSync, lstatSync, mkdirSync, openSync,
+  readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, type BigIntStats
+} from 'node:fs'
 import { join, dirname, extname, basename } from 'node:path'
 import sharp from 'sharp'
 import { query, run, safeFtsQuery } from './sqlite'
@@ -143,18 +146,129 @@ async function upsert(
   )
 }
 
+type Ingested = {
+  id: string
+  relPath: string
+  created: boolean
+  sourceHash: string
+  stored: BigIntStats
+}
+
+const OWNED_TEMP_NAME = /^\.slidewell-[0-9a-f-]{36}\.tmp(?:\.[^.]+)?$/
+const INBOX_VIDEOS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv'])
+
+function fileStat(path: string): BigIntStats | undefined {
+  return lstatSync(path, { bigint: true, throwIfNoEntry: false })
+}
+
+function sameFile(a: BigIntStats | undefined, b: BigIntStats | undefined): boolean {
+  if (!a || !b) return a === b
+  return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs
+}
+
+function syncPath(path: string): void {
+  const fd = openSync(path, 'r')
+  try {
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+async function publishWellFile(
+  dest: string,
+  write: (tmp: string) => void | boolean | Promise<boolean>,
+  verify?: { temp: (tmp: string) => Promise<void>; previous: BigIntStats | undefined }
+): Promise<void> {
+  const directory = dirname(dest)
+  const tmp = join(directory, `.slidewell-${randomUUID()}.tmp${extname(dest)}`)
+  try {
+    if ((await write(tmp)) === false) return
+    syncPath(tmp)
+    if (verify) {
+      await verify.temp(tmp)
+      if (!sameFile(verify.previous, fileStat(dest))) throw new Error('The well destination changed during the write.')
+    } else if (fileStat(dest)) {
+      return // a concurrent import already published this sidecar or poster
+    }
+    renameSync(tmp, dest)
+    syncPath(directory)
+  } finally {
+    rmSync(tmp, { force: true })
+  }
+}
+
+async function inspectCopy(path: string, before: BigIntStats): Promise<string> {
+  const hash = await hashFileStream(path)
+  if (!sameFile(before, fileStat(path))) throw new Error('The well copy changed during verification.')
+  return hash
+}
+
+async function storeCopy(
+  dest: string,
+  size: bigint,
+  digest: string,
+  write: (tmp: string) => void
+): Promise<{ created: boolean; stored: BigIntStats }> {
+  const before = fileStat(dest)
+  if (before && !before.isFile()) throw new Error('The well copy path is not a regular file.')
+  if (before) {
+    const existing = await inspectCopy(dest, before)
+    if (before.size === size && existing === digest) {
+      syncPath(dest)
+      syncPath(dirname(dest))
+      return { created: false, stored: before }
+    }
+    // A genuine collision under the existing short filename must not destroy another complete copy.
+    if (existing.startsWith(digest.slice(0, 7))) throw new Error('Two different well files have the same short ID.')
+  }
+
+  await publishWellFile(dest, write, {
+    previous: before,
+    async temp(tmp) {
+      const candidate = fileStat(tmp)
+      if (!candidate || candidate.size !== size || await inspectCopy(tmp, candidate) !== digest) {
+        throw new Error('The temporary well copy did not verify.')
+      }
+    }
+  })
+  const stored = fileStat(dest)
+  if (!stored?.isFile() || stored.size !== size || await inspectCopy(dest, stored) !== digest) {
+    throw new Error('The stored well copy did not verify.')
+  }
+  return { created: true, stored }
+}
+
+function cleanStaleWellTemps(root: string): void {
+  const cutoff = Date.now() - 60_000
+  for (const directory of [join(root, 'images'), join(root, 'videos')]) {
+    if (!existsSync(directory)) continue
+    if (!fileStat(directory)?.isDirectory()) continue
+    for (const name of readdirSync(directory)) {
+      if (!OWNED_TEMP_NAME.test(name)) continue
+      const path = join(directory, name)
+      try {
+        const entry = fileStat(path)
+        if (entry?.isFile() && Number(entry.mtimeMs) < cutoff) rmSync(path, { force: true })
+      } catch {
+        /* a failed cleanup need not stop an inbox retry */
+      }
+    }
+  }
+}
+
 /** Ingest a net-new image (screenshot etc.): normalise to WebP, content-address, OCR, store + index. */
 export async function ingestScreenshot(
   archiveRoot: string,
   root: string,
   srcPath: string,
   source = 'screenshot'
-): Promise<{ id: string; relPath: string; created: boolean; sourceHash: string } | null> {
+): Promise<Ingested | null> {
   if (!existsSync(srcPath)) return null
   await ensureWell(root)
   const orig = readFileSync(srcPath)
   const sourceHash = createHash('sha256').update(orig).digest('hex').slice(0, 12)
-  let buf = orig
+  let buf: Buffer = orig
   let ext = (extname(srcPath).slice(1) || 'png').toLowerCase()
   try {
     const webp = await sharp(orig).webp({ quality: 82 }).toBuffer()
@@ -165,25 +279,21 @@ export async function ingestScreenshot(
   } catch {
     /* keep original */
   }
-  const id = createHash('sha256').update(buf).digest('hex').slice(0, 7)
+  const digest = createHash('sha256').update(buf).digest('hex')
+  const id = digest.slice(0, 7)
   const text = await ocrImage(archiveRoot, srcPath)
   const slug = slugify(text, 'screenshot')
   const relPath = join('images', `${slug}--${id}.${ext}`)
   const dest = join(root, relPath)
-  const created = !existsSync(dest) // false: the well already held this picture (review undo must leave it)
-  if (created) {
-    mkdirSync(dirname(dest), { recursive: true })
-    writeFileSync(dest, buf)
-    const sidecar = join(root, 'images', `${slug}--${id}.yml`)
-    writeFileSync(
-      sidecar,
-      [`id: ${id}`, `created: ${nowIso().slice(0, 10)}`, 'provenance: added', `source: ${source}`, 'alt: ""', 'caption: ""', 'tags: []', 'notes: ""'].join('\n') + '\n',
-      'utf8'
-    )
+  const { created, stored } = await storeCopy(dest, BigInt(buf.length), digest, (tmp) => writeFileSync(tmp, buf, { flag: 'wx' }))
+  const sidecar = join(root, 'images', `${slug}--${id}.yml`)
+  if (!existsSync(sidecar)) {
+    const yaml = [`id: ${id}`, `created: ${nowIso().slice(0, 10)}`, 'provenance: added', `source: ${source}`, 'alt: ""', 'caption: ""', 'tags: []', 'notes: ""'].join('\n') + '\n'
+    await publishWellFile(sidecar, (tmp) => writeFileSync(tmp, yaml, { flag: 'wx' }))
   }
   await upsert(root, { id, slug, ext, relPath, storeRoot: 'well', source, tags: '', notes: '', ocr: text })
   await recordSource(root, id, sourceHash)
-  return { id, relPath, created, sourceHash }
+  return { id, relPath, created, sourceHash, stored }
 }
 
 export function findFfmpeg(): string {
@@ -204,12 +314,12 @@ export function makePoster(srcAbs: string, destAbs: string): Promise<boolean> {
 }
 
 function hashFileStream(path: string): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const h = createHash('sha256')
     const s = createReadStream(path)
     s.on('data', (d) => h.update(d))
     s.on('end', () => resolve(h.digest('hex')))
-    s.on('error', () => resolve(''))
+    s.on('error', reject)
   })
 }
 
@@ -219,30 +329,29 @@ function hashFileStream(path: string): Promise<string> {
  * discoverable on disk without the app (ADR-0026) and reusable by TalkWeaver. The 20 MB gate is
  * enforced by the caller (triage), so a forced large video still copies here.
  */
-export async function ingestVideo(archiveRoot: string, root: string, srcPath: string): Promise<{ id: string; relPath: string; created: boolean; sourceHash: string } | null> {
+export async function ingestVideo(archiveRoot: string, root: string, srcPath: string): Promise<Ingested | null> {
   if (!existsSync(srcPath)) return null
   await ensureWell(root)
   mkdirSync(join(root, 'videos'), { recursive: true })
   const ext = (extname(srcPath).slice(1) || 'mp4').toLowerCase()
+  const size = statSync(srcPath, { bigint: true, throwIfNoEntry: false })?.size
+  if (size === undefined) return null
   const full = await hashFileStream(srcPath)
-  const id = full ? full.slice(0, 7) : createHash('sha256').update(srcPath).digest('hex').slice(0, 7)
+  const id = full.slice(0, 7)
   const slug = slugify(basename(srcPath).replace(/\.[^.]+$/, ''), 'video')
   const relPath = join('videos', `${slug}--${id}.${ext}`)
   const dest = join(root, relPath)
-  const created = !existsSync(dest)
-  if (created) {
-    copyFileSync(srcPath, dest)
-    const posterAbs = join(root, 'videos', `${slug}--${id}.jpg`)
-    await makePoster(srcPath, posterAbs)
-    const sidecar = join(root, 'videos', `${slug}--${id}.yml`)
-    writeFileSync(
-      sidecar,
-      [`id: ${id}`, `created: ${nowIso().slice(0, 10)}`, 'provenance: added', 'source: triage', 'kind: video', 'alt: ""', 'caption: ""', 'tags: []', 'notes: ""'].join('\n') + '\n',
-      'utf8'
-    )
+  const { created, stored } = await storeCopy(dest, size, full, (tmp) => copyFileSync(srcPath, tmp, constants.COPYFILE_EXCL))
+  const poster = join(root, 'videos', `${slug}--${id}.jpg`)
+  if (!existsSync(poster)) await publishWellFile(poster, (tmp) => makePoster(dest, tmp))
+  const sidecar = join(root, 'videos', `${slug}--${id}.yml`)
+  if (!existsSync(sidecar)) {
+    const yaml = [`id: ${id}`, `created: ${nowIso().slice(0, 10)}`, 'provenance: added', 'source: triage', 'kind: video', 'alt: ""', 'caption: ""', 'tags: []', 'notes: ""'].join('\n') + '\n'
+    await publishWellFile(sidecar, (tmp) => writeFileSync(tmp, yaml, { flag: 'wx' }))
   }
-  if (full) await recordSource(root, id, full.slice(0, 12))
-  return { id, relPath, created, sourceHash: full ? full.slice(0, 12) : '' }
+  const sourceHash = full.slice(0, 12)
+  await recordSource(root, id, sourceHash)
+  return { id, relPath, created, sourceHash, stored }
 }
 
 function readSidecarField(yml: string, key: string): string {
@@ -370,14 +479,19 @@ export function wellAbsPath(root: string, vaultRoot: string | null, row: WellRow
 export async function drainInbox(archiveRoot: string, root: string): Promise<number> {
   const inbox = join(root, '_inbox')
   if (!existsSync(inbox)) return 0
+  cleanStaleWellTemps(root)
   let n = 0
   for (const f of readdirSync(inbox)) {
     if (f.startsWith('.')) continue
     const p = join(inbox, f)
     try {
-      const res = await ingestScreenshot(archiveRoot, root, p, 'screenshot')
-      if (res) {
-        rmSync(p, { force: true }) // remove the inbox copy (the stored copy lives in images/)
+      const original = fileStat(p)
+      if (!original?.isFile()) continue
+      const res = INBOX_VIDEOS.has(extname(p).toLowerCase())
+        ? await ingestVideo(archiveRoot, root, p)
+        : await ingestScreenshot(archiveRoot, root, p, 'screenshot')
+      if (res && sameFile(res.stored, fileStat(join(root, res.relPath))) && sameFile(original, fileStat(p))) {
+        rmSync(p, { force: true })
         n++
       }
     } catch {
