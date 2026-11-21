@@ -9,7 +9,7 @@ import { resolve as resolvePath, sep as pathSep } from 'path'
 import { planSources, matchesFromKind, countFrom, type FilterableResult, type FromCounts, type SourcePlan } from './searchfilters'
 import { matchedSearch, rowIds, type MatchCluster, type MatchRow } from './matched-search'
 import { startSettings, type SaveResult, type SettingsApp } from './settings-host'
-import { CONFIG_UNREADABLE, ConfigReadError, patchConfigFile, readConfigFile } from './config-file'
+import { CONFIG_UNREADABLE, ConfigReadError, patchConfigFile, readConfigFile, saveConfigParts } from './config-file'
 import { ARCHIVE_DEFAULT, foldersOverlap, OTHERS_DEFAULT, OVERLAP_REASON } from './settings-rules'
 import { keySlots } from './key-slots'
 import { legacyFromPrefs, splitLegacyPatch } from '../shared/settings-schema'
@@ -151,7 +151,7 @@ function rawConfig(): Config | null {
   }
 }
 function readConfig(): Config {
-  // Views can render defaults while config.json is unavailable. Every save re-reads the file and refuses the write.
+  // Shared preferences remain available. Writes to config.json refuse an unreadable file.
   const raw = rawConfig() ?? {}
   if (!settings || !prefsInStore) return raw
   const p = legacyFromPrefs(settings.values())
@@ -167,29 +167,31 @@ function readConfig(): Config {
  * never thrown. Callers that only fire and forget may ignore it: a failure is logged by the settings host.
  */
 function writeConfig(patch: Partial<Config>): Promise<SaveResult> {
-  try {
-    if (!settings || !prefsInStore) {
-      writeRawConfig(patch)
-      return Promise.resolve({ ok: true })
+  const s = prefsInStore ? settings : null
+  const split = s ? splitLegacyPatch(patch as Record<string, unknown>) : null
+  return saveConfigParts<SaveResult>(() => {
+    try {
+      if (!split) writeRawConfig(patch)
+      else if (Object.keys(split.rest).length > 0) {
+        writeRawConfig((raw) => {
+          const rest: Partial<Config> = { ...split.rest }
+          // Preserve the older version's own preferences alongside nested app state.
+          if (rest.r2 && raw.r2) rest.r2 = { ...pickLegacy(raw.r2, ['accountId', 'endpoint', 'bucket', 'prefix']), ...rest.r2 }
+          if (rest.pictureSearch && raw.pictureSearch) rest.pictureSearch = { ...pickLegacy(raw.pictureSearch, ['includeWell']), ...rest.pictureSearch }
+          return rest
+        })
+      }
+      return { ok: true }
+    } catch (error) {
+      if (error instanceof ConfigReadError) return { ok: false, error: CONFIG_UNREADABLE }
+      console.warn('[config] Saved state could not be written.')
+      return { ok: false, error: 'SlideWell could not save your settings.' }
     }
-    const split = splitLegacyPatch(patch as Record<string, unknown>)
-    const s = settings
-    if (Object.keys(split.rest).length > 0) {
-      writeRawConfig((raw) => {
-        const rest: Partial<Config> = { ...split.rest }
-        // Preserve the older version's own preferences alongside nested app state.
-        if (rest.r2 && raw.r2) rest.r2 = { ...pickLegacy(raw.r2, ['accountId', 'endpoint', 'bucket', 'prefix']), ...rest.r2 }
-        if (rest.pictureSearch && raw.pictureSearch) rest.pictureSearch = { ...pickLegacy(raw.pictureSearch, ['includeWell']), ...rest.pictureSearch }
-        return rest
-      })
-    }
-    return Promise.all(Object.entries(split.prefs).map(([key, value]) => s.set(key, value)))
-      .then((rs) => rs.find((r) => !r.ok) ?? { ok: true })
-  } catch (error) {
-    if (error instanceof ConfigReadError) return Promise.resolve({ ok: false, error: CONFIG_UNREADABLE })
-    console.warn('[config] Saved state could not be written.')
-    return Promise.resolve({ ok: false, error: 'SlideWell could not save your settings.' })
-  }
+  }, async () => {
+    if (!s || !split) return { ok: true }
+    const results = await Promise.all(Object.entries(split.prefs).map(([key, value]) => s.set(key, value)))
+    return results.find((result) => !result.ok) ?? { ok: true }
+  })
 }
 /** Writes state fields (and key ciphertext) without replacing other fields or using a fallback read. */
 function writeRawConfig(patch: Partial<Config> | ((current: Config) => Partial<Config>)): void {

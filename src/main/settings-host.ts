@@ -10,7 +10,6 @@ import { installSettings, type SecretSlots, type SettingsHost } from '@app-patte
 import { MAIN_COMMANDS, MENUS, NO_CONTEXT, registry, type CommandContext } from '../shared/commands'
 import { APP_ID, migrateLegacy, schema } from '../shared/settings-schema'
 import { migrateFromConfig, stampMigration } from './settings-migration'
-import { CONFIG_UNREADABLE } from './config-file'
 import { libraryFolderRule } from './settings-rules'
 
 /** Custom pages of the Settings window (renderer/src/settings-pages.tsx); the window may be opened at them. */
@@ -64,7 +63,7 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
   const dir = app.getPath('userData')
   const version = app.getVersion()
   const migration = await migrateFromConfig(dir, version, wiring.log)
-  if (migration.kind === 'failed' && migration.reason !== CONFIG_UNREADABLE) wiring.log(`[settings] preferences still read from config.json: ${migration.reason}`)
+  if (migration.kind === 'failed') wiring.log(`[settings] preferences still read from config.json: ${migration.reason}`)
 
   let host: SettingsHost | undefined
   let ctx: CommandContext = NO_CONTEXT

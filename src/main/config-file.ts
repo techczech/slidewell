@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { linkSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, type BigIntStats } from 'node:fs'
+import { linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, type BigIntStats } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const CONFIG_FILE = 'config.json'
@@ -26,7 +26,7 @@ function revision(stat: BigIntStats | undefined): string {
 }
 
 function withStagedFile(path: string, bytes: Buffer, publish: (tmp: string) => void): void {
-  const tmp = `${path}.${randomUUID()}.tmp`
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
   try {
     writeFileSync(tmp, bytes, { mode: 0o600, flag: 'wx', flush: true })
     publish(tmp)
@@ -81,6 +81,41 @@ function readSnapshot<T extends object>(path: string, log: Log): Snapshot<T> | u
   }
 }
 
+
+// Match only this writer's staging names, including the original format without a PID.
+const stagedConfigName = /^config\.json(?:\.previous|\.unreadable-.+?)?\.(?:(\d+)\.)?[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/
+
+export function cleanConfigTemps(dir: string): void {
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return
+  }
+  for (const name of names) {
+    const match = stagedConfigName.exec(name)
+    if (!match) continue
+    const path = join(dir, name)
+    try {
+      const stat = statOf(path)
+      if (!stat?.isFile()) continue
+      if (match[1]) {
+        try {
+          process.kill(Number(match[1]), 0)
+          continue
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue
+        }
+      } else if (Date.now() - Number(stat.mtimeMs) < 60_000) {
+        continue // a prior build without PID-labelled staging files may still be writing
+      }
+      rmSync(path, { force: true })
+    } catch {
+      // Cleanup never prevents opening the shared settings store.
+    }
+  }
+}
+
 /** Returns undefined for a new profile. An existing unreadable file throws instead. */
 export function readConfigFile<T extends object>(dir: string, log: Log = console.warn): T | undefined {
   return readSnapshot<T>(join(dir, CONFIG_FILE), log)?.value
@@ -105,4 +140,14 @@ export function patchConfigFile<T extends object>(dir: string, makeNext: (curren
     unchanged()
     renameSync(tmp, path)
   })
+}
+
+// When a write spans both stores, preserve the result from the config write.
+export async function saveConfigParts<Result extends { ok: boolean }>(
+  saveState: () => Result,
+  savePreferences: () => Promise<Result>
+): Promise<Result> {
+  const state = saveState()
+  const preferences = await savePreferences()
+  return state.ok ? preferences : state
 }

@@ -31,7 +31,8 @@ const version = JSON.parse(readFileSync('package.json', 'utf8')).version
 const env = { ...process.env, HOME: home, SLIDEWELL_DATA_DIR: userData, SLIDEWELL_E2E_HIDDEN: '1' }
 delete env.ELECTRON_RUN_AS_NODE
 
-const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env })
+const launch = () => electron.launch({ args: ['.', `--user-data-dir=${userData}`], env })
+const app = await launch()
 const r = {}
 const damaged = Buffer.from('{"windowBounds":')
 try {
@@ -110,6 +111,20 @@ try {
   r.configProblemShown = true
 } finally {
   await app.close()
+}
+const reopened = await launch()
+try {
+  const win = await reopened.firstWindow({ timeout: 20000 })
+  const paths = await win.evaluate(() => window.sw.settings.getPaths())
+  r.sharedSettingsLoadedAfterRestart = paths.wellRoot === config.wellRoot && paths.convertOcrDefault === true
+  const [settingsWin] = await Promise.all([reopened.waitForEvent('window', { timeout: 10000 }), win.locator('.titlebar-actions .tb-btn', { hasText: '⚙' }).click()])
+  await settingsWin.getByRole('alert').filter({ hasText: 'SlideWell could not read your saved state.' }).waitFor()
+  r.sharedSettingsWriteAccepted = await settingsWin.evaluate(async () =>
+    (await window.bridleSettings.set('library.convertOcr', false)).ok)
+  await win.waitForFunction(async () => !(await window.sw.settings.getPaths()).convertOcrDefault)
+  r.sharedSettingsSavedAfterRestart = JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8')).settings['library.convertOcr'] !== true
+} finally {
+  await reopened.close()
 }
 const copies = readdirSync(userData).filter((name) => name.startsWith('config.json.unreadable-'))
 r.damagedConfigPreserved = readFileSync(configPath).equals(damaged) &&

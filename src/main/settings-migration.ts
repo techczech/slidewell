@@ -21,7 +21,7 @@ import { registry } from '../shared/commands'
 import { APP_ID, LEGACY_MARK, migrateLegacy, prefsFromLegacy, schema } from '../shared/settings-schema'
 import { foldersOverlap, libraryFolderRule, libraryRoots, OTHERS_DEFAULT, OVERLAP_REASON } from './settings-rules'
 
-import { CONFIG_UNREADABLE, ConfigReadError, readConfigFile } from './config-file'
+import { cleanConfigTemps, ConfigReadError, readConfigFile } from './config-file'
 export const SETTINGS_FILE = 'settings.json'
 export const STAMP_FILE = 'settings-migration.json'
 /** Who a re-migration is logged as: the store's actors are only you or an agent (package follow-up). */
@@ -98,13 +98,14 @@ export async function migrateFromConfig(
   log: (line: string) => void = () => {},
   opts: { lock?: LockOptions; now?: () => number } = {}
 ): Promise<Migration> {
+  cleanConfigTemps(dir)
   const at = (opts.now ?? Date.now)()
   let legacy: Record<string, unknown> | null
   try {
     legacy = readLegacyPrefs(dir, log)
   } catch (error) {
-    if (error instanceof ConfigReadError) return { kind: 'failed', reason: CONFIG_UNREADABLE }
-    throw error
+    if (!(error instanceof ConfigReadError)) throw error
+    legacy = null
   }
   if (!existsSync(join(dir, SETTINGS_FILE))) {
     if (!legacy) return { kind: 'none' }
@@ -223,7 +224,13 @@ export function stampMigration(dir: string, version: string, m: Migration, now: 
     return false
   }
   // `at` is when the migration ran, so a change made after it (by the CLI in the same run) counts as the new version's.
-  const legacy = m.kind === 'again' ? m.stamp : m.kind === 'first' ? m.legacy : readLegacyPrefs(dir) ?? {}
+  let legacy: Record<string, unknown>
+  try {
+    legacy = m.kind === 'again' ? m.stamp : m.kind === 'first' ? m.legacy : readLegacyPrefs(dir) ?? {}
+  } catch (error) {
+    if (error instanceof ConfigReadError) return false
+    throw error
+  }
   const at = m.kind === 'again' || m.kind === 'first' ? m.at : now()
   const stamp: Stamp = { format: 'slidewell-settings-migration', at, version, legacy }
   writeVia(join(dir, STAMP_FILE), JSON.stringify(stamp, null, 2), false)
