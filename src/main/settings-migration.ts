@@ -21,7 +21,7 @@ import { registry } from '../shared/commands'
 import { APP_ID, LEGACY_MARK, migrateLegacy, prefsFromLegacy, schema } from '../shared/settings-schema'
 import { foldersOverlap, libraryFolderRule, libraryRoots, OTHERS_DEFAULT, OVERLAP_REASON } from './settings-rules'
 
-import { cleanConfigTemps, ConfigReadError, readConfigFile } from './config-file'
+import { cleanConfigTemps, CONFIG_UNREADABLE, ConfigReadError, readConfigFile } from './config-file'
 export const SETTINGS_FILE = 'settings.json'
 export const STAMP_FILE = 'settings-migration.json'
 /** Who a re-migration is logged as: the store's actors are only you or an agent (package follow-up). */
@@ -105,6 +105,7 @@ export async function migrateFromConfig(
     legacy = readLegacyPrefs(dir, log)
   } catch (error) {
     if (!(error instanceof ConfigReadError)) throw error
+    if (!existsSync(join(dir, SETTINGS_FILE))) return { kind: 'failed', reason: CONFIG_UNREADABLE }
     legacy = null
   }
   if (!existsSync(join(dir, SETTINGS_FILE))) {

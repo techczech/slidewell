@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { CONFIG_UNREADABLE, patchConfigFile, readConfigFile, saveConfigParts } from '../src/main/config-file'
@@ -22,13 +22,13 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-it('skips migration of damaged config and keeps one recovery copy', async () => {
+it('defers first migration until damaged config is repaired and keeps one recovery copy', async () => {
   const damaged = Buffer.from('{"windowBounds":')
   writeFileSync(config, damaged)
 
   const log = vi.fn()
-  expect((await migrateFromConfig(dir, '0.4.0', log)).kind).toBe('none')
-  expect((await migrateFromConfig(dir, '0.4.0', log)).kind).toBe('none')
+  expect(await migrateFromConfig(dir, '0.4.0', log)).toEqual({ kind: 'failed', reason: CONFIG_UNREADABLE })
+  expect((await migrateFromConfig(dir, '0.4.0', log)).kind).toBe('failed')
   const makeNext = vi.fn(() => ({ windowBounds: { width: 800, height: 600 } }))
   expect(() => patchConfigFile(dir, makeNext, log)).toThrow(CONFIG_UNREADABLE)
   expect(makeNext).not.toHaveBeenCalled()
@@ -39,6 +39,18 @@ it('skips migration of damaged config and keeps one recovery copy', async () => 
   expect(readFileSync(join(dir, copies[0])).equals(damaged)).toBe(true)
   expect(readFileSync(config).equals(damaged)).toBe(true)
   expect(readdirSync(dir).sort()).toEqual(['config.json', copies[0]].sort())
+
+  const io = { stdout: vi.fn(), stderr: vi.fn() }
+  const settings = join(dir, 'settings.json')
+  expect(await run(['set', 'sorting.period', '30d'], io, dir)).toBe(1)
+  expect(existsSync(settings)).toBe(false)
+
+  const wellRoot = join(dir, 'recovered-well')
+  writeFileSync(config, JSON.stringify({ wellRoot }))
+  expect(await run(['set', 'sorting.period', '30d'], io, dir)).toBe(0)
+  const saved = JSON.parse(readFileSync(settings, 'utf8')).settings
+  expect(saved['library.wellRoot']).toBe(wellRoot)
+  expect(saved['sorting.period']).toBe('30d')
 })
 
 it('keeps the active bytes intact and removes staged files if the final rename fails', async () => {
@@ -97,6 +109,7 @@ it('loads and saves shared preferences despite an unreadable legacy config', asy
   const damaged = Buffer.from('{"windowBounds":')
   writeFileSync(config, damaged)
 
+  expect((await migrateFromConfig(dir, '0.4.0')).kind).toBe('none')
   expect(await run(['get', 'sorting.period'], io, dir)).toBe(0)
   expect(period()).toBe('30d')
   expect(await run(['set', 'sorting.period', '90d'], io, dir)).toBe(0)
