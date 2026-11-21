@@ -5,6 +5,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, watch as fsWatch } 
 import { pathToFileURL } from 'url'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { startSettings, type SaveResult, type SettingsApp } from './settings-host'
+import { CONFIG_UNREADABLE, ConfigReadError, patchConfigFile, readConfigFile, saveConfigParts } from './config-file'
 import { ARCHIVE_DEFAULT, OTHERS_DEFAULT } from './settings-rules'
 import { keySlots } from './key-slots'
 import { legacyFromPrefs, splitLegacyPatch } from '../shared/settings-schema'
@@ -115,24 +116,23 @@ type Config = {
   pythonPath?: string
   windowBounds?: { width: number; height: number }
 }
-function configPath(): string {
-  return join(app.getPath('userData'), 'config.json')
-}
 // The preferences moved to the shared settings file (settings-host.ts, shared/settings-schema.ts). Readers
 // here still see config.json's old shape: readConfig() lays the current settings over config.json, and
 // writeConfig() sends preference fields to the settings store (who: you) and the rest to config.json.
 // Until the settings start, and when the move could not be made safely, config.json is read as before.
 let settings: SettingsApp | null = null
 let prefsInStore = false
-function rawConfig(): Config {
+function rawConfig(): Config | null {
   try {
-    return JSON.parse(readFileSync(configPath(), 'utf8'))
-  } catch {
-    return {}
+    return readConfigFile<Config>(app.getPath('userData')) ?? {}
+  } catch (error) {
+    if (error instanceof ConfigReadError) return null
+    throw error
   }
 }
 function readConfig(): Config {
-  const raw = rawConfig()
+  // Shared preferences remain available. Writes to config.json refuse an unreadable file.
+  const raw = rawConfig() ?? {}
   if (!settings || !prefsInStore) return raw
   const p = legacyFromPrefs(settings.values())
   return {
@@ -147,30 +147,38 @@ function readConfig(): Config {
  * never thrown. Callers that only fire and forget may ignore it: a failure is logged by the settings host.
  */
 function writeConfig(patch: Partial<Config>): Promise<SaveResult> {
-  const dir = app.getPath('userData')
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  let rest: Partial<Config> = patch
-  let prefs: Promise<SaveResult> = Promise.resolve({ ok: true })
-  if (settings && prefsInStore) {
-    const split = splitLegacyPatch(patch as Record<string, unknown>)
-    const s = settings
-    const writes = Object.entries(split.prefs).map(([key, value]) => s.set(key, value))
-    prefs = Promise.all(writes).then((rs) => rs.find((r) => !r.ok) ?? { ok: true })
-    rest = split.rest as Partial<Config>
-    if (Object.keys(rest).length === 0) return prefs
-    // config.json stays the older version's file: its own preference fields inside r2 and pictureSearch are kept
-    const raw = rawConfig()
-    if (rest.r2 && raw.r2) rest = { ...rest, r2: { ...pickLegacy(raw.r2, ['accountId', 'endpoint', 'bucket', 'prefix']), ...rest.r2 } }
-    if (rest.pictureSearch && raw.pictureSearch) rest = { ...rest, pictureSearch: { ...pickLegacy(raw.pictureSearch, ['includeWell']), ...rest.pictureSearch } }
-  }
-  writeRawConfig(rest)
-  return prefs
+  const s = prefsInStore ? settings : null
+  const split = s ? splitLegacyPatch(patch as Record<string, unknown>) : null
+  return saveConfigParts<SaveResult>(() => {
+    try {
+      if (!split) writeRawConfig(patch)
+      else if (Object.keys(split.rest).length > 0) {
+        writeRawConfig((raw) => {
+          const rest: Partial<Config> = { ...split.rest }
+          // Preserve the older version's own preferences alongside nested app state.
+          if (rest.r2 && raw.r2) rest.r2 = { ...pickLegacy(raw.r2, ['accountId', 'endpoint', 'bucket', 'prefix']), ...rest.r2 }
+          if (rest.pictureSearch && raw.pictureSearch) rest.pictureSearch = { ...pickLegacy(raw.pictureSearch, ['includeWell']), ...rest.pictureSearch }
+          return rest
+        })
+      }
+      return { ok: true }
+    } catch (error) {
+      if (error instanceof ConfigReadError) return { ok: false, error: CONFIG_UNREADABLE }
+      console.warn('[config] Saved state could not be written.')
+      return { ok: false, error: 'SlideWell could not save your settings.' }
+    }
+  }, async () => {
+    if (!s || !split) return { ok: true }
+    const results = await Promise.all(Object.entries(split.prefs).map(([key, value]) => s.set(key, value)))
+    return results.find((result) => !result.ok) ?? { ok: true }
+  })
 }
-/** Writes state fields (and the key ciphertext) to config.json as they are, without touching its preferences. */
-function writeRawConfig(patch: Partial<Config>): void {
-  const dir = app.getPath('userData')
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  writeFileSync(configPath(), JSON.stringify({ ...rawConfig(), ...patch }, null, 2), 'utf8')
+/** Writes state fields (and key ciphertext) without replacing other fields or using a fallback read. */
+function writeRawConfig(patch: Partial<Config> | ((current: Config) => Partial<Config>)): void {
+  patchConfigFile<Config>(app.getPath('userData'), (current = {}) => ({
+    ...current,
+    ...(typeof patch === 'function' ? patch(current) : patch)
+  }))
 }
 function pickLegacy<T extends object>(o: T, keys: string[]): Partial<T> {
   return Object.fromEntries(Object.entries(o).filter(([k]) => keys.includes(k))) as Partial<T>
@@ -393,15 +401,17 @@ app.whenReady().then(async () => {
   let cloudKeyOps: { has(p: 'openai' | 'anthropic'): boolean; set(p: 'openai' | 'anthropic', k: string): { ok: boolean; error?: string; shape?: boolean }; remove(p: 'openai' | 'anthropic'): void } | null = null
   const r2Key = (field: 'accessKeyIdEnc' | 'secretEnc', label: string) => ({
     label,
-    has: () => Boolean(rawConfig().r2?.[field]),
+    has: () => Boolean(rawConfig()?.r2?.[field]),
     set(value: string) {
       if (!value || value.length > 512 || !safeStorage.isEncryptionAvailable()) return { ok: false }
-      writeRawConfig({ r2: { ...(rawConfig().r2 ?? {}), [field]: safeStorage.encryptString(value).toString('base64') } })
+      writeRawConfig((current) => ({ r2: { ...current.r2, [field]: safeStorage.encryptString(value).toString('base64') } }))
       return { ok: true }
     },
     remove() {
-      const { [field]: _gone, ...rest } = rawConfig().r2 ?? {}
-      writeRawConfig({ r2: rest })
+      writeRawConfig((current) => {
+        const { [field]: _gone, ...rest } = current.r2 ?? {}
+        return { r2: rest }
+      })
     }
   })
   const cloudKey = (p: 'openai' | 'anthropic', label: string) => ({
@@ -593,7 +603,8 @@ app.whenReady().then(async () => {
   // Each provider's key is stored like the R2 credentials: safeStorage ciphertext in config.json, never returned or
   // logged. One store per provider, each with its own field, and no other source: no environment variable is read.
   const cloudCfg = (): NonNullable<Config['sorterCloud']> => readConfig().sorterCloud ?? {}
-  const saveCloudCfg = (patch: Partial<NonNullable<Config['sorterCloud']>>): void => void writeConfig({ sorterCloud: { ...cloudCfg(), ...patch } })
+  const saveCloudCfg = (patch: Partial<NonNullable<Config['sorterCloud']>>): void =>
+    writeRawConfig((current) => ({ sorterCloud: { ...current.sorterCloud, ...patch } }))
   const keychain = { available: () => safeStorage.isEncryptionAvailable(), encrypt: (k: string) => safeStorage.encryptString(k), decrypt: (b: Buffer) => safeStorage.decryptString(b) }
   const cloudKeys = {
     openai: new ApiKeyStore(() => cloudCfg()[KEY_FIELD.openai], (enc) => saveCloudCfg({ [KEY_FIELD.openai]: enc }), keychain, PROVIDERS.openai.keyRule),
@@ -694,6 +705,7 @@ app.whenReady().then(async () => {
 
   // --- IPC: the typed contract lives in src/preload/index.ts ---
   appHandle('archive:available', () => archiveAvailable())
+  appHandle('settings:config-problem', () => rawConfig() === null ? CONFIG_UNREADABLE : null)
   appHandle('settings:get-paths', async () => ({
     archiveRoot: readConfig().archiveRoot ?? null,
     archiveDefault: ARCHIVE_DEFAULT,
@@ -811,13 +823,13 @@ app.whenReady().then(async () => {
       async writePrefs(prefs) {
         if (settings && prefsInStore) return writeConfig({ r2: prefs })
         try {
-          writeRawConfig({ r2: { ...(rawConfig().r2 ?? {}), ...prefs } }) // preferences still in config.json
+          writeRawConfig((current) => ({ r2: { ...current.r2, ...prefs } })) // preferences still in config.json
           return { ok: true }
         } catch (e) {
           return { ok: false, error: `The R2 settings were not saved (${(e as NodeJS.ErrnoException)?.code ?? 'error'}).` }
         }
       },
-      writeCiphertext: (enc) => writeRawConfig({ r2: { ...(rawConfig().r2 ?? {}), ...enc } })
+      writeCiphertext: (enc) => writeRawConfig((current) => ({ r2: { ...current.r2, ...enc } }))
     })
   )
   appHandle('settings:test-r2', async () => {

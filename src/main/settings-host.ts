@@ -9,6 +9,7 @@ import { SettingsStore } from '@app-patterns/settings/node'
 import { installSettings, type SecretSlots, type SettingsHost } from '@app-patterns/settings-electron/main'
 import { MAIN_COMMANDS, MENUS, NO_CONTEXT, registry, type CommandContext } from '../shared/commands'
 import { APP_ID, migrateLegacy, schema } from '../shared/settings-schema'
+import { CONFIG_UNREADABLE } from './config-file'
 import { migrateFromConfig, stampMigration } from './settings-migration'
 import { libraryFolderRule } from './settings-rules'
 
@@ -63,7 +64,7 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
   const dir = app.getPath('userData')
   const version = app.getVersion()
   const migration = await migrateFromConfig(dir, version, wiring.log)
-  if (migration.kind === 'failed') wiring.log(`[settings] preferences still read from config.json: ${migration.reason}`)
+  if (migration.kind === 'failed' && migration.reason !== CONFIG_UNREADABLE) wiring.log(`[settings] preferences still read from config.json: ${migration.reason}`)
 
   let host: SettingsHost | undefined
   let ctx: CommandContext = NO_CONTEXT
@@ -87,8 +88,11 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
 
   // Preferences still read from config.json: the store must not collect changes main would not read (a later
   // launch would find settings.json and stop reading config.json). The window shows the store read-only.
-  if (migration.kind === 'failed') store.refuseWrites('SlideWell could not move your settings to the new settings file. Your settings are unchanged.')
-  else if (!store.problem()) {
+  if (migration.kind === 'failed') {
+    store.refuseWrites(migration.reason === CONFIG_UNREADABLE
+      ? CONFIG_UNREADABLE
+      : 'SlideWell could not move your settings to the new settings file. Your settings are unchanged.')
+  } else if (!store.problem()) {
     try {
       stampMigration(dir, version, migration)
     } catch (e) {

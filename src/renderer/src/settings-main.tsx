@@ -29,6 +29,7 @@ const ROW_HINTS: Record<string, RowHint> = {
 type Opened = { section: string; sheet?: SheetState; n: number }
 
 function SettingsApp(): React.JSX.Element | null {
+  const [configProblem, setConfigProblem] = useState<string | null>(null)
   const [view, setView] = useState<SettingsView | null>(null)
   const [opened, setOpened] = useState<Opened>({ section: 'general', n: 0 })
   const [seenAt, setSeenAt] = useState(() => Date.now())
@@ -47,9 +48,15 @@ function SettingsApp(): React.JSX.Element | null {
       setView(v)
       if (v.request) void open(v.request)
     })
+    const refreshConfigProblem = () => {
+      void window.sw.settings.configProblem().then(setConfigProblem, () => {})
+    }
+    refreshConfigProblem()
+    window.addEventListener('focus', refreshConfigProblem)
     const offChanged = bridge.onChanged(setView)
     const offSection = bridge.onSection((r) => void open(r))
     return () => {
+      window.removeEventListener('focus', refreshConfigProblem)
       offChanged()
       offSection()
     }
@@ -59,6 +66,7 @@ function SettingsApp(): React.JSX.Element | null {
   return (
     <>
       <div className="sw-titlebar">Settings</div>
+      {configProblem && <p role="alert" className="sw-config-problem">{configProblem}</p>}
       <SettingsWindow
         key={opened.n}
         className="sw-settings"

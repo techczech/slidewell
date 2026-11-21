@@ -1,6 +1,6 @@
 // Moving SlideWell's preferences from userData/config.json (the old version's file) to the shared settings
-// file userData/settings.json (a new file name). config.json is never copied, deleted or rewritten here: it
-// stays the old version's file, and is the backup. It is read for migration only, and only for preferences
+// file userData/settings.json (a new file name). Preferences are only read from config.json here.
+// The config-file module also preserves a recovery copy if it cannot parse the original. Only preferences
 // the schema knows (prefsFromLegacy); the key ciphertext and anything else is never taken.
 //
 //   First launch (no settings.json): the preferences are handed to the store as settings.json
@@ -21,7 +21,7 @@ import { registry } from '../shared/commands'
 import { APP_ID, LEGACY_MARK, migrateLegacy, prefsFromLegacy, schema } from '../shared/settings-schema'
 import { foldersOverlap, libraryFolderRule, libraryRoots, OTHERS_DEFAULT, OVERLAP_REASON } from './settings-rules'
 
-export const CONFIG_FILE = 'config.json'
+import { cleanConfigTemps, CONFIG_UNREADABLE, ConfigReadError, readConfigFile } from './config-file'
 export const SETTINGS_FILE = 'settings.json'
 export const STAMP_FILE = 'settings-migration.json'
 /** Who a re-migration is logged as: the store's actors are only you or an agent (package follow-up). */
@@ -55,14 +55,10 @@ const isRec = (x: unknown): x is Record<string, unknown> => Boolean(x) && typeof
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
 const code = (e: unknown): string => (e as NodeJS.ErrnoException)?.code ?? 'error'
 
-/** config.json's preferences by schema key, or null when there is no readable config.json. No size cap: it is the old version's own file. */
-export function readLegacyPrefs(dir: string): Record<string, unknown> | null {
-  try {
-    const cfg: unknown = JSON.parse(readFileSync(join(dir, CONFIG_FILE), 'utf8'))
-    return isRec(cfg) ? prefsFromLegacy(cfg) : null
-  } catch {
-    return null
-  }
+/** config.json's preferences by schema key, or null on a new profile. */
+export function readLegacyPrefs(dir: string, log?: (line: string) => void): Record<string, unknown> | null {
+  const config = readConfigFile<Record<string, unknown>>(dir, log)
+  return config ? prefsFromLegacy(config) : null
 }
 
 function readStamp(dir: string): Stamp | null {
@@ -102,8 +98,16 @@ export async function migrateFromConfig(
   log: (line: string) => void = () => {},
   opts: { lock?: LockOptions; now?: () => number } = {}
 ): Promise<Migration> {
+  cleanConfigTemps(dir)
   const at = (opts.now ?? Date.now)()
-  const legacy = readLegacyPrefs(dir)
+  let legacy: Record<string, unknown> | null
+  try {
+    legacy = readLegacyPrefs(dir, log)
+  } catch (error) {
+    if (!(error instanceof ConfigReadError)) throw error
+    if (!existsSync(join(dir, SETTINGS_FILE))) return { kind: 'failed', reason: CONFIG_UNREADABLE }
+    legacy = null
+  }
   if (!existsSync(join(dir, SETTINGS_FILE))) {
     if (!legacy) return { kind: 'none' }
     // The store writes this hand-over itself (its migration), which libraryFolderRule lets through (settings-rules.ts),
@@ -221,7 +225,13 @@ export function stampMigration(dir: string, version: string, m: Migration, now: 
     return false
   }
   // `at` is when the migration ran, so a change made after it (by the CLI in the same run) counts as the new version's.
-  const legacy = m.kind === 'again' ? m.stamp : m.kind === 'first' ? m.legacy : readLegacyPrefs(dir) ?? {}
+  let legacy: Record<string, unknown>
+  try {
+    legacy = m.kind === 'again' ? m.stamp : m.kind === 'first' ? m.legacy : readLegacyPrefs(dir) ?? {}
+  } catch (error) {
+    if (error instanceof ConfigReadError) return false
+    throw error
+  }
   const at = m.kind === 'again' || m.kind === 'first' ? m.at : now()
   const stamp: Stamp = { format: 'slidewell-settings-migration', at, version, legacy }
   writeVia(join(dir, STAMP_FILE), JSON.stringify(stamp, null, 2), false)
