@@ -692,6 +692,7 @@ const api = {
       ipcRenderer.invoke('others:delete-matching', query, filters)
   },
   settings: {
+    configProblem: (): Promise<string | null> => ipcRenderer.invoke('settings:config-problem'),
     getPaths: (): Promise<{
       archiveRoot: string | null
       archiveDefault: string
