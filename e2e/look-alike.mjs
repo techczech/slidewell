@@ -1,24 +1,47 @@
-// End-to-end: look-alike groups in search ("N versions" cards, collapsed and expanded).
-// Needs a fixture folder with well/picture-search.db holding well-image vectors.
-// The model is not needed for grouping.
-//
-// Run after `npm run build`:
-//   SLIDEWELL_LA_SCRATCH=<scratch> [SLIDEWELL_LA_QUERY=drop] node e2e/look-alike.mjs
-// Hidden run (SLIDEWELL_E2E_HIDDEN=1); screenshots go to <scratch>/screens. Never touches the installed app.
-import { createScratch, launchHidden, copyFixture } from './support/scratch.mjs'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+// End-to-end: two synthetic well images group into one card and expand again.
+// Run: npm run test:look-alike
+import { DatabaseSync } from 'node:sqlite'
+import { mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import sharp from 'sharp'
+import { createScratch, launchHidden } from './support/scratch.mjs'
 
-const fixture = process.env.SLIDEWELL_LA_SCRATCH
-if (!fixture || !existsSync(join(fixture, 'well', 'picture-search.db'))) {
-  console.error('Set SLIDEWELL_LA_SCRATCH to a fixture folder with well/picture-search.db.')
-  process.exit(2)
-}
 const scratch = createScratch('look')
-copyFixture(join(fixture, 'well'), join(scratch, 'well'))
-mkdirSync(join(scratch, 'userData'))
-writeFileSync(join(scratch, 'userData', 'config.json'), JSON.stringify({ wellRoot: join(scratch, 'well') }))
-const query = process.env.SLIDEWELL_LA_QUERY || 'drop'
+const well = join(scratch, 'well')
+const userData = join(scratch, 'userData')
+const images = join(well, 'images')
+mkdirSync(userData)
+mkdirSync(images, { recursive: true })
+writeFileSync(join(userData, 'config.json'), JSON.stringify({ wellRoot: well }))
+const query = 'fixture'
+const records = new DatabaseSync(join(well, 'well.db'))
+const vectors = new DatabaseSync(join(well, 'picture-search.db'))
+try {
+  records.exec(`CREATE VIRTUAL TABLE well_fts USING fts5(id UNINDEXED, slug UNINDEXED, ext UNINDEXED,
+    rel_path UNINDEXED, root UNINDEXED, source UNINDEXED, tags, notes, ocr_text, added_at UNINDEXED)`)
+  vectors.exec(`CREATE TABLE vectors (
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL, presentation_id TEXT, slide_order INTEGER, well_id TEXT,
+    path TEXT NOT NULL, file_size INTEGER NOT NULL, file_mtime_ms INTEGER NOT NULL,
+    embedded_at TEXT NOT NULL, vector BLOB NOT NULL
+  )`)
+  const addRecord = records.prepare("INSERT INTO well_fts VALUES (?, ?, 'webp', ?, 'well', 'screenshot', '', 'fixture', '', ?)")
+  const addVector = vectors.prepare("INSERT INTO vectors VALUES (?, 'well', NULL, NULL, ?, ?, ?, ?, ?, ?)")
+  const vector = new Float32Array(768)
+  vector[0] = 1
+  const now = new Date().toISOString()
+  for (const [id, background] of [['aaaaaaa', '#1d4ed8'], ['bbbbbbb', '#1e40af']]) {
+    const rel = `images/fixture--${id}.webp`
+    const path = join(well, rel)
+    await sharp({ create: { width: 640, height: 400, channels: 3, background } }).webp().toFile(path)
+    const stat = statSync(path)
+    addRecord.run(id, 'fixture', rel, now)
+    addVector.run(`well:${id}`, id, path, stat.size, Math.round(stat.mtimeMs), now, Buffer.from(vector.buffer))
+  }
+} finally {
+  vectors.close()
+  records.close()
+}
+
 const screens = join(scratch, 'screens')
 mkdirSync(screens, { recursive: true })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -28,7 +51,7 @@ const check = (name, ok, detail = '') => {
   if (!ok) failed++
 }
 
-const app = await launchHidden(join(scratch, 'userData'), join(scratch, 'home'))
+const app = await launchHidden(userData, join(scratch, 'home'))
 try {
   let win = null
   for (let i = 0; i < 300 && !win; i++) {
