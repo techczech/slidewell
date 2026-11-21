@@ -154,7 +154,7 @@ export async function ingestScreenshot(
   await ensureWell(root)
   const orig = readFileSync(srcPath)
   const sourceHash = createHash('sha256').update(orig).digest('hex').slice(0, 12)
-  let buf = orig
+  let buf: Buffer = orig
   let ext = (extname(srcPath).slice(1) || 'png').toLowerCase()
   try {
     const webp = await sharp(orig).webp({ quality: 82 }).toBuffer()
