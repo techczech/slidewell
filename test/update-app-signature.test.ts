@@ -56,7 +56,7 @@ describe('downloaded SlideWell trust', () => {
     })
     expect(verdict).toBe('signature')
     expect(observed).toEqual([['/usr/bin/codesign', '--verify', '--deep', '--strict',
-      '-R', `identifier "${bundleId}" and anchor apple generic and certificate leaf[subject.OU] = "${team}"`,
+      '-R', `=identifier "${bundleId}" and anchor apple generic and certificate leaf[subject.OU] = "${team}"`,
       '/tmp/fake-wrong-team.app']])
   })
 })
