@@ -11,10 +11,12 @@
 
 **Real-path test that proves it:** Ten consecutive passes of `test/source-watcher.test.ts` on the Studio under load, a full Studio Vitest run with zero failures, and `npm run test:triage` through laptop `agent-run` using its isolated fixture.
 
-- [ ] Accept filter, max-wait, pool image add/remove, ignored pool descendants and pool symlink replacement all checked.
-- [ ] Triage waits for both exact names in their expected sources, then checks parsed fields and ignored files.
-- [ ] Quote pass counts and record any runtime watcher defect separately from test timing.
+- [x] Accept filter, max-wait, pool image add/remove, ignored pool descendants and pool symlink replacement all checked.
+- [x] Triage waits for both exact names in their expected sources, then checks parsed fields and ignored files.
+- [x] Quote pass counts and record any runtime watcher defect separately from test timing.
 
 **May touch:** `test/source-watcher.test.ts`, `e2e/triage.mjs`, watcher implementation if evidence identifies a product defect.
 **Boundary:** none → normal review.
 **Status:** ready
+
+Vault-watcher delivery against real file events is no longer covered at unit level. The vault tests inject events at the watcher boundary. The Triage end-to-end spec uses real capture folders and accepts automatic discovery through the watcher or the safety-net scan.

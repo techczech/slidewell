@@ -14,7 +14,7 @@ import { pileOf, type ProposalLabel } from './review/piles'
 import type { ReviewService } from './review/service'
 import type { Retrainer } from './sorter/retrain'
 import { createSourceWatcher } from './source-watcher'
-import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow, type ScanOptions } from './triage'
+import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow, type ScanListing, type ScanOptions } from './triage'
 import { appCounts, cleanAppList, decideAllFromApps } from './triage-apps'
 import { createImportRunner } from './triage-import-run'
 import { ingestScreenshot } from './well'
@@ -22,6 +22,19 @@ import type { AppHandle } from './app-handle'
 
 // An extra folder watched for screenshots. namedOnly limits Desktop scans to screenshot names at the top level.
 export type CaptureSource = { path: string; namedOnly: boolean }
+
+const CAPTURE_RESCAN_MS = 60_000
+const CAPTURE_RESCAN_STAGGER_MS = 1000
+const CAPTURE_RESCAN_GAP_MS = 20_000
+const CAPTURE_RESCAN_BACKOFF_MS = 10 * 60_000
+
+interface ScheduledSource {
+  source: CaptureSource
+  listing: ScanListing
+  timer?: ReturnType<typeof setTimeout>
+  lastScanAt?: number
+  failedAt?: number
+}
 
 interface ConfigPatch {
   screenshotRoot?: string
@@ -58,16 +71,19 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     }
   }
 
-  // Every folder the capture inbox reads: the primary screenshotRoot plus configured extras that exist.
-  function triageSources(): CaptureSource[] {
+  function captureSources(includeMissing: boolean): CaptureSource[] {
     const out: CaptureSource[] = []
-    const primary = screenshotRootResolved()
+    const config = readConfig()
+    const primary = screenshotRootResolved() ?? (includeMissing ? config.screenshotRoot : null)
     if (primary) out.push({ path: primary, namedOnly: false })
-    for (const s of readConfig().captureSources ?? []) {
-      if (s && typeof s.path === 'string' && existsSync(s.path) && !out.some((o) => o.path === s.path)) out.push({ path: s.path, namedOnly: Boolean(s.namedOnly) })
+    for (const s of config.captureSources ?? []) {
+      if (s && typeof s.path === 'string' && (includeMissing || existsSync(s.path)) && !out.some((o) => o.path === s.path)) out.push({ path: s.path, namedOnly: Boolean(s.namedOnly) })
     }
     return out
   }
+
+  // Every available folder the capture inbox reads, primary first.
+  const triageSources = (): CaptureSource[] => captureSources(false)
 
   // Capture-watcher downloads are owned here: quitting SlideWell or pressing Stop on the backlog import
   // aborts them (the active download child is killed) and they stay off until the next explicit user
@@ -80,16 +96,22 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
   // online-only files; the primary Triage folder never does, under any alias (it can hold thousands).
   // Every other source skips the primary folder's subtree (walk and download) when it is nested inside.
   async function scanOptionsFor(s: CaptureSource, o: { downloads?: boolean } = {}): Promise<ScanOptions> {
-    const [nameTemplate, cleanshotExport] = await Promise.all([cleanShotNameTemplate(), cleanShotFolder()])
-    const desktop = join(homedir(), 'Desktop')
     const primary = screenshotRootResolved()
-    let downloadRoot = await captureDownloadRoot(s.path, { desktop, cleanshotExport, primary })
-    // the whole Desktop is never downloaded: only when the source is scanned for screenshot names alone
-    if (downloadRoot && !s.namedOnly && downloadRoot === (await captureDownloadRoot(desktop, { desktop, cleanshotExport: null, primary: null }))) downloadRoot = null
-    const [src, primaryReal] = await Promise.all([s.path, primary].map((p) => (p ? realpath(p).catch(() => null) : Promise.resolve(null))))
+    const [nameTemplate, src, primaryReal] = await Promise.all([
+      cleanShotNameTemplate(),
+      realpath(s.path).catch(() => null),
+      primary ? realpath(primary).catch(() => null) : null
+    ])
     const excludeDir = primaryReal && src !== primaryReal ? primaryReal : null
-    const dl = captureDownloads.options(o.downloads === false ? null : downloadRoot)
-    return { namedOnly: s.namedOnly, nameTemplate, excludeDir, ...dl }
+    let downloadRoot = null
+    if (o.downloads !== false) {
+      const cleanshotExport = await cleanShotFolder()
+      const desktop = join(homedir(), 'Desktop')
+      downloadRoot = await captureDownloadRoot(s.path, { desktop, cleanshotExport, primary })
+      // the whole Desktop is never downloaded: only when the source is scanned for screenshot names alone
+      if (downloadRoot && !s.namedOnly && downloadRoot === (await captureDownloadRoot(desktop, { desktop, cleanshotExport: null, primary: null }))) downloadRoot = null
+    }
+    return { namedOnly: s.namedOnly, nameTemplate, excludeDir, ...captureDownloads.options(downloadRoot) }
   }
 
   function install(deps: InstallDependencies): { launchScan: () => void; refreshWatchers: () => void } {
@@ -175,6 +197,47 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     }
     // Triage IPC answers the main window only
     const onTriageProgress = (m: string): void => void getMainWindow()?.webContents.send('triage:progress', m)
+    const scheduled = new Map<string, ScheduledSource>()
+    const pending = new Map<string, number>()
+    const loggedFailures = new Set<string>()
+    let launchTimer: ReturnType<typeof setTimeout> | undefined
+
+    async function scanSource(s: CaptureSource, o: { downloads?: boolean; fallback?: () => boolean } = {}) {
+      pending.set(s.path, (pending.get(s.path) ?? 0) + 1)
+      const entry = scheduled.get(s.path)
+      const startedAt = Date.now()
+      const fallback = o.fallback
+      const isCurrent = fallback && (() => scheduled.get(s.path) === entry && existsSync(s.path) && fallback())
+      try {
+        const opts = await scanOptionsFor(s, o)
+        const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, {
+          ...opts,
+          listing: entry?.listing,
+          onlyChanged: Boolean(fallback),
+          isCurrent
+        })
+        if (entry && scheduled.get(s.path) === entry && (!res.skipped || isCurrent?.() !== false)) {
+          entry.lastScanAt = Date.now()
+          entry.failedAt = undefined
+        }
+        if (!res.skipped) review.filesChanged()
+        return res
+      } catch (error) {
+        if (entry && scheduled.get(s.path) === entry) {
+          entry.failedAt = startedAt
+          if (!loggedFailures.has(s.path)) {
+            loggedFailures.add(s.path)
+            console.warn('Triage scan failed for capture source', s.path, error)
+          }
+        }
+        throw error
+      } finally {
+        const count = pending.get(s.path)! - 1
+        if (count) pending.set(s.path, count)
+        else pending.delete(s.path)
+      }
+    }
+
     guardedHandle(ipcMain, fromMainWindow, 'triage:scan', async () => {
       captureDownloads.resume() // an explicit Scan turns downloading back on after a Stop
       return scanAllSources()
@@ -187,8 +250,7 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
       const sum = { indexed: 0, total: 0, offline: 0 }
       try {
         for (const s of sources) {
-          const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, await scanOptionsFor(s, o))
-          review.filesChanged() // Review's Not on this Mac answers are worked out again (review/not-on-mac-cache.ts)
+          const res = await scanSource(s, o)
           sum.indexed += res.indexed
           sum.total += res.total
           sum.offline += res.offline
@@ -199,28 +261,68 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
       }
     }
     // Capture-and-forget: files added while SlideWell was closed are picked up shortly after launch.
+    const notifyTriage = () => getMainWindow()?.webContents.send('triage:changed')
     const launchScan = (): void => {
-      setTimeout(() => {
-        if (!restartWork.locked()) void restartWork.run(() => scanAllSources()).then(() => getMainWindow()?.webContents.send('triage:changed'))
+      clearTimeout(launchTimer)
+      launchTimer = setTimeout(() => {
+        if (!restartWork.locked()) void restartWork.run(() => scanAllSources()).then(notifyTriage)
       }, 2500)
     }
-    // Capture inbox: a debounced watcher per source runs the same scan for just that source, then tells
-    // the Triage panel to re-list. Originals are only read.
+    // Capture inbox: the watcher retains its debounce and download policy.
     const watcher = createSourceWatcher((path) => {
       const s = triageSources().find((x) => x.path === path)
       if (!s || restartWork.locked()) return
-      void restartWork.run(async () => scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, await scanOptionsFor(s)))
-        .then(() => {
-          review.filesChanged()
-          getMainWindow()?.webContents.send('triage:changed')
-        })
-        .catch(() => undefined)
+      void restartWork.run(() => scanSource(s)).then(notifyTriage).catch(() => undefined)
     })
+    function mainWindowVisible(): boolean {
+      const window = getMainWindow()
+      return Boolean(window && !window.isDestroyed() && window.isVisible() && !window.isMinimized())
+    }
+    function rescan(entry: ScheduledSource, timer = false): void {
+      const s = entry.source
+      const canScan = () => !timer || mainWindowVisible()
+      if (!canScan() || restartWork.locked() || pending.has(s.path) || !existsSync(s.path)) return
+      const now = Date.now()
+      if (now - (entry.lastScanAt ?? -Infinity) < CAPTURE_RESCAN_GAP_MS) return
+      if (now - (entry.failedAt ?? -Infinity) < CAPTURE_RESCAN_BACKOFF_MS) return
+      void restartWork.run(() => scanSource(s, { downloads: false, fallback: canScan }))
+        .then((res) => { if (!res.skipped) notifyTriage() })
+        .catch(() => undefined)
+    }
+    const rescanOnFocus = (_event: Electron.Event, window: BrowserWindow): void => {
+      if (window === getMainWindow() && !window.isDestroyed()) for (const entry of scheduled.values()) rescan(entry)
+    }
+    function scheduleRescan(entry: ScheduledSource, delay: number): void {
+      entry.timer = setTimeout(() => {
+        scheduleRescan(entry, CAPTURE_RESCAN_MS)
+        rescan(entry, true)
+      }, delay)
+    }
     function refreshWatchers(): void {
       watcher.setSources(triageSources().map((s) => ({ path: s.path, recursive: !s.namedOnly })))
+      const wanted = new Map(captureSources(true).map((s) => [s.path, s]))
+      for (const [path, entry] of scheduled) {
+        if (wanted.get(path)?.namedOnly === entry.source.namedOnly) continue
+        clearTimeout(entry.timer)
+        scheduled.delete(path)
+      }
+      let delay = CAPTURE_RESCAN_MS
+      for (const source of wanted.values()) {
+        if (!scheduled.has(source.path)) {
+          const entry: ScheduledSource = { source, listing: {} }
+          scheduled.set(source.path, entry)
+          scheduleRescan(entry, delay)
+        }
+        delay += CAPTURE_RESCAN_STAGGER_MS
+      }
     }
     refreshWatchers()
+    app.on('browser-window-focus', rescanOnFocus)
     app.on('will-quit', () => {
+      app.removeListener('browser-window-focus', rescanOnFocus)
+      clearTimeout(launchTimer)
+      for (const entry of scheduled.values()) clearTimeout(entry.timer)
+      scheduled.clear()
       watcher.close()
       captureDownloads.stop() // kill any active download child
     })
