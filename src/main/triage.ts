@@ -119,9 +119,26 @@ interface ScanItem {
   offline: boolean
 }
 
+export interface ScanListing {
+  fingerprint?: string
+}
+
+interface ScanResult {
+  indexed: number
+  total: number
+  offline: number
+  skipped?: true
+}
+
 /** How one source is scanned. `namedOnly` = only files whose names parse as screenshots, top level only (the Desktop). */
 export interface ScanOptions {
   namedOnly?: boolean
+  /** The last listing successfully scanned for this configured source. */
+  listing?: ScanListing
+  /** The safety net can stop after enumerating unchanged files. */
+  onlyChanged?: boolean
+  /** A queued safety-net scan may outlive its source configuration. */
+  isCurrent?: () => boolean
   /** CleanShot's own name template (cleanshot-folder.ts): Desktop names, date, app and window. */
   nameTemplate?: NameTemplate | null
   /**
@@ -175,7 +192,7 @@ export function scanTriageSource(
   sourceRoot: string,
   onProgress?: (msg: string) => void,
   opts: ScanOptions = {}
-): Promise<{ indexed: number; total: number; offline: number }> {
+): Promise<ScanResult> {
   const next = scanChain.then(() => scanTriageSourceNow(archiveRoot, wellRoot, sourceRoot, onProgress, opts))
   scanChain = next.catch(() => undefined)
   return next
@@ -187,40 +204,12 @@ async function scanTriageSourceNow(
   sourceRoot: string,
   onProgress: ((msg: string) => void) | undefined,
   opts: ScanOptions
-): Promise<{ indexed: number; total: number; offline: number }> {
+): Promise<ScanResult> {
+  const skipped = { indexed: 0, total: 0, offline: 0, skipped: true } as const
+  if (opts.isCurrent?.() === false) return skipped
   if (!existsSync(sourceRoot)) return { indexed: 0, total: 0, offline: 0 }
-  await ensureTriage(wellRoot)
-  const db = triageDb(wellRoot)
-  const prior = await query<ScanRow>(db, 'SELECT source, rel_path, size, mtime, offline FROM triage_fts', [])
-  const seen = new Map(prior.map((r) => [`${r.source}\0${r.rel_path}`, `${r.size}:${r.mtime}`]))
-  const wasOffline = new Set(prior.filter((r) => r.offline === '1').map((r) => `${r.source}\0${r.rel_path}`))
-  const downloadRoot = opts.downloadRoot ?? null
-  let downloads = Boolean(downloadRoot) // ends for this scan on Stop, the failure limit or the time budget
-  let failuresInARow = 0
-  const failLimit = opts.downloadFailLimit ?? 3
-  let downloadMs = 0
-  const download = opts.download ?? downloadInChild
   const excludeDir = opts.excludeDir ?? null
-  const now = opts.now ?? Date.now
-  const backoff = new Map(
-    (await query<{ rel_path: string; sig: string; failures: string; last_attempt: string }>(db, 'SELECT rel_path, sig, failures, last_attempt FROM download_backoff WHERE source = ?', [sourceRoot])).map((r) => [
-      r.rel_path,
-      { sig: r.sig, failures: Number(r.failures), last: Number(r.last_attempt) }
-    ])
-  )
-  const inBackoff = (rel: string, sig: string): boolean => {
-    const b = backoff.get(rel)
-    return Boolean(b && b.sig === sig && now() - b.last < downloadBackoffMs(b.failures))
-  }
-  const recordFailure = async (rel: string, sig: string): Promise<void> => {
-    const b = backoff.get(rel)
-    const failures = b && b.sig === sig ? b.failures + 1 : 1
-    backoff.set(rel, { sig, failures, last: now() })
-    await run(db, 'INSERT OR REPLACE INTO download_backoff (source, rel_path, sig, failures, last_attempt) VALUES (?, ?, ?, ?, ?)', [sourceRoot, rel, sig, failures, now()])
-  }
-  const clearFailures = async (rel: string): Promise<void> => {
-    if (backoff.delete(rel)) await run(db, 'DELETE FROM download_backoff WHERE source = ? AND rel_path = ?', [sourceRoot, rel])
-  }
+  const db = triageDb(wellRoot)
 
   // Phase 0 — enumerate (stat only). The primary Triage subtree is never entered from another source.
   const walked = [...walk(sourceRoot, !opts.namedOnly, excludeDir)].map((w) => w.abs)
@@ -244,9 +233,49 @@ async function scanTriageSourceNow(
     } catch {
       continue
     }
-    if (files.length % 200 === 0) onProgress?.(`found ${files.length} media files…`)
+    if (!opts.onlyChanged && files.length % 200 === 0) onProgress?.(`found ${files.length} media files…`)
   }
+  // Record what this scan saw before reading any bytes. Files that arrive during the scan
+  // will change the next listing, even if the watcher misses their events.
+  const listing = opts.listing
+  const fingerprint = listing && createHash('sha256').update(JSON.stringify([
+    wellRoot,
+    files.map((f) => JSON.stringify([f.rel, f.size, f.mtime, f.offline])).sort()
+  ])).digest('hex')
+  if (opts.onlyChanged && listing && listing.fingerprint === fingerprint && existsSync(db)) return skipped
+
   onProgress?.(`found ${files.length} media files — reading…`)
+  await ensureTriage(wellRoot)
+  const prior = await query<ScanRow>(db, 'SELECT source, rel_path, size, mtime, offline FROM triage_fts', [])
+  const seen = new Map(prior.map((r) => [`${r.source}\0${r.rel_path}`, `${r.size}:${r.mtime}`]))
+  const wasOffline = new Set(prior.filter((r) => r.offline === '1').map((r) => `${r.source}\0${r.rel_path}`))
+  const downloadRoot = opts.downloadRoot ?? null
+  let downloads = Boolean(downloadRoot) // ends for this scan on Stop, the failure limit or the time budget
+  let failuresInARow = 0
+  const failLimit = opts.downloadFailLimit ?? 3
+  let downloadMs = 0
+  const download = opts.download ?? downloadInChild
+  const now = opts.now ?? Date.now
+  const backoff = new Map(
+    (await query<{ rel_path: string; sig: string; failures: string; last_attempt: string }>(db, 'SELECT rel_path, sig, failures, last_attempt FROM download_backoff WHERE source = ?', [sourceRoot])).map((r) => [
+      r.rel_path,
+      { sig: r.sig, failures: Number(r.failures), last: Number(r.last_attempt) }
+    ])
+  )
+  const inBackoff = (rel: string, sig: string): boolean => {
+    const b = backoff.get(rel)
+    return Boolean(b && b.sig === sig && now() - b.last < downloadBackoffMs(b.failures))
+  }
+  const recordFailure = async (rel: string, sig: string): Promise<void> => {
+    const b = backoff.get(rel)
+    const failures = b && b.sig === sig ? b.failures + 1 : 1
+    backoff.set(rel, { sig, failures, last: now() })
+    await run(db, 'INSERT OR REPLACE INTO download_backoff (source, rel_path, sig, failures, last_attempt) VALUES (?, ?, ?, ?, ?)', [sourceRoot, rel, sig, failures, now()])
+  }
+  const clearFailures = async (rel: string): Promise<void> => {
+    if (backoff.delete(rel)) await run(db, 'DELETE FROM download_backoff WHERE source = ? AND rel_path = ?', [sourceRoot, rel])
+  }
+
   // Download order, fair across scans: files with no recorded failure first (newest first), then files
   // that failed before, the one waiting longest (oldest last attempt) first. A few files that never
   // download therefore cannot use up every scan's failure limit ahead of an older healthy file.
@@ -348,6 +377,7 @@ async function scanTriageSourceNow(
     if (i % 3 === 0 || i === files.length) onProgress?.(`processed ${i}/${files.length} · ${indexed} read · ${offlineN} not downloaded`)
   }
   onProgress?.(`done — ${indexed} read, ${offlineN} not downloaded, ${files.length} total`)
+  if (listing) listing.fingerprint = fingerprint
   return { indexed, total: files.length, offline: offlineN }
 }
 

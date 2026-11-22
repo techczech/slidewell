@@ -9,16 +9,18 @@ import { setTimeout as delay } from 'node:timers/promises'
 
 const out = (o) => console.log(JSON.stringify(o))
 
-async function waitForTriageRows(win, expected) {
-  const deadline = performance.now() + 60000
+async function waitForTriageRows(win, expected, timeoutMs = 60_000) {
+  const deadline = performance.now() + timeoutMs
+  let items = []
   while (performance.now() < deadline) {
-    const { items } = await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0))
+    ({ items } = await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0)))
     if (expected.every(({ filename, source }) => items.some((row) => row.filename === filename && row.source === source))) {
-      return items
+      return { items }
     }
     await delay(250)
   }
-  throw new Error(`Timed out waiting for Triage rows: ${expected.map(({ filename }) => filename).join(', ')}`)
+  const missing = expected.filter(({ filename, source }) => !items.some((row) => row.filename === filename && row.source === source))
+  return { items, error: `Timed out waiting for Triage rows: ${missing.map(({ filename }) => filename).join(', ')}` }
 }
 
 // two distinct 1x1 PNGs (different bytes → different content hashes)
@@ -64,12 +66,13 @@ try {
   await win.waitForSelector('.triage-panel', { timeout: 5000 })
   result.panelOpened = (await win.locator('.triage-panel').count()) === 1
 
-  const launchRows = await waitForTriageRows(win, [
+  const { items: launchRows, error: launchRowsError } = await waitForTriageRows(win, [
     { filename: PRE, source: second },
     ...['one.png', 'two.png', 'dup.png'].map((filename) => ({ filename, source }))
   ])
   const pre = launchRows.filter((x) => x.filename === PRE)
-  result.launchScanPicksUp = pre.length === 1 && pre[0].app === 'Safari'
+  if (launchRowsError) result.launchRowsError = launchRowsError
+  result.launchScanPicksUp = !launchRowsError && pre.length === 1 && pre[0].app === 'Safari'
 
   // scan the fixture (recursive: 3 files across a subfolder, two of them byte-identical)
   const scan = await win.evaluate(() => window.sw.triage.scan())
@@ -135,19 +138,25 @@ try {
   result.datesOk = desc.items.every((i) => /^\d{4}-\d{2}-\d{2}$/.test(i.date))
   result.dateSortFlips = desc.items[0].relPath === asc.items[asc.items.length - 1].relPath && desc.items[0].date >= desc.items[1].date
 
-  // capture inbox: files dropped into the extra sources appear WITHOUT pressing Scan (watcher), carrying
+  // capture inbox: files dropped into the extra sources appear without pressing Scan, carrying
   // the app/window parsed from the name; non-screenshot Desktop files are ignored.
   const CS = 'CleanShot 2026-10-08 at 0801 from Google Chrome with TalkWeaver Layout Showcase.png'
   const GREEN = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg+M/wHwAEAQH/cetH5QAAAABJRU5ErkJggg=='
   const YELLOW = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg=='
+  const droppedAt = performance.now()
   writeFileSync(join(second, CS), Buffer.from(GREEN, 'base64'))
   const DESKTOP = 'Screenshot 2026-10-09 at 10.05.01.png'
   writeFileSync(join(desk, 'notes.png'), Buffer.from(BLUE, 'base64'))
   writeFileSync(join(desk, DESKTOP), Buffer.from(YELLOW, 'base64'))
-  const watchedRows = await waitForTriageRows(win, [{ filename: CS, source: second }, { filename: DESKTOP, source: desk }])
+  // Allow one full safety-net interval plus time to index and relist the fixture rows.
+  const { items: watchedRows, error: watchedRowsError } = await waitForTriageRows(
+    win, [{ filename: CS, source: second }, { filename: DESKTOP, source: desk }], 75_000
+  )
+  result.automaticDiscoveryMs = Math.round(performance.now() - droppedAt)
+  if (watchedRowsError) result.watchedRowsError = watchedRowsError
   const watched = watchedRows.filter((x) => x.filename !== PRE && (x.source === second || x.source === desk))
   const cs = watched.find((x) => x.filename === CS)
-  result.watchedAppears = watched.length === 2
+  result.watchedAppears = !watchedRowsError && watched.length === 2
   result.parsedFields = Boolean(cs) && cs.app === 'Google Chrome' && cs.windowTitle === 'TalkWeaver Layout Showcase' && cs.takenAt === '2026-10-08T08:01:00' && cs.date === '2026-10-08'
   result.desktopOthersIgnored = !watched.some((x) => x.filename === 'holiday.png' || x.filename === 'notes.png')
   // manual scan still works and covers all sources without disturbing the watched rows
@@ -174,7 +183,6 @@ try {
     result.wellEmptyBeforeImport &&
     result.excludedCount === 2 &&
     result.undecidedCount === 1 && // PRE
-    
     result.imported >= 1 &&
     result.wellHasImagesAfterImport &&
     result.includedAfterImport >= 1 &&
@@ -186,4 +194,4 @@ try {
   await app.close()
 }
 out({ ...result, pass })
-finish(pass ? null : result.error || failedChecks(result) || 'Triage fixture assertions failed')
+finish(pass ? null : result.error || result.launchRowsError || result.watchedRowsError || failedChecks(result) || 'Triage fixture assertions failed')

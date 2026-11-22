@@ -13,6 +13,10 @@ vi.mock('electron', () => ({
   clipboard: {},
   dialog: {}
 }))
+vi.mock('node:fs/promises', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs/promises')>()),
+  realpath: async (path: string) => path
+}))
 vi.mock('../src/main/backlog-ipc', () => ({ registerBacklogIpc: () => undefined }))
 vi.mock('../src/main/cleanshot-folder', () => ({
   cleanShotNameTemplate: async () => null,
@@ -78,6 +82,16 @@ describe('capture fallback through the Triage scan', () => {
     expect(send).toHaveBeenCalledWith('triage:changed')
     await vi.advanceTimersByTimeAsync(60_000)
     expect(scan).toHaveBeenCalledTimes(4)
+  })
+
+  it('leaves Review and Triage alone when the timer finds unchanged listings', async () => {
+    install()
+    scan.mockResolvedValue({ indexed: 0, total: 0, offline: 0, skipped: true })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(scan).toHaveBeenCalledTimes(2)
+    expect(scan.mock.calls.every((call) => call[4].onlyChanged)).toBe(true)
+    expect(filesChanged).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
   })
 
   it('responds only to the main window gaining focus', async () => {
