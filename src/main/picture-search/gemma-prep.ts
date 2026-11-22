@@ -7,7 +7,7 @@
  * the pixels match the spike that produced the recorded quality numbers; test/gemma-prep.test.ts
  * checks equality against transformers.js when the model is on disk.
  */
-import sharp from 'sharp'
+import sharp, { type Sharp } from 'sharp'
 import { Tokenizer } from '@huggingface/tokenizers'
 
 export type ImageProcessorConfig = {
@@ -72,7 +72,7 @@ export function patchify(hwc: Float32Array, H: number, W: number, C: number, pat
 
 type Raw = { data: Uint8Array; width: number; height: number; channels: number }
 
-async function decode(img: sharp.Sharp): Promise<Raw> {
+async function decode(img: Sharp): Promise<Raw> {
   const { data, info } = await img.rotate().raw().toBuffer({ resolveWithObject: true })
   return { data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength), width: info.width, height: info.height, channels: info.channels }
 }
