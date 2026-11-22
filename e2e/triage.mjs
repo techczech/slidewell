@@ -51,12 +51,13 @@ try {
   await win.waitForSelector('.triage-panel', { timeout: 5000 })
   result.panelOpened = (await win.locator('.triage-panel').count()) === 1
 
-  let pre = []
-  for (let i = 0; i < 20 && pre.length < 1; i++) {
-    await win.waitForTimeout(1000)
-    pre = (await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0))).items.filter((x) => x.filename === PRE)
-  }
-  result.launchScanPicksUp = pre.length === 1 && pre[0].app === 'Safari'
+  const pre = await win.waitForFunction(async (filename) => {
+    const { items } = await window.sw.triage.list('', 'all', 'scanned', 50, 0)
+    const matches = items.filter((x) => x.filename === filename)
+    return matches.length ? matches : false
+  }, PRE, { polling: 250, timeout: 60000 })
+  const preRows = await pre.jsonValue()
+  result.launchScanPicksUp = preRows.length === 1 && preRows[0].app === 'Safari'
 
   // scan the fixture (recursive: 3 files across a subfolder, two of them byte-identical)
   const scan = await win.evaluate(() => window.sw.triage.scan())
@@ -128,13 +129,17 @@ try {
   const GREEN = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg+M/wHwAEAQH/cetH5QAAAABJRU5ErkJggg=='
   const YELLOW = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg=='
   writeFileSync(join(second, CS), Buffer.from(GREEN, 'base64'))
-  writeFileSync(join(desk, 'Screenshot 2026-10-09 at 10.05.01.png'), Buffer.from(YELLOW, 'base64'))
+  const DESKTOP = 'Screenshot 2026-10-09 at 10.05.01.png'
   writeFileSync(join(desk, 'notes.png'), Buffer.from(BLUE, 'base64'))
-  let watched = []
-  for (let i = 0; i < 25 && watched.length < 2; i++) {
-    await win.waitForTimeout(1000)
-    watched = (await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0))).items.filter((x) => x.filename !== PRE && (x.source.endsWith('second') || x.source.endsWith('desktop')))
-  }
+  writeFileSync(join(desk, DESKTOP), Buffer.from(YELLOW, 'base64'))
+  const watchedRows = await win.waitForFunction(async ({ pre, captures, sources }) => {
+    const { items } = await window.sw.triage.list('', 'all', 'scanned', 50, 0)
+    const rows = items.filter((x) => x.filename !== pre && sources.includes(x.source))
+    return captures.every((filename, i) => rows.some((x) => x.filename === filename && x.source === sources[i]))
+      ? rows
+      : false
+  }, { pre: PRE, captures: [CS, DESKTOP], sources: [second, desk] }, { polling: 250, timeout: 60000 })
+  const watched = await watchedRows.jsonValue()
   const cs = watched.find((x) => x.filename === CS)
   result.watchedAppears = watched.length === 2
   result.parsedFields = Boolean(cs) && cs.app === 'Google Chrome' && cs.windowTitle === 'TalkWeaver Layout Showcase' && cs.takenAt === '2026-10-08T08:01:00' && cs.date === '2026-10-08'
