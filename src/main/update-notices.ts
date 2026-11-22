@@ -10,6 +10,10 @@ import { createElectronFeedFetcher, createUpdateLinkOpener } from '@app-patterns
 import { CHECK_UPDATES, UPDATE_IDENTITY, WHATS_NEW } from '../shared/update-identity'
 
 const shippedNotes: Record<string, readonly WhatsNewItem[]> = {
+  '0.4.0-alpha.20': [
+    { title: 'Update notices', text: 'SlideWell checks once a day whether a newer version exists and tells you. Turn this off in Settings › About and updates.' },
+    { title: 'Safer saving', text: 'A screenshot leaves the inbox only after its copy in the well has been checked, and a damaged settings file is kept aside instead of being overwritten.' }
+  ],
   '0.4.0-alpha.19': [
     { title: 'Settings in one place', text: 'Open Settings to manage your archive, watched folders, AI accounts and shortcuts.' },
     { title: 'Screenshot review', text: 'Review your sorter’s suggestions before deciding what to keep or throw away.' }
