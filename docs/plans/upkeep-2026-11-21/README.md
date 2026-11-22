@@ -43,6 +43,10 @@ Frontier now: 01. After 01 lands: 02, 03, 04, 05, 08. Two of eight need an Opus 
 
 Not run on 21 November: the unit suite needs `npm ci` in a fresh worktree and the machine's `agent-run` slot was queued for over an hour, so the job was withdrawn. There is no CI for tests (`.github/workflows/release.yml` packages only). The last recorded full run is on the unmerged `codex/slidewell-real-typecheck` branch (17 October, alpha.15): 1,100 passed, one skipped.
 
+## Follow-ups
+
+- 11 — Reproduce the four Studio failures in `test/source-watcher.test.ts` and make the filesystem-event tests reliable. Preserve the accept filter, max-wait, image-pool change and symlink retargeting assertions.
+
 ## Excluded: needs Dominik's choice
 
 - Lean Mac archive from R2 (`_DTC/slidewell/roadmap/lean-mac-archive-from-r2.md`): spec first; the R2 layout and cache size are his.

@@ -71,8 +71,8 @@ describe('IPC: what the sorter goes by, and sort runs', () => {
 })
 
 describe('IPC: Triage by app goes through the guard in the main process', () => {
-  it('apps and decide-all are guarded handlers that validate before they act', () => {
-    const text = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
+  it("apps and decide-all use the capture installer's main-window guard", () => {
+    const text = readFileSync(join(__dirname, '..', 'src', 'main', 'capture-sources-ipc.ts'), 'utf8')
     for (const ch of ['triage:apps', 'triage:decide-all']) expect(text).toContain(`guardedHandle(ipcMain, fromMainWindow, '${ch}'`)
   })
 })
