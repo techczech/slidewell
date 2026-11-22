@@ -1,0 +1,62 @@
+import { execFileSync } from 'node:child_process'
+import { copyFileSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { verifyMacDownload } from '../src/main/update-engine'
+import { RELEASE_TRUST, runningSignatureMatches } from '../src/main/update-trust'
+
+const bundleId = 'net.dominiklukes.slidewell'
+const team = 'M7H45AGG8A'
+
+describe('downloaded SlideWell trust', () => {
+  it.skipIf(process.platform !== 'darwin')('refuses a genuinely ad hoc-signed bundle with the correct plist', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sw-trust-'))
+    const bundle = join(root, 'Disposable.app')
+    const contents = join(bundle, 'Contents')
+    mkdirSync(join(contents, 'MacOS'), { recursive: true })
+    copyFileSync('/usr/bin/true', join(contents, 'MacOS', 'fixture'))
+    writeFileSync(join(contents, 'Info.plist'), `<?xml version="1.0"?><plist version="1.0"><dict>
+      <key>CFBundleIdentifier</key><string>${bundleId}</string>
+      <key>CFBundleShortVersionString</key><string>1.1.0</string>
+      <key>CFBundleExecutable</key><string>fixture</string>
+      <key>CFBundlePackageType</key><string>APPL</string>
+    </dict></plist>`)
+    execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', bundle], { stdio: 'pipe' })
+    execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', bundle])
+    const disposableTrust = { bundleId, team: null }
+    expect(runningSignatureMatches(bundle, disposableTrust)).toBe(true)
+    expect(runningSignatureMatches(bundle, RELEASE_TRUST)).toBe(false)
+    const zip = join(root, 'fixture.zip')
+    execFileSync('/usr/bin/ditto', ['-c', '-k', '--keepParent', bundle, zip])
+    const offer = { bundleId, version: '1.1.0', released: '2026-11-22', size: statSync(zip).size, sha512: '', url: '' }
+    expect(await verifyMacDownload(zip, offer, '1.0.0', disposableTrust)).toBeNull()
+    expect(await verifyMacDownload(zip, offer, '1.0.0')).toBe('signature')
+  })
+
+  it('requires a notarised Gatekeeper assessment even when spctl exits successfully', async () => {
+    const { verifyBundleTrust } = await import('../src/main/update-trust')
+    const identity = { bundleId, team }
+    const bundle = '/tmp/fake-bundle.app'
+    const verify = (verdict: string) => verifyBundleTrust(bundle, identity, async (tool, args) => {
+      if (tool === '/usr/bin/codesign') return ''
+      expect([tool, ...args]).toEqual(['/usr/sbin/spctl', '-a', '-t', 'exec', '-vv', bundle])
+      return verdict
+    })
+    expect(await verify('source=Developer ID\n')).toBe('notarisation')
+    expect(await verify('source=Notarized Developer ID\n')).toBeNull()
+  })
+
+  it('checks the pinned team and rejects a bundle whose codesign assessment fails', async () => {
+    const observed: string[][] = []
+    const { verifyBundleTrust } = await import('../src/main/update-trust')
+    const verdict = await verifyBundleTrust('/tmp/fake-wrong-team.app', RELEASE_TRUST, async (tool, args) => {
+      observed.push([tool, ...args])
+      if (tool === '/usr/bin/codesign') throw new Error('does not satisfy its specified requirement')
+    })
+    expect(verdict).toBe('signature')
+    expect(observed).toEqual([['/usr/bin/codesign', '--verify', '--deep', '--strict',
+      '-R', `=identifier "${bundleId}" and anchor apple generic and certificate leaf[subject.OU] = "${team}"`,
+      '/tmp/fake-wrong-team.app']])
+  })
+})

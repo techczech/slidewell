@@ -1,3 +1,4 @@
+import { restartWork } from '../restart-work'
 /**
  * IPC for the Auto sorting tab's "What the sorter goes by" and its piles (ticket 20). Types:
  * src/preload/index.ts. Main window only, like the sorter's other handlers (service.ts).
@@ -26,7 +27,7 @@ export function registerGoesByAndRunsIpc(d: GoesByAndRunsDeps): void {
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
     ipcMain.handle(channel, (e, ...args) => {
       if (!d.allowed(e.sender)) throw new Error(`${channel}: not allowed from this window`)
-      return fn(...args)
+      return restartWork.run(() => fn(...args))
     })
   }
   const table = (): ReturnType<typeof goesBy> => goesBy(d.wellRoot(), d.appRules())

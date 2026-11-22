@@ -1,3 +1,4 @@
+import { restartWork } from '../restart-work'
 /**
  * The screenshot sorter, local part, as one main-process service.
  *
@@ -622,7 +623,7 @@ export function registerSorterIpc(
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
     ipcMain.handle(channel, (e, ...args) => {
       if (!allowed(e.sender)) throw new Error(`${channel}: not allowed from this window`)
-      return fn(...args)
+      return restartWork.run(() => fn(...args))
     })
   }
   handle('sorter:status', () => svc.status({ count: true }))

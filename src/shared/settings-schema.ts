@@ -9,7 +9,7 @@
 //
 // Pure: no Electron, no node:, so main, renderer, the CLI and tests share it.
 import { defineSchema, type Migrated, type SettingValue } from '@app-patterns/settings'
-import { UPDATE_CHECK_KEY } from './update-identity'
+import { UPDATE_ALPHA_KEY, UPDATE_CHECK_KEY } from './update-identity'
 
 export const APP_ID = 'slidewell'
 export const APP_NAME = 'SlideWell'
@@ -157,7 +157,11 @@ export const schema = defineSchema({
     })),
     {
       key: UPDATE_CHECK_KEY, label: 'Check for new versions', section: 'updates', type: 'toggle', default: true,
-      help: 'SlideWell checks once a day. You can also check at any time.'
+      help: 'SlideWell checks once a day. Turn this off to stop all update checks.'
+    },
+    {
+      key: UPDATE_ALPHA_KEY, label: 'Get early versions (alpha)', section: 'updates', type: 'toggle', default: false,
+      help: 'Offer newer alpha builds. Turning this off keeps your current version until a newer release.'
     },
     {
       key: 'advanced.pythonPath', label: 'Python', section: 'advanced', type: 'path', default: '',

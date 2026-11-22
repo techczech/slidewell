@@ -45,6 +45,9 @@ export function registerEmbedProtocol(modelDir: () => string): void {
   })
 }
 
+const embedWindows = new WeakSet<BrowserWindow>()
+export const isEmbedWindow = (win: BrowserWindow): boolean => embedWindows.has(win)
+
 /** Hidden-window host for WebGpuEmbedder. */
 export function electronEmbedHost(preloadPath: string): HostFactory {
   return (ev: HostEvents): EmbedHost => {
@@ -54,6 +57,7 @@ export function electronEmbedHost(preloadPath: string): HostFactory {
       height: 200,
       webPreferences: { preload: preloadPath, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false }
     })
+    embedWindows.add(win)
     const wc = win.webContents
     let gone = false
     let destroyed = false

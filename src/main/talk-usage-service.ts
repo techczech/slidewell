@@ -22,6 +22,7 @@ export interface TalkUsageDeps {
   watch: (vault: string, onChange: () => void) => UsageWatch
   /** Told when the published usage may have changed, and why not when it did not. */
   notify: (r: { ok: boolean; reason: string }) => void
+  mayStart?: () => boolean
   log?: (message: string) => void
   scan?: (wellRoot: string, vaultRoot: string, isCurrent: () => boolean) => Promise<ScanOutcome>
   load?: (wellRoot: string, vaultRoot: string) => Promise<UsageMap>
@@ -35,6 +36,7 @@ export interface TalkUsageService {
   refresh(): Promise<void>
   /** Resolves once the queue is empty. */
   idle(): Promise<void>
+  busy(): boolean
   close(): void
 }
 
@@ -57,7 +59,7 @@ export function createTalkUsageService(deps: TalkUsageDeps): TalkUsageService {
 
   // a waiting task of the same kind already covers a new request: both read the config when they run
   const enqueue = (kind: Kind): Promise<void> => {
-    if (closed) return Promise.resolve()
+    if (closed || deps.mayStart?.() === false) return Promise.resolve()
     const waiting = pending.find((t) => t.kind === kind)
     if (waiting) return waiting.promise
     let resolve: () => void = () => undefined
@@ -131,6 +133,7 @@ export function createTalkUsageService(deps: TalkUsageDeps): TalkUsageService {
     sync: () => enqueue('sync'),
     refresh: () => enqueue('scan'),
     idle: async () => { while (running) await drained },
+    busy: () => running,
     close: () => {
       closed = true
       active?.watch.close()

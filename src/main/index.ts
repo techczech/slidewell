@@ -8,8 +8,11 @@ import { startSettings, type SaveResult, type SettingsApp } from './settings-hos
 import { CONFIG_UNREADABLE, ConfigReadError, patchConfigFile, readConfigFile, saveConfigParts } from './config-file'
 import { ARCHIVE_DEFAULT, OTHERS_DEFAULT } from './settings-rules'
 import { keySlots } from './key-slots'
+import { restartWork } from './restart-work'
+import { isUpdateFixture, updateFixtureRoot } from './update-fixture'
 import { hadUpdateConfiguration, installUpdateNotices } from './update-notices'
-import { UPDATE_CHECK_KEY } from '../shared/update-identity'
+import type { RestartBlocker } from '../shared/update-install'
+import { UPDATE_ALPHA_KEY, UPDATE_CHECK_KEY } from '../shared/update-identity'
 import { legacyFromPrefs, splitLegacyPatch } from '../shared/settings-schema'
 import { saveR2 } from './r2-save'
 import { MAIN_COMMANDS, registry, type CommandContext } from '../shared/commands'
@@ -25,7 +28,7 @@ import { pickStore, keyForPath, fetchFromR2, syncDirToR2, type StoreName } from 
 import { PictureSearchService, registerPictureSearchIpc, type PictureSearchSettings } from './picture-search/service'
 import { startPictureQueryServer, PICTURE_QUERY_SOCKET, type QueryServer } from './picture-search/query-socket'
 import { WebGpuEmbedder } from './picture-search/webgpu-embedder'
-import { electronEmbedHost, registerEmbedProtocol, EMBED_SCHEME } from './picture-search/electron-embed-host'
+import { electronEmbedHost, isEmbedWindow, registerEmbedProtocol, EMBED_SCHEME } from './picture-search/electron-embed-host'
 import { modelDir as pictureModelDir } from './picture-search/model-store'
 import { SorterService, changePeriod, cloudGates, registerSorterIpc, type LocalRunSummary, type TrainResult } from './sorter/service'
 import createTrainWorker from './sorter/train-worker?nodeWorker'
@@ -57,9 +60,17 @@ const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUI
 
 // Test-only: SLIDEWELL_E2E_HIDDEN=1 keeps automated runs in the background (no window shown, no
 // Dock icon, nothing takes focus). Honoured only when set to exactly '1'; unset changes nothing.
-const E2E_HIDDEN = process.env['SLIDEWELL_E2E_HIDDEN'] === '1'
+const fixtureRoot = updateFixtureRoot()
+const E2E_HIDDEN = Boolean(fixtureRoot) || process.env['SLIDEWELL_E2E_HIDDEN'] === '1'
+if (isUpdateFixture && !fixtureRoot) app.exit(1)
 // Tests and the settings CLI can point the app at a throwaway data folder (the CLI reads the same variable).
-if (process.env['SLIDEWELL_DATA_DIR']) app.setPath('userData', process.env['SLIDEWELL_DATA_DIR'])
+if (fixtureRoot) {
+  process.env.HOME = join(fixtureRoot, 'home')
+  process.env.SLIDEWELL_E2E_HIDDEN = '1'
+  app.commandLine.appendSwitch('use-mock-keychain')
+  app.setPath('home', process.env.HOME)
+  app.setPath('userData', join(fixtureRoot, 'profile'))
+} else if (process.env['SLIDEWELL_DATA_DIR']) app.setPath('userData', process.env['SLIDEWELL_DATA_DIR'])
 if (E2E_HIDDEN && process.platform === 'darwin') app.dock?.hide()
 
 // Custom schemes must be registered as privileged BEFORE app ready so the renderer treats them
@@ -201,7 +212,11 @@ function fromAppWindow(e: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): 
 function appHandle(channel: string, fn: (e: Electron.IpcMainInvokeEvent, ...args: any[]) => unknown): void { // eslint-disable-line @typescript-eslint/no-explicit-any
   ipcMain.handle(channel, (e, ...args) => {
     if (!fromAppWindow(e)) throw new Error(`${channel}: not allowed from this window`)
-    return fn(e, ...args)
+    if (channel.startsWith('updates:')) {
+      if (e.senderFrame !== e.sender.mainFrame) throw new Error(`${channel}: not allowed from this frame`)
+      return fn(e, ...args)
+    }
+    return restartWork.run(() => fn(e, ...args))
   })
 }
 /** Sends a status push to the main window and an open Settings window. */
@@ -302,6 +317,7 @@ let refreshWatchers: () => void = () => undefined
 let lastWatchedRoot = ''
 
 function openMain(): void {
+  if (restartWork.locked()) return
   if (!mainWindow || mainWindow.isDestroyed()) createWindow()
   else {
     if (mainWindow.isMinimized()) mainWindow.restore()
@@ -327,9 +343,15 @@ function createWindow(): BrowserWindow {
     }
   })
 
-  win.on('close', () => {
-    const b = win.getBounds()
-    writeConfig({ windowBounds: { width: b.width, height: b.height } })
+  win.on('close', (event) => {
+    const { width, height } = win.getBounds()
+    const patch = { windowBounds: { width, height } }
+    if (!restartWork.locked()) {
+      void writeConfig(patch)
+      return
+    }
+    // The update closes this window before native preparation. Do not lose a failed close write.
+    try { writeRawConfig(patch) } catch { event.preventDefault() }
   })
 
   const devUrl = process.env['ELECTRON_RENDERER_URL']
@@ -453,27 +475,21 @@ app.whenReady().then(async () => {
   settings = started.settings
   prefsInStore = !started.legacy
   lastWatchedRoot = readConfig().screenshotRoot ?? ''
-  updates = installUpdateNotices({
-    appHandle, hadConfiguration,
-    broadcast: toAppWindows,
-    tellMain: (channel, value) => mainWindow?.webContents.send(channel, value),
-    enabled: () => settings?.values()[UPDATE_CHECK_KEY] !== false
-  })
   app.on('will-quit', () => {
     updates?.stop()
     settings?.dispose()
   })
   ipcMain.handle('app:bindings', (e) => (fromAppWindow(e) ? (settings?.bindings() ?? {}) : {}))
   ipcMain.handle('app:run-command', (e, id: unknown) => {
-    if (fromAppWindow(e) && typeof id === 'string' && MAIN_COMMANDS.has(id)) settings?.runMainCommand(id)
+    if (!restartWork.locked() && fromAppWindow(e) && typeof id === 'string' && MAIN_COMMANDS.has(id)) settings?.runMainCommand(id)
   })
   ipcMain.handle('app:show-in-main', (e, id: unknown) => {
-    if (!fromAppWindow(e) || typeof id !== 'string' || !registry.byId(id) || MAIN_COMMANDS.has(id)) return
+    if (restartWork.locked() || !fromAppWindow(e) || typeof id !== 'string' || !registry.byId(id) || MAIN_COMMANDS.has(id)) return
     openMain()
     mainWindow?.webContents.send('app:command', id)
   })
   ipcMain.handle('app:open-settings-at', (e, section: unknown) => {
-    if (fromAppWindow(e)) settings?.openSettings(typeof section === 'string' ? section : undefined)
+    if (!restartWork.locked() && fromAppWindow(e)) settings?.openSettings(typeof section === 'string' ? section : undefined)
   })
   ipcMain.handle('app:set-context', (e, c: Partial<CommandContext> | null) => {
     if (!fromAppWindow(e)) return
@@ -485,7 +501,9 @@ app.whenReady().then(async () => {
     const abs = decodeSwUrlPath(request.url)
     // a fetch from R2 writes only under an allowed root's real path, and the file served passes the real-path check:
     // a link inside a root that leads outside every root is neither written through nor served
-    const served = abs ? await serveSwFile(abs, allowedRoots(), existsSync(abs) ? null : r2FetcherFor(abs)) : null
+    const fetcher = abs && !restartWork.locked() && !existsSync(abs) ? r2FetcherFor(abs) : null
+    const served = abs ? await serveSwFile(abs, allowedRoots(),
+      fetcher && ((...args) => restartWork.run(() => fetcher(...args)))) : null
     if (!served) return new Response('not found', { status: 404 })
     return net.fetch(pathToFileURL(served).toString())
   })
@@ -576,7 +594,9 @@ app.whenReady().then(async () => {
   // the retrain by itself after ten answers. It trains, tests and re-scores existing proposals of undecided
   // screenshots; it makes no sort run, writes no decision and asks no cloud model ---
   const retrainer: Retrainer<TrainResult> = new Retrainer<TrainResult>({
-    train: () => sorter.trainAndTest({ rescore: true }),
+    train: () => restartWork.locked()
+      ? Promise.resolve({ ok: false, busy: true, error: 'SlideWell is restarting.' })
+      : restartWork.run(() => sorter.trainAndTest({ rescore: true })),
     choices: () => sorter.choices(),
     changed: () => sorter.push(),
     power: { onBattery: () => powerMonitor.isOnBatteryPower(), onAc: (cb) => void powerMonitor.on('on-ac', cb) },
@@ -663,7 +683,10 @@ app.whenReady().then(async () => {
   }
   settings?.slotsChanged()
   // the nightly batch runs only while the app is open: checked shortly after launch (a missed night runs then) and every minute
-  const cloudTick = (): void => void cloud.tick().catch((e) => console.warn(`[sorter-cloud] nightly check failed: ${(e as Error)?.name ?? 'error'}`))
+  const cloudTick = (): void => {
+    if (restartWork.locked()) return
+    void restartWork.run(() => cloud.tick()).catch((e) => console.warn(`[sorter-cloud] nightly check failed: ${(e as Error)?.name ?? 'error'}`))
+  }
   const cloudFirst = setTimeout(cloudTick, 30_000)
   const cloudTimer = setInterval(cloudTick, 60_000)
   app.on('will-quit', () => {
@@ -885,13 +908,71 @@ app.whenReady().then(async () => {
     sendLine: (line) => mainWindow?.webContents.send('ingest:line', line)
   })
 
-  void startWell().finally(() => pictureSearch?.start())
-  createWindow().webContents.once('did-finish-load', () => capture.launchScan())
+  const blockers = (): RestartBlocker[] => {
+    const holds: RestartBlocker[] = []
+    if (settings?.settingsWebContents()) holds.push('settings')
+    if (restartWork.busy() || talkUsage.busy() || pictureSearch?.updateWorkBusy() || settings?.hasPendingWrites()) holds.push('work')
+    if (rawConfig() === null || settings?.restartProblem()) holds.push('unsaved')
+    if (BrowserWindow.getAllWindows().some((w) => w !== mainWindow &&
+        w.webContents !== settings?.settingsWebContents() && !isEmbedWindow(w))) holds.push('window')
+    return holds
+  }
+
+  updates = installUpdateNotices({
+    appHandle, hadConfiguration,
+    broadcast: toAppWindows,
+    tellMain: (channel, value) => mainWindow?.webContents.send(channel, value),
+    enabled: () => settings?.values()[UPDATE_CHECK_KEY] !== false,
+    alpha: () => settings?.values()[UPDATE_ALPHA_KEY] === true,
+    restart: {
+      blockers,
+      async closeWindows() {
+        if (blockers().length || !restartWork.freeze()) return false
+        // An idle ONNX host can be recreated if the restart fails. It holds no editable state.
+        pictureSearch?.closeIdleEmbedder()
+        const win = mainWindow
+        if (!win || win.isDestroyed()) return true
+        return new Promise((resolve) => {
+          const timer = setTimeout(() => { win.removeListener('closed', closed); resolve(false) }, 5000)
+          function closed() { clearTimeout(timer); resolve(true) }
+          win.once('closed', closed)
+          win.close()
+        })
+      },
+      openWindows: () => BrowserWindow.getAllWindows().length,
+      commitAbandoned() {
+        restartWork.release()
+        openMain()
+        capture.launchScan()
+        void talkUsage.refresh()
+      },
+      drainWriteQueues: async () => (await settings?.flushForRestart()) === true,
+      writeQueuesBusy: () => settings?.hasPendingWrites() ? ['settings'] : []
+    }
+  })
+  app.on('before-quit', () => {
+    updates?.beforeQuit()
+    restartWork.release()
+  })
+
+  void restartWork.run(startWell).finally(() => { if (!restartWork.locked()) pictureSearch?.start() })
+  const window = createWindow()
+  window.webContents.once('did-finish-load', () => {
+    capture.launchScan()
+    if (fixtureRoot) {
+      writeFileSync(join(fixtureRoot, 'fixture-boot.json'), JSON.stringify({
+        version: app.getVersion(), userData: app.getPath('userData'), hidden: !window.isVisible()
+      }))
+    }
+  })
 
   app.on('activate', () => {
     // not getAllWindows(): the hidden picture-search window would keep that non-empty
-    if (!mainWindow || mainWindow.isDestroyed()) createWindow()
+    if (!restartWork.locked() && (!mainWindow || mainWindow.isDestroyed())) createWindow()
   })
+}).catch((error: unknown) => {
+  if (fixtureRoot) writeFileSync(join(fixtureRoot, 'fixture-start-error.txt'), String(error))
+  throw error
 })
 
 // On launch: ensure the well exists, drain anything Raycast dropped while we were closed, index
@@ -902,6 +983,7 @@ app.whenReady().then(async () => {
 const talkUsage = createTalkUsageService({
   wellRoot: wellRootResolved,
   vaultRoot: detectVaultRoot,
+  mayStart: () => !restartWork.locked(),
   // only talk outlines, folders and pool images appearing or going; wait at most 30 s however busy the vault is
   watch: (vault, onChange) => {
     const w = createSourceWatcher(() => onChange(), 4000, 30000)
@@ -930,7 +1012,10 @@ async function startWell(): Promise<void> {
         return
       }
       clearTimeout(timer)
-      timer = setTimeout(() => void drain(), INBOX_SETTLE_MS)
+      timer = setTimeout(() => {
+        if (restartWork.locked()) { schedule(); return }
+        void restartWork.run(drain)
+      }, INBOX_SETTLE_MS)
     }
     const drain = async (): Promise<void> => {
       busy = true
@@ -955,7 +1040,7 @@ async function startWell(): Promise<void> {
     await drain()
     const vr = detectVaultRoot()
     if (vr) {
-      void scanVault(archiveRoot(), root, vr).then((n) => n > 0 && pictureSearch?.poke(), () => undefined)
+      await scanVault(archiveRoot(), root, vr).then((n) => n > 0 && pictureSearch?.poke(), () => undefined)
     }
     // read-only scan of the vault's talks on launch and whenever the vault changes
     await talkUsage.sync()

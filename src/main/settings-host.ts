@@ -1,3 +1,4 @@
+import { restartWork } from './restart-work'
 // The app's side of the shared settings: the store (userData/settings.json), the first-launch migration
 // from config.json, the Settings window, the generated menu bar, export/import and the key slots.
 // Behaviour lives in the @app-patterns packages; this file wires them to SlideWell's schema, registry and windows.
@@ -36,6 +37,9 @@ export type SettingsApp = {
    */
   isSettingsSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean
   settingsWebContents(): Electron.WebContents | null
+  restartProblem(): boolean
+  hasPendingWrites(): boolean
+  flushForRestart(): Promise<boolean>
   dispose(): void
 }
 
@@ -79,7 +83,7 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
     registry: commandsAdapter(registry),
     appVersion: version,
     migrate: migrateLegacy,
-    beforeWrite: libraryFolderRule, // the library-folder rule, on every write this store makes
+    beforeWrite: (...args) => restartWork.locked() ? { reject: 'SlideWell is restarting to finish an update.' } : libraryFolderRule(...args), // the library-folder rule, on every write this store makes
     log: (line: string) => wiring.log(`[settings] ${line}`),
     onChange: (state) => {
       host?.storeChanged(state)
@@ -127,6 +131,9 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
   })
 
   const settings: SettingsApp = {
+    restartProblem: () => migration.kind === 'failed' || Boolean(store.problem()),
+    hasPendingWrites: () => store.pending() > 0,
+    flushForRestart: async () => !store.problem() && await store.flushWithin(5000),
     values: () => ({ ...store.view().settings, ...Object.fromEntries(pending) }),
     set(key, value) {
       pending.set(key, value)

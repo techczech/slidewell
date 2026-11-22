@@ -1,3 +1,4 @@
+import { restartWork } from '../restart-work'
 /**
  * IPC for the review screen (ticket 08). Types: src/preload/index.ts. Main window only.
  *
@@ -35,7 +36,7 @@ export function registerReviewIpc(svc: ReviewService, allowed: (sender: Electron
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
     ipcMain.handle(channel, (e, ...args) => {
       if (!allowed(e.sender)) throw new Error(`${channel}: not allowed from this window`)
-      return fn(...args)
+      return restartWork.run(() => fn(...args))
     })
   }
   const obj = (o: unknown): Record<string, unknown> => (o && typeof o === 'object' ? (o as Record<string, unknown>) : {})

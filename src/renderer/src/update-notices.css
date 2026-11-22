@@ -61,3 +61,10 @@
 .sw-update-notes li + li {
   margin-top: 8px;
 }
+
+.sw-update-popover progress,
+.sw-update-settings-answer progress {
+  display: block;
+  width: 100%;
+  margin-top: 0.5rem;
+}

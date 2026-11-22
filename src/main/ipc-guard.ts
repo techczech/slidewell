@@ -1,3 +1,4 @@
+import { restartWork } from './restart-work'
 /**
  * An ipcMain.handle that answers only the windows `allowed` accepts (the main window). Any other
  * sender — the hidden picture-search window, a stray webContents — gets an error and the handler
@@ -13,6 +14,6 @@ export function guardedHandle(
 ): void {
   ipc.handle(channel, (e, ...args) => {
     if (!allowed(e.sender)) throw new Error(`${channel}: not allowed from this window`)
-    return fn(e, ...args)
+    return restartWork.run(() => fn(e, ...args))
   })
 }

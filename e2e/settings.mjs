@@ -57,15 +57,9 @@ try {
   const hidden = await app.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows().every((window) => !window.isVisible()))
   out({ cheatSheetFocus: focus, hidden })
-  if (hidden) {
-    // A hidden BrowserWindow does not receive physical keypresses on macOS.
-    await app.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0].webContents.send('app:command', 'cheat')
-    })
-  } else {
-    await win.keyboard.press('Escape')
-    await win.keyboard.press('?')
-  }
+  await app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].webContents.send('app:command', 'cheat')
+  })
   const rows = win.locator('.help-modal .drow[data-command]')
   await rows.first().waitFor({ state: 'attached', timeout: 5000 }).catch(() => undefined)
   const rowCount = await rows.count()

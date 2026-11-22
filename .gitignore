@@ -9,3 +9,5 @@ out/
 
 # Vendored App Patterns Framework packages.
 vendor/app-patterns/
+
+/out-update-test/

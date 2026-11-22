@@ -69,3 +69,13 @@ npm run dist:mac     # package a DMG + ZIP into release/ (unsigned unless a Deve
 ```
 
 Releases are cut by tagging a version that matches `package.json` — `git tag v0.3.1 && git push origin v0.3.1` → `.github/workflows/release.yml` runs the tests, builds, signs with the Developer ID certificate, notarises, and uploads `SlideWell-mac-arm64.dmg` and `SlideWell-mac-arm64.zip` to a draft GitHub Release; review it, then publish. Needs the `ppt-archive` store for real data; without it the app launches and reports "archive not connected" (point it at your folder in Settings).
+
+### Update feed
+
+Mark alpha builds as **prereleases** when publishing their draft releases. Both channels use the signed and notarised build from the release workflow.
+
+Once the GitHub assets are public, update the site's [updates.json](https://techczech.github.io/slidewell/updates.json). Keep `schema: 1` and the stable `latest` notice for older copies. Copy every field in `latest` into `channels.release`. Add a `channels.alpha` entry for the newest published alpha, if one is available. Its version has the form `X.Y.Z-alpha.N`.
+
+The release workflow creates an `update-entry.json` artefact from its ZIP and checks it against a fresh download from the draft GitHub release. Copy that entry’s `update` into the matching channel. To verify the live feed against a fresh local download, run `node scripts/update-feed-entry.mjs check <version> <path-to-SlideWell-mac-arm64.zip> <path-to-updates.json>`. Confirm that the extracted app has the expected version and Developer ID and passes Gatekeeper before listing it.
+
+`npm run test:in-place-update` exercises the installer using a separate, ad hoc-signed fixture bundle under `/tmp`. The public release checks use the published Developer ID build.
