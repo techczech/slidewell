@@ -5,14 +5,14 @@
 // Settings window's custom pages still reach the app's own IPC (judged by frame), and a Triage folder set
 // by the CLI is watched at once (a screenshot dropped there is picked up without a Scan).
 // Needs no archive. Run: npm run test:settings (builds first).
-import { _electron as electron } from 'playwright'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, readFileSync, existsSync } from 'node:fs'
+import { finish, failedChecks } from './support/result.mjs'
+import { createScratch, launchHidden } from './support/scratch.mjs'
+import { mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 
 const out = (o) => console.log(JSON.stringify(o))
-const work = mkdtempSync(join(tmpdir(), 'sw-settings-e2e-'))
+const work = createScratch('settings')
 const userData = join(work, 'userData')
 const home = join(work, 'home')
 mkdirSync(userData, { recursive: true })
@@ -26,12 +26,8 @@ const config = {
   windowBounds: { width: 1300, height: 860 }
 }
 writeFileSync(configPath, JSON.stringify(config), 'utf8')
-process.on('exit', () => rmSync(work, { recursive: true, force: true }))
 const version = JSON.parse(readFileSync('package.json', 'utf8')).version
-const env = { ...process.env, HOME: home, SLIDEWELL_DATA_DIR: userData, SLIDEWELL_E2E_HIDDEN: '1' }
-delete env.ELECTRON_RUN_AS_NODE
-
-const launch = () => electron.launch({ args: ['.', `--user-data-dir=${userData}`], env })
+const launch = () => launchHidden(userData, home)
 const app = await launch()
 const r = {}
 const damaged = Buffer.from('{"windowBounds":')
@@ -53,16 +49,31 @@ try {
   r.menuFrame = menu.map((m) => m.label).join(' | ')
   r.menuSettings = appMenu.some((i) => i.label.startsWith('Settings') && i.accel) && appMenu.some((i) => i.label.startsWith('Export Settings')) && appMenu.some((i) => i.label.startsWith('Import Settings'))
 
-  await win.keyboard.press('Escape') // leave the search field
-  await win.waitForTimeout(150)
-  await win.keyboard.press('?')
-  await win.waitForTimeout(300)
-  const rows = await win.locator('.help-modal .drow[data-command]').count()
+  const focus = await win.evaluate(() => ({
+    hasFocus: document.hasFocus(),
+    activeElement: document.activeElement?.tagName ?? null,
+    activeClass: document.activeElement?.className ?? null
+  }))
+  const hidden = await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows().every((window) => !window.isVisible()))
+  out({ cheatSheetFocus: focus, hidden })
+  if (hidden) {
+    // A hidden BrowserWindow does not receive physical keypresses on macOS.
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].webContents.send('app:command', 'cheat')
+    })
+  } else {
+    await win.keyboard.press('Escape')
+    await win.keyboard.press('?')
+  }
+  const rows = win.locator('.help-modal .drow[data-command]')
+  await rows.first().waitFor({ state: 'attached', timeout: 5000 }).catch(() => undefined)
+  const rowCount = await rows.count()
   const none = await win.locator('.help-modal .help-none').count()
-  r.cheatSheet = rows >= 30 && none >= 3
-  r.cheatRows = rows
-  await win.keyboard.press('Escape')
-  await win.waitForTimeout(200)
+  out({ cheatSheetRows: rowCount, cheatSheetUnbound: none })
+  if (hidden && rowCount === 0) throw new Error('cheat sheet has 0 rows after app:command')
+  r.cheatSheet = rowCount >= 30 && none >= 3
+  if (r.cheatSheet) await win.getByRole('dialog', { name: 'Keyboard shortcuts' }).getByRole('button', { name: /close/i }).click()
 
   const [settingsWin] = await Promise.all([app.waitForEvent('window', { timeout: 10000 }), win.locator('.titlebar-actions .tb-btn', { hasText: '⚙' }).click()])
   settingsWin.on('console', (m) => console.error('[settings console]', m.text()))
@@ -131,4 +142,4 @@ r.damagedConfigPreserved = readFileSync(configPath).equals(damaged) &&
   copies.length === 1 && readFileSync(join(userData, copies[0])).equals(damaged)
 const pass = Object.entries(r).every(([k, v]) => k === 'menuFrame' || k === 'cheatRows' || v === true)
 out({ ...r, pass })
-process.exit(pass ? 0 : 1)
+finish(pass ? null : failedChecks(r) || 'Settings fixture assertions failed')

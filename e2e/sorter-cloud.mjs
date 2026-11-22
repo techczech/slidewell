@@ -38,17 +38,17 @@
 // interception installed from this script in the main process (protocol.handle); main's native
 // consent dialog (dialog.showMessageBox) is replaced the same way, answering from a queue and
 // recording what it showed. The app's own code has no stub switch. Nothing goes to the real network.
-import { _electron as electron } from 'playwright'
+import { finish, recordFailure } from './support/result.mjs'
+import { createScratch, launchHidden } from './support/scratch.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { homedir } from 'node:os'
 import sharp from 'sharp'
 
 const repo = resolve(import.meta.dirname, '..')
-const scratch = resolve(process.env.SLIDEWELL_CLOUD_SCRATCH || join(homedir(), 'Library', 'Caches', 'slidewell-e2e-sorter-cloud'))
+const scratch = createScratch('cloud')
 const screens = resolve(process.env.SLIDEWELL_CLOUD_SCREENS || join(scratch, 'screens'))
 const FAKE_KEY = 'sk-test-E2ELEAKCHECK-0123456789abcdefghijklmnopqrstuv'
 const FAKE_ANT_KEY = 'sk-ant-api03-E2EANTLEAKCHECK-0123456789abcdefghijklmn'
@@ -57,12 +57,14 @@ const SORTER_VERSION = /SORTER_VERSION = '([^']+)'/.exec(readFileSync(join(repo,
 let failed = 0
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : ' - ' + detail}`)
-  if (!ok) failed++
+  if (!ok) {
+    recordFailure(name)
+    failed++
+  }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // --- scratch profile + synthetic well ---
-for (const d of ['userData', 'home', 'well', 'source']) rmSync(join(scratch, d), { recursive: true, force: true })
 const userData = join(scratch, 'userData')
 const well = join(scratch, 'well')
 const source = join(scratch, 'source')
@@ -183,10 +185,9 @@ const stubUrl = `http://127.0.0.1:${server.address().port}`
 console.log(`stub: ${stubUrl}`)
 
 const output = []
-const app = await electron.launch({
-  args: ['.', `--user-data-dir=${userData}`, '--use-mock-keychain'],
-  cwd: repo,
-  env: { ...process.env, HOME: join(scratch, 'home'), SLIDEWELL_E2E_HIDDEN: '1' }
+const app = await launchHidden(userData, join(scratch, 'home'), { cwd: repo }).catch((error) => {
+  server.close()
+  throw error
 })
 app.process().stdout?.on('data', (d) => output.push(String(d)))
 app.process().stderr?.on('data', (d) => output.push(String(d)))
@@ -267,7 +268,7 @@ try {
     const { row, input } = await openKeyForm(slotId)
     await input.fill(key)
     await row.getByRole('button', { name: 'Add key', exact: true }).click()
-    await row.getByText(/Key saved/).waitFor({ timeout: 10000 })
+    await row.getByText('Connected', { exact: true }).waitFor({ timeout: 10000 })
   }
   const openAuto = async () => {
     await closeSettings()
@@ -423,10 +424,10 @@ try {
   await antForm.input.fill(FAKE_KEY) // the OpenAI-shaped key, in the wrong field
   await antForm.row.getByRole('button', { name: 'Add key', exact: true }).click()
   await antForm.sw.locator('[role="alert"]').waitFor({ timeout: 10000 }) // the window's notice (main's exact words are not shown any more)
-  check('an OpenAI-shaped key is refused as the Anthropic key', !readCfg().anthropicKeyEnc && (await antForm.row.getByText(/Key saved/).count()) === 0)
+  check('an OpenAI-shaped key is refused as the Anthropic key', !readCfg().anthropicKeyEnc && (await antForm.row.getByText('Connected', { exact: true }).count()) === 0)
   await antForm.input.fill(FAKE_ANT_KEY)
   await antForm.row.getByRole('button', { name: 'Add key', exact: true }).click()
-  await antForm.row.getByText(/Key saved/).waitFor({ timeout: 10000 })
+  await antForm.row.getByText('Connected', { exact: true }).waitFor({ timeout: 10000 })
   await gotoSorter()
   await anthropicRow.locator('.pic-ready', { hasText: 'Saved' }).waitFor({ timeout: 10000 })
   const cfgBothText = readFileSync(join(userData, 'config.json'), 'utf8')
@@ -564,6 +565,7 @@ try {
   const in90 = await win.evaluate(() => window.sw.cloud.prepare())
   check('Last 90 days does not reach it either', in90.period === '90d' && in90.blocked === 'nothing-doubtful' && in90.message === 'Nothing doubtful from the last 90 days is waiting for Luna.', JSON.stringify(in90))
 } catch (e) {
+  recordFailure(String(e))
   failed++
   console.log(`FAIL  ${e?.stack ?? e}`)
 } finally {
@@ -588,4 +590,4 @@ if (existsSync(userData)) walk(userData)
 check('no file in the profile holds either key in plain text', hits.length === 0, hits.join(', '))
 console.log(`screens: ${screens}`)
 console.log(failed ? `${failed} FAILED` : 'ALL PASSED')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)

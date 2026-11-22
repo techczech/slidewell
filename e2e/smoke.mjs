@@ -6,28 +6,38 @@
 // default archive/well/others folders and TalkWeaver's config from HOME), so it can never read or
 // write a real SlideWell profile. With no archive the run covers the shell only (archiveConnected:
 // false). To exercise the archive features, point SLIDEWELL_SMOKE_ARCHIVE at a Core A archive; the
-// app only reads it here (search/browse/stats; the import panel is opened but never run).
-import { _electron as electron } from 'playwright'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs'
+// spec copies it into scratch before launching the app. Generate a synthetic archive with
+// node e2e/support/make-smoke-archive.mjs and pass the printed path as SLIDEWELL_SMOKE_ARCHIVE.
+import { finish, failedChecks } from './support/result.mjs'
+import { copyFixture, createScratch, launchHidden } from './support/scratch.mjs'
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 
 const out = (o) => console.log(JSON.stringify(o))
-const work = mkdtempSync(join(tmpdir(), 'sw-smoke-'))
+const work = createScratch('smoke')
 const userData = join(work, 'userData')
 const home = join(work, 'home')
 mkdirSync(userData, { recursive: true })
 mkdirSync(home, { recursive: true })
 const config = { wellRoot: join(work, 'well'), othersArchiveRoot: join(work, 'others-library') }
-if (process.env.SLIDEWELL_SMOKE_ARCHIVE) config.archiveRoot = process.env.SLIDEWELL_SMOKE_ARCHIVE
+if (process.env.SLIDEWELL_SMOKE_ARCHIVE) {
+  config.archiveRoot = join(work, 'archive')
+  copyFixture(process.env.SLIDEWELL_SMOKE_ARCHIVE, config.archiveRoot)
+}
 writeFileSync(join(userData, 'config.json'), JSON.stringify(config), 'utf8')
-process.on('exit', () => rmSync(work, { recursive: true, force: true }))
 
 // SLIDEWELL_E2E_HIDDEN: runs in the background — no window shown, no Dock icon, no focus taken
-const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home, SLIDEWELL_E2E_HIDDEN: '1' } })
+const app = await launchHidden(userData, home)
 try {
   const win = await app.firstWindow({ timeout: 20000 })
   await win.waitForLoadState('domcontentloaded')
+  const sendCommand = (id) => app.evaluate(({ BrowserWindow }, command) => {
+    BrowserWindow.getAllWindows()[0].webContents.send('app:command', command)
+  }, id)
+  const dismiss = async (selector) => {
+    await sendCommand('dismiss')
+    await win.locator(selector).waitFor({ state: 'hidden', timeout: 5000 })
+  }
 
   const title = await win.title()
   const wordmark = (await win.locator('.wordmark').textContent())?.trim()
@@ -83,8 +93,7 @@ try {
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1440, 900))
     await win.fill('.search-input', 'classroom')
     await win.waitForTimeout(1500)
-    mkdirSync('e2e/out', { recursive: true })
-    await win.screenshot({ path: 'e2e/out/search-filters-1440.png' })
+    if (process.env.SLIDEWELL_SMOKE_SCREEN) await win.screenshot({ path: process.env.SLIDEWELL_SMOKE_SCREEN })
     filterLayoutOk = await win.evaluate(() => {
       const bottom = (sel) => Math.max(0, ...[...document.querySelectorAll(sel)].map((e) => e.getBoundingClientRect().bottom))
       const head = document.querySelector('.results-head')
@@ -118,9 +127,8 @@ try {
     await win.fill('.search-input', 'dyslexia')
     await win.waitForTimeout(1200)
 
-    // keyboard: blur search, arrow-select, inspector (I), command palette (⌘K), help (?)
-    await win.keyboard.press('Escape') // blur the search input
-    await win.waitForTimeout(150)
+    // Start outside the text field so navigation and the inspector shortcut reach the grid.
+    await win.locator('.search-input').blur()
     // index of the selected card among the rendered grid (DOM order == orderedReps order)
     const selIndex = () =>
       win.evaluate(() => Array.from(document.querySelectorAll('main .grid .card')).findIndex((c) => c.classList.contains('selected')))
@@ -138,28 +146,27 @@ try {
     await win.keyboard.press('i')
     await win.waitForTimeout(350)
     inspectorOk = (await win.locator('.deck-sidebar').count()) === 1
-    await win.keyboard.press('Escape')
-    await win.waitForTimeout(200)
+    await dismiss('.deck-sidebar')
     await win.keyboard.press('Meta+k')
     await win.waitForTimeout(350)
     paletteOk =
       (await win.locator('.cmd-palette').count()) === 1 &&
       (await win.locator('.cmd-item').count()) > 0 &&
       (await win.locator('.cmd-shortcut').count()) > 0 // actions list their keyboard shortcuts
-    await win.keyboard.press('Escape')
-    await win.waitForTimeout(200)
-    await win.keyboard.press('?')
-    await win.waitForTimeout(250)
-    helpOk = (await win.locator('.help-modal').count()) === 1
-    await win.keyboard.press('Escape')
+    // The palette has a focused text field. Dismiss it through the app command bridge.
+    await dismiss('.cmd-palette')
+    await sendCommand('cheat')
+    const help = win.getByRole('dialog', { name: 'Keyboard shortcuts' })
+    await help.waitFor({ timeout: 5000 })
+    helpOk = (await help.locator('[data-command]').count()) >= 30
+    await help.getByRole('button', { name: /close/i }).click()
     await win.waitForTimeout(200)
 
-    // Triage screen opens from the toolbar and renders (deeper scan/include flow: e2e/triage.mjs)
-    await win.locator('.titlebar-actions .tb-btn', { hasText: 'Triage' }).click()
-    await win.waitForTimeout(300)
+    // Triage is a main tab. Return to Search before checking its selection and action menu again.
+    await win.getByRole('tab', { name: 'Triage', exact: true }).click()
+    await win.waitForSelector('.triage-panel')
     triageOpensOk = (await win.locator('.triage-panel').count()) === 1
-    await win.keyboard.press('Escape')
-    await win.waitForTimeout(200)
+    await win.getByRole('tab', { name: 'Search', exact: true }).click()
 
     // Settings: the shared Settings window (own window, single instance) with the app's Requirements page;
     // the first launch moved config.json's folders into settings.json (config.json is left as the old version's file)
@@ -208,9 +215,8 @@ try {
       await win.keyboard.press('Meta+k')
       await win.waitForTimeout(300)
       lightboxPaletteOk = (await win.locator('.cmd-palette').count()) === 1
-      await win.keyboard.press('Escape')
-      await win.waitForTimeout(150)
-      await win.keyboard.press('Escape')
+      await dismiss('.cmd-palette')
+      await dismiss('.lightbox')
     }
 
     // a filter re-runs (Date select: Owner, Date, Slides → nth 1)
@@ -263,8 +269,7 @@ try {
       await win.waitForTimeout(900)
     }
     deckModeOk = nDeckCards > 0 && (await win.locator('.deck-sidebar').count()) === 1
-    await win.keyboard.press('Escape') // close the deck inspector before clicking the titlebar
-    await win.waitForTimeout(200)
+    await dismiss('.deck-sidebar')
 
     // Stats panel: opens and renders year bars
     await win.locator('.tb-btn', { hasText: 'Stats' }).click()
@@ -281,18 +286,20 @@ try {
     // No ppt-archive store here: only the shell loaded, so the feature checks did not run. Report SKIPPED, never pass.
     out({ launched: true, title, archiveConnected, pass: null, skipped: true, reason: 'archive not connected' })
     await app.close()
-    process.exit(0)
+    finish('archive not connected (SLIDEWELL_SMOKE_ARCHIVE is required)', 2)
   }
   const shellPass = title === 'SlideWell' && wordmark === 'SlideWell'
   const featuresPass =
     !archiveConnected ||
     (filterSelects === 4 && hasSearchableFilters && hasToggle && hasScope && noDeckWord && filterLayoutOk && browseDefault > 0 && cardCount > 0 && menuItems >= 8 && hasContext && lightboxOpened && filterReran && importPanelOk && contextFilterOk && groupByDeckOk && imagesTypeOk && deckModeOk && statsOk && roleAllOk && selectionOk && rowNavOk && clickSelectsOk && inspectorOk && paletteOk && lightboxPaletteOk && helpOk && triageOpensOk && settingsOk)
   const pass = shellPass && featuresPass
-  out({ launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, noDeckWord, filterLayoutOk, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, rowNavOk, clickSelectsOk, inspectorOk, paletteOk, lightboxPaletteOk, helpOk, triageOpensOk, settingsOk, imgCards, imgTags, pass })
+  const report = { launched: true, title, archiveConnected, filterSelects, hasSearchableFilters, hasToggle, hasScope, noDeckWord, filterLayoutOk, browseDefault, cardCount, firstTitle, clusterBadges, menuItems, hasContext, lightboxOpened, filterReran, importPanelOk, contextFilterOk, groupByDeckOk, imagesTypeOk, deckModeOk, statsOk, roleAllOk, selectionOk, rowNavOk, clickSelectsOk, inspectorOk, paletteOk, lightboxPaletteOk, helpOk, triageOpensOk, settingsOk, imgCards, imgTags, pass }
+  out(report)
   await app.close()
-  process.exit(pass ? 0 : 2)
+  finish(pass ? null : failedChecks(report) || 'smoke assertions failed', 2)
 } catch (e) {
+  console.error(e.stack)
   out({ launched: false, error: String(e) })
   await app.close().catch(() => {})
-  process.exit(1)
+  finish(String(e))
 }

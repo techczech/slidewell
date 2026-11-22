@@ -3,20 +3,24 @@
 // and is driven in chrome-headless-shell. No Electron, no real data.
 //
 // Run: node e2e/review-ui.mjs        Screenshots: only when SLIDEWELL_REVIEW_SCREENS names a folder
+import { finish, recordFailure } from './support/result.mjs'
 import { createServer } from 'vite'
 import react from '@vitejs/plugin-react'
 import { chromium } from 'playwright'
 import { mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
-const root = resolve(import.meta.dirname, '..', 'src', 'renderer')
+const root = resolve(process.env.SLIDEWELL_TEST_APP_ROOT ?? resolve(import.meta.dirname, '..'), 'src', 'renderer')
 const screens = process.env.SLIDEWELL_REVIEW_SCREENS ? resolve(process.env.SLIDEWELL_REVIEW_SCREENS) : null
 if (screens) mkdirSync(screens, { recursive: true })
 const shoot = (page, name) => (screens ? page.screenshot({ path: join(screens, name) }) : Promise.resolve())
 let failed = 0
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : ' - ' + detail}`)
-  if (!ok) failed++
+  if (!ok) {
+    recordFailure(name)
+    failed++
+  }
 }
 
 // "today" or "yesterday" as whenWords says it for this time: the mock's times are relative to now, so just after
@@ -30,12 +34,13 @@ const dayWord = (iso) => {
 }
 
 const server = await createServer({ configFile: false, root, plugins: [react()], logLevel: 'error', server: { host: '127.0.0.1', port: 0 } })
-await server.listen()
-const url = server.resolvedUrls.local[0]
 // headless: true runs Playwright's chrome-headless-shell build, never an installed Chrome
-const browser = await chromium.launch({ headless: true })
-console.log(`browser: ${browser.version()} (headless shell)`)
+let browser
 try {
+  await server.listen()
+  const url = server.resolvedUrls.local[0]
+  browser = await chromium.launch({ headless: true })
+  console.log(`browser: ${browser.version()} (headless shell)`)
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
   const errors = []
   page.on('pageerror', (e) => errors.push(e.message))
@@ -1046,8 +1051,11 @@ try {
   check('Empty Bin hid all 602', (await big.evaluate(() => window.sw.review.piles())).bin.total === 0)
   check('no page errors at scale', errors.length === 0, errors.join(' | '))
 } finally {
-  await browser.close()
-  await server.close()
+  try {
+    await browser?.close()
+  } finally {
+    await server.close()
+  }
 }
 console.log(failed ? `${failed} FAILED` : 'all passed')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)

@@ -1,10 +1,10 @@
 // Isolated triage e2e (ADR-0029). Runs the real scan → list → select → importSelected flow through
 // the app's IPC, against throwaway dirs (temp userData + temp well + a fixture source folder), so it
 // never touches the user's real well/config. Run: `node e2e/triage.mjs` (after `npm run build`).
-import { _electron as electron } from 'playwright'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs'
+import { finish, failedChecks } from './support/result.mjs'
+import { createScratch, launchHidden } from './support/scratch.mjs'
+import { mkdirSync, writeFileSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 
 const out = (o) => console.log(JSON.stringify(o))
 
@@ -12,7 +12,7 @@ const out = (o) => console.log(JSON.stringify(o))
 const RED = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 const BLUE = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
 
-const work = mkdtempSync(join(tmpdir(), 'sw-triage-'))
+const work = createScratch('triage')
 const userData = join(work, 'userData')
 const wellRoot = join(work, 'well')
 const source = join(work, 'source')
@@ -38,7 +38,7 @@ utimesSync(join(second, PRE), new Date('2010-01-01'), new Date('2010-01-01')) //
 writeFileSync(join(userData, 'config.json'), JSON.stringify({ wellRoot, screenshotRoot: source, captureSources: [{ path: second, namedOnly: false }, { path: desk, namedOnly: true }] }), 'utf8')
 
 // SLIDEWELL_E2E_HIDDEN: runs in the background — no window shown, no Dock icon, no focus taken
-const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, SLIDEWELL_E2E_HIDDEN: '1' } })
+const app = await launchHidden(userData, join(work, 'home'))
 let pass = false
 const result = {}
 try {
@@ -125,7 +125,7 @@ try {
   // capture inbox: files dropped into the extra sources appear WITHOUT pressing Scan (watcher), carrying
   // the app/window parsed from the name; non-screenshot Desktop files are ignored.
   const CS = 'CleanShot 2026-10-08 at 0801 from Google Chrome with TalkWeaver Layout Showcase.png'
-  const GREEN = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkaGj4DwAEQAIAvFrtDAAAAABJRU5ErkJggg=='
+  const GREEN = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg+M/wHwAEAQH/cetH5QAAAABJRU5ErkJggg=='
   const YELLOW = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg=='
   writeFileSync(join(second, CS), Buffer.from(GREEN, 'base64'))
   writeFileSync(join(desk, 'Screenshot 2026-10-09 at 10.05.01.png'), Buffer.from(YELLOW, 'base64'))
@@ -173,7 +173,6 @@ try {
   result.error = String(e)
 } finally {
   await app.close()
-  rmSync(work, { recursive: true, force: true })
 }
 out({ ...result, pass })
-process.exit(pass ? 0 : 1)
+finish(pass ? null : result.error || failedChecks(result) || 'Triage fixture assertions failed')

@@ -22,6 +22,13 @@
     "test:auto-sorting-ui": "node e2e/auto-sorting-ui.mjs",
     "test:review": "electron-vite build && node e2e/review.mjs",
     "test:sorter-cloud": "electron-vite build && node e2e/sorter-cloud.mjs",
+    "test:backlog-import": "electron-vite build && node e2e/backlog-import.mjs",
+    "test:look-alike": "electron-vite build && node e2e/look-alike.mjs",
+    "test:match-switch": "electron-vite build && node e2e/match-switch.mjs",
+    "test:more-like-this": "electron-vite build && node e2e/more-like-this.mjs",
+    "test:picture-search": "electron-vite build && node e2e/picture-search.mjs",
+    "test:sorter": "electron-vite build && node e2e/sorter.mjs",
+    "test:used-in-talks": "electron-vite build && node e2e/used-in-talks.mjs",
     "settings": "bun run src/cli/settings-cli.ts",
     "test:settings": "electron-vite build && node e2e/settings.mjs"
   },

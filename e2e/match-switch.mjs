@@ -1,21 +1,24 @@
 // End-to-end: the Match switch (Words / Meaning / Both). Needs an indexed profile (model downloaded,
-// sample archive indexed), as left behind by e2e/picture-search.mjs with SLIDEWELL_PICTURE_KEEP_MODEL=1.
+// sample archive indexed), supplied as a read-only fixture.
 //
 // Run after `npm run build`:
 //   SLIDEWELL_MATCH_SCRATCH=<folder holding userData/ (with models/), well/, home/ and sample-archive/> \
 //   node e2e/match-switch.mjs
 // Optional: SLIDEWELL_MATCH_WORDS (default 'research'), SLIDEWELL_MATCH_NOWORDS (default
-// 'an inverted pyramid hierarchy diagram'). Screenshots go to <scratch>/screens (hidden run).
+// 'an inverted pyramid hierarchy diagram'). Screenshots use the temporary run folder (hidden run).
 // Never touches the installed app; every launch is SLIDEWELL_E2E_HIDDEN=1 with its own user-data-dir.
-import { _electron as electron } from 'playwright'
-import { existsSync, mkdirSync, writeFileSync, rmSync, cpSync } from 'node:fs'
+import { finish, recordFailure } from './support/result.mjs'
+import { createScratch, launchHidden, copyIndexedSearchFixture } from './support/scratch.mjs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const scratch = process.env.SLIDEWELL_MATCH_SCRATCH
-if (!scratch || !existsSync(join(scratch, 'userData', 'models'))) {
+const fixture = process.env.SLIDEWELL_MATCH_SCRATCH
+if (!fixture || !existsSync(join(fixture, 'userData', 'models'))) {
   console.error('Set SLIDEWELL_MATCH_SCRATCH to a folder with userData/models, well/ and sample-archive/.')
-  process.exit(2)
+  finish('Set SLIDEWELL_MATCH_SCRATCH to a folder with userData/models, well/ and sample-archive/.', 2)
 }
+const scratch = createScratch('match')
+copyIndexedSearchFixture(fixture, scratch)
 const wordsQuery = process.env.SLIDEWELL_MATCH_WORDS || 'research'
 const noWordsQuery = process.env.SLIDEWELL_MATCH_NOWORDS || 'an inverted pyramid hierarchy diagram'
 const screens = join(scratch, 'screens')
@@ -24,15 +27,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failed = 0
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : ' - ' + detail}`)
-  if (!ok) failed++
+  if (!ok) {
+    recordFailure(name)
+    failed++
+  }
 }
 
 function profile(name, withModel) {
   const userData = join(scratch, name === 'main' ? 'userData' : name)
-  if (name !== 'main') {
-    rmSync(userData, { recursive: true, force: true })
-    mkdirSync(userData, { recursive: true })
-  }
+  mkdirSync(userData, { recursive: true })
   writeFileSync(join(userData, 'config.json'), JSON.stringify({ archiveRoot: join(scratch, 'sample-archive'), wellRoot: join(scratch, 'well'), othersArchiveRoot: join(scratch, 'others') }), 'utf8')
   if (!withModel && existsSync(join(userData, 'models'))) throw new Error('profile unexpectedly has a model')
   return userData
@@ -40,15 +43,20 @@ function profile(name, withModel) {
 async function launch(userData) {
   const home = join(scratch, 'home')
   mkdirSync(home, { recursive: true })
-  const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`], env: { ...process.env, HOME: home, SLIDEWELL_E2E_HIDDEN: '1' } })
-  let win = null
-  for (let i = 0; i < 300 && !win; i++) {
-    win = app.windows().find((w) => !w.url().startsWith('swembed:') && w.url() !== 'about:blank') ?? null
-    if (!win) await sleep(100)
+  const app = await launchHidden(userData, home)
+  try {
+    let win = null
+    for (let i = 0; i < 300 && !win; i++) {
+      win = app.windows().find((w) => !w.url().startsWith('swembed:') && w.url() !== 'about:blank') ?? null
+      if (!win) await sleep(100)
+    }
+    if (!win) throw new Error('main window did not open')
+    await win.waitForLoadState('domcontentloaded')
+    return { app, win }
+  } catch (error) {
+    await app.close().catch(() => undefined)
+    throw error
   }
-  if (!win) throw new Error('main window did not open')
-  await win.waitForLoadState('domcontentloaded')
-  return { app, win }
 }
 const search = async (win, text) => {
   await win.locator('.searchbar .search-input').fill(text)
@@ -150,4 +158,4 @@ try {
   await app.close()
 }
 console.log(failed ? 'MATCH SWITCH E2E: FAILED' : 'MATCH SWITCH E2E: PASSED')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)

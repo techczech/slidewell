@@ -6,20 +6,24 @@
 // for the Settings bridge (window.bridleSettings), opened at the Sorting help page; its calls are counted on its own fake.
 //
 // Run: node e2e/auto-sorting-ui.mjs      Screenshots: only when SLIDEWELL_AUTOSORT_SCREENS names a folder
+import { finish, recordFailure } from './support/result.mjs'
 import { createServer } from 'vite'
 import react from '@vitejs/plugin-react'
 import { chromium } from 'playwright'
 import { mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
-const root = resolve(import.meta.dirname, '..', 'src', 'renderer')
+const root = resolve(process.env.SLIDEWELL_TEST_APP_ROOT ?? resolve(import.meta.dirname, '..'), 'src', 'renderer')
 const screens = process.env.SLIDEWELL_AUTOSORT_SCREENS ? resolve(process.env.SLIDEWELL_AUTOSORT_SCREENS) : null
 if (screens) mkdirSync(screens, { recursive: true })
 const shoot = (page, name) => (screens ? page.screenshot({ path: join(screens, name) }) : Promise.resolve())
 let failed = 0
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : ' - ' + detail}`)
-  if (!ok) failed++
+  if (!ok) {
+    recordFailure(name)
+    failed++
+  }
 }
 
 // The fake, installed before the app's own mock so that every hook (title bar, tab, Settings) sees it.
@@ -248,11 +252,12 @@ function installFake() {
 }
 
 const server = await createServer({ configFile: false, root, plugins: [react()], logLevel: 'error', server: { host: '127.0.0.1', port: 0 } })
-await server.listen()
-const url = server.resolvedUrls.local[0]
-const browser = await chromium.launch({ headless: true }) // Playwright's chrome-headless-shell, never an installed Chrome
-console.log(`browser: ${browser.version()} (headless shell)`)
+let browser
 try {
+  await server.listen()
+  const url = server.resolvedUrls.local[0]
+  browser = await chromium.launch({ headless: true })
+  console.log(`browser: ${browser.version()} (headless shell)`)
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 })
   const errors = []
   page.on('pageerror', (e) => errors.push(e.message))
@@ -734,8 +739,11 @@ try {
 
   check('no page errors', errors.length === 0, errors.join(' | '))
 } finally {
-  await browser.close()
-  await server.close()
+  try {
+    await browser?.close()
+  } finally {
+    await server.close()
+  }
 }
 console.log(failed ? `${failed} FAILED` : 'ALL PASSED')
-process.exit(failed ? 1 : 0)
+finish(failed ? 'assertion failed' : null)
