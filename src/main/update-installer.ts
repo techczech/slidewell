@@ -13,12 +13,12 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { MacUpdater, type AppUpdater, type UpdateInfo } from 'electron-updater'
 import { getAppCacheDir } from 'electron-updater/out/AppAdapter'
-import type { ChannelEntry, UpdateFile } from '../shared/update-channels.ts'
-import { inPlaceRefusal, type InPlaceFacts, type InPlaceRefusal, type InstallPhase, type RestartBlocker } from '../shared/update-install.ts'
+import type { ChannelEntry, UpdateFile } from '../shared/update-channels'
+import { inPlaceRefusal, type InPlaceFacts, type InPlaceRefusal, type InstallPhase, type RestartBlocker } from '../shared/update-install'
 import {
   OfferProvider, closeDependencyInstallPath, createUpdateEngine, dependencyDownload, launchdJobPresence, pathPresence, verifyMacDownload,
   type NativeUpdater, type Offer, type Presence, type Withdrawal,
-} from './update-engine.ts'
+} from './update-engine'
 import { installUpdateDownloadFilter } from './update-download-filter'
 import { UPDATE_INSTALL_IDENTITY } from '../shared/update-identity'
 

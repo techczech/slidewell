@@ -83,7 +83,7 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
     registry: commandsAdapter(registry),
     appVersion: version,
     migrate: migrateLegacy,
-    beforeWrite: (...args) => restartWork.locked() ? 'SlideWell is restarting to finish an update.' : libraryFolderRule(...args), // the library-folder rule, on every write this store makes
+    beforeWrite: (...args) => restartWork.locked() ? { reject: 'SlideWell is restarting to finish an update.' } : libraryFolderRule(...args), // the library-folder rule, on every write this store makes
     log: (line: string) => wiring.log(`[settings] ${line}`),
     onChange: (state) => {
       host?.storeChanged(state)

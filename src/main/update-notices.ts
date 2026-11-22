@@ -108,7 +108,7 @@ export function installUpdateNotices(ports: Ports) {
     return facts.get(file.url) ?? null
   }
   const withInstall = (notice: NoticeSnapshot): UpdateSnapshot => {
-    const file = fileFor()
+    const file = state.lastResult === 'unreadable' ? null : fileFor()
     const install = installer?.state() ?? IDLE
     return { ...notice, alpha: alphaOn(), install, file, refusal: refusal(file), blockers: install.phase === 'waiting' ? ports.restart?.blockers() ?? [] : [] }
   }

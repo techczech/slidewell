@@ -10,7 +10,7 @@ import type { ProviderRuntimeOptions } from 'electron-updater/out/providers/Prov
 import { compareVersions } from '@app-patterns/updates'
 import { spawn } from 'node:child_process'
 import { stat } from 'node:fs/promises'
-import { failReasonOf, installStep, IDLE, type FailReason, type InstallEvent, type InstallPhase, type ReopenCause, type RestartBlocker } from '../shared/update-install.ts'
+import { failReasonOf, installStep, IDLE, type FailReason, type InstallEvent, type InstallPhase, type ReopenCause, type RestartBlocker } from '../shared/update-install'
 
 /** Past this, a restart that has not happened is reported (Squirrel.Mac's checks of a large app take a while). */
 export const RESTART_WATCHDOG_MS = 5 * 60 * 1000
@@ -324,8 +324,8 @@ export function createUpdateEngine(ports: EnginePorts) {
       leftover(a, 'held', `${open} window${open === 1 ? ' is' : 's are'} open again`)
       return false
     }
-    if (busyWrites()) {
-      leftover(a, 'held', 'a write started again')
+    if (busyWrites() || ports.gate(a.offer) !== null) {
+      leftover(a, 'held', 'the update or write state changed during native preparation')
       return false
     }
     a.quitting = true

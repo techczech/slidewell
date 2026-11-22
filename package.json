@@ -31,7 +31,8 @@
     "test:used-in-talks": "electron-vite build && node e2e/used-in-talks.mjs",
     "settings": "bun run src/cli/settings-cli.ts",
     "test:settings": "electron-vite build && node e2e/settings.mjs",
-    "test:update-notices": "electron-vite build && node e2e/update-notices.mjs"
+    "test:update-notices": "electron-vite build && node e2e/update-notices.mjs",
+    "test:in-place-update": "electron-vite build --config electron.vite.update-test.config.ts && node e2e/in-place-update.mjs"
   },
   "build": {
     "appId": "net.dominiklukes.slidewell",

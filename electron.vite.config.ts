@@ -11,7 +11,7 @@ const BUNDLED = ['@app-patterns/commands', '@app-patterns/settings', '@app-patte
 // The Settings window's preload is sandboxed: it may require nothing but electron, so it must be one file.
 // Built as its own bundle after the other preloads (as a third input, rollup would split the window.sw
 // bridge it shares with index.ts into a chunk the sandbox cannot load).
-function settingsPreload(): Plugin {
+function settingsPreload(outDir: string): Plugin {
   return {
     name: 'slidewell-settings-preload',
     apply: 'build',
@@ -20,7 +20,7 @@ function settingsPreload(): Plugin {
         configFile: false,
         logLevel: 'warn',
         build: {
-          outDir: resolve(__dirname, 'out/preload'),
+          outDir: resolve(__dirname, outDir, 'preload'),
           emptyOutDir: false,
           minify: false,
           lib: { entry: resolve(__dirname, 'src/preload/settings.ts'), formats: ['cjs'], fileName: () => 'settings.js' },
@@ -31,39 +31,47 @@ function settingsPreload(): Plugin {
   }
 }
 
-export default defineConfig({
-  main: {
-    plugins: [externalizeDepsPlugin({ exclude: BUNDLED })],
-    build: {
-      rollupOptions: {
-        input: {
-          index: resolve(__dirname, 'src/main/index.ts')
-        }
-      }
-    }
-  },
-  preload: {
-    plugins: [externalizeDepsPlugin({ exclude: BUNDLED }), settingsPreload()],
-    build: {
-      rollupOptions: {
-        input: {
-          index: resolve(__dirname, 'src/preload/index.ts'),
-          // the hidden picture-search window (src/main/picture-search/webgpu-embedder.ts)
-          embedder: resolve(__dirname, 'src/preload/embedder.ts')
-        }
-      }
-    }
-  },
-  renderer: {
-    root: resolve(__dirname, 'src/renderer'),
-    build: {
-      rollupOptions: {
-        input: {
-          index: resolve(__dirname, 'src/renderer/index.html'),
-          settings: resolve(__dirname, 'src/renderer/settings.html')
+export function slideWellConfig(outDir: string, updateFixture = false) {
+  return defineConfig({
+    main: {
+      define: { __SLIDEWELL_UPDATE_FIXTURE__: JSON.stringify(updateFixture) },
+      plugins: [externalizeDepsPlugin({ exclude: BUNDLED })],
+      build: {
+        outDir: resolve(__dirname, outDir, 'main'),
+        rollupOptions: {
+          input: {
+            index: resolve(__dirname, 'src/main/index.ts')
+          }
         }
       }
     },
-    plugins: [react()]
-  }
-})
+    preload: {
+      plugins: [externalizeDepsPlugin({ exclude: BUNDLED }), settingsPreload(outDir)],
+      build: {
+        outDir: resolve(__dirname, outDir, 'preload'),
+        rollupOptions: {
+          input: {
+            index: resolve(__dirname, 'src/preload/index.ts'),
+            // the hidden picture-search window (src/main/picture-search/webgpu-embedder.ts)
+            embedder: resolve(__dirname, 'src/preload/embedder.ts')
+          }
+        }
+      }
+    },
+    renderer: {
+      root: resolve(__dirname, 'src/renderer'),
+      build: {
+        outDir: resolve(__dirname, outDir, 'renderer'),
+        rollupOptions: {
+          input: {
+            index: resolve(__dirname, 'src/renderer/index.html'),
+            settings: resolve(__dirname, 'src/renderer/settings.html')
+          }
+        }
+      },
+      plugins: [react()]
+    }
+  })
+}
+
+export default slideWellConfig('out')
