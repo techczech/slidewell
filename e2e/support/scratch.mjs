@@ -49,13 +49,18 @@ export function copyIndexedSearchFixture(fixture, scratch) {
   }
 }
 
+// SLIDEWELL_E2E_EXECUTABLE=<.app>/Contents/MacOS/SlideWell walks a packaged candidate instead of the source build.
+const packaged = process.env.SLIDEWELL_E2E_EXECUTABLE
+
 export function launchHidden(userData, home, { args = [], ...options } = {}) {
   mkdirSync(home, { recursive: true })
   const env = { ...process.env, HOME: home, SLIDEWELL_DATA_DIR: userData, SLIDEWELL_E2E_HIDDEN: '1' }
   delete env.ELECTRON_RUN_AS_NODE
+  delete env.SLIDEWELL_E2E_EXECUTABLE
   return electron.launch({
     ...options,
-    args: ['.', `--user-data-dir=${userData}`, '--use-mock-keychain', ...args],
+    ...(packaged ? { executablePath: packaged } : {}),
+    args: [...(packaged ? [] : ['.']), `--user-data-dir=${userData}`, '--use-mock-keychain', ...args],
     env
   })
 }
