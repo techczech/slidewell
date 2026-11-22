@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import type { DeckCard, DeckDetail, MoreLikeThisResult, SlideClusterResult, SlideResult } from '../../preload'
 import { authorOf, talksLine } from './SearchCards'
+import { registry } from '../../shared/commands'
+import { CHECK_UPDATES, WHATS_NEW } from '../../shared/update-identity'
 
 export function DeckSidebar({
   detail,
@@ -435,18 +437,22 @@ export function CommandPalette({
   onClose,
   onRun
 }: {
-  item: SlideResult | DeckCard
+  item: SlideResult | DeckCard | null
   deckMode: boolean
   onClose: () => void
-  onRun: (a: ActionId) => void
+  onRun: (a: ActionId | typeof CHECK_UPDATES | typeof WHATS_NEW) => void
 }): JSX.Element {
-  const kind = 'kind' in item ? (item as SlideResult).kind : undefined
-  const all = actionItems(deckMode, kind)
+  const kind = item && 'kind' in item ? item.kind : undefined
+  const all: { id: ActionId | typeof CHECK_UPDATES | typeof WHATS_NEW; label: string; shortcut?: string }[] = [
+    ...(item ? actionItems(deckMode, kind) : []),
+    { id: CHECK_UPDATES, label: registry.byId(CHECK_UPDATES)!.label },
+    { id: WHATS_NEW, label: registry.byId(WHATS_NEW)!.label }
+  ]
   const [q, setQ] = useState('')
   const [hi, setHi] = useState(0)
   const filtered = q ? all.filter((a) => a.label.toLowerCase().includes(q.toLowerCase())) : all
   useEffect(() => setHi(0), [q])
-  const title = item.title
+  const title = item?.title ?? 'SlideWell'
   return (
     <div className="overlay" onClick={onClose}>
       <div className="cmd-palette" onClick={(e) => e.stopPropagation()}>

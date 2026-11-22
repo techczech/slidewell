@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { UpdateSnapshot, WhatsNewItem } from '@app-patterns/updates'
 import type { Stats } from '../main/stats'
 import type { ImportSnapshot } from '../main/triage-import-progress'
 
@@ -546,7 +547,29 @@ export type CloudStatus = {
   periods: ReadonlyArray<{ id: SortPeriod; label: string }>
 }
 
+export type UpdateNotes = { version: string; items: WhatsNewItem[] }
+
+function onUpdate<T>(channel: string, fn: (value: T) => void): () => void {
+  const listener = (_event: Electron.IpcRendererEvent, value: T): void => fn(value)
+  ipcRenderer.on(channel, listener)
+  return () => ipcRenderer.removeListener(channel, listener)
+}
+
 const api = {
+  updates: {
+    get: (): Promise<UpdateSnapshot> => ipcRenderer.invoke('updates:get'),
+    check: (): Promise<UpdateSnapshot> => ipcRenderer.invoke('updates:check'),
+    notNow: (): Promise<UpdateSnapshot> => ipcRenderer.invoke('updates:not-now'),
+    skip: (): Promise<UpdateSnapshot> => ipcRenderer.invoke('updates:skip'),
+    stopSkipping: (): Promise<UpdateSnapshot> => ipcRenderer.invoke('updates:stop-skipping'),
+    download: (): Promise<boolean> => ipcRenderer.invoke('updates:download'),
+    releaseNotes: (): Promise<boolean> => ipcRenderer.invoke('updates:release-notes'),
+    store: (): Promise<boolean> => ipcRenderer.invoke('updates:store'),
+    whatsNew: (): Promise<UpdateNotes> => ipcRenderer.invoke('updates:whats-new'),
+    onChanged: (fn: (snapshot: UpdateSnapshot) => void) => onUpdate('updates:changed', fn),
+    onAnswer: (fn: (snapshot: UpdateSnapshot) => void) => onUpdate('updates:answer', fn),
+    onShowNotes: (fn: (notes: UpdateNotes) => void) => onUpdate('updates:show-notes', fn)
+  },
   // Picture search: model download/delete, background indexing, query by text or by image id.
   picture: {
     status: (): Promise<PictureSearchStatus> => ipcRenderer.invoke('picture:status'),

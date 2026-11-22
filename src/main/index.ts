@@ -8,6 +8,8 @@ import { startSettings, type SaveResult, type SettingsApp } from './settings-hos
 import { CONFIG_UNREADABLE, ConfigReadError, patchConfigFile, readConfigFile, saveConfigParts } from './config-file'
 import { ARCHIVE_DEFAULT, OTHERS_DEFAULT } from './settings-rules'
 import { keySlots } from './key-slots'
+import { hadUpdateConfiguration, installUpdateNotices } from './update-notices'
+import { UPDATE_CHECK_KEY } from '../shared/update-identity'
 import { legacyFromPrefs, splitLegacyPatch } from '../shared/settings-schema'
 import { saveR2 } from './r2-save'
 import { MAIN_COMMANDS, registry, type CommandContext } from '../shared/commands'
@@ -396,6 +398,8 @@ else
 
 app.whenReady().then(async () => {
   if (!singleInstance) return
+  const hadConfiguration = hadUpdateConfiguration(app.getPath('userData'))
+  let updates: ReturnType<typeof installUpdateNotices> | undefined
   // --- shared settings (settings-host.ts): store + migration from config.json, Settings window, menu bar, key slots ---
   // The cloud step's two keys are wired once the cloud service exists (below); until then they read as missing.
   let cloudKeyOps: { has(p: 'openai' | 'anthropic'): boolean; set(p: 'openai' | 'anthropic', k: string): { ok: boolean; error?: string; shape?: boolean }; remove(p: 'openai' | 'anthropic'): void } | null = null
@@ -423,6 +427,7 @@ app.whenReady().then(async () => {
   const started = await startSettings({
     openMain,
     sendCommand: (id) => mainWindow?.webContents.send('app:command', id),
+    runUpdateCommand: (id) => updates?.runCommand(id),
     changed: () => {
       setOwnerNames(resolveOwnerNames(readConfig().ownerNames).names)
       // the Triage folder changed from the window, the CLI or an import: the watcher follows it at once
@@ -432,6 +437,7 @@ app.whenReady().then(async () => {
         refreshWatchers()
       }
       mainWindow?.webContents.send('app:settings-changed', settings?.bindings() ?? {})
+      updates?.settingChanged()
     },
     slots: keySlots(
       {
@@ -447,7 +453,16 @@ app.whenReady().then(async () => {
   settings = started.settings
   prefsInStore = !started.legacy
   lastWatchedRoot = readConfig().screenshotRoot ?? ''
-  app.on('will-quit', () => settings?.dispose())
+  updates = installUpdateNotices({
+    appHandle, hadConfiguration,
+    broadcast: toAppWindows,
+    tellMain: (channel, value) => mainWindow?.webContents.send(channel, value),
+    enabled: () => settings?.values()[UPDATE_CHECK_KEY] !== false
+  })
+  app.on('will-quit', () => {
+    updates?.stop()
+    settings?.dispose()
+  })
   ipcMain.handle('app:bindings', (e) => (fromAppWindow(e) ? (settings?.bindings() ?? {}) : {}))
   ipcMain.handle('app:run-command', (e, id: unknown) => {
     if (fromAppWindow(e) && typeof id === 'string' && MAIN_COMMANDS.has(id)) settings?.runMainCommand(id)

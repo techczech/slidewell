@@ -9,6 +9,7 @@
 //
 // Pure: no Electron, no node:, so main, renderer, the CLI and tests share it.
 import { defineSchema, type Migrated, type SettingValue } from '@app-patterns/settings'
+import { UPDATE_CHECK_KEY } from './update-identity'
 
 export const APP_ID = 'slidewell'
 export const APP_NAME = 'SlideWell'
@@ -44,7 +45,8 @@ export const schema = defineSchema({
     { id: 'capture', label: 'Screenshots', icon: 'camera' },
     { id: 'sorting', label: 'Sorting', icon: 'sparkles' },
     { id: 'storage', label: 'Storage', icon: 'cloud' },
-    { id: 'advanced', label: 'Advanced', icon: 'wrench' }
+    { id: 'advanced', label: 'Advanced', icon: 'wrench' },
+    { id: 'updates', label: 'About and updates', icon: 'info' }
   ],
   settings: [
     {
@@ -153,6 +155,10 @@ export const schema = defineSchema({
       ],
       help: 'With an R2 backup the full copy stays on this Mac and is mirrored to R2 when you sync, so another Mac can fetch it.'
     })),
+    {
+      key: UPDATE_CHECK_KEY, label: 'Check for new versions', section: 'updates', type: 'toggle', default: true,
+      help: 'SlideWell checks once a day. You can also check at any time.'
+    },
     {
       key: 'advanced.pythonPath', label: 'Python', section: 'advanced', type: 'path', default: '',
       help: 'The Python that runs Core A’s import tools. Empty means the one SlideWell finds.', importable: false

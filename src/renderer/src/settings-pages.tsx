@@ -4,6 +4,7 @@
 // window and the Settings window.
 import { useCallback, useEffect, useState } from 'react'
 import type { CustomPage } from '@app-patterns/settings-react'
+import { AboutUpdates } from './UpdateNotices'
 import type { Dependency } from '../../preload'
 import { PictureSearchSettings } from './PictureSearch'
 import { SorterServiceSettings } from './SorterServiceSettings'
@@ -137,6 +138,7 @@ export function customPages(openSection: (id: string) => void): CustomPage[] {
     { id: 'capture-sources', label: 'Watched folders', icon: 'folder-search', render: () => <CaptureSources /> },
     { id: 'backlog-import', label: 'Older screenshots', icon: 'history', render: () => <div className="sw-page"><BacklogImportSettings /></div> },
     { id: 'sync', label: 'Sync and libraries', icon: 'refresh-cw', render: () => <SyncAndLibraries /> },
-    { id: 'requirements', label: 'Requirements', icon: 'list-checks', render: () => <Requirements /> }
+    { id: 'requirements', label: 'Requirements', icon: 'list-checks', render: () => <Requirements /> },
+    { id: 'updates', label: 'About and updates', icon: 'info', render: () => <AboutUpdates /> }
   ]
 }

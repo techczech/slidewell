@@ -7,6 +7,7 @@
 // here would be chord collisions. They are listed in the cheat sheet as SCREEN_KEYS until the registry
 // can scope commands to a screen.
 import { chordFromEvent, defineRegistry, dispatchKey, type Bindings, type CommandDef, type KeyContext, type KeyLike, type MenuDecl } from '@app-patterns/commands'
+import { CHECK_UPDATES, WHATS_NEW } from './update-identity'
 
 export type Group = 'Find' | 'Selection' | 'Copy' | 'Show' | 'Library' | 'Go' | 'Move'
 
@@ -21,7 +22,7 @@ const MOVE = 'Arrow, Enter and Escape keys move and open; they are not menu acti
 
 const DEFS: CommandDef<Group, CommandContext>[] = [
   { id: 'find', group: 'Find', label: 'Search the archive', key: '⌘F', icon: 'search', fixed: true, typing: true, available: onSearch },
-  { id: 'actions', group: 'Selection', label: 'Actions on the selection', key: '⌘K', icon: 'zap', fixed: true, typing: true, available: needsItems },
+  { id: 'actions', group: 'Selection', label: 'Open command palette', key: '⌘K', icon: 'zap', fixed: true, typing: true, available: onSearch },
   { id: 'inspector', group: 'Selection', label: 'Show or hide details', key: 'I', icon: 'panel-right', available: needsItems },
   { id: 'open-item', group: 'Move', label: 'Open full size', key: '↵', icon: 'maximize-2', noMenu: true, noMenuReason: MOVE },
   { id: 'move-left', group: 'Move', label: 'Previous item', key: '←', icon: 'arrow-left', noMenu: true, noMenuReason: MOVE },
@@ -48,12 +49,14 @@ const DEFS: CommandDef<Group, CommandContext>[] = [
   { id: 'open-auto-sorting', group: 'Go', label: 'Auto sorting', key: '', icon: 'sparkles' },
   { id: 'stats', group: 'Library', label: 'Your presentations in numbers', key: 'S', icon: 'bar-chart-3', available: onSearch },
   { id: 'import', group: 'Library', label: 'Import PowerPoint…', key: 'O', icon: 'download', available: onSearch },
+  { id: CHECK_UPDATES, group: 'Go', label: 'Check for Updates…', key: '', icon: 'refresh-cw', noMenu: true, noMenuReason: 'Placed in the application menu' },
+  { id: WHATS_NEW, group: 'Go', label: 'What’s new in SlideWell', key: '', icon: 'info', noMenu: true, noMenuReason: 'Placed in the Help menu' },
   { id: 'convert', group: 'Library', label: 'Convert a presentation to an Outline…', key: '', icon: 'arrow-left-right' }
 ]
 
 // The frame commands (settings, cheat, export-settings, import-settings) are added by the package.
 export const registry = defineRegistry<Group, CommandContext>(DEFS, {
-  overlayIds: ['dismiss', 'settings', 'cheat']
+  overlayIds: ['dismiss', 'settings', 'cheat', CHECK_UPDATES, WHATS_NEW]
 })
 
 /** App menus; the frame supplies App, Edit, View, Window and Help. */
@@ -89,7 +92,7 @@ export function commandForEvent(e: KeyLike & { key?: string }, bindings: Binding
 }
 
 /** Commands the main process runs itself (the Settings window host); the rest go to the renderer. */
-export const MAIN_COMMANDS: ReadonlySet<string> = new Set(['settings', 'export-settings', 'import-settings'])
+export const MAIN_COMMANDS: ReadonlySet<string> = new Set(['settings', 'export-settings', 'import-settings', CHECK_UPDATES, WHATS_NEW])
 
 /** The Review and Triage screens' own keys (not commands yet; see the note at the top). For the cheat sheet. */
 export const SCREEN_KEYS: ReadonlyArray<readonly [string, string]> = [
