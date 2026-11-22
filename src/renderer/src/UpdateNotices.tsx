@@ -51,13 +51,17 @@ function AnswerActions({ view, snapshot, onAnswer }: { view: AnswerView; snapsho
   )
 }
 
-function UpdateAction({ snapshot, version }: { snapshot: UpdateSnapshot; version?: string }): JSX.Element | null {
+function UpdateAction({ snapshot, version, onDownload }: {
+  snapshot: UpdateSnapshot
+  version?: string
+  onDownload?(): void
+}): JSX.Element | null {
   if (!snapshot.enabled || !version) return null
   const api = window.sw.updates
   if (snapshot.file && !snapshot.refusal && snapshot.state.lastResult !== 'unreadable') {
     return <button className="primary-btn" onClick={() => void api.update(version)}>Update</button>
   }
-  return <button className="primary-btn" onClick={() => void api.download()}>Download</button>
+  return <button className="primary-btn" onClick={() => { onDownload?.(); void api.download() }}>Download</button>
 }
 
 function InstallDetails({ snapshot }: { snapshot: UpdateSnapshot }): JSX.Element | null {
@@ -173,7 +177,7 @@ export function UpdateStatus(): JSX.Element | null {
             <p>Released {dateText(latest.released)}. {aboutLines(snapshot).version} is installed.</p>
             <ul>{latest.summary.map((line, i) => <li key={i}>{line}</li>)}</ul>
             <div className="sw-update-actions">
-              <UpdateAction snapshot={snapshot} version={latest.version} />
+              <UpdateAction snapshot={snapshot} version={latest.version} onDownload={() => setOpen(false)} />
               <button className="copyref" onClick={() => { setOpen(false); void api.notNow() }}>Not now</button>
               <button className="copyref" onClick={() => { setOpen(false); void api.skip() }}>Skip this version</button>
             </div>
