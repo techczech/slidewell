@@ -56,6 +56,30 @@ function arrive(p: string): void {
 const rows = async (): Promise<Record<string, string>> =>
   Object.fromEntries((await query<{ rel_path: string; offline: string }>(join(well, 'triage.db'), 'SELECT rel_path, offline FROM triage_fts', [])).map((r) => [r.rel_path, r.offline]))
 
+describe('capture rescan listing', () => {
+  it('skips an unchanged listing and scans when a nested capture changes', async () => {
+    placeholder('nested/a.png', 1)
+    const listing = {}
+    const progress = vi.fn()
+    await scanTriageSource('/nonexistent', well, src, progress, { listing })
+    progress.mockClear()
+    const opts = { listing, onlyChanged: true }
+    const unchanged = await scanTriageSource('/nonexistent', well, src, progress, opts)
+    expect(unchanged.skipped).toBe(true)
+    expect(progress).not.toHaveBeenCalled()
+
+    const added = join(src, 'nested/b.png')
+    writeFileSync(added, 'new capture')
+    const changed = await scanTriageSource('/nonexistent', well, src, progress, opts)
+    expect(changed).toEqual({ indexed: 1, total: 2, offline: 1 })
+    expect(await rows()).toEqual({ 'nested/a.png': '1', 'nested/b.png': '0' })
+
+    progress.mockClear()
+    expect((await scanTriageSource('/nonexistent', well, src, progress, opts)).skipped).toBe(true)
+    expect(progress).not.toHaveBeenCalled()
+  })
+})
+
 describe('capture scan: online-only files', () => {
   it('without download authority nothing is downloaded or read', async () => {
     placeholder('a.png', 1)
