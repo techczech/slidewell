@@ -104,7 +104,9 @@ function createProfile(label) {
   mkdirSync(join(dir, 'home'))
   const config = join(profile, 'config.json')
   writeFileSync(config, JSON.stringify({
-    wellRoot: join(dir, 'well'), archiveRoot: join(dir, 'absent-archive'), windowBounds: { width: 1200, height: 800 },
+    wellRoot: join(dir, 'well'), archiveRoot: join(dir, 'absent-archive'),
+    othersArchiveRoot: join(dir, 'others'), screenshotRoot: join(dir, 'captures'), conversionsRoot: join(dir, 'conversions'),
+    windowBounds: { width: 1200, height: 800 },
     updateFixtureSentinel: 'preserve me'
   }))
   console.log(`Fixture ${label}:`, dir)
@@ -257,6 +259,13 @@ try {
   assert.ok(existsSync(join(fixture.profile, 'settings.json')))
   run('/usr/bin/codesign', ['--verify', '--deep', '--strict', fixture.bundle])
   console.log('PASS one click downloaded once, replaced the signed bundle in place, relaunched it and retained the same profile')
+  // ShipIt relaunches outside Playwright. End only the synthetic executable at this exact path.
+  const command = `/private${fixture.executable}`
+  const processes = run('/bin/ps', ['-axww', '-o', 'pid=,comm=']).trim().split('\n')
+  for (const line of processes) {
+    const match = /^(\d+)\s+(.+)$/.exec(line.trim())
+    if (match?.[2] === fixture.executable || match?.[2] === command) process.kill(Number(match[1]), 'SIGTERM')
+  }
 } finally {
   server.closeAllConnections()
   await new Promise((resolve) => server.close(resolve))
