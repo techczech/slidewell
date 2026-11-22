@@ -1,9 +1,9 @@
 // The update feed with channels (ADR-0054, porting TalkWeaver ADR-0044 §2). Pure: no Electron, no network;
-// unit-tested in tests/main/update-channels.test.ts.
+// unit-tested in test/update-channels.test.ts.
 //
 // `updates.json` keeps `schema: 1` and `latest` (what copies up to 0.28.x read) and gains `channels.release` (field
-// for field the same as `latest`) and `channels.alpha` (optional). Each entry may name the file that updates this app
-// in place, per platform: a GitHub release asset of the public repository at that entry's own tag, with its SHA-512
+// for field the same as `latest`) and `channels.alpha` (optional). Each entry may name a Mac update asset
+// at that entry's own GitHub release tag, with its SHA-512
 // and size. The whole feed is refused when any part of it is wrong, as before. The shared validator in
 // @app-patterns/updates 0.4.1 ignores the unknown `channels` key, so older copies keep telling and linking.
 import {
@@ -25,7 +25,7 @@ export interface UpdateFile {
   sha512: string
   /** Exact size in bytes. */
   size: number
-  /** Mac only: the bundle identifier the app inside carries. A running copy with another one cannot use the file. */
+  /** Bundle identifier of the released Mac app. */
   bundleId: string
 }
 export interface ChannelEntry extends UpdateFeedLatest {
@@ -46,9 +46,7 @@ export function isAlphaVersion(text: unknown): text is string {
   return parsed !== null && parsed.pre.length === 2 && parsed.pre[0] === 'alpha' && typeof parsed.pre[1] === 'number'
 }
 
-const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,150}$/
 const SHA512_BASE64 = /^[A-Za-z0-9+/]{86}==$/
-const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9.-]{0,154}$/
 
 /** One platform's update file, or null when anything about it is wrong. */
 export function validateUpdateFile(value: unknown, version: string, assetPrefix: string = RELEASE_ASSET_PREFIX): UpdateFile | null {
@@ -58,14 +56,13 @@ export function validateUpdateFile(value: unknown, version: string, assetPrefix:
   const folder = `${assetPrefix}v${version}/`
   if (!url.startsWith(folder)) return null
   const name = url.slice(folder.length)
-  if (!FILE_NAME.test(name) || name.includes('..')) return null
   if (name !== 'SlideWell-mac-arm64.zip') return null
   let parsed: URL
   try { parsed = new URL(url) } catch { return null }
   if (parsed.href !== url || parsed.username !== '' || parsed.password !== '' || parsed.search !== '' || parsed.hash !== '') return null
   if (typeof sha512 !== 'string' || !SHA512_BASE64.test(sha512) || !'AQgw'.includes(sha512[85])) return null
   if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0 || size > MAX_UPDATE_FILE_BYTES) return null
-  if (typeof bundleId !== 'string' || !BUNDLE_ID.test(bundleId) || bundleId !== (assetPrefix === RELEASE_ASSET_PREFIX ? PUBLISHED_BUNDLE_ID : UPDATE_INSTALL_IDENTITY.fixtureBundleId)) return null
+  if (typeof bundleId !== 'string' || bundleId !== (assetPrefix === RELEASE_ASSET_PREFIX ? PUBLISHED_BUNDLE_ID : UPDATE_INSTALL_IDENTITY.fixtureBundleId)) return null
   return { url, sha512, size, bundleId }
 }
 

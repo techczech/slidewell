@@ -1,5 +1,5 @@
 // Updating in place (ADR-0044 §3, §5): the engine behind the one click, free of Electron so that it is tested in
-// plain Node (scripts/test-update-engine.mjs) with fake timers, a fake Squirrel.Mac and the real electron-updater.
+// Vitest with a fake Squirrel.Mac, and in the packaged fixture with the real electron-updater.
 // src/main/update-installer.ts wires it to Electron; src/shared/update-install.ts holds the states and words.
 //
 // This is TalkWeaver's deferred Squirrel.Mac hand-over. Download and verify without arming ShipIt.
@@ -22,7 +22,7 @@ export interface Offer {
   url: string
   sha512: string
   size: number
-  /** CFBundleIdentifier the feed states for the Mac file (absent for a stand-in without one). */
+  /** CFBundleIdentifier of the installed and offered Mac app. */
   bundleId: string
 }
 
@@ -83,7 +83,7 @@ export interface EnginePorts {
   verify(file: string, offer: Offer): Promise<FailReason | null>
   /** D3 only: serve the verified file on electron-updater's local address and set Squirrel.Mac's feed to it. */
   handOver(file: string): Promise<void>
-  /** Squirrel.Mac (a stand-in in a run from source, which logs instead of installing). Asked only in D3. */
+  /** Squirrel.Mac, reached only in the native phase of an authorised restart. */
   native(): NativeUpdater
   /** D3's commit: close every window through the app's own close route. True only when every window has closed;
    *  false as soon as one is kept open. */

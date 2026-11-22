@@ -21,6 +21,8 @@ const site = 'https://techczech.github.io/slidewell/'
 const targetZip = 'SlideWell-mac-arm64.zip'
 const assetPath = `/releases/download/v${nextVersion}/${targetZip}`
 console.log('Fixture build and ZIPs:', root)
+const buildHome = join(root, 'builder-home')
+mkdirSync(buildHome)
 
 function run(file, args, options = {}) {
   return execFileSync(file, args, { encoding: 'utf8', ...options })
@@ -31,7 +33,10 @@ function build(version) {
   run('./node_modules/.bin/electron-builder', [
     '--mac', 'dir', '--arm64', '--publish', 'never', '--config', 'build/electron-builder.update-test.cjs',
     `-c.extraMetadata.version=${version}`, `-c.directories.output=${out}`
-  ], { env: { ...process.env, CSC_IDENTITY_AUTO_DISCOVERY: 'false' }, stdio: 'inherit' })
+  ], {
+    env: { PATH: process.env.PATH, HOME: buildHome, TMPDIR: root, CSC_IDENTITY_AUTO_DISCOVERY: 'false' },
+    stdio: 'inherit'
+  })
   const bundle = join(out, 'mac-arm64', appName + '.app')
   // The fixture alone has a certificate-free designated requirement shared across its versions.
   run('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', bundle])
@@ -120,6 +125,8 @@ async function withApp(fixture, test) {
   const env = { ...process.env, HOME: join(fixture.dir, 'home') }
   delete env.ELECTRON_RUN_AS_NODE
   const app = await electron.launch({ executablePath: fixture.executable, args: ['--use-mock-keychain'], env })
+  app.process().stdout?.on('data', (data) => process.stdout.write(data))
+  app.process().stderr?.on('data', (data) => process.stderr.write(data))
   try {
     const win = await app.firstWindow()
     await win.waitForFunction(() => Boolean(window.sw?.updates))

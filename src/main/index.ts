@@ -11,6 +11,7 @@ import { keySlots } from './key-slots'
 import { restartWork } from './restart-work'
 import { isUpdateFixture, updateFixtureRoot } from './update-fixture'
 import { hadUpdateConfiguration, installUpdateNotices } from './update-notices'
+import type { RestartBlocker } from '../shared/update-install'
 import { UPDATE_ALPHA_KEY, UPDATE_CHECK_KEY } from '../shared/update-identity'
 import { legacyFromPrefs, splitLegacyPatch } from '../shared/settings-schema'
 import { saveR2 } from './r2-save'
@@ -499,7 +500,9 @@ app.whenReady().then(async () => {
     const abs = decodeSwUrlPath(request.url)
     // a fetch from R2 writes only under an allowed root's real path, and the file served passes the real-path check:
     // a link inside a root that leads outside every root is neither written through nor served
-    const served = abs ? await serveSwFile(abs, allowedRoots(), existsSync(abs) ? null : r2FetcherFor(abs)) : null
+    const fetcher = abs && !restartWork.locked() && !existsSync(abs) ? r2FetcherFor(abs) : null
+    const served = abs ? await serveSwFile(abs, allowedRoots(),
+      fetcher && ((...args) => restartWork.run(() => fetcher(...args)))) : null
     if (!served) return new Response('not found', { status: 404 })
     return net.fetch(pathToFileURL(served).toString())
   })
@@ -904,10 +907,10 @@ app.whenReady().then(async () => {
     sendLine: (line) => mainWindow?.webContents.send('ingest:line', line)
   })
 
-  const blockers = (): import('../shared/update-install').RestartBlocker[] => {
-    const holds: import('../shared/update-install').RestartBlocker[] = []
+  const blockers = (): RestartBlocker[] => {
+    const holds: RestartBlocker[] = []
     if (settings?.settingsWebContents()) holds.push('settings')
-    if (restartWork.busy() || pictureSearch?.updateWorkBusy()) holds.push('work')
+    if (restartWork.busy() || talkUsage.busy() || pictureSearch?.updateWorkBusy() || settings?.hasPendingWrites()) holds.push('work')
     if (rawConfig() === null || settings?.restartProblem()) holds.push('unsaved')
     if (BrowserWindow.getAllWindows().some((w) => w !== mainWindow &&
         w.webContents !== settings?.settingsWebContents() && !isEmbedWindow(w))) holds.push('window')
@@ -939,6 +942,8 @@ app.whenReady().then(async () => {
       commitAbandoned() {
         restartWork.release()
         openMain()
+        capture.launchScan()
+        void talkUsage.refresh()
       },
       drainWriteQueues: async () => (await settings?.flushForRestart()) === true,
       writeQueuesBusy: () => settings?.hasPendingWrites() ? ['settings'] : []
@@ -965,6 +970,7 @@ app.whenReady().then(async () => {
 const talkUsage = createTalkUsageService({
   wellRoot: wellRootResolved,
   vaultRoot: detectVaultRoot,
+  mayStart: () => !restartWork.locked(),
   // only talk outlines, folders and pool images appearing or going; wait at most 30 s however busy the vault is
   watch: (vault, onChange) => {
     const w = createSourceWatcher(() => onChange(), 4000, 30000)

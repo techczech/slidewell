@@ -6,6 +6,7 @@ module.exports = {
   appId: 'net.dominiklukes.slidewell.updatetest',
   productName: 'SlideWell Update Test',
   publish: null,
+  electronDist: 'node_modules/electron/dist',
   files: [{ from: 'out-update-test', to: 'out' }, 'package.json'],
   mac: { ...build.mac, target: ['dir'], identity: null, notarize: false, hardenedRuntime: false }
 }
