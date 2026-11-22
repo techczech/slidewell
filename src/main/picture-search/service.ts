@@ -1,3 +1,4 @@
+import { restartWork } from '../restart-work'
 /**
  * Picture search as one service for the main process: model download/delete, the background
  * indexer, pause/resume (persisted), and the query function. index.ts creates it once, registers the
@@ -234,7 +235,7 @@ export class PictureSearchService {
 
   /** New well images may exist (import, paste, vault scan). */
   poke(): void {
-    if (modelState(this.dir()) === 'ready') this.indexer.poke()
+    if (!restartWork.locked() && modelState(this.dir()) === 'ready') this.indexer.poke()
   }
 
   /** The archive changed (ingest): enumerate its renders again. */
@@ -333,7 +334,7 @@ export class PictureSearchService {
       ready: () => this.store !== null && this.modelReady(),
       query: async (text, limit) => {
         if (!this.store || !this.modelReady()) throw new Error('picture index not opened by SlideWell yet')
-        return this.pictureQuery({ text }, { limit, kinds: ['slide', 'well-image', 'triage'] })
+        return restartWork.run(() => this.pictureQuery({ text }, { limit, kinds: ['slide', 'well-image', 'triage'] }))
       }
     }
   }
@@ -341,6 +342,16 @@ export class PictureSearchService {
   /** How many picture queries this process has run (the Words-only fast path must leave it unchanged). */
   queryCount(): number {
     return this.queries
+  }
+
+  updateWorkBusy(): boolean {
+    return this.indexer.busy() || this.downloading !== null
+  }
+
+  closeIdleEmbedder(): void {
+    this.embedder?.dispose?.()
+    this.embedder = null
+    this.engine = null
   }
 
   dispose(): void {
@@ -356,7 +367,7 @@ export function registerPictureSearchIpc(svc: PictureSearchService, allowed: (e:
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
     ipcMain.handle(channel, (e, ...args) => {
       if (!allowed(e)) throw new Error(`${channel}: not allowed from this window`)
-      return fn(...args)
+      return restartWork.run(() => fn(...args))
     })
   }
   handle('picture:status', () => svc.status())

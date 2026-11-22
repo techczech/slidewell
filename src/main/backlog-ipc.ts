@@ -1,3 +1,4 @@
+import { restartWork } from './restart-work'
 /**
  * IPC for the backlog import (ticket 13). The renderer can only (1) ask for a dry run, (2) run the
  * exact plan it was shown, by id, (3) cancel, (4) read / change CleanShot's export folder on a click.
@@ -52,7 +53,7 @@ export function registerBacklogIpc(deps: {
     return { id, plan: plan.ok ? { ...plan, items: [] } : plan }
   })
 
-  ipcMain.handle('backlog:run', async (e, planId: string) => {
+  ipcMain.handle('backlog:run', async (e, planId: string) => restartWork.run(async () => {
     if (!deps.isMainWindow(e)) return null
     if (running) return { refused: 'already running' }
     if (!shown || shown.id !== planId || Date.now() - shown.at > PLAN_TTL_MS) return { refused: 'show the plan again first' }
@@ -70,7 +71,7 @@ export function registerBacklogIpc(deps: {
     } finally {
       running = null
     }
-  })
+  }))
 
   ipcMain.handle('backlog:cancel', (e) => {
     if (!deps.isMainWindow(e)) return false
@@ -95,13 +96,13 @@ export function registerBacklogIpc(deps: {
   })
 
   // Writes only the folder the user was shown, and only if it is still the watched folder (by realpath).
-  ipcMain.handle('backlog:set-cleanshot', async (e, shown: string) => {
+  ipcMain.handle('backlog:set-cleanshot', async (e, shown: string) => restartWork.run(async () => {
     if (!deps.isMainWindow(e)) return null
     const w = deps.watchedFolder()
     const [a, b] = await Promise.all([realOrNull(w), realOrNull(typeof shown === 'string' ? shown : null)])
     if (!a || !b || a !== b) return { refused: 'the folder changed, review again' }
     return setCleanShotExportPath(shown, deps.writer)
-  })
+  }))
 }
 
 const realOrNull = real

@@ -3,9 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { IpcMainInvokeEvent } from 'electron'
-import { compareVersions, type UpdateSnapshot } from '@app-patterns/updates'
+import { compareVersions } from '@app-patterns/updates'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { installUpdateNotices } from '../src/main/update-notices'
+import type { UpdateSnapshot } from '../src/shared/update-snapshot'
 import { UPDATE_IDENTITY } from '../src/shared/update-identity'
 
 const electron = vi.hoisted(() => ({
@@ -61,17 +62,19 @@ function setup({ version = '0.4.0-alpha.19', enabled = true, hadConfiguration = 
     return request
   })
   const handlers = new Map<string, (event: IpcMainInvokeEvent) => unknown>()
+  let alpha = false
   const tellMain = vi.fn()
   const notices = installUpdateNotices({
     appHandle: (id, handler) => void handlers.set(id, handler),
     broadcast: vi.fn(),
     tellMain,
     enabled: () => enabled,
+    alpha: () => alpha,
     hadConfiguration
   })
   stops.push(notices.stop)
   const invoke = <T = UpdateSnapshot>(id: string) => handlers.get('updates:' + id)!({} as IpcMainInvokeEvent) as T
-  return { invoke, headers, tellMain, notices, replyWith: (body: string | null) => { reply = body } }
+  return { invoke, headers, tellMain, notices, optIn: (on: boolean) => { alpha = on; notices.settingChanged() }, replyWith: (body: string | null) => { reply = body } }
 }
 
 describe('SlideWell update notices', () => {
@@ -134,17 +137,33 @@ describe('SlideWell update notices', () => {
     expect(electron.net.request).toHaveBeenCalledTimes(2)
   })
 
-  it('checks by hand with the daily setting off, and keeps a development run offline', async () => {
+  it('keeps both manual entry points offline with checks off, and keeps a development run offline', async () => {
     vi.useFakeTimers()
-    const { invoke } = setup({ enabled: false })
+    const { invoke, notices, tellMain } = setup({ enabled: false })
     await vi.advanceTimersByTimeAsync(120_000)
     expect(electron.net.request).not.toHaveBeenCalled()
-    expect((await invoke<Promise<UpdateSnapshot>>('check')).state.lastResult).toBe('newer')
-    electron.net.request.mockClear()
+    expect((await invoke<Promise<UpdateSnapshot>>('check')).state.lastResult).toBeUndefined()
+    notices.runCommand('check-for-updates')
+    await Promise.resolve()
+    expect(tellMain).toHaveBeenCalledWith('updates:answer', expect.objectContaining({ enabled: false }))
+    expect(electron.net.request).not.toHaveBeenCalled()
     electron.app.isPackaged = false
     const dev = setup()
     expect((await dev.invoke<Promise<UpdateSnapshot>>('check')).source).toBe('development')
     expect(electron.net.request).not.toHaveBeenCalled()
+  })
+
+  it('changes the offer from the validated feed without a download or a second check', async () => {
+    const { invoke, optIn, replyWith } = setup({ version: '0.5.0-alpha.2' })
+    const legacy = JSON.parse(feed('0.4.0'))
+    replyWith(JSON.stringify({ ...legacy, channels: { release: legacy.latest, alpha: { ...legacy.latest, version: '0.5.0-alpha.10' } } }))
+    expect((await invoke<Promise<UpdateSnapshot>>('check')).mark).toBeNull()
+    optIn(true)
+    expect(invoke('get').mark?.version).toBe('0.5.0-alpha.10')
+    expect(invoke('get').install.phase).toBe('idle')
+    optIn(false)
+    expect(invoke('get').mark).toBeNull()
+    expect(electron.net.request).toHaveBeenCalledTimes(1)
   })
 
   it('shows shipped notes after an upgrade and clears the mark when opened', () => {

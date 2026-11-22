@@ -1,5 +1,6 @@
+import type { UpdateSnapshot } from '../shared/update-snapshot'
 import { contextBridge, ipcRenderer } from 'electron'
-import type { UpdateSnapshot, WhatsNewItem } from '@app-patterns/updates'
+import type { WhatsNewItem } from '@app-patterns/updates'
 import type { Stats } from '../main/stats'
 import type { ImportSnapshot } from '../main/triage-import-progress'
 
@@ -562,6 +563,9 @@ const api = {
     notNow: (): Promise<UpdateSnapshot> => ipcRenderer.invoke('updates:not-now'),
     skip: (): Promise<UpdateSnapshot> => ipcRenderer.invoke('updates:skip'),
     stopSkipping: (): Promise<UpdateSnapshot> => ipcRenderer.invoke('updates:stop-skipping'),
+    update: (seen: string): Promise<UpdateSnapshot> => ipcRenderer.invoke('updates:update', seen),
+    cancel: (): Promise<UpdateSnapshot> => ipcRenderer.invoke('updates:cancel'),
+    restart: (): Promise<UpdateSnapshot> => ipcRenderer.invoke('updates:restart'),
     download: (): Promise<boolean> => ipcRenderer.invoke('updates:download'),
     releaseNotes: (): Promise<boolean> => ipcRenderer.invoke('updates:release-notes'),
     store: (): Promise<boolean> => ipcRenderer.invoke('updates:store'),

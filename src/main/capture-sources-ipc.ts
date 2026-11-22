@@ -1,3 +1,4 @@
+import { restartWork } from './restart-work'
 import { app, clipboard, dialog, ipcMain, type BrowserWindow, type WebContents } from 'electron'
 import { existsSync, writeFileSync } from 'fs'
 import { realpath } from 'node:fs/promises'
@@ -199,15 +200,16 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     }
     // Capture-and-forget: files added while SlideWell was closed are picked up shortly after launch.
     const launchScan = (): void => {
-      setTimeout(() => void scanAllSources().then(() => getMainWindow()?.webContents.send('triage:changed')), 2500)
+      setTimeout(() => {
+        if (!restartWork.locked()) void restartWork.run(() => scanAllSources()).then(() => getMainWindow()?.webContents.send('triage:changed'))
+      }, 2500)
     }
     // Capture inbox: a debounced watcher per source runs the same scan for just that source, then tells
     // the Triage panel to re-list. Originals are only read.
     const watcher = createSourceWatcher((path) => {
       const s = triageSources().find((x) => x.path === path)
-      if (!s) return
-      void scanOptionsFor(s)
-        .then((o) => scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, o))
+      if (!s || restartWork.locked()) return
+      void restartWork.run(async () => scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, await scanOptionsFor(s)))
         .then(() => {
           review.filesChanged()
           getMainWindow()?.webContents.send('triage:changed')
@@ -228,7 +230,7 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
       watchedFolder: screenshotRootResolved,
       stateDir: () => join(app.getPath('userData'), 'backlog-import'),
       isMainWindow: fromAppWindow,
-      afterRun: ({ stopped }) => void scanAllSources({ downloads: !stopped }).then(() => getMainWindow()?.webContents.send('triage:changed')),
+      afterRun: ({ stopped }) => void restartWork.run(() => scanAllSources({ downloads: !stopped })).then(() => getMainWindow()?.webContents.send('triage:changed')),
       captureDownloads
     })
     guardedHandle(ipcMain, fromMainWindow, 'triage:list', async (_e, q: string, state: string, sort?: string, limit?: number, offset?: number, apps?: unknown) => {

@@ -1,3 +1,4 @@
+import { restartWork } from '../restart-work'
 /**
  * IPC for teaching the sorter (ticket 22). Types: src/preload/index.ts. Main window only, like the
  * sorter's other handlers (service.ts, goes-by-and-runs-ipc.ts).
@@ -44,7 +45,7 @@ export function registerTeachIpc(d: TeachIpcDeps): void {
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
     ipcMain.handle(channel, (e, ...args) => {
       if (!d.allowed(e.sender)) throw new Error(`${channel}: not allowed from this window`)
-      return fn(...args)
+      return restartWork.run(() => fn(...args))
     })
   }
   /** Reject unless there are at most `max` arguments and `ok` holds (the two handlers whose result has no refusal value). */

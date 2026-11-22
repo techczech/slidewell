@@ -42,6 +42,8 @@ export class Indexer {
     return { ...this.progress }
   }
 
+  busy(): boolean { return this.loop !== null }
+
   isPaused(): boolean {
     return this.paused
   }

@@ -98,6 +98,32 @@ try {
     console.log('PASS the Search command palette ran a manual update check')
   })
 
+  await withApp('alpha', async (app, win, userData) => {
+    const release = JSON.parse(readFileSync(fixture, 'utf8')).latest
+    const alpha = { ...release, version: '99.1.0-alpha.10' }
+    writeFileSync(fixture, JSON.stringify({ schema: 1, latest: release, channels: { release, alpha } }))
+    const initialRequests = requests.length
+    const check = await win.evaluate(() => window.sw.updates.check())
+    assert.equal(check.mark.version, release.version)
+    assert.equal(check.install.phase, 'idle')
+    assert.equal(requests.length, initialRequests + 1)
+    const [settings] = await Promise.all([
+      app.waitForEvent('window', { timeout: 15000 }),
+      win.evaluate(() => window.sw.app.openSettings('updates'))
+    ])
+    const early = settings.getByRole('checkbox', { name: 'Get early versions (alpha)' })
+    await early.waitFor()
+    assert.equal(await early.isChecked(), false)
+    await early.click()
+    await win.locator('[data-update-mark]').filter({ hasText: alpha.version }).waitFor()
+    assert.equal(JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8')).settings['updates.alphaVersions'], true)
+    assert.equal(requests.length, initialRequests + 1)
+    await early.click()
+    await win.locator('[data-update-mark]').filter({ hasText: release.version }).waitFor()
+    assert.equal((await win.evaluate(() => window.sw.updates.get())).install.phase, 'idle')
+    console.log('PASS alpha opt-in switched the cached offer without an asset request')
+  })
+
   await withApp('disabled', async (app, win, userData) => {
     const initialRequests = requests.length
     const [settings] = await Promise.all([
@@ -114,6 +140,9 @@ try {
     assert.equal(await daily.isChecked(), false)
     const saved = JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8'))
     assert.equal(saved.settings['updates.checkForNewVersions'], false)
+    await win.evaluate(() => window.sw.updates.check())
+    await win.evaluate(() => window.sw.app.runCommand('check-for-updates'))
+    assert.equal(requests.length, initialRequests, 'manual check reached the feed with the Settings switch off')
     // The enabled profile established that a fresh run normally checks at two minutes.
     await new Promise((resolve) => setTimeout(resolve, 125000))
     assert.equal(requests.length, initialRequests, 'daily request reached the feed with the Settings switch off')

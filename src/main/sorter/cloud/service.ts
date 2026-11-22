@@ -1,3 +1,4 @@
+import { restartWork } from '../../restart-work'
 /**
  * The sorter's cloud step as one main-process service: the nightly batch and the manual "Sort now".
  * It asks one of two providers, chosen in Settings: OpenAI's Luna (the default) or Anthropic's Haiku
@@ -1385,7 +1386,7 @@ export function registerCloudIpc(
   const handle = (channel: string, fn: (...args: any[]) => unknown): void => { // eslint-disable-line @typescript-eslint/no-explicit-any
     ipcMain.handle(channel, (e, ...args) => {
       if (!allowed(e)) throw new Error(`${channel}: not allowed from this window`)
-      return fn(...args)
+      return restartWork.run(() => fn(...args))
     })
   }
   handle('cloud:status', () => svc.status())

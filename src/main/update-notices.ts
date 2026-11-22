@@ -4,9 +4,14 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   copySource, createUpdateChecker, feedRequest, readUpdateState,
-  validateFeed, type FeedAnswer, type UpdateSnapshot, type WhatsNewItem
+  compareVersions, type FeedAnswer, type UpdateSnapshot as NoticeSnapshot, type WhatsNewItem
 } from '@app-patterns/updates'
 import { createElectronFeedFetcher, createUpdateLinkOpener } from '@app-patterns/updates/electron'
+import { channelOffer, isOfferSeen, newerOffer, parseChannelFeed, RELEASE_ASSET_PREFIX, updateFileFor, validateChannelFeedObject } from '../shared/update-channels'
+import { IDLE, inPlaceRefusal } from '../shared/update-install'
+import type { UpdateSnapshot } from '../shared/update-snapshot'
+import { createUpdateInstaller, readInPlaceFacts, type InstallerDeps, type UpdateInstaller } from './update-installer'
+import { isUpdateFixture, readFixtureFeed, updateFixtureRoot } from './update-fixture'
 import { CHECK_UPDATES, UPDATE_IDENTITY, WHATS_NEW } from '../shared/update-identity'
 
 const shippedNotes: Record<string, readonly WhatsNewItem[]> = {
@@ -17,19 +22,22 @@ const shippedNotes: Record<string, readonly WhatsNewItem[]> = {
 }
 
 interface Ports {
-  appHandle(channel: string, handler: (event: IpcMainInvokeEvent) => unknown): void
+  appHandle(channel: string, handler: (event: IpcMainInvokeEvent, seen?: unknown) => unknown): void
   broadcast(channel: string, value: unknown): void
   tellMain(channel: string, value: unknown): void
   enabled(): boolean
+  alpha?(): boolean
+  restart?: Pick<InstallerDeps, 'blockers' | 'closeWindows' | 'openWindows' | 'commitAbandoned' | 'drainWriteQueues' | 'writeQueuesBusy'>
   hadConfiguration: boolean
 }
 
 function testFeed(): URL | null {
-  // Only the hidden, unpackaged test app with an explicit temporary profile can use a loopback feed.
-  if (app.isPackaged || process.env.SLIDEWELL_E2E_HIDDEN !== '1' || !process.env.SLIDEWELL_DATA_DIR) return null
   try {
-    const url = new URL(process.env.SLIDEWELL_E2E_UPDATES_FEED ?? '')
-    if (url.protocol === 'http:' && url.hostname === '127.0.0.1' && url.pathname === '/updates.json' &&
+    const fixture = updateFixtureRoot()
+    const hiddenSource = !app.isPackaged && process.env.SLIDEWELL_E2E_HIDDEN === '1' && process.env.SLIDEWELL_DATA_DIR
+    if (!fixture && !hiddenSource) return null
+    const url = new URL(fixture ? readFixtureFeed(fixture) : process.env.SLIDEWELL_E2E_UPDATES_FEED ?? '')
+    if (url.protocol === 'http:' && url.hostname === '127.0.0.1' && url.port && url.pathname === '/updates.json' &&
         !url.username && !url.password && !url.search && !url.hash) return url
   } catch { /* no local stand-in */ }
   return null
@@ -66,15 +74,52 @@ export function installUpdateNotices(ports: Ports) {
   const running = app.getVersion()
   const feedUrl = UPDATE_IDENTITY.feedUrl
   const localFeed = testFeed()
-  const source = copySource({ packaged: app.isPackaged || localFeed !== null, store: process.mas === true, running })
+  const fixture = isUpdateFixture && localFeed !== null
+  const assetPrefix = fixture ? new URL('/releases/download/', localFeed).href : RELEASE_ASSET_PREFIX
+  const source = copySource({
+    packaged: (app.isPackaged && !isUpdateFixture) || localFeed !== null,
+    store: process.mas === true,
+    running
+  })
   const fetchReleaseFeed = createElectronFeedFetcher(UPDATE_IDENTITY, { net, session })
-  const statePath = join(app.getPath('userData'), 'update-notices.json')
+  const dataDir = app.getPath('userData')
+  const statePath = join(dataDir, 'update-notices.json')
+  const alphaOn = () => ports.alpha?.() === true
   let state = readUpdateState(undefined, feedUrl)
+  let channels: ReturnType<typeof validateChannelFeedObject> = null
   try {
-    state = readUpdateState(JSON.parse(readFileSync(statePath, 'utf8')), feedUrl)
-    if (state.latest && !hasSlideWellLinks(state.latest)) state.latest = undefined
-  } catch { /* state can be rebuilt */ }
+    const raw = JSON.parse(readFileSync(statePath, 'utf8'))
+    state = readUpdateState(raw, feedUrl)
+    channels = validateChannelFeedObject({ schema: 1, latest: raw.latest, channels: raw.channels }, feedUrl, assetPrefix)
+  } catch { /* State can be rebuilt. */ }
+
   let enabled = ports.enabled()
+  let alpha = alphaOn()
+  let installer: UpdateInstaller | undefined
+  let lastOffer: string | undefined
+  const offer = () => newerOffer(channels ?? undefined, alphaOn(), running)
+  const fileFor = () => updateFileFor(offer(), process.platform, process.arch)
+  const facts = new Map<string, ReturnType<typeof inPlaceRefusal>>()
+  const refusal = (file: ReturnType<typeof fileFor>) => {
+    if (!app.isPackaged) return 'development'
+    if (source === 'store') return 'store'
+    if (!file) return 'no-file'
+    if (!facts.has(file.url)) facts.set(file.url, inPlaceRefusal(readInPlaceFacts(file, source)))
+    return facts.get(file.url) ?? null
+  }
+  const withInstall = (notice: NoticeSnapshot): UpdateSnapshot => {
+    const file = fileFor()
+    const install = installer?.state() ?? IDLE
+    return { ...notice, alpha: alphaOn(), install, file, refusal: refusal(file), blockers: install.phase === 'waiting' ? ports.restart?.blockers() ?? [] : [] }
+  }
+  const publish = (notice: NoticeSnapshot): void => {
+    const version = offer()?.version
+    const changed = version !== lastOffer
+    lastOffer = version
+    if (changed) installer?.reset()
+    ports.broadcast('updates:changed', withInstall(notice))
+  }
+
   const checker = createUpdateChecker({
     identity: UPDATE_IDENTITY,
     running,
@@ -82,32 +127,45 @@ export function installUpdateNotices(ports: Ports) {
     platform: process.platform,
     arch: process.arch,
     fetchFeed: async () => {
+      if (!ports.enabled()) return { ok: false, reason: 'unreachable' }
       const answer = await (localFeed ? fetchTestFeed(localFeed) : fetchReleaseFeed())
       if (!answer.ok) return answer
-      const validated = validateFeed(answer.text, feedUrl)
-      if (!validated.ok) return answer
-      return hasSlideWellLinks(validated.latest)
-        ? answer : { ok: false, reason: 'unreadable' }
+      const parsed = parseChannelFeed(answer.text, feedUrl, assetPrefix)
+      if (!parsed.ok) return { ok: false, reason: 'unreadable' }
+      // The shared checker still validates and schedules the schema-1 release. Project the opted-in
+      // entry from the full validated feed on every read, including immediately after a channel change.
+      channels = parsed.feed
+      return answer
     },
-    readState: () => state,
+    readState: () => {
+      const latest = channels ? channelOffer(channels, alphaOn()) : undefined
+      const lastResult = state.lastResult === 'newer' || state.lastResult === 'current'
+        ? (latest && compareVersions(latest.version, running) > 0 ? 'newer' : 'current')
+        : state.lastResult
+      return { ...state, latest, lastResult }
+    },
     writeState(next) {
-      state = next
+      state = { ...next, latest: channels?.release }
       const temp = `${statePath}.${randomUUID()}.tmp`
       try {
-        writeFileSync(temp, JSON.stringify(next), { flag: 'wx', mode: 0o600 })
+        writeFileSync(temp, JSON.stringify({ ...state, channels: channels ?? undefined }), { flag: 'wx', mode: 0o600 })
         renameSync(temp, statePath)
       } catch {
         console.warn('[updates] Could not save update notice state.')
       }
     },
     enabled: ports.enabled,
-    isBusy: () => false,
+    isBusy: () => installer?.state().phase === 'restarting',
     hasNotes: (version) => Boolean(shippedNotes[version]?.length),
     hadConfiguration: () => ports.hadConfiguration,
     now: Date.now,
-    changed: (snapshot) => ports.broadcast('updates:changed', snapshot)
+    changed: publish
   })
 
+  const snap = () => withInstall(checker.snapshot())
+  const tell = () => publish(checker.snapshot())
+  const check = async () => ports.enabled() && installer?.state().phase !== 'restarting'
+    ? withInstall(await checker.checkNow()) : snap()
   const open = createUpdateLinkOpener({
     async openExternal(url) {
       if (url !== UPDATE_IDENTITY.storeUrl && !onSlideWellSite(url)) throw new Error('Off-site update link')
@@ -115,34 +173,70 @@ export function installUpdateNotices(ports: Ports) {
       else await shell.openExternal(url)
     }
   }, UPDATE_IDENTITY, () => checker.snapshot().state.latest, process.platform)
+
   const install = ports.appHandle
   const notes = () => ({ version: running, items: shippedNotes[running] ?? [] })
-  install('updates:get', () => checker.snapshot())
-  install('updates:check', () => checker.checkNow())
-  install('updates:not-now', () => checker.notNow())
+  install('updates:get', snap)
+  install('updates:check', check)
+  install('updates:not-now', () => withInstall(checker.notNow()))
   install('updates:skip', () => {
     const offered = checker.snapshot().mark
-    return offered ? checker.skip(offered.version) : checker.snapshot()
+    return offered ? withInstall(checker.skip(offered.version)) : snap()
   })
-  install('updates:stop-skipping', () => checker.stopSkipping())
+  install('updates:stop-skipping', () => withInstall(checker.stopSkipping()))
   install('updates:download', () => open('download'))
   install('updates:release-notes', () => open('notes', checker.snapshot().state.latest?.version))
   install('updates:store', () => source === 'store' && open('store'))
   install('updates:whats-new', () => { checker.dismissWhatsNew(); return notes() })
+  install('updates:update', (_event, seen) => {
+    const entry = offer()
+    const file = fileFor()
+    if (!app.isPackaged || !ports.restart || !file || !ports.enabled() || state.lastResult === 'unreadable' ||
+        !isOfferSeen(seen, entry) || inPlaceRefusal(readInPlaceFacts(file, source))) {
+      tell()
+      return snap()
+    }
+    installer ??= createUpdateInstaller({
+      ...ports.restart,
+      source,
+      cacheDirName: 'slidewell-updater',
+      cacheBase: join(dataDir, 'updater-cache'),
+      configDir: join(dataDir, 'updater'),
+      fixtureOrigin: fixture ? localFeed.origin : null,
+      offerEligible: (candidate) => {
+        const selected = fileFor()
+        return ports.enabled() && state.lastResult !== 'unreadable' && candidate.version === offer()?.version &&
+          selected?.url === candidate.url && selected.sha512 === candidate.sha512 &&
+          selected.size === candidate.size && selected.bundleId === candidate.bundleId
+      },
+      changed: tell,
+      log: (message) => console.log(`[updates] ${message}`)
+    })
+    void installer.start(entry, file)
+    return snap()
+  })
+  install('updates:cancel', () => { installer?.cancel(); return snap() })
+  install('updates:restart', () => { installer?.restart(); return snap() })
 
   if (source !== 'development') checker.start()
   return {
     stop: checker.stop,
+    blocksQuit: () => installer?.blocksQuit() === true,
     settingChanged() {
       const next = ports.enabled()
-      if (next !== enabled) {
+      const nextAlpha = alphaOn()
+      if (next !== enabled || nextAlpha !== alpha) {
+        const previousVersion = channels && channelOffer(channels, alpha).version
+        const nextVersion = channels && channelOffer(channels, nextAlpha).version
+        if (!next || previousVersion !== nextVersion) installer?.cancel()
         enabled = next
+        alpha = nextAlpha
         checker.settingChanged()
       }
     },
     runCommand(id: string): void {
       if (id === CHECK_UPDATES) {
-        void checker.checkNow().then((snapshot: UpdateSnapshot) => ports.tellMain('updates:answer', snapshot))
+        void check().then((snapshot) => ports.tellMain('updates:answer', snapshot))
       } else if (id === WHATS_NEW) {
         checker.dismissWhatsNew()
         ports.tellMain('updates:show-notes', notes())
@@ -154,8 +248,4 @@ export function installUpdateNotices(ports: Ports) {
 function onSlideWellSite(link: string): boolean {
   const url = new URL(link)
   return url.origin === new URL(UPDATE_IDENTITY.feedUrl).origin && url.pathname.startsWith('/slidewell/')
-}
-
-function hasSlideWellLinks({ notes, download }: { notes: string; download: { mac: string; windows: string } }): boolean {
-  return [notes, download.mac, download.windows].every(onSlideWellSite)
 }
