@@ -24,10 +24,13 @@ describe('downloaded SlideWell trust', () => {
     </dict></plist>`)
     execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', bundle], { stdio: 'pipe' })
     execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', bundle])
+    const disposableTrust = { bundleId, team: null }
+    expect(runningSignatureMatches(bundle, disposableTrust)).toBe(true)
     expect(runningSignatureMatches(bundle, RELEASE_TRUST)).toBe(false)
     const zip = join(root, 'fixture.zip')
     execFileSync('/usr/bin/ditto', ['-c', '-k', '--keepParent', bundle, zip])
     const offer = { bundleId, version: '1.1.0', released: '2026-11-22', size: statSync(zip).size, sha512: '', url: '' }
+    expect(await verifyMacDownload(zip, offer, '1.0.0', disposableTrust)).toBeNull()
     expect(await verifyMacDownload(zip, offer, '1.0.0')).toBe('signature')
   })
 

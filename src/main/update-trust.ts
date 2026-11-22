@@ -19,7 +19,7 @@ function signatureArgs(bundle: string, { bundleId, team }: TrustIdentity): strin
   const requirement = team
     ? `${identifier} and anchor apple generic and certificate leaf[subject.OU] = "${team}"`
     : identifier
-  return ['--verify', '--deep', '--strict', '-R', requirement, bundle]
+  return ['--verify', '--deep', '--strict', '-R', `=${requirement}`, bundle]
 }
 
 export function runningSignatureMatches(bundle: string, identity: TrustIdentity): boolean {
