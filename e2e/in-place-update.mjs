@@ -117,7 +117,7 @@ const versionOf = ({ bundle }) => run('/usr/bin/plutil', ['-extract', 'CFBundleS
 async function waitFor(predicate, timeout = 30000) {
   const until = Date.now() + timeout
   while (Date.now() < until) {
-    if (predicate()) return
+    if (await predicate()) return
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
   throw new Error('Timed out waiting for the disposable update fixture')
@@ -162,7 +162,7 @@ try {
     await win.getByRole('button', { name: 'Update', exact: true }).click()
     await waitFor(() => assetCount() === before + 1)
     await win.getByRole('button', { name: 'Cancel', exact: true }).click()
-    await win.waitForFunction(async () => (await window.sw.updates.get()).install.phase === 'idle')
+    await waitFor(async () => (await win.evaluate(() => window.sw.updates.get())).install.phase === 'idle')
     pauseDownload = false
   })
   original(cancelled)
@@ -177,7 +177,7 @@ try {
     ])
     await settings.getByText('Check for new versions daily').waitFor()
     await win.getByRole('button', { name: 'Update', exact: true }).click()
-    await win.waitForFunction(async () => (await window.sw.updates.get()).install.phase === 'waiting', undefined, { timeout: 45000 })
+    await waitFor(async () => (await win.evaluate(() => window.sw.updates.get())).install.phase === 'waiting', 45000)
     original(held)
   })
   original(held)
@@ -188,8 +188,9 @@ try {
     await offer(win)
     writeFileSync(blocked.config, '{"windowBounds":')
     await win.getByRole('button', { name: 'Update', exact: true }).click()
-    await win.waitForFunction(async () => (await window.sw.updates.get()).install.phase === 'waiting', undefined, { timeout: 45000 })
-    assert.ok((await win.evaluate(async () => (await window.sw.updates.get()).blockers)).includes('unsaved'))
+    await waitFor(async () => (await win.evaluate(() => window.sw.updates.get())).install.phase === 'waiting', 45000)
+    const { blockers } = await win.evaluate(() => window.sw.updates.get())
+    assert.ok(blockers.includes('unsaved'), `Expected the unreadable config to hold restart, got ${JSON.stringify(blockers)}`)
     assert.equal(await win.getByRole('button', { name: 'Restart', exact: true }).isDisabled(), true)
   })
   assert.equal(versionOf(blocked), baseVersion)
