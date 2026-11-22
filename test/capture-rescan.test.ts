@@ -34,7 +34,9 @@ type InstallDeps = Parameters<ReturnType<typeof createCaptureSources>['install']
 const extra = join(__dirname, 'fixtures')
 const send = vi.fn()
 const filesChanged = vi.fn()
-const mainWindow = { webContents: { send } } as NonNullable<ReturnType<InstallDeps['getMainWindow']>>
+const isVisible = vi.fn(() => true)
+const isMinimized = vi.fn(() => false)
+const mainWindow = { webContents: { send }, isVisible, isMinimized } as NonNullable<ReturnType<InstallDeps['getMainWindow']>>
 const event = { sender: mainWindow.webContents } as Electron.IpcMainInvokeEvent
 const scanResult = { indexed: 1, total: 1, offline: 0 }
 
@@ -57,6 +59,8 @@ function install() {
 
 beforeEach(() => {
   vi.useFakeTimers()
+  isVisible.mockReturnValue(true)
+  isMinimized.mockReturnValue(false)
   scan.mockReset().mockResolvedValue(scanResult)
   send.mockClear()
   filesChanged.mockClear()
@@ -76,6 +80,10 @@ describe('capture fallback through the Triage scan', () => {
     await vi.advanceTimersByTimeAsync(59_999)
     expect(scan).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(1)
+    expect(scan.mock.calls.map((call) => call[2])).toEqual([__dirname])
+    await vi.advanceTimersByTimeAsync(999)
+    expect(scan).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
     expect(scan.mock.calls.map((call) => call[2])).toEqual([__dirname, extra])
     expect(scan.mock.calls.every((call) => call[4].downloadRoot === null)).toBe(true)
     expect(filesChanged).toHaveBeenCalledTimes(2)
@@ -87,7 +95,7 @@ describe('capture fallback through the Triage scan', () => {
   it('leaves Review and Triage alone when the timer finds unchanged listings', async () => {
     install()
     scan.mockResolvedValue({ indexed: 0, total: 0, offline: 0, skipped: true })
-    await vi.advanceTimersByTimeAsync(60_000)
+    await vi.advanceTimersByTimeAsync(61_000)
     expect(scan).toHaveBeenCalledTimes(2)
     expect(scan.mock.calls.every((call) => call[4].onlyChanged)).toBe(true)
     expect(filesChanged).not.toHaveBeenCalled()
@@ -102,6 +110,73 @@ describe('capture fallback through the Triage scan', () => {
     app.emit('browser-window-focus', {}, mainWindow)
     await vi.advanceTimersByTimeAsync(0)
     expect(scan).toHaveBeenCalledTimes(2)
+  })
+
+  it('waits 20 seconds after a manual scan before either fallback trigger can start', async () => {
+    install()
+    await vi.advanceTimersByTimeAsync(59_999)
+    await handlers.get('triage:scan')!(event)
+    scan.mockClear()
+    app.emit('browser-window-focus', {}, mainWindow)
+    await vi.advanceTimersByTimeAsync(19_999)
+    expect(scan).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    app.emit('browser-window-focus', {}, mainWindow)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(scan).toHaveBeenCalledTimes(2)
+
+    app.emit('browser-window-focus', {}, mainWindow)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(scan).toHaveBeenCalledTimes(2)
+  })
+
+  it('pauses timed scans while hidden or minimised and scans on return', async () => {
+    install()
+    isVisible.mockReturnValue(false)
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(scan).not.toHaveBeenCalled()
+
+    isVisible.mockReturnValue(true)
+    isMinimized.mockReturnValue(true)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(scan).not.toHaveBeenCalled()
+
+    isMinimized.mockReturnValue(false)
+    app.emit('browser-window-focus', {}, mainWindow)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(scan).toHaveBeenCalledTimes(2)
+  })
+
+  it('backs off only the failing source for ten minutes and logs once', async () => {
+    install()
+    const failure = new Error('scan failed')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const primaryScans = () => scan.mock.calls.filter((call) => call[2] === __dirname).length
+    let shouldFail = true
+    scan.mockImplementation(async (_archive, _well, source: string) => {
+      if (source === __dirname && shouldFail) throw failure
+      return scanResult
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(primaryScans()).toBe(1)
+      expect(warn).toHaveBeenCalledOnce()
+      app.emit('browser-window-focus', {}, mainWindow)
+      await vi.advanceTimersByTimeAsync(599_999)
+      expect(primaryScans()).toBe(1)
+      expect(scan.mock.calls.filter((call) => call[2] === extra).length).toBeGreaterThan(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(primaryScans()).toBe(2)
+      expect(warn).toHaveBeenCalledOnce()
+
+      shouldFail = false
+      await vi.advanceTimersByTimeAsync(600_000)
+      expect(primaryScans()).toBe(3)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(primaryScans()).toBe(4)
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('skips a busy source on both timer and focus, then retries it later', async () => {
