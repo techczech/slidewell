@@ -167,7 +167,9 @@ export function createUpdateInstaller(deps: InstallerDeps) {
     if (before.job === 'absent' && before.request === 'absent') return withdrawalResult(before, before)
     if (before.job !== 'absent') native.unload()
     // Only the request is needed to disarm ShipIt. Leave the larger cache to ordinary cleanup.
-    try { unlinkSync(native.request) } catch { /* The final check reports any remaining request. */ }
+    try {
+      if (lstatSync(native.folder).isDirectory()) unlinkSync(native.request)
+    } catch { /* The final check reports any remaining request. */ }
     return withdrawalResult(before, native.check())
   }
 

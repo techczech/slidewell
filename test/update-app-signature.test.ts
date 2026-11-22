@@ -47,7 +47,7 @@ describe('downloaded SlideWell trust', () => {
   it('checks the pinned team and rejects a bundle whose codesign assessment fails', async () => {
     const observed: string[][] = []
     const { verifyBundleTrust } = await import('../src/main/update-trust')
-    const verdict = await verifyBundleTrust('/tmp/fake-wrong-team.app', { bundleId, team }, async (tool, args) => {
+    const verdict = await verifyBundleTrust('/tmp/fake-wrong-team.app', RELEASE_TRUST, async (tool, args) => {
       observed.push([tool, ...args])
       if (tool === '/usr/bin/codesign') throw new Error('does not satisfy its specified requirement')
     })
