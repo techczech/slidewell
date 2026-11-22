@@ -122,6 +122,30 @@ describe('explicit update and restart', () => {
     expect(quitAndInstall).not.toHaveBeenCalled()
   })
 
+  it('checks once more on ordinary quit and lets it proceed when withdrawal is still unclear', async () => {
+    const native = new EventEmitter()
+    const ask = vi.fn()
+    const quitAndInstall = vi.fn()
+    const unclear = { found: true, gone: false, after: 'unknown' as const }
+    const withdrawNative = vi.fn(async () => unclear)
+    const withdrawOnQuit = vi.fn(() => unclear)
+    let windows = 0
+    const t = setup({
+      native: () => Object.assign(native, { checkForUpdates: ask, quitAndInstall }),
+      openWindows: () => windows, withdrawNative, withdrawOnQuit
+    })
+    await t.engine.start(offer)
+    await vi.waitFor(() => expect(ask).toHaveBeenCalledOnce())
+    windows = 1
+    native.emit('update-downloaded')
+    await vi.waitFor(() => expect(t.engine.state()).toMatchObject({ phase: 'reopen', pending: true }))
+    const preventDefault = vi.fn()
+    t.engine.beforeQuit({ preventDefault } as never)
+    expect(withdrawOnQuit).toHaveBeenCalledOnce()
+    expect(preventDefault).not.toHaveBeenCalled()
+    expect(quitAndInstall).not.toHaveBeenCalled()
+  })
+
   it('tracks unfinished work and locks its entry points once the restart begins', async () => {
     const work = createRestartWork()
     let finish!: () => void
