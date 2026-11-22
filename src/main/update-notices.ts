@@ -15,6 +15,11 @@ import { isUpdateFixture, readFixtureFeed, updateFixtureRoot } from './update-fi
 import { CHECK_UPDATES, UPDATE_IDENTITY, WHATS_NEW } from '../shared/update-identity'
 
 const shippedNotes: Record<string, readonly WhatsNewItem[]> = {
+  '0.4.0-alpha.21': [
+    { title: 'New screenshots arrive on their own', text: 'Triage now looks for new captures when you come back to SlideWell and once a minute while it is open, so a screenshot shows up even when macOS forgets to announce it.' },
+    { title: 'Updates in one click', text: 'Tick Get early versions (alpha) in Settings › About and updates to install new versions from inside SlideWell; it checks that each one comes from the same developer before restarting.' },
+    { title: 'Security fixes', text: 'The picture library SlideWell uses to read and resize images is updated to a version with known problems fixed.' }
+  ],
   '0.4.0-alpha.20': [
     { title: 'Update notices', text: 'SlideWell checks once a day whether a newer version exists and tells you. Turn this off in Settings › About and updates.' },
     { title: 'Safer saving', text: 'A screenshot leaves the inbox only after its copy in the well has been checked, and a damaged settings file is kept aside instead of being overwritten.' }
