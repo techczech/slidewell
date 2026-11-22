@@ -78,6 +78,8 @@ try {
   }
   await openInspectorOnFirstSlide(win)
   const btn = win.locator('.more-like-this .primary-btn')
+  // The inspector reads model status over IPC after mounting.
+  await btn.and(win.locator('button:enabled')).waitFor({ timeout: 10000 })
   check('button is enabled with the model', !(await btn.isDisabled()))
   check('hint names what it does', (await win.locator('.mlt-hint').innerText()).includes('other presentations'))
   // The sample indexes only part of the archive, so walk the cards until one is indexed; those walked past

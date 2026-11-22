@@ -31,6 +31,13 @@ const app = await launchHidden(userData, home)
 try {
   const win = await app.firstWindow({ timeout: 20000 })
   await win.waitForLoadState('domcontentloaded')
+  const sendCommand = (id) => app.evaluate(({ BrowserWindow }, command) => {
+    BrowserWindow.getAllWindows()[0].webContents.send('app:command', command)
+  }, id)
+  const dismiss = async (selector) => {
+    await sendCommand('dismiss')
+    await win.locator(selector).waitFor({ state: 'hidden', timeout: 5000 })
+  }
 
   const title = await win.title()
   const wordmark = (await win.locator('.wordmark').textContent())?.trim()
@@ -120,9 +127,8 @@ try {
     await win.fill('.search-input', 'dyslexia')
     await win.waitForTimeout(1200)
 
-    // keyboard: blur search, arrow-select, inspector (I), command palette (⌘K), help (?)
-    await win.keyboard.press('Escape') // blur the search input
-    await win.waitForTimeout(150)
+    // Start outside the text field so navigation and the inspector shortcut reach the grid.
+    await win.locator('.search-input').blur()
     // index of the selected card among the rendered grid (DOM order == orderedReps order)
     const selIndex = () =>
       win.evaluate(() => Array.from(document.querySelectorAll('main .grid .card')).findIndex((c) => c.classList.contains('selected')))
@@ -140,20 +146,16 @@ try {
     await win.keyboard.press('i')
     await win.waitForTimeout(350)
     inspectorOk = (await win.locator('.deck-sidebar').count()) === 1
-    await win.keyboard.press('Escape')
-    await win.waitForTimeout(200)
+    await dismiss('.deck-sidebar')
     await win.keyboard.press('Meta+k')
     await win.waitForTimeout(350)
     paletteOk =
       (await win.locator('.cmd-palette').count()) === 1 &&
       (await win.locator('.cmd-item').count()) > 0 &&
       (await win.locator('.cmd-shortcut').count()) > 0 // actions list their keyboard shortcuts
-    await win.keyboard.press('Escape')
-    await win.waitForTimeout(200)
-    // This spec launches a hidden window, so open the cheat sheet through the app command bridge.
-    await app.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0].webContents.send('app:command', 'cheat')
-    })
+    // The palette has a focused text field. Dismiss it through the app command bridge.
+    await dismiss('.cmd-palette')
+    await sendCommand('cheat')
     const help = win.getByRole('dialog', { name: 'Keyboard shortcuts' })
     await help.waitFor({ timeout: 5000 })
     helpOk = (await help.locator('[data-command]').count()) >= 30
@@ -213,9 +215,8 @@ try {
       await win.keyboard.press('Meta+k')
       await win.waitForTimeout(300)
       lightboxPaletteOk = (await win.locator('.cmd-palette').count()) === 1
-      await win.keyboard.press('Escape')
-      await win.waitForTimeout(150)
-      await win.keyboard.press('Escape')
+      await dismiss('.cmd-palette')
+      await dismiss('.lightbox')
     }
 
     // a filter re-runs (Date select: Owner, Date, Slides → nth 1)
@@ -268,8 +269,7 @@ try {
       await win.waitForTimeout(900)
     }
     deckModeOk = nDeckCards > 0 && (await win.locator('.deck-sidebar').count()) === 1
-    await win.keyboard.press('Escape') // close the deck inspector before clicking the titlebar
-    await win.waitForTimeout(200)
+    await dismiss('.deck-sidebar')
 
     // Stats panel: opens and renders year bars
     await win.locator('.tb-btn', { hasText: 'Stats' }).click()
@@ -298,6 +298,7 @@ try {
   await app.close()
   finish(pass ? null : failedChecks(report) || 'smoke assertions failed', 2)
 } catch (e) {
+  console.error(e.stack)
   out({ launched: false, error: String(e) })
   await app.close().catch(() => {})
   finish(String(e))
