@@ -6,7 +6,8 @@
 // default archive/well/others folders and TalkWeaver's config from HOME), so it can never read or
 // write a real SlideWell profile. With no archive the run covers the shell only (archiveConnected:
 // false). To exercise the archive features, point SLIDEWELL_SMOKE_ARCHIVE at a Core A archive; the
-// spec copies it into scratch before launching the app.
+// spec copies it into scratch before launching the app. Generate a synthetic archive with
+// node e2e/support/make-smoke-archive.mjs and pass the printed path as SLIDEWELL_SMOKE_ARCHIVE.
 import { finish, failedChecks } from './support/result.mjs'
 import { copyFixture, createScratch, launchHidden } from './support/scratch.mjs'
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
@@ -149,10 +150,14 @@ try {
       (await win.locator('.cmd-shortcut').count()) > 0 // actions list their keyboard shortcuts
     await win.keyboard.press('Escape')
     await win.waitForTimeout(200)
-    await win.keyboard.press('?')
-    await win.waitForTimeout(250)
-    helpOk = (await win.locator('.help-modal').count()) === 1
-    await win.keyboard.press('Escape')
+    // This spec launches a hidden window, so open the cheat sheet through the app command bridge.
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].webContents.send('app:command', 'cheat')
+    })
+    const help = win.getByRole('dialog', { name: 'Keyboard shortcuts' })
+    await help.waitFor({ timeout: 5000 })
+    helpOk = (await help.locator('[data-command]').count()) >= 30
+    await help.getByRole('button', { name: /close/i }).click()
     await win.waitForTimeout(200)
 
     // Triage is a main tab. Return to Search before checking its selection and action menu again.

@@ -268,7 +268,7 @@ try {
     const { row, input } = await openKeyForm(slotId)
     await input.fill(key)
     await row.getByRole('button', { name: 'Add key', exact: true }).click()
-    await row.getByText(/Key saved/).waitFor({ timeout: 10000 })
+    await row.getByText('Connected', { exact: true }).waitFor({ timeout: 10000 })
   }
   const openAuto = async () => {
     await closeSettings()
@@ -424,10 +424,10 @@ try {
   await antForm.input.fill(FAKE_KEY) // the OpenAI-shaped key, in the wrong field
   await antForm.row.getByRole('button', { name: 'Add key', exact: true }).click()
   await antForm.sw.locator('[role="alert"]').waitFor({ timeout: 10000 }) // the window's notice (main's exact words are not shown any more)
-  check('an OpenAI-shaped key is refused as the Anthropic key', !readCfg().anthropicKeyEnc && (await antForm.row.getByText(/Key saved/).count()) === 0)
+  check('an OpenAI-shaped key is refused as the Anthropic key', !readCfg().anthropicKeyEnc && (await antForm.row.getByText('Connected', { exact: true }).count()) === 0)
   await antForm.input.fill(FAKE_ANT_KEY)
   await antForm.row.getByRole('button', { name: 'Add key', exact: true }).click()
-  await antForm.row.getByText(/Key saved/).waitFor({ timeout: 10000 })
+  await antForm.row.getByText('Connected', { exact: true }).waitFor({ timeout: 10000 })
   await gotoSorter()
   await anthropicRow.locator('.pic-ready', { hasText: 'Saved' }).waitFor({ timeout: 10000 })
   const cfgBothText = readFileSync(join(userData, 'config.json'), 'utf8')
