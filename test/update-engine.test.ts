@@ -88,6 +88,40 @@ describe('explicit update and restart', () => {
     }
   })
 
+  it('leaves the windows open when a newly selected channel invalidates the held offer', async () => {
+    let held = true
+    let eligible = true
+    const closeWindows = vi.fn(async () => true)
+    const t = setup({ blockers: () => held ? ['work'] : [], gate: () => eligible ? null : 'changed', closeWindows })
+    await t.engine.start(offer)
+    expect(t.engine.state().phase).toBe('waiting')
+    held = false
+    eligible = false
+    t.engine.restart()
+    expect(t.engine.state().phase).toBe('failed')
+    expect(closeWindows).not.toHaveBeenCalled()
+    expect(t.handOver).not.toHaveBeenCalled()
+  })
+
+  it('withdraws an armed preparation if a window reopens before the native answer', async () => {
+    const native = new EventEmitter()
+    const ask = vi.fn()
+    const quitAndInstall = vi.fn()
+    const withdrawNative = vi.fn(async () => ({ found: true, gone: true, after: 'absent' as const }))
+    let windows = 0
+    const t = setup({
+      native: () => Object.assign(native, { checkForUpdates: ask, quitAndInstall }),
+      openWindows: () => windows, withdrawNative
+    })
+    await t.engine.start(offer)
+    await vi.waitFor(() => expect(ask).toHaveBeenCalledOnce())
+    windows = 1
+    native.emit('update-downloaded')
+    await vi.waitFor(() => expect(t.engine.state()).toMatchObject({ phase: 'reopen', pending: false }))
+    expect(withdrawNative).toHaveBeenCalledOnce()
+    expect(quitAndInstall).not.toHaveBeenCalled()
+  })
+
   it('tracks unfinished work and locks its entry points once the restart begins', async () => {
     const work = createRestartWork()
     let finish!: () => void

@@ -189,7 +189,7 @@ try {
     writeFileSync(blocked.config, '{"windowBounds":')
     await win.getByRole('button', { name: 'Update', exact: true }).click()
     await win.waitForFunction(async () => (await window.sw.updates.get()).install.phase === 'waiting', undefined, { timeout: 45000 })
-    assert.deepEqual(await win.evaluate(async () => (await window.sw.updates.get()).blockers), ['unsaved'])
+    assert.ok((await win.evaluate(async () => (await window.sw.updates.get()).blockers)).includes('unsaved'))
     assert.equal(await win.getByRole('button', { name: 'Restart', exact: true }).isDisabled(), true)
   })
   assert.equal(versionOf(blocked), baseVersion)

@@ -10,9 +10,13 @@ export function updateFixtureRoot(): string | null {
   if (!isUpdateFixture || !app.isPackaged) return null
   const bundle = resolve(process.execPath, '..', '..', '..')
   const root = dirname(bundle)
-  if (!/^\/(?:private\/)?tmp\/swup-[A-Za-z0-9]+$/.test(root) ||
-      !existsSync(join(root, 'fixture-marker')) || realpathSync(bundle) !== join(realpathSync(root), 'SlideWell Update Test.app')) return null
-  return root
+  const temporary = /^\/(?:private\/)?tmp\/swup-[A-Za-z0-9]+$/
+  if (!temporary.test(root) || !existsSync(join(root, 'fixture-marker'))) return null
+  try {
+    const canonical = realpathSync(root)
+    return temporary.test(canonical) && realpathSync(bundle) === join(canonical, 'SlideWell Update Test.app')
+      ? canonical : null
+  } catch { return null }
 }
 
 export function readFixtureFeed(root: string): string {

@@ -388,6 +388,8 @@ export function createUpdateEngine(ports: EnginePorts) {
   /** D3: the person's action means restart now. Re-read the blockers; only then hand the verified file to Squirrel.Mac. */
   function restartNow(a: Attempt): void {
     if (!live(a) || a.file === null) return
+    const refusal = ports.gate(a.offer)
+    if (refusal !== null) { fail(a, 'other', refusal); return }
     const blockers = blockersNow()
     if (blockers.length > 0) {
       if (state.phase === 'downloading') { ports.log(`downloaded ${a.offer.version}; the restart waits, nothing armed: ${blockers.join(', ')}`); set({ type: 'downloaded', blockers }) }
