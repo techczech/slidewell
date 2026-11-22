@@ -18,13 +18,14 @@ import { ocrImage, ingestScreenshot, ingestVideo, makePoster, recordWellSource }
 import { appKey, tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
 import { parseScreenshotName, type NameTemplate } from './screenshot-name'
 import { downloadOnlineOnly as downloadInChild, downloadWithDeadline, openDownloaded, type DownloadOptions, type FileIdentity } from './online-only'
-import { walk } from './scan-walk'
+import { walk, walkAsync } from './scan-walk'
 import { DatabaseSync } from 'node:sqlite'
 import { pileOf, type ProposalLabel } from './review/piles'
 import { hiddenFromLists } from './review/store'
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'heic', 'heif', 'tiff', 'tif', 'bmp'])
 const VIDEO_EXT = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv'])
+const CAPTURE_SETTLE_MS = 2000
 
 /** Soft gate (ADR-0029): a video over this needs an explicit confirm before include. */
 export const VIDEO_GATE_BYTES = 20 * 1024 * 1024
@@ -212,7 +213,13 @@ async function scanTriageSourceNow(
   const db = triageDb(wellRoot)
 
   // Phase 0 — enumerate (stat only). The primary Triage subtree is never entered from another source.
-  const walked = [...walk(sourceRoot, !opts.namedOnly, excludeDir)].map((w) => w.abs)
+  const settledBefore = Date.now() - CAPTURE_SETTLE_MS
+  const walked: string[] = []
+  if (opts.onlyChanged) {
+    for await (const { abs } of walkAsync(sourceRoot, !opts.namedOnly, excludeDir)) walked.push(abs)
+  } else {
+    for (const { abs } of walk(sourceRoot, !opts.namedOnly, excludeDir)) walked.push(abs)
+  }
   // lower-case names per folder: a trailing " 2" is a duplicate counter only when the plain name is there too
   const siblings = new Map<string, Set<string>>()
   for (const abs of walked) {
@@ -228,13 +235,15 @@ async function scanTriageSourceNow(
     if (!kind) continue
     if (opts.namedOnly && !parseName(abs)) continue
     try {
-      const st = statSync(abs)
+      const st = opts.onlyChanged ? await fsp.stat(abs) : statSync(abs)
+      if (opts.onlyChanged && st.mtimeMs > settledBefore) continue
       files.push({ abs, rel: relative(sourceRoot, abs), kind, ext, size: st.size, mtime: Math.round(st.mtimeMs), offline: st.size > 0 && st.blocks === 0 })
     } catch {
       continue
     }
     if (!opts.onlyChanged && files.length % 200 === 0) onProgress?.(`found ${files.length} media files…`)
   }
+  if (opts.isCurrent?.() === false) return skipped
   // Record what this scan saw before reading any bytes. Files that arrive during the scan
   // will change the next listing, even if the watcher misses their events.
   const listing = opts.listing

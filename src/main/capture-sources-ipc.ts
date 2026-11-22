@@ -24,11 +24,16 @@ import type { AppHandle } from './app-handle'
 export type CaptureSource = { path: string; namedOnly: boolean }
 
 const CAPTURE_RESCAN_MS = 60_000
+const CAPTURE_RESCAN_STAGGER_MS = 1000
+const CAPTURE_RESCAN_GAP_MS = 20_000
+const CAPTURE_RESCAN_BACKOFF_MS = 10 * 60_000
 
 interface ScheduledSource {
   source: CaptureSource
   listing: ScanListing
-  timer: ReturnType<typeof setInterval>
+  timer?: ReturnType<typeof setTimeout>
+  lastScanAt?: number
+  failedAt?: number
 }
 
 interface ConfigPatch {
@@ -194,22 +199,38 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     const onTriageProgress = (m: string): void => void getMainWindow()?.webContents.send('triage:progress', m)
     const scheduled = new Map<string, ScheduledSource>()
     const pending = new Map<string, number>()
+    const loggedFailures = new Set<string>()
     let launchTimer: ReturnType<typeof setTimeout> | undefined
 
-    async function scanSource(s: CaptureSource, o: { downloads?: boolean; fallback?: ScheduledSource } = {}) {
+    async function scanSource(s: CaptureSource, o: { downloads?: boolean; fallback?: () => boolean } = {}) {
       pending.set(s.path, (pending.get(s.path) ?? 0) + 1)
+      const entry = scheduled.get(s.path)
+      const startedAt = Date.now()
+      const fallback = o.fallback
+      const isCurrent = fallback && (() => scheduled.get(s.path) === entry && existsSync(s.path) && fallback())
       try {
-        const listing = scheduled.get(s.path)?.listing
-        const fallback = o.fallback
         const opts = await scanOptionsFor(s, o)
         const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, {
           ...opts,
-          listing,
+          listing: entry?.listing,
           onlyChanged: Boolean(fallback),
-          isCurrent: fallback && (() => scheduled.get(s.path) === fallback && existsSync(s.path))
+          isCurrent
         })
+        if (entry && scheduled.get(s.path) === entry && (!res.skipped || isCurrent?.() !== false)) {
+          entry.lastScanAt = Date.now()
+          entry.failedAt = undefined
+        }
         if (!res.skipped) review.filesChanged()
         return res
+      } catch (error) {
+        if (entry && scheduled.get(s.path) === entry) {
+          entry.failedAt = startedAt
+          if (!loggedFailures.has(s.path)) {
+            loggedFailures.add(s.path)
+            console.warn('Triage scan failed for capture source', s.path, error)
+          }
+        }
+        throw error
       } finally {
         const count = pending.get(s.path)! - 1
         if (count) pending.set(s.path, count)
@@ -253,28 +274,46 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
       if (!s || restartWork.locked()) return
       void restartWork.run(() => scanSource(s)).then(notifyTriage).catch(() => undefined)
     })
-    function rescan(entry: ScheduledSource): void {
+    function mainWindowVisible(): boolean {
+      const window = getMainWindow()
+      return Boolean(window?.isVisible() && !window.isMinimized())
+    }
+    function rescan(entry: ScheduledSource, timer = false): void {
       const s = entry.source
-      if (restartWork.locked() || pending.has(s.path) || !existsSync(s.path)) return
-      void restartWork.run(() => scanSource(s, { downloads: false, fallback: entry }))
+      const canScan = () => !timer || mainWindowVisible()
+      if (!canScan() || restartWork.locked() || pending.has(s.path) || !existsSync(s.path)) return
+      const now = Date.now()
+      if (now - (entry.lastScanAt ?? -Infinity) < CAPTURE_RESCAN_GAP_MS) return
+      if (now - (entry.failedAt ?? -Infinity) < CAPTURE_RESCAN_BACKOFF_MS) return
+      void restartWork.run(() => scanSource(s, { downloads: false, fallback: canScan }))
         .then((res) => { if (!res.skipped) notifyTriage() })
         .catch(() => undefined)
     }
     const rescanOnFocus = (_event: Electron.Event, window: BrowserWindow): void => {
       if (window === getMainWindow()) for (const entry of scheduled.values()) rescan(entry)
     }
+    function scheduleRescan(entry: ScheduledSource, delay: number): void {
+      entry.timer = setTimeout(() => {
+        scheduleRescan(entry, CAPTURE_RESCAN_MS)
+        rescan(entry, true)
+      }, delay)
+    }
     function refreshWatchers(): void {
       watcher.setSources(triageSources().map((s) => ({ path: s.path, recursive: !s.namedOnly })))
       const wanted = new Map(captureSources(true).map((s) => [s.path, s]))
       for (const [path, entry] of scheduled) {
         if (wanted.get(path)?.namedOnly === entry.source.namedOnly) continue
-        clearInterval(entry.timer)
+        clearTimeout(entry.timer)
         scheduled.delete(path)
       }
+      let delay = CAPTURE_RESCAN_MS
       for (const source of wanted.values()) {
-        if (scheduled.has(source.path)) continue
-        const entry: ScheduledSource = { source, listing: {}, timer: setInterval(() => rescan(entry), CAPTURE_RESCAN_MS) }
-        scheduled.set(source.path, entry)
+        if (!scheduled.has(source.path)) {
+          const entry: ScheduledSource = { source, listing: {} }
+          scheduled.set(source.path, entry)
+          scheduleRescan(entry, delay)
+        }
+        delay += CAPTURE_RESCAN_STAGGER_MS
       }
     }
     refreshWatchers()
@@ -282,7 +321,7 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     app.on('will-quit', () => {
       app.removeListener('browser-window-focus', rescanOnFocus)
       clearTimeout(launchTimer)
-      for (const entry of scheduled.values()) clearInterval(entry.timer)
+      for (const entry of scheduled.values()) clearTimeout(entry.timer)
       scheduled.clear()
       watcher.close()
       captureDownloads.stop() // kill any active download child

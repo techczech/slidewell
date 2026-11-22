@@ -65,6 +65,12 @@ try {
   await win.locator('.view-switch .scope-tab', { hasText: 'Triage' }).click()
   await win.waitForSelector('.triage-panel', { timeout: 5000 })
   result.panelOpened = (await win.locator('.triage-panel').count()) === 1
+  // Exercise the timer's visible-window path without showing or focusing the actual window.
+  const mainWindow = await app.browserWindow(win)
+  await mainWindow.evaluate((window) => {
+    if (window.isVisible()) throw new Error('Triage E2E window must be hidden')
+    window.isVisible = () => true
+  })
 
   const { items: launchRows, error: launchRowsError } = await waitForTriageRows(win, [
     { filename: PRE, source: second },
@@ -150,7 +156,7 @@ try {
   writeFileSync(join(desk, DESKTOP), Buffer.from(YELLOW, 'base64'))
   // Allow one full safety-net interval plus time to index and relist the fixture rows.
   const { items: watchedRows, error: watchedRowsError } = await waitForTriageRows(
-    win, [{ filename: CS, source: second }, { filename: DESKTOP, source: desk }], 75_000
+    win, [{ filename: CS, source: second }, { filename: DESKTOP, source: desk }], 85_000
   )
   result.automaticDiscoveryMs = Math.round(performance.now() - droppedAt)
   if (watchedRowsError) result.watchedRowsError = watchedRowsError
