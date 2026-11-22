@@ -36,7 +36,8 @@ const send = vi.fn()
 const filesChanged = vi.fn()
 const isVisible = vi.fn(() => true)
 const isMinimized = vi.fn(() => false)
-const mainWindow = { webContents: { send }, isVisible, isMinimized } as NonNullable<ReturnType<InstallDeps['getMainWindow']>>
+const isDestroyed = vi.fn(() => false)
+const mainWindow = { webContents: { send }, isVisible, isMinimized, isDestroyed } as NonNullable<ReturnType<InstallDeps['getMainWindow']>>
 const event = { sender: mainWindow.webContents } as Electron.IpcMainInvokeEvent
 const scanResult = { indexed: 1, total: 1, offline: 0 }
 
@@ -59,7 +60,9 @@ function install() {
 
 beforeEach(() => {
   vi.useFakeTimers()
+  isVisible.mockReset()
   isVisible.mockReturnValue(true)
+  isDestroyed.mockReturnValue(false)
   isMinimized.mockReturnValue(false)
   scan.mockReset().mockResolvedValue(scanResult)
   send.mockClear()
@@ -145,6 +148,18 @@ describe('capture fallback through the Triage scan', () => {
     app.emit('browser-window-focus', {}, mainWindow)
     await vi.advanceTimersByTimeAsync(0)
     expect(scan).toHaveBeenCalledTimes(2)
+  })
+
+  it('skips a closed main window without calling its visibility methods', async () => {
+    install()
+    isDestroyed.mockReturnValue(true)
+    isVisible.mockImplementation(() => { throw new Error('Object has been destroyed') })
+
+    await vi.advanceTimersByTimeAsync(61_000)
+    app.emit('browser-window-focus', {}, mainWindow)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(isVisible).not.toHaveBeenCalled()
+    expect(scan).not.toHaveBeenCalled()
   })
 
   it('backs off only the failing source for ten minutes and logs once', async () => {

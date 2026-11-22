@@ -276,7 +276,7 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     })
     function mainWindowVisible(): boolean {
       const window = getMainWindow()
-      return Boolean(window?.isVisible() && !window.isMinimized())
+      return Boolean(window && !window.isDestroyed() && window.isVisible() && !window.isMinimized())
     }
     function rescan(entry: ScheduledSource, timer = false): void {
       const s = entry.source
@@ -290,7 +290,7 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
         .catch(() => undefined)
     }
     const rescanOnFocus = (_event: Electron.Event, window: BrowserWindow): void => {
-      if (window === getMainWindow()) for (const entry of scheduled.values()) rescan(entry)
+      if (window === getMainWindow() && !window.isDestroyed()) for (const entry of scheduled.values()) rescan(entry)
     }
     function scheduleRescan(entry: ScheduledSource, delay: number): void {
       entry.timer = setTimeout(() => {
