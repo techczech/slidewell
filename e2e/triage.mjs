@@ -5,8 +5,21 @@ import { finish, failedChecks } from './support/result.mjs'
 import { createScratch, launchHidden } from './support/scratch.mjs'
 import { mkdirSync, writeFileSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 
 const out = (o) => console.log(JSON.stringify(o))
+
+async function waitForTriageRows(win, expected) {
+  const deadline = performance.now() + 60000
+  while (performance.now() < deadline) {
+    const { items } = await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0))
+    if (expected.every(({ filename, source }) => items.some((row) => row.filename === filename && row.source === source))) {
+      return items
+    }
+    await delay(250)
+  }
+  throw new Error(`Timed out waiting for Triage rows: ${expected.map(({ filename }) => filename).join(', ')}`)
+}
 
 // two distinct 1x1 PNGs (different bytes → different content hashes)
 const RED = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
@@ -51,11 +64,11 @@ try {
   await win.waitForSelector('.triage-panel', { timeout: 5000 })
   result.panelOpened = (await win.locator('.triage-panel').count()) === 1
 
-  let pre = []
-  for (let i = 0; i < 20 && pre.length < 1; i++) {
-    await win.waitForTimeout(1000)
-    pre = (await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0))).items.filter((x) => x.filename === PRE)
-  }
+  const launchRows = await waitForTriageRows(win, [
+    { filename: PRE, source: second },
+    ...['one.png', 'two.png', 'dup.png'].map((filename) => ({ filename, source }))
+  ])
+  const pre = launchRows.filter((x) => x.filename === PRE)
   result.launchScanPicksUp = pre.length === 1 && pre[0].app === 'Safari'
 
   // scan the fixture (recursive: 3 files across a subfolder, two of them byte-identical)
@@ -128,13 +141,11 @@ try {
   const GREEN = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg+M/wHwAEAQH/cetH5QAAAABJRU5ErkJggg=='
   const YELLOW = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg=='
   writeFileSync(join(second, CS), Buffer.from(GREEN, 'base64'))
-  writeFileSync(join(desk, 'Screenshot 2026-10-09 at 10.05.01.png'), Buffer.from(YELLOW, 'base64'))
+  const DESKTOP = 'Screenshot 2026-10-09 at 10.05.01.png'
   writeFileSync(join(desk, 'notes.png'), Buffer.from(BLUE, 'base64'))
-  let watched = []
-  for (let i = 0; i < 25 && watched.length < 2; i++) {
-    await win.waitForTimeout(1000)
-    watched = (await win.evaluate(() => window.sw.triage.list('', 'all', 'scanned', 50, 0))).items.filter((x) => x.filename !== PRE && (x.source.endsWith('second') || x.source.endsWith('desktop')))
-  }
+  writeFileSync(join(desk, DESKTOP), Buffer.from(YELLOW, 'base64'))
+  const watchedRows = await waitForTriageRows(win, [{ filename: CS, source: second }, { filename: DESKTOP, source: desk }])
+  const watched = watchedRows.filter((x) => x.filename !== PRE && (x.source === second || x.source === desk))
   const cs = watched.find((x) => x.filename === CS)
   result.watchedAppears = watched.length === 2
   result.parsedFields = Boolean(cs) && cs.app === 'Google Chrome' && cs.windowTitle === 'TalkWeaver Layout Showcase' && cs.takenAt === '2026-10-08T08:01:00' && cs.date === '2026-10-08'
