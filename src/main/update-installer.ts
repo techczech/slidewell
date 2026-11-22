@@ -8,7 +8,7 @@
 // Windows constructs nothing: no in-place install there in this release (ADR-0044 §5).
 import { app, session } from 'electron'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { accessSync, constants, existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { MacUpdater, type AppUpdater, type UpdateInfo } from 'electron-updater'
@@ -20,7 +20,10 @@ import {
   type NativeUpdater, type Offer, type Presence, type Withdrawal,
 } from './update-engine'
 import { installUpdateDownloadFilter } from './update-download-filter'
-import { UPDATE_INSTALL_IDENTITY } from '../shared/update-identity'
+import { isUpdateFixture } from './update-fixture'
+import { FIXTURE_TRUST, RELEASE_TRUST, runningSignatureMatches } from './update-trust'
+
+const expectedTrust = isUpdateFixture ? FIXTURE_TRUST : RELEASE_TRUST
 
 /** electron-updater's own network partition (electronHttpExecutor.ts NET_SESSION_NAME). */
 const UPDATER_PARTITION = 'electron-updater'
@@ -64,6 +67,9 @@ function readBundleId(bundle: string): string | null {
 const runningBundle = (): string => resolve(process.execPath, '..', '..', '..')
 
 /** The facts inPlaceRefusal decides on, read from this computer now. */
+// Verify once for this running bundle. Each download is checked independently after extraction.
+let validRunningSignature: boolean | undefined
+
 export function readInPlaceFacts(file: UpdateFile | null, source: string): InPlaceFacts {
   const platform = process.platform
   const appPath = platform === 'darwin' ? runningBundle() : dirname(process.execPath)
@@ -74,7 +80,10 @@ export function readInPlaceFacts(file: UpdateFile | null, source: string): InPla
     accessSync(dirname(appPath), constants.W_OK)
     writable = true
   } catch (error) { writeError = (error as NodeJS.ErrnoException)?.code ?? 'EACCES' }
-  return { platform, arch: process.arch, source, file, appPath, writable, writeError, bundleId: platform === 'darwin' ? readBundleId(appPath) : null }
+  const bundleId = platform === 'darwin' ? readBundleId(appPath) : null
+  const trusted = app.isPackaged && process.mas !== true && bundleId === expectedTrust.bundleId &&
+    (validRunningSignature ??= runningSignatureMatches(appPath, expectedTrust))
+  return { platform, arch: process.arch, source, file, appPath, writable, writeError, bundleId, trusted }
 }
 
 export function createUpdateInstaller(deps: InstallerDeps) {
@@ -112,45 +121,56 @@ export function createUpdateInstaller(deps: InstallerDeps) {
   }
   const theUpdater = (): AppUpdater => (updater ??= create())
 
-  /**
-   * Squirrel.Mac keeps a prepared update as an install request (ShipItState.plist in its cache folder) and a launchd
-   * job (ShipIt) that installs it when the app's process ends. Remove both, then CHECK that both are gone.
-   */
-  async function withdrawNative(): Promise<Withdrawal> {
-    if (process.platform !== 'darwin') return { found: false, gone: true, after: 'absent' }
-    const bundleId = readBundleId(runningBundle())
-    if (bundleId !== (deps.fixtureOrigin ? UPDATE_INSTALL_IDENTITY.fixtureBundleId : UPDATE_INSTALL_IDENTITY.bundleId)) { deps.log('the withdrawal could not name ShipIt (no bundle identifier): not confirmed'); return { found: true, gone: false, after: 'unknown' } }
-    const label = `${bundleId}.ShipIt`
+  function nativeWithdrawal(timeout: number) {
+    const label = `${expectedTrust.bundleId}.ShipIt`
     const folder = join(userInfo().homedir, 'Library', 'Caches', label)
     const request = join(folder, 'ShipItState.plist')
-    // Each check gives a definite answer or 'unknown' (a timeout, an error, an unexpected exit code, a path that
-    // cannot be read). Only two definite 'absent' answers count as withdrawn; 'unknown' is never read as gone.
-    const job = (): Presence => launchdJobPresence(spawnSync('/bin/launchctl', ['list', label], { stdio: 'ignore', timeout: 5000 }))
-    const requestThere = (): Presence => pathPresence(() => lstatSync(request))
-    const before = { job: job(), request: requestThere() }
+    return {
+      folder,
+      request,
+      check: () => ({
+        job: launchdJobPresence(spawnSync('/bin/launchctl', ['list', label], { stdio: 'ignore', timeout })),
+        request: pathPresence(() => lstatSync(request))
+      }),
+      unload() {
+        const result = spawnSync('/bin/launchctl', ['remove', label], { stdio: 'ignore', timeout })
+        if (result.status !== 0) deps.log(`launchctl remove ${label} exited ${result.status ?? result.error?.message}`)
+      }
+    }
+  }
+  type NativeState = ReturnType<ReturnType<typeof nativeWithdrawal>['check']>
+  function withdrawalResult(before: NativeState, after: NativeState): Withdrawal {
     const found = before.job !== 'absent' || before.request !== 'absent'
+    if (after.job === 'absent' && after.request === 'absent') return { found, gone: true, after: 'absent' }
+    const presence: Presence = after.job === 'present' && after.request === 'present' ? 'present' : 'unknown'
+    return { found: true, gone: false, after: presence }
+  }
+
+  async function withdrawNative(): Promise<Withdrawal> {
+    const native = nativeWithdrawal(5000)
+    const before = native.check()
     deps.log(`withdrawing: before, ShipIt job ${before.job}, install request ${before.request}`)
     let last = before
     for (let round = 0; round < 8; round++) {
-      if (last.job !== 'absent') {
-        const r = spawnSync('/bin/launchctl', ['remove', label], { stdio: 'ignore', timeout: 5000 })
-        if (r.status !== 0) deps.log(`launchctl remove ${label} exited ${r.status ?? r.error?.message}`)
-      }
-      try { rmSync(folder, { recursive: true, force: true }) } catch (error) { deps.log(`could not remove ${folder}: ${(error as Error)?.message ?? error}`) }
-      await new Promise((r) => setTimeout(r, 250))
-      last = { job: job(), request: requestThere() }
-      if (last.job === 'absent' && last.request === 'absent') {
-        deps.log(found ? 'a prepared update was withdrawn and checked: no ShipIt job, no install request' : 'checked: nothing was prepared')
-        return { found, gone: true, after: 'absent' }
-      }
+      if (last.job !== 'absent') native.unload()
+      try { rmSync(native.folder, { recursive: true, force: true }) } catch (error) { deps.log(`could not clear ShipIt cache: ${String(error)}`) }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      last = native.check()
+      if (last.job === 'absent' && last.request === 'absent') break
     }
-    // 'present' only when both are definitely there: then the update WILL install at the next quit.
-    const after: Presence = last.job === 'present' && last.request === 'present' ? 'present' : 'unknown'
-    deps.log(`the withdrawal is NOT confirmed: ShipIt job ${last.job}, install request ${last.request} (afterwards: ${after})`)
-    return { found: true, gone: false, after }
+    return withdrawalResult(before, last)
   }
 
-  let nativeQuit = false
+  function withdrawOnQuit(): Withdrawal {
+    const native = nativeWithdrawal(500)
+    const before = native.check()
+    if (before.job === 'absent' && before.request === 'absent') return withdrawalResult(before, before)
+    if (before.job !== 'absent') native.unload()
+    // Only the request is needed to disarm ShipIt. Leave the larger cache to ordinary cleanup.
+    try { unlinkSync(native.request) } catch { /* The final check reports any remaining request. */ }
+    return withdrawalResult(before, native.check())
+  }
+
   const engine = createUpdateEngine({
     platform: process.platform,
     gate: (offer) => {
@@ -163,25 +183,23 @@ export function createUpdateInstaller(deps: InstallerDeps) {
     openWindows: deps.openWindows,
     drainWriteQueues: deps.drainWriteQueues,
     writeQueuesBusy: deps.writeQueuesBusy,
-    commitAbandoned: () => { nativeQuit = false; deps.commitAbandoned() },
+    commitAbandoned: deps.commitAbandoned,
     downloader: () => {
       rmSync(cacheDir, { recursive: true, force: true })
       return downloader ??= dependencyDownload(theUpdater(), (info) => { chosen = info })
     },
-    verify: (file, offer) => verifyMacDownload(file, offer, app.getVersion()),
+    verify: (file, offer) => verifyMacDownload(file, offer, app.getVersion(), expectedTrust),
     handOver: (file) => handOver ? handOver(file) : Promise.reject(new Error('the updater was not created')),
     native: () => {
       const native = (theUpdater() as unknown as { nativeUpdater: NativeUpdater }).nativeUpdater
       return {
         on: (event, listener) => native.on(event, listener),
         checkForUpdates: () => native.checkForUpdates(),
-        quitAndInstall: () => {
-          nativeQuit = true
-          native.quitAndInstall()
-        }
+        quitAndInstall: () => native.quitAndInstall()
       }
     },
     withdrawNative,
+    withdrawOnQuit,
     releaseFiles: () => {
       try { (updater as unknown as { closeServerIfExists?: () => void } | null)?.closeServerIfExists?.() } catch { /* already closed */ }
       try { rmSync(cacheDir, { recursive: true, force: true }) } catch { /* nothing there */ }
@@ -192,10 +210,7 @@ export function createUpdateInstaller(deps: InstallerDeps) {
 
   return {
     state: (): InstallPhase => engine.state(),
-    blocksQuit(): boolean {
-      const state = engine.state()
-      return (state.phase === 'restarting' && !nativeQuit) || (state.phase === 'reopen' && state.pending)
-    },
+    beforeQuit: engine.beforeQuit,
     /** The click: download the entry's file for this computer, check it, then restart or wait. */
     start(entry: ChannelEntry, file: UpdateFile): Promise<InstallPhase> {
       const offer: Offer = { version: entry.version, released: entry.released, url: file.url, sha512: file.sha512, size: file.size, bundleId: file.bundleId }

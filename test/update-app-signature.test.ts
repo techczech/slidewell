@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { verifyMacDownload } from '../src/main/update-engine'
+import { RELEASE_TRUST, runningSignatureMatches } from '../src/main/update-trust'
 
 const bundleId = 'net.dominiklukes.slidewell'
 const team = 'M7H45AGG8A'
@@ -23,10 +24,24 @@ describe('downloaded SlideWell trust', () => {
     </dict></plist>`)
     execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', bundle], { stdio: 'pipe' })
     execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', bundle])
+    expect(runningSignatureMatches(bundle, RELEASE_TRUST)).toBe(false)
     const zip = join(root, 'fixture.zip')
     execFileSync('/usr/bin/ditto', ['-c', '-k', '--keepParent', bundle, zip])
     const offer = { bundleId, version: '1.1.0', released: '2026-11-22', size: statSync(zip).size, sha512: '', url: '' }
     expect(await verifyMacDownload(zip, offer, '1.0.0')).toBe('signature')
+  })
+
+  it('requires a notarised Gatekeeper assessment even when spctl exits successfully', async () => {
+    const { verifyBundleTrust } = await import('../src/main/update-trust')
+    const identity = { bundleId, team }
+    const bundle = '/tmp/fake-bundle.app'
+    const verify = (verdict: string) => verifyBundleTrust(bundle, identity, async (tool, args) => {
+      if (tool === '/usr/bin/codesign') return ''
+      expect([tool, ...args]).toEqual(['/usr/sbin/spctl', '-a', '-t', 'exec', '-vv', bundle])
+      return verdict
+    })
+    expect(await verify('source=Developer ID\n')).toBe('notarisation')
+    expect(await verify('source=Notarized Developer ID\n')).toBeNull()
   })
 
   it('checks the pinned team and rejects a bundle whose codesign assessment fails', async () => {

@@ -3,6 +3,7 @@ export function createRestartWork() {
   let active = 0
   let locked = false
 
+  // Every background job that writes must be wrapped by run so the restart can wait for it.
   function run<T>(work: () => T): T {
     if (locked) throw new Error('SlideWell is restarting to finish an update.')
     active++

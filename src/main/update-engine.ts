@@ -9,7 +9,9 @@ import { CancellationToken, Provider, type AppUpdater, type UpdateInfo } from 'e
 import type { ProviderRuntimeOptions } from 'electron-updater/out/providers/Provider'
 import { compareVersions } from '@app-patterns/updates'
 import { spawn } from 'node:child_process'
-import { stat } from 'node:fs/promises'
+import { lstat, mkdtemp, rm, stat } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { RELEASE_TRUST, verifyBundleTrust } from './update-trust'
 import { failReasonOf, installStep, IDLE, type FailReason, type InstallEvent, type InstallPhase, type ReopenCause, type RestartBlocker } from '../shared/update-install'
 
 /** Past this, a restart that has not happened is reported (Squirrel.Mac's checks of a large app take a while). */
@@ -99,6 +101,8 @@ export interface EnginePorts {
   commitAbandoned?(): void
   /** Removes Squirrel.Mac's ShipIt job and its install request and staged copy, then checks that both are gone. */
   withdrawNative(): Promise<Withdrawal>
+  /** A single bounded withdrawal attempt during an ordinary quit. */
+  withdrawOnQuit?(): Withdrawal
   /** Removes the downloaded file and the updater's cache, and closes electron-updater's local address. */
   releaseFiles(): void
   timers?: { set(fn: () => void, ms: number): unknown; clear(handle: unknown): void }
@@ -434,6 +438,25 @@ export function createUpdateEngine(ports: EnginePorts) {
 
   return {
     state: (): InstallPhase => state,
+    beforeQuit(): void {
+      const attempt = current
+      if (attempt?.quitting) return
+      const mayBeArmed = attempt?.asked || nativeOwner !== null || withdrawing > 0 ||
+        (state.phase === 'reopen' && state.pending)
+      if (attempt) {
+        attempt.ended = true
+        current = null
+        stopWatchdog(attempt)
+        if (!attempt.settled) attempt.token.cancel()
+      }
+      if (!mayBeArmed) return
+      try {
+        const result = ports.withdrawOnQuit?.()
+        ports.log(result?.gone ? 'withdrawal confirmed on quit' : 'withdrawal could not be confirmed on quit')
+      } catch (error) {
+        ports.log(`could not check withdrawal on quit: ${message(error)}`)
+      }
+    },
     /** The click on Update (or Try again): D1 (download and check, ours alone), then D3 at once or D2. */
     async start(offer: Offer): Promise<InstallPhase> {
       if (ports.platform !== 'darwin') { ports.log(`no in-place update on ${ports.platform} in this release (ADR-0044 §5): refused before any download`); return state }
@@ -583,7 +606,7 @@ function run(cmd: string, args: string[], input?: Buffer, limit = 64 * 1024 * 10
 }
 
 /** CFBundleShortVersionString and CFBundleIdentifier of the one app at the top of a Mac update zip. */
-export async function readZippedAppPlist(zip: string): Promise<{ version: string; bundleId: string } | null> {
+export async function readZippedAppPlist(zip: string): Promise<{ version: string; bundleId: string; name: string } | null> {
   const names = (await run('/usr/bin/unzip', ['-Z1', zip])).toString('utf8').split('\n').map((n) => n.replace(/\r$/, '')).filter(Boolean)
   if (names.some((name) => /[\u0000-\u001f\u007f\\]/.test(name) ||
     name.replace(/\/$/, '').split('/').some((part) => part === '' || part === '.' || part === '..'))) return null
@@ -593,7 +616,7 @@ export async function readZippedAppPlist(zip: string): Promise<{ version: string
   if (plists.length !== 1 || apps.size !== 1 || /[*?[\]\\]/.test(plists[0])) return null
   const plist = await run('/usr/bin/unzip', ['-p', zip, plists[0]], undefined, 1024 * 1024)
   const read = async (key: string) => (await run('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', '-'], plist)).toString('utf8').trim()
-  try { return { version: await read('CFBundleShortVersionString'), bundleId: await read('CFBundleIdentifier') } } catch { return null }
+  try { return { version: await read('CFBundleShortVersionString'), bundleId: await read('CFBundleIdentifier'), name: plists[0].split('/')[0] } } catch { return null }
 }
 
 /**
@@ -602,13 +625,31 @@ export async function readZippedAppPlist(zip: string): Promise<{ version: string
  * states. A genuinely signed older build put under a newer name is refused here (Squirrel.Mac checks only the
  * signature).
  */
-export async function verifyMacDownload(file: string, offer: Offer, running: string): Promise<FailReason | null> {
+export async function verifyMacDownload(file: string, offer: Offer, running: string, identity = RELEASE_TRUST): Promise<FailReason | null> {
   const size = (await stat(file)).size
   if (size !== offer.size) return 'mismatch'
   const inside = await readZippedAppPlist(file).catch(() => null)
   if (!inside) return 'wrong-version'
   if (inside.version !== offer.version) return 'wrong-version'
   if (compareVersions(inside.version, running) <= 0) return 'wrong-version'
-  if (inside.bundleId !== offer.bundleId) return 'wrong-version'
-  return null
+  if (inside.bundleId !== offer.bundleId || inside.bundleId !== identity.bundleId) return 'wrong-version'
+
+  const scratch = await mkdtemp(join(dirname(file), 'verify-'))
+  try {
+    // bsdtar's default extraction refuses paths through symlinks and parent traversal.
+    // Restore AppleDouble metadata when present, and keep the untrusted bundle in this private directory.
+    await run('/usr/bin/tar', ['-xf', file, '-C', scratch, '--no-same-owner', '--mac-metadata'])
+    const bundle = join(scratch, inside.name)
+    if (!(await lstat(bundle)).isDirectory()) return 'signature'
+    const plist = join(bundle, 'Contents', 'Info.plist')
+    const extract = async (key: string) =>
+      (await run('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', plist])).toString('utf8').trim()
+    if (await extract('CFBundleIdentifier') !== identity.bundleId ||
+        await extract('CFBundleShortVersionString') !== offer.version) return 'wrong-version'
+    return await verifyBundleTrust(bundle, identity)
+  } catch {
+    return 'signature'
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
 }

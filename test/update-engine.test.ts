@@ -139,10 +139,8 @@ describe('explicit update and restart', () => {
     windows = 1
     native.emit('update-downloaded')
     await vi.waitFor(() => expect(t.engine.state()).toMatchObject({ phase: 'reopen', pending: true }))
-    const preventDefault = vi.fn()
-    t.engine.beforeQuit({ preventDefault } as never)
+    expect(() => t.engine.beforeQuit()).not.toThrow()
     expect(withdrawOnQuit).toHaveBeenCalledOnce()
-    expect(preventDefault).not.toHaveBeenCalled()
     expect(quitAndInstall).not.toHaveBeenCalled()
   })
 

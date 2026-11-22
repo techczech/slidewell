@@ -38,6 +38,7 @@ export interface InPlaceFacts {
   writeError?: string | null
   /** Mac: CFBundleIdentifier of the running app, or null when it could not be read. */
   bundleId: string | null
+  trusted: boolean
 }
 
 /** Why this copy cannot update itself in place, or null when it can. */
@@ -52,24 +53,24 @@ export function inPlaceRefusal(facts: InPlaceFacts): InPlaceRefusal | null {
     if (facts.writeError === 'EROFS') return 'disk-image'
   }
   if (!facts.writable) return 'read-only'
-  if (facts.platform === 'darwin' && facts.bundleId !== facts.file.bundleId) return 'other-copy'
+  if (facts.platform === 'darwin' && (facts.bundleId !== facts.file.bundleId || !facts.trusted)) return 'other-copy'
   return null
 }
 
 export const REFUSAL_TEXT: Record<InPlaceRefusal, string> = {
   store: 'The Mac App Store installs new versions of this copy.',
-  development: 'This copy was started from source and does not update itself.',
+  development: 'Download SlideWell from the SlideWell site for in-place updates.',
   platform: 'SlideWell updates itself only on Apple silicon Macs.',
   'no-file': 'This version is only on the download page.',
   'disk-image': 'SlideWell cannot replace itself here: it is running from a disk image. Move it to Applications and open it from there.',
   translocated: 'SlideWell cannot replace itself here: macOS is running it from a temporary place. Move it to Applications and open it again.',
   'read-only': 'SlideWell cannot replace itself here: this account cannot change the app’s folder.',
-  'other-copy': 'SlideWell cannot replace itself here: this copy was built for testing.',
+  'other-copy': 'This copy cannot update in place. Download SlideWell from the SlideWell site.',
 }
 
 // ── The states of the click ─────────────────────────────────────────────────────────────────────
 
-export type FailReason = 'network' | 'mismatch' | 'wrong-version' | 'save' | 'signature' | 'disk' | 'reopen' | 'other'
+export type FailReason = 'network' | 'mismatch' | 'wrong-version' | 'save' | 'signature' | 'notarisation' | 'disk' | 'reopen' | 'other'
 
 /** Why a restart the person asked for did not happen while macOS may have prepared the update (ADR-0044 §3, D4). */
 export type ReopenCause = 'held' | 'no-answer' | 'install-failed'
@@ -162,7 +163,8 @@ export const FAIL_TEXT: Record<FailReason, string> = {
   mismatch: 'The downloaded file did not match the published one, so it was not used.',
   'wrong-version': 'The download was not the version offered, so it was not installed.',
   save: 'SlideWell could not finish saving before restarting. Check your settings and try again.',
-  signature: 'The new version is not signed by SlideWell’s developer, so it was not installed.',
+  signature: 'The update’s signature could not be verified. Download SlideWell from the SlideWell site.',
+  notarisation: 'macOS could not verify the update’s notarisation. Download SlideWell from the SlideWell site.',
   disk: 'There is not enough space on this computer.',
   reopen: 'An earlier update was stopped part-way. Quit and reopen SlideWell, then press Update again.',
   other: 'Something went wrong while updating.',
@@ -205,7 +207,7 @@ export function reopenText(state: { version: string; cause: ReopenCause; pending
   return {
     mark: 'Update restart is on hold',
     title: 'SlideWell could not finish restarting',
-    detail: `${why} Quit is paused while macOS may still have this update prepared.`,
+    detail: `${why} SlideWell will check again when you quit. macOS may finish the update when SlideWell closes.`,
   }
 }
 

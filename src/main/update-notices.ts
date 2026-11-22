@@ -221,7 +221,7 @@ export function installUpdateNotices(ports: Ports) {
   if (source !== 'development') checker.start()
   return {
     stop: checker.stop,
-    blocksQuit: () => installer?.blocksQuit() === true,
+    beforeQuit: () => installer?.beforeQuit(),
     settingChanged() {
       const next = ports.enabled()
       const nextAlpha = alphaOn()

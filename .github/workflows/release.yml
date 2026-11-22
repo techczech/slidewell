@@ -58,3 +58,18 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Write and verify the update feed entry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          release_version=$(node -p 'require("./package.json").version')
+          feed_work=$(mktemp -d)
+          node scripts/update-feed-entry.mjs write "$release_version" release/SlideWell-mac-arm64.zip "$feed_work/update-entry.json"
+          gh release download "v$release_version" --pattern SlideWell-mac-arm64.zip --dir "$feed_work"
+          node scripts/update-feed-entry.mjs check "$release_version" "$feed_work/SlideWell-mac-arm64.zip" "$feed_work/update-entry.json"
+          cp "$feed_work/update-entry.json" release/update-entry.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slidewell-update-feed-entry
+          path: release/update-entry.json
+          if-no-files-found: error

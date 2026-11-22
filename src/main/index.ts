@@ -950,8 +950,9 @@ app.whenReady().then(async () => {
       writeQueuesBusy: () => settings?.hasPendingWrites() ? ['settings'] : []
     }
   })
-  app.on('before-quit', (event) => {
-    if (updates?.blocksQuit()) event.preventDefault()
+  app.on('before-quit', () => {
+    updates?.beforeQuit()
+    restartWork.release()
   })
 
   void restartWork.run(startWell).finally(() => { if (!restartWork.locked()) pictureSearch?.start() })
