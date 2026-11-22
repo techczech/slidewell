@@ -9,7 +9,7 @@
 import { app, session } from 'electron'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { userInfo } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { MacUpdater, type AppUpdater, type UpdateInfo } from 'electron-updater'
 import { getAppCacheDir } from 'electron-updater/out/AppAdapter'
@@ -121,7 +121,7 @@ export function createUpdateInstaller(deps: InstallerDeps) {
     const bundleId = readBundleId(runningBundle())
     if (bundleId !== (deps.fixtureOrigin ? UPDATE_INSTALL_IDENTITY.fixtureBundleId : UPDATE_INSTALL_IDENTITY.bundleId)) { deps.log('the withdrawal could not name ShipIt (no bundle identifier): not confirmed'); return { found: true, gone: false, after: 'unknown' } }
     const label = `${bundleId}.ShipIt`
-    const folder = join(homedir(), 'Library', 'Caches', label)
+    const folder = join(userInfo().homedir, 'Library', 'Caches', label)
     const request = join(folder, 'ShipItState.plist')
     // Each check gives a definite answer or 'unknown' (a timeout, an error, an unexpected exit code, a path that
     // cannot be read). Only two definite 'absent' answers count as withdrawn; 'unknown' is never read as gone.

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
-import { constants, cpSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { constants, cpSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { _electron as electron } from 'playwright'
@@ -127,15 +127,16 @@ async function withApp(fixture, test) {
   const env = { ...process.env, HOME: join(fixture.dir, 'home') }
   delete env.ELECTRON_RUN_AS_NODE
   const app = await electron.launch({ executablePath: fixture.executable, args: ['--use-mock-keychain'], env })
-  app.process().stdout?.on('data', (data) => process.stdout.write(data))
-  app.process().stderr?.on('data', (data) => process.stderr.write(data))
+  const child = app.process()
+  child.stdout?.on('data', (data) => process.stdout.write(data))
+  child.stderr?.on('data', (data) => process.stderr.write(data))
   try {
     const win = await app.firstWindow()
     await win.waitForFunction(() => Boolean(window.sw?.updates))
     assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().every((w) => !w.isVisible())), true)
-    return await test(app, win)
+    return await test(app, win, child)
   } finally {
-    if (app.process().exitCode === null) await app.close()
+    if (child.exitCode === null && child.signalCode === null) await app.close()
   }
 }
 
@@ -242,19 +243,25 @@ try {
   const fixture = createProfile('success')
   asset = good
   advertised = good
-  await withApp(fixture, async (app, win) => {
+  await withApp(fixture, async (_app, win, child) => {
     await offer(win)
     const before = assetCount()
-    const exit = once(app.process(), 'exit')
+    const exit = once(child, 'exit')
     await win.getByRole('button', { name: 'Update', exact: true }).click()
-    await waitFor(() => app.process().exitCode !== null, 90000)
+    await waitFor(() => child.exitCode !== null || child.signalCode !== null, 90000)
     await exit
     assert.equal(assetCount(), before + 1)
   })
-  const noticeState = join(fixture.profile, 'update-notices.json')
+  const bootPath = join(fixture.dir, 'fixture-boot.json')
   await waitFor(() => {
-    try { return JSON.parse(readFileSync(noticeState, 'utf8')).lastVersionRun === nextVersion } catch { return false }
+    const errorFile = join(fixture.dir, 'fixture-start-error.txt')
+    if (existsSync(errorFile)) throw new Error(readFileSync(errorFile, 'utf8'))
+    try { return JSON.parse(readFileSync(bootPath, 'utf8')).version === nextVersion } catch { return false }
   }, 90000)
+  const boot = JSON.parse(readFileSync(bootPath, 'utf8'))
+  assert.equal(boot.userData, realpathSync(fixture.profile))
+  assert.equal(boot.hidden, true)
+  assert.equal(JSON.parse(readFileSync(join(fixture.profile, 'update-notices.json'), 'utf8')).lastVersionRun, nextVersion)
   assert.equal(versionOf(fixture), nextVersion)
   assert.equal(JSON.parse(readFileSync(fixture.config, 'utf8')).updateFixtureSentinel, 'preserve me')
   assert.ok(existsSync(join(fixture.profile, 'settings.json')))

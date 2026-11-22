@@ -67,6 +67,7 @@ if (isUpdateFixture && !fixtureRoot) app.exit(1)
 if (fixtureRoot) {
   process.env.HOME = join(fixtureRoot, 'home')
   process.env.SLIDEWELL_E2E_HIDDEN = '1'
+  app.commandLine.appendSwitch('use-mock-keychain')
   app.setPath('home', process.env.HOME)
   app.setPath('userData', join(fixtureRoot, 'profile'))
 } else if (process.env['SLIDEWELL_DATA_DIR']) app.setPath('userData', process.env['SLIDEWELL_DATA_DIR'])
@@ -954,12 +955,23 @@ app.whenReady().then(async () => {
   })
 
   void restartWork.run(startWell).finally(() => { if (!restartWork.locked()) pictureSearch?.start() })
-  createWindow().webContents.once('did-finish-load', () => capture.launchScan())
+  const window = createWindow()
+  window.webContents.once('did-finish-load', () => {
+    capture.launchScan()
+    if (fixtureRoot) {
+      writeFileSync(join(fixtureRoot, 'fixture-boot.json'), JSON.stringify({
+        version: app.getVersion(), userData: app.getPath('userData'), hidden: !window.isVisible()
+      }))
+    }
+  })
 
   app.on('activate', () => {
     // not getAllWindows(): the hidden picture-search window would keep that non-empty
     if (!restartWork.locked() && (!mainWindow || mainWindow.isDestroyed())) createWindow()
   })
+}).catch((error: unknown) => {
+  if (fixtureRoot) writeFileSync(join(fixtureRoot, 'fixture-start-error.txt'), String(error))
+  throw error
 })
 
 // On launch: ensure the well exists, drain anything Raycast dropped while we were closed, index
