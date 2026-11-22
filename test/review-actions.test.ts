@@ -555,11 +555,16 @@ describe('IPC guard: Triage answers the main window only', () => {
     expect(ran).toBe(1)
   })
 
-  it('every Triage handler in the main process goes through the guard', () => {
-    const text = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
-    expect(text).not.toMatch(/ipcMain\.handle\('triage:/)
-    for (const ch of ['triage:scan', 'triage:list', 'triage:decide', 'triage:import-selected', 'well:add-from-clipboard']) {
-      expect(text).toContain(`guardedHandle(ipcMain, fromMainWindow, '${ch}'`)
+  it('registers Triage and clipboard handlers through the live main-window guard', () => {
+    const main = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
+    const capture = readFileSync(join(__dirname, '..', 'src', 'main', 'capture-sources-ipc.ts'), 'utf8')
+    for (const text of [main, capture]) {
+      expect(text).not.toMatch(/(?:ipcMain\.handle|appHandle)\(\s*['"](?:triage:|well:add-from-clipboard)/)
+    }
+    expect(main).toContain('installCaptureSources({')
+    expect(main).toContain('fromMainWindow: (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents)')
+    for (const ch of ['triage:scan', 'triage:list', 'triage:decide', 'triage:import-selected', 'triage:import-status', 'well:add-from-clipboard']) {
+      expect(capture).toContain(`guardedHandle(ipcMain, fromMainWindow, '${ch}'`)
     }
   })
 })

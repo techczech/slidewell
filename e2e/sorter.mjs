@@ -125,23 +125,36 @@ try {
   } else console.log('SKIP sorting-refused check: the scratch copy already has a report (SLIDEWELL_SORTER_RECOPY=0)')
 
   const t0 = Date.now()
-  // start training, then keep asking the main process for a reply: training runs in a worker thread,
-  // so the main process should answer quickly throughout (the fit itself is CPU-bound for seconds)
-  await win.evaluate(() => {
+  // The sorter status IPC measures the main process reply while the worker trains. The Node
+  // inspector can reject an evaluation while this window and the training job are still live.
+  const trainingDocument = await win.evaluate(() => {
+    window.__trainingRoot = document.querySelector('.app')
+    if (!window.__trainingRoot) throw new Error('SlideWell app root is missing')
     window.__train = window.sw.sorter.train().then((r) => (window.__trained = r))
+    return performance.timeOrigin
   })
   let trained = null
   // samples per training step (grouping, then fitting): polled back to back so short steps are caught
   const steps = {}
   while (!trained) {
     const a = Date.now()
-    const st = await app.evaluate(() => 'ok').then(() => win.evaluate(() => window.sw.sorter.status().then((s) => ({ phase: s.phase, message: s.message }))))
+    const st = await win.evaluate(async () => {
+      const { phase, message } = await window.sw.sorter.status()
+      return {
+        phase,
+        message,
+        document: performance.timeOrigin,
+        sameRoot: document.querySelector('.app') === window.__trainingRoot,
+        trained: window.__trained ?? null
+      }
+    })
     const ms = Date.now() - a
+    if (st.document !== trainingDocument || !st.sameRoot) throw new Error('SlideWell replaced its view during sorter training')
     if (st.phase === 'training') {
       const k = /grouping/.test(st.message) ? 'grouping' : 'fitting'
       steps[k] = { samples: (steps[k]?.samples ?? 0) + 1, slowestReplyMs: Math.max(steps[k]?.slowestReplyMs ?? 0, ms) }
     }
-    trained = await win.evaluate(() => window.__trained ?? null)
+    trained = st.trained
   }
   out('train seconds', Math.round((Date.now() - t0) / 1000))
   out('main process during training', steps)

@@ -1,7 +1,7 @@
 // The Triage import control's state (idle → working → done/failed), the main-side runner that emits it,
 // and the real promote loop's progress order on scratch folders with invented file names.
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { IDLE, adoptStatus, applySnapshot, failureMessage, importButtonLabel, importLine, startClick, type ImportSnapshot } from '../src/main/triage-import-progress'
 import { createImportRunner } from '../src/main/triage-import-run'
@@ -134,7 +134,7 @@ describe('promote loop progress (real triage db, fake files)', () => {
   }, 30_000)
 })
 
-it('counts and names a failed item and continues the rest of the batch', async () => {
+it('counts and names a failed item, preserves its original and continues the batch', async () => {
   const src = realpathSync(join(dir, 'Shots'))
   const well = join(dir, 'well')
   const failed = join(src, 'throws.png')
@@ -151,8 +151,12 @@ it('counts and names a failed item and continues the rest of the batch', async (
   try {
     expect(await importSelectedTriage('/nonexistent', well, src)).toEqual({ imported: 1, skipped: 1, gated: 0 })
     expect(log.mock.calls.some(([line]) => typeof line === 'string' && line.includes('import failed') && line.includes('throws.png'))).toBe(true)
-    expect(existsSync(failed)).toBe(true)
-    expect(existsSync(good)).toBe(true)
+    expect(readFileSync(failed, 'utf8')).toBe('failed media')
+    expect(readFileSync(good, 'utf8')).toBe('healthy media 0')
+    const decision = await query<{ state: string; well_id: string | null }>(
+      join(well, 'triage.db'), 'SELECT state, well_id FROM triage_decisions WHERE hash = ?', [hashes[0].hash]
+    )
+    expect(decision).toEqual([{ state: 'selected', well_id: null }])
   } finally {
     log.mockRestore()
   }
