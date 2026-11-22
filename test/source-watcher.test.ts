@@ -1,12 +1,12 @@
 import { EventEmitter } from 'node:events'
-import { watch } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createSourceWatcher, type WatchedSource } from '../src/main/source-watcher'
 import { isVaultChangeRelevant } from '../src/main/talk-usage'
 
+const mockWatch = vi.hoisted(() => vi.fn())
 vi.mock('node:fs', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:fs')>()),
-  watch: vi.fn()
+  watch: mockWatch
 }))
 
 describe('createSourceWatcher', () => {
@@ -20,7 +20,7 @@ describe('createSourceWatcher', () => {
   afterEach(() => {
     watcher.close()
     vi.useRealTimers()
-    vi.resetAllMocks()
+    mockWatch.mockReset()
   })
 
   // Drive the native event boundary directly. FSEvents can coalesce, delay or omit
@@ -28,17 +28,15 @@ describe('createSourceWatcher', () => {
   function start(accept: WatchedSource['accept'], debounceMs: number, maxWaitMs?: number) {
     const changes = vi.fn()
     const native = Object.assign(new EventEmitter(), {
-      close() { native.removeAllListeners() },
-      ref() { return native },
-      unref() { return native }
+      close() { native.removeAllListeners() }
     })
-    vi.mocked(watch).mockImplementation((_path, _options, listener) => {
-      native.on('change', listener!)
+    mockWatch.mockImplementation((_path, _options, listener: (event: string, name: string) => void) => {
+      native.on('change', listener)
       return native
     })
     watcher = createSourceWatcher(changes, debounceMs, maxWaitMs)
     watcher.setSources([{ path: source, recursive: true, accept }])
-    expect(watch).toHaveBeenCalledWith(source, { recursive: true, persistent: false }, expect.any(Function))
+    expect(mockWatch).toHaveBeenCalledWith(source, { recursive: true, persistent: false }, expect.any(Function))
     return { changes, emit: (event: string, name: string) => native.emit('change', event, name) }
   }
 
@@ -56,11 +54,14 @@ describe('createSourceWatcher', () => {
 
   it('fires within maxWait even when events never stop', () => {
     const { changes, emit } = start((rel) => rel.endsWith('-outline.md'), 400, 900)
-    for (let elapsed = 0; elapsed <= 800; elapsed += 100) {
+    for (let elapsed = 0; elapsed < 800; elapsed += 100) {
       emit('change', 'b-outline.md')
       vi.advanceTimersByTime(100)
-      if (elapsed < 800) expect(changes).not.toHaveBeenCalled()
     }
+    emit('change', 'b-outline.md')
+    vi.advanceTimersByTime(99)
+    expect(changes).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
     expect(changes).toHaveBeenCalledExactlyOnceWith(source)
   })
 
