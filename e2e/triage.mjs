@@ -64,7 +64,11 @@ try {
   await win.waitForSelector('.triage-panel', { timeout: 5000 })
   result.panelOpened = (await win.locator('.triage-panel').count()) === 1
 
-  const pre = (await waitForTriageRows(win, [{ filename: PRE, source: second }])).filter((x) => x.filename === PRE)
+  const launchRows = await waitForTriageRows(win, [
+    { filename: PRE, source: second },
+    ...['one.png', 'two.png', 'dup.png'].map((filename) => ({ filename, source }))
+  ])
+  const pre = launchRows.filter((x) => x.filename === PRE)
   result.launchScanPicksUp = pre.length === 1 && pre[0].app === 'Safari'
 
   // scan the fixture (recursive: 3 files across a subfolder, two of them byte-identical)
