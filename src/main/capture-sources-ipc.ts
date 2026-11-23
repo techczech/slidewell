@@ -241,12 +241,16 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     }
     // One row → renderable wire shape. Images render from the source file; videos from a cached poster,
     // with mediaUrl pointing at the source file so the renderer can play it inline.
-    const triageToWire = (r: TriageRow, sourceRoot: string, wellR: string, storedCopy?: string): Record<string, unknown> => {
+    const triageToWire = (r: TriageRow, sourceRoot: string, wellR: string, sourceAvailable: boolean, storedCopy?: string): Record<string, unknown> => {
       const isVideo = r.kind === 'video'
       const offline = r.offline === '1' && !storedCopy
       const root = r.source || sourceRoot
       const fileAbs = storedCopy ?? (root ? join(root, r.rel_path) : null)
       const posterAbs = r.poster_rel ? join(wellR, r.poster_rel) : null
+      const previewUrl = (abs: string | null): string | null => {
+        const url = swThumb(abs)
+        return url && !sourceAvailable ? `${url}?local=1` : url
+      }
       const sizeBytes = Number(r.size) || 0
       const mtime = Number(r.mtime) || 0
       let date = r.taken_at ? r.taken_at.slice(0, 10) : ''
@@ -273,8 +277,8 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
         sizeMB: Math.round((sizeBytes / 1048576) * 10) / 10,
         large: isVideo && sizeBytes > VIDEO_GATE_BYTES,
         snippet: (r.ocr_text || '').replace(/\s+/g, ' ').trim().slice(0, 160),
-        thumbUrl: offline ? null : swThumb(isVideo ? posterAbs : fileAbs),
-        mediaUrl: offline || !isVideo ? null : swThumb(fileAbs),
+        thumbUrl: offline ? null : previewUrl(isVideo ? posterAbs : fileAbs),
+        mediaUrl: offline || !isVideo ? null : previewUrl(fileAbs),
         ...reviewLabel(r)
       }
     }
@@ -463,7 +467,8 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
         const wellRows = missingCopies.length ? await wellByIds(wellR, missingCopies.map((r) => r.well_id!)).catch(() => []) : []
         const copies = new Map(wellRows.filter((r) => r.root === 'well').map((r) => [r.id, join(wellR, r.rel_path)]))
         const counts = await triageCounts(wellR)
-        return { items: rows.map((r) => triageToWire(r, src, wellR, r.well_id ? copies.get(r.well_id) : undefined)), counts, hasMore: rows.length === lim }
+        const items = rows.map((r) => triageToWire(r, src, wellR, available.has(r.source || src), r.well_id ? copies.get(r.well_id) : undefined))
+        return { items, counts, hasMore: rows.length === lim }
       } catch {
         return empty
       }

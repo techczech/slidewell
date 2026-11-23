@@ -43,6 +43,7 @@ import { whyReader } from './sorter/why'
 import type { SorterLearning, SorterRetrain } from '../preload'
 import type { AppRule } from './sorter/app-rules'
 import { ReviewService } from './review/service'
+import { downloadedOnDisk } from './review/picture'
 import { registerReviewIpc } from './review/ipc'
 import { decodeSwUrlPath as decodeSwPath, resolveSwUrlReal as resolveSwReal, serveSwFile, swUrlOf } from './swarchive-guard'
 import { CloudSorter, KEY_FIELD, normaliseCloudSettings, registerCloudIpc, saveCloudKey, removeCloudKey, type CloudRunSummary, type CloudSettings, type StoredCloudSettings } from './sorter/cloud/service'
@@ -500,9 +501,11 @@ app.whenReady().then(async () => {
 
   protocol.handle('swarchive', async (request) => {
     const abs = decodeSwUrlPath(request.url)
+    const localOnly = new URL(request.url).searchParams.get('local') === '1'
+    if (abs && localOnly && !downloadedOnDisk(abs)) return new Response('not found', { status: 404 })
     // a fetch from R2 writes only under an allowed root's real path, and the file served passes the real-path check:
     // a link inside a root that leads outside every root is neither written through nor served
-    const fetcher = abs && !restartWork.locked() && !existsSync(abs) ? r2FetcherFor(abs) : null
+    const fetcher = abs && !localOnly && !restartWork.locked() && !existsSync(abs) ? r2FetcherFor(abs) : null
     const served = abs ? await serveSwFile(abs, allowedRoots(),
       fetcher && ((...args) => restartWork.run(() => fetcher(...args)))) : null
     if (!served) return new Response('not found', { status: 404 })
