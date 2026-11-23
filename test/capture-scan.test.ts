@@ -3,7 +3,7 @@
 // the injected downloader "downloads" it by writing its bytes. No real iCloud or OneDrive is involved.
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { closeSync, mkdirSync, openSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, promises as fsp, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -14,7 +14,7 @@ vi.mock('../src/main/well', () => ({
   makePoster: async () => false,
   recordWellSource: async () => undefined
 }))
-const { scanTriageSource } = await import('../src/main/triage')
+const { scanTriageSource, setTriageDecision } = await import('../src/main/triage')
 const { query } = await import('../src/main/sqlite')
 
 const SCRATCH = join(homedir(), 'Library', 'Caches', 'slidewell-dev-15', 'vitest-scan')
@@ -322,5 +322,101 @@ describe('capture scan: online-only files', () => {
     expect(calls).toBe(1)
     expect(killed).toBe(true)
     expect(await rows()).toEqual({ 'a.png': '1', 'b.png': '1' })
+  })
+})
+
+describe('re-pointing a capture folder', () => {
+  const captures = () => query(join(well, 'triage.db'), 'SELECT rowid, * FROM triage_fts ORDER BY rowid', [])
+  const decisions = () => query(join(well, 'triage.db'), 'SELECT * FROM triage_decisions ORDER BY hash', [])
+
+  it('moves matching rows in place and leaves missing rows at their original path', async () => {
+    writeFileSync(join(src, 'kept.png'), 'kept screenshot')
+    writeFileSync(join(src, 'discarded.png'), 'discarded screenshot')
+    writeFileSync(join(src, 'stayed.png'), 'capture absent from the replacement')
+    placeholder('online.png', 1)
+    await scanTriageSource('/nonexistent', well, src)
+    const before = await captures()
+    await setTriageDecision('/nonexistent', well, src, before.find((row) => row.filename === 'kept.png')!.hash, 'select')
+    await setTriageDecision('/nonexistent', well, src, before.find((row) => row.filename === 'discarded.png')!.hash, 'exclude')
+    const previousDecisions = await decisions()
+
+    const replacement = join(dir, 'New shots')
+    mkdirSync(replacement)
+    for (const filename of ['kept.png', 'discarded.png', 'online.png']) {
+      renameSync(join(src, filename), join(replacement, filename === 'discarded.png' ? 'renamed.png' : filename))
+    }
+    utimesSync(join(replacement, 'renamed.png'), 3, 3)
+    writeFileSync(join(replacement, 'new.png'), 'new capture')
+    const options = { previousSources: [src] }
+    expect((await scanTriageSource('/nonexistent', well, replacement, undefined, options)).indexed).toBe(1)
+    const moved = await captures()
+    expect(moved.slice(0, before.length)).toEqual(before.map((row) => {
+      if (row.filename === 'stayed.png') return row
+      if (row.filename === 'discarded.png') return { ...row, source: replacement, rel_path: 'renamed.png', filename: 'renamed.png' }
+      return { ...row, source: replacement }
+    }))
+    expect(moved.slice(before.length)).toEqual([expect.objectContaining({ filename: 'new.png', source: replacement })])
+    expect(await decisions()).toEqual(previousDecisions)
+
+    for (const filename of ['kept.png', 'renamed.png', 'online.png', 'new.png']) renameSync(join(replacement, filename), join(src, filename))
+    await scanTriageSource('/nonexistent', well, src, undefined, { previousSources: [replacement] })
+    expect(await captures()).toEqual(moved.map((row) => ({ ...row, source: src })))
+    expect(await decisions()).toEqual(previousDecisions)
+  })
+
+  it('does not open unchanged files for content on the next scan or with a fresh scanner', async () => {
+    const file = join(src, 'before.png')
+    writeFileSync(file, 'capture content')
+    await scanTriageSource('/nonexistent', well, src)
+    const replacement = join(dir, 'New shots')
+    renameSync(src, replacement)
+    renameSync(join(replacement, 'before.png'), join(replacement, 'after.png'))
+    utimesSync(join(replacement, 'after.png'), 4, 4)
+    const wellAlias = join(dir, 'well alias')
+    symlinkSync(well, wellAlias)
+    const options = { previousSources: [src], listing: {} }
+    const opened = vi.spyOn(fsp, 'open')
+    try {
+      await scanTriageSource('/nonexistent', wellAlias, replacement, undefined, options)
+      expect(opened.mock.calls.filter(([path]) => path === join(replacement, 'after.png'))).toHaveLength(1)
+      opened.mockClear()
+      await scanTriageSource('/nonexistent', wellAlias, replacement, undefined, options)
+      expect(opened).not.toHaveBeenCalled()
+
+      vi.resetModules()
+      const fresh = await import('../src/main/triage')
+      await fresh.scanTriageSource('/nonexistent', wellAlias, replacement, undefined, { previousSources: [src] })
+      expect(opened).not.toHaveBeenCalled()
+    } finally {
+      opened.mockRestore()
+    }
+  })
+
+  it('matches the same path and metadata when either copy is online-only', async () => {
+    placeholder('becomes-local.png', 1)
+    const gone = placeholder('becomes-online.png', 2)
+    arrive(gone)
+    await scanTriageSource('/nonexistent', well, src)
+    const before = await captures()
+    const replacement = join(dir, 'New shots')
+    renameSync(src, replacement)
+    const local = join(replacement, 'becomes-local.png')
+    const online = join(replacement, 'becomes-online.png')
+    const originalTimes = statSync(online)
+    arrive(local)
+    writeFileSync(online, '')
+    truncateSync(online, originalTimes.size)
+    utimesSync(online, originalTimes.atime, originalTimes.mtime)
+    expect(statSync(online).blocks).toBe(0)
+
+    const download = vi.fn()
+    const result = await scanTriageSource('/nonexistent', well, replacement, undefined, {
+      previousSources: [src], downloadRoot: replacement, download
+    })
+    expect(result.indexed).toBe(0)
+    expect(download).not.toHaveBeenCalled()
+    expect(await captures()).toEqual(before.map((row) => ({
+      ...row, source: replacement, offline: row.filename === 'becomes-local.png' ? '0' : '1'
+    })))
   })
 })

@@ -102,6 +102,9 @@ export type Dependency = {
   install: string
   required: boolean
 }
+export type CaptureFolderStatus = { path: string; namedOnly: boolean; primary: boolean; exists: boolean }
+export type CaptureFolderAction = { ok: true } | { ok: false; error: string }
+
 // A scanned item in a Triage source (ADR-0029) — not yet in the library unless state==='included'.
 export type TriageItem = {
   hash: string // content hash — the DECISION key; repeats across duplicate files (not unique)
@@ -738,6 +741,14 @@ const api = {
     }> => ipcRenderer.invoke('settings:get-paths'),
     chooseArchive: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-archive'),
     chooseVault: (): Promise<string | null> => ipcRenderer.invoke('settings:choose-vault'),
+    captureSourceStatus: (): Promise<CaptureFolderStatus[]> => ipcRenderer.invoke('settings:capture-source-status'),
+    onCaptureSourcesChanged: (cb: (sources: CaptureFolderStatus[]) => void): (() => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, sources: CaptureFolderStatus[]): void => cb(sources)
+      ipcRenderer.on('capture-sources:changed', handler)
+      return () => ipcRenderer.removeListener('capture-sources:changed', handler)
+    },
+    replaceCaptureSource: (path: string): Promise<CaptureFolderAction> => ipcRenderer.invoke('settings:replace-capture-source', path),
+    stopCaptureSource: (path: string): Promise<CaptureFolderAction> => ipcRenderer.invoke('settings:stop-capture-source', path),
     // Capture inbox extras: add an offered default ('desktop' = screenshot-named files only, 'cleanshot') or any folder.
     addCaptureSource: (which: 'desktop' | 'cleanshot' | 'folder'): Promise<boolean> => ipcRenderer.invoke('settings:add-capture-source', which),
     removeCaptureSource: (path: string): Promise<boolean> => ipcRenderer.invoke('settings:remove-capture-source', path),

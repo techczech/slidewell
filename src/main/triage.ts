@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto'
 import { constants as fsc, existsSync, lstatSync, mkdirSync, promises as fsp, statSync } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
 import { join, relative, extname, basename, dirname } from 'node:path'
-import { query, run, safeFtsQuery } from './sqlite'
+import { query, run, runScript, safeFtsQuery, sqlString } from './sqlite'
 import { ocrImage, ingestScreenshot, ingestVideo, makePoster, recordWellSource } from './well'
 import { appKey, tallyTriageStates, planSelectedImport, type TriageCounts } from './triage-logic'
 import { parseScreenshotName, type NameTemplate } from './screenshot-name'
@@ -58,7 +58,11 @@ async function ensureTriage(wellRoot: string): Promise<void> {
        source UNINDEXED, taken_at UNINDEXED, app, window_title
      )`
   )
-  await run(db, `CREATE TABLE IF NOT EXISTS triage_decisions (hash TEXT PRIMARY KEY, state TEXT NOT NULL, decided_at TEXT, well_id TEXT)`)
+  await run(db, `CREATE TABLE IF NOT EXISTS triage_relocation_observations (
+    triage_rowid INTEGER PRIMARY KEY, hash TEXT NOT NULL, scanned_at TEXT NOT NULL,
+    size TEXT NOT NULL, mtime TEXT NOT NULL, content_hash TEXT
+  );
+  CREATE TABLE IF NOT EXISTS triage_decisions (hash TEXT PRIMARY KEY, state TEXT NOT NULL, decided_at TEXT, well_id TEXT)`)
   // per-file download backoff (ticket 15): a file that keeps failing waits longer each time
   await run(db, `CREATE TABLE IF NOT EXISTS download_backoff (source TEXT NOT NULL, rel_path TEXT NOT NULL, sig TEXT NOT NULL, failures INTEGER NOT NULL, last_attempt INTEGER NOT NULL, PRIMARY KEY (source, rel_path))`)
 }
@@ -103,11 +107,15 @@ async function hashFile(file: string | FileHandle, timeoutMs = 15000): Promise<s
 }
 
 interface ScanRow {
+  rowid: number
+  hash: string
   source: string
   rel_path: string
   size: string
   mtime: string
   offline: string
+  scanned_at: string
+  content_hash: string | null
 }
 
 interface ScanItem {
@@ -124,6 +132,71 @@ export interface ScanListing {
   fingerprint?: string
 }
 
+type CaptureMove = { file: ScanItem; row: ScanRow; offline: boolean; contentHash: string | null }
+
+function queueCandidate(index: Map<string, ScanRow[]>, key: string, row: ScanRow): void {
+  const candidates = index.get(key)
+  if (candidates) candidates.push(row)
+  else index.set(key, [row])
+}
+
+function relocationMatcher(prior: ScanRow[], previousSources: readonly string[]) {
+  const priority = new Map(previousSources.map((path, index) => [path, index]))
+  const earlier = prior.filter((row) => priority.has(row.source))
+    .sort((left, right) => priority.get(left.source)! - priority.get(right.source)! || left.rowid - right.rowid)
+  const metadata = new Map<string, ScanRow[]>()
+  const hashes = new Map<string, ScanRow[]>()
+  const claimed = new Set<number>()
+  for (const row of earlier) {
+    queueCandidate(metadata, JSON.stringify([row.rel_path, row.size, row.mtime]), row)
+    queueCandidate(hashes, row.content_hash ?? row.hash, row)
+  }
+  function claim(candidates: ScanRow[] | undefined, rel: string): ScanRow | undefined {
+    const row = candidates?.find((r) => r.rel_path === rel && !claimed.has(r.rowid))
+      ?? candidates?.find((r) => !claimed.has(r.rowid))
+    if (row) claimed.add(row.rowid)
+    return row
+  }
+  return {
+    hasCandidates: () => claimed.size < earlier.length,
+    byMetadata: (f: ScanItem) => claim(metadata.get(JSON.stringify([f.rel, String(f.size), String(f.mtime)])), f.rel),
+    byHash: (hash: string, rel: string) => claim(hashes.get(hash), rel)
+  }
+}
+
+async function applyCaptureMoves(db: string, sourceRoot: string, moves: CaptureMove[]): Promise<boolean> {
+  const statements: string[] = []
+  for (const { file, row, offline, contentHash } of moves) {
+    let st
+    try {
+      st = lstatSync(file.abs, { throwIfNoEntry: false })
+    } catch {
+      continue
+    }
+    if (!st?.isFile() || st.size !== file.size || Math.round(st.mtimeMs) !== file.mtime) continue
+    if ((st.size > 0 && st.blocks === 0) !== file.offline) continue
+    const actualHash = contentHash && contentHash !== row.hash ? sqlString(contentHash) : 'NULL'
+    statements.push(
+      `UPDATE triage_fts SET source = ${sqlString(sourceRoot)}, rel_path = ${sqlString(file.rel)},
+         filename = ${sqlString(basename(file.rel))}, ext = ${sqlString(file.ext)}, offline = '${offline ? '1' : '0'}'
+         WHERE rowid = ${row.rowid} AND source = ${sqlString(row.source)} AND rel_path = ${sqlString(row.rel_path)}
+         AND hash = ${sqlString(row.hash)} AND scanned_at = ${sqlString(row.scanned_at)};`,
+      `INSERT INTO triage_relocation_observations (triage_rowid, hash, scanned_at, size, mtime, content_hash)
+         SELECT ${row.rowid}, ${sqlString(row.hash)}, ${sqlString(row.scanned_at)}, '${file.size}', '${file.mtime}', ${actualHash}
+         WHERE changes() = 1
+         ON CONFLICT(triage_rowid) DO UPDATE SET hash = excluded.hash, scanned_at = excluded.scanned_at,
+         size = excluded.size, mtime = excluded.mtime, content_hash = excluded.content_hash;`
+    )
+  }
+  if (statements.length) {
+    // The well may be reached through a directory alias, such as macOS's /tmp.
+    // Resolve its directory and keep runScript's no-follow check on the database file.
+    const directory = await fsp.realpath(dirname(db))
+    await runScript(join(directory, basename(db)), ['BEGIN IMMEDIATE;', ...statements, 'COMMIT;'].join('\n'), 60_000)
+  }
+  return statements.length === moves.length * 2
+}
+
 interface ScanResult {
   indexed: number
   total: number
@@ -136,6 +209,8 @@ export interface ScanOptions {
   namedOnly?: boolean
   /** The last listing successfully scanned for this configured source. */
   listing?: ScanListing
+  /** Former paths of this capture folder. Their matching rows remain the original records. */
+  previousSources?: readonly string[]
   /** The safety net can stop after enumerating unchanged files. */
   onlyChanged?: boolean
   /** A queued safety-net scan may outlive its source configuration. */
@@ -255,7 +330,14 @@ async function scanTriageSourceNow(
 
   onProgress?.(`found ${files.length} media files — reading…`)
   await ensureTriage(wellRoot)
-  const prior = await query<ScanRow>(db, 'SELECT source, rel_path, size, mtime, offline FROM triage_fts', [])
+  // The row's original mtime remains its capture date. The observation supplies the
+  // metadata of the file at its current location, including across process restarts.
+  const prior = await query<ScanRow>(db, `SELECT t.rowid, t.hash, t.source, t.rel_path, t.scanned_at, t.offline,
+    COALESCE(m.size, t.size) AS size, COALESCE(m.mtime, t.mtime) AS mtime, m.content_hash
+    FROM triage_fts t LEFT JOIN triage_relocation_observations m
+      ON m.triage_rowid = t.rowid AND m.hash = t.hash AND m.scanned_at = t.scanned_at`, [])
+  const previousSources = (opts.previousSources ?? []).filter((path) => path !== sourceRoot)
+  const matcher = previousSources.length ? relocationMatcher(prior, previousSources) : null
   const seen = new Map(prior.map((r) => [`${r.source}\0${r.rel_path}`, `${r.size}:${r.mtime}`]))
   const wasOffline = new Set(prior.filter((r) => r.offline === '1').map((r) => `${r.source}\0${r.rel_path}`))
   const downloadRoot = opts.downloadRoot ?? null
@@ -302,6 +384,16 @@ async function scanTriageSourceNow(
     return b.mtime - a.mtime || (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0) // newest first
   })
 
+  // Claim matching paths before trying bytes, so a renamed duplicate cannot take the
+  // existing row of a file that still has its original relative path.
+  const metadataMoves = new Map<ScanItem, ScanRow>()
+  if (matcher) for (const f of files) {
+    if (seen.has(`${sourceRoot}\0${f.rel}`)) continue
+    const row = matcher.byMetadata(f)
+    if (row) metadataMoves.set(f, row)
+  }
+  const moves: CaptureMove[] = []
+
   // Phase 1 — process new/changed files one at a time, committing + reporting per file.
   let indexed = 0
   let offlineN = 0
@@ -313,6 +405,21 @@ async function scanTriageSourceNow(
     const backingOff = f.offline && inBackoff(f.rel, sig)
     if (seen.get(key) === sig && !(downloads && wasOffline.has(key) && !backingOff)) {
       if (f.offline) offlineN++
+      continue
+    }
+    let row = metadataMoves.get(f)
+    let contents: string | null | undefined
+    if (!f.offline && !row && !seen.has(key) && matcher?.hasCandidates()) {
+      contents = await hashFile(f.abs)
+      if (contents) row = matcher.byHash(contents, f.rel)
+    }
+    if (row) {
+      // Rows first seen as placeholders retain their decision key. Verify any bytes
+      // now available so a later import can safely link that decision to its copy.
+      if (!f.offline && row.hash.startsWith('p:') && !row.content_hash && contents === undefined) contents = await hashFile(f.abs)
+      const offline = f.offline || contents === null
+      if (offline) offlineN++
+      moves.push({ file: f, row, offline, contentHash: contents ?? row.content_hash })
       continue
     }
     let downloaded: FileHandle | null = null // the checked descriptor of a file downloaded just now
@@ -346,47 +453,39 @@ async function scanTriageSourceNow(
       }
     }
     const pathId = (): string => 'p:' + createHash('sha256').update(`${f.rel}:${sig}`).digest('hex').slice(0, 11)
-    let hash: string
+    const contentHash = f.offline ? null : (contents !== undefined ? contents : await hashFile(downloaded ?? f.abs))
+    const hash = contentHash ?? pathId()
+    if (!contentHash) offlineN++
     let ocr = ''
     let posterRel = ''
-    let rowOffline = f.offline
-    if (f.offline) {
-      hash = pathId() // online-only placeholder; never read
-      offlineN++
-    } else {
-      const h = await hashFile(downloaded ?? f.abs)
-      if (h === null) {
-        // unreadable / stalled read — treat like a not-downloaded file rather than hang
-        hash = pathId()
-        rowOffline = true
-        offlineN++
-      } else if (f.kind === 'video') {
-        hash = h
+    if (contentHash) {
+      if (f.kind === 'video') {
         const posterAbs = join(postersDir(wellRoot), `${hash}.jpg`)
         if (existsSync(posterAbs) || (await makePoster(f.abs, posterAbs))) {
           posterRel = relative(wellRoot, posterAbs)
           ocr = await ocrImage(archiveRoot, posterAbs)
         }
-        indexed++
       } else {
-        hash = h
         ocr = await ocrImage(archiveRoot, f.abs)
-        indexed++
       }
+      indexed++
     }
     const name = f.abs.split('/').pop() || f.rel
     const parsed = parseName(f.abs)
     await run(
       db,
-      `DELETE FROM triage_fts WHERE rel_path = ? AND source = ?;
+      `DELETE FROM triage_relocation_observations WHERE triage_rowid IN (SELECT rowid FROM triage_fts WHERE rel_path = ? AND source = ?);
+       DELETE FROM triage_fts WHERE rel_path = ? AND source = ?;
        INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, poster_rel, offline, ocr_text, scanned_at, source, taken_at, app, window_title)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [f.rel, sourceRoot, hash, f.kind, f.rel, name, f.ext, String(f.size), String(f.mtime), posterRel, rowOffline ? '1' : '0', ocr, new Date().toISOString(), sourceRoot, parsed?.takenAt ?? '', parsed?.app ?? '', parsed?.window ?? '']
+      [f.rel, sourceRoot, f.rel, sourceRoot, hash, f.kind, f.rel, name, f.ext, String(f.size), String(f.mtime), posterRel, contentHash ? '0' : '1', ocr, new Date().toISOString(), sourceRoot, parsed?.takenAt ?? '', parsed?.app ?? '', parsed?.window ?? '']
     )
     if (i % 3 === 0 || i === files.length) onProgress?.(`processed ${i}/${files.length} · ${indexed} read · ${offlineN} not downloaded`)
   }
+  if (moves.length && opts.isCurrent?.() === false) return skipped
+  const applied = await applyCaptureMoves(db, sourceRoot, moves)
+  if (listing) listing.fingerprint = applied ? fingerprint : undefined
   onProgress?.(`done — ${indexed} read, ${offlineN} not downloaded, ${files.length} total`)
-  if (listing) listing.fingerprint = fingerprint
   return { indexed, total: files.length, offline: offlineN }
 }
 
@@ -700,22 +799,24 @@ export async function promoteTriageHashes(
   const db = triageDb(wellRoot)
   if (onlyHashes && onlyHashes.length === 0) return { imported: [], skipped: 0, gated: 0 }
   const only = onlyHashes ? ` AND triage_fts.hash IN (${onlyHashes.map(() => '?').join(',')})` : ''
-  // GROUP BY hash: decisions are keyed by content hash, but triage_fts is keyed by path, so a hash
-  // with duplicate files JOINs to multiple rows. One row per hash avoids ingesting the same selected
-  // item once per duplicate.
-  const staged = await query<{ hash: string; kind: string; rel_path: string; offline: string; source: string }>(
+  // A decision can have more than one path. Choose a readable copy before importing
+  // once per hash, including when another copy is still at an unavailable former path.
+  const staged = await query<{ hash: string; kind: string; rel_path: string; offline: string; source: string; content_hash: string | null }>(
     db,
-    `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline, triage_fts.source AS source
+    `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline, triage_fts.source AS source, m.content_hash
      FROM triage_fts JOIN triage_decisions d ON d.hash = triage_fts.hash
-     WHERE d.state = 'selected'${only}
-     GROUP BY triage_fts.hash`,
+     LEFT JOIN triage_relocation_observations m ON m.triage_rowid = triage_fts.rowid
+       AND m.hash = triage_fts.hash AND m.scanned_at = triage_fts.scanned_at
+     WHERE d.state = 'selected'${only}`,
     onlyHashes ?? []
   )
-  const enriched = staged.map((s) => {
-    const abs = join(s.source || sourceRoot, s.rel_path)
+  const copies = new Map<string, { hash: string; kind: string; offline: boolean; missing: boolean; sizeBytes: number; abs: string; contentHash: string | null }>()
+  for (const s of staged) {
+    const root = s.source || sourceRoot
+    const abs = root ? join(root, s.rel_path) : ''
     let size: number | undefined
     try {
-      size = statSync(abs, { throwIfNoEntry: false })?.size
+      if (abs) size = statSync(abs, { throwIfNoEntry: false })?.size
     } catch {
       console.error(`[triage] import failed for ${abs} — could not read the file; left staged`)
     }
@@ -723,24 +824,26 @@ export async function promoteTriageHashes(
     const sizeBytes = size ?? 0
     // offline = OneDrive online-only placeholder (stored as '1' at scan time). It can't be ingested
     // (no local bytes), so it is skipped — a keyboard-select bypasses the card's offline-disabled button.
-    return { hash: s.hash, kind: s.kind, offline: s.offline === '1', missing, sizeBytes, abs }
-  })
-  const plan = planSelectedImport(enriched, forceHashes, VIDEO_GATE_BYTES)
+    const offline = s.offline === '1'
+    const existing = copies.get(s.hash)
+    if (!existing || ((existing.missing || existing.offline) && !missing && !offline)) {
+      copies.set(s.hash, { hash: s.hash, kind: s.kind, offline, missing, sizeBytes, abs, contentHash: s.content_hash })
+    }
+  }
+  const plan = planSelectedImport([...copies.values()], forceHashes, VIDEO_GATE_BYTES)
   const imported: PromoteResult['imported'] = []
   let failed = 0
   let handled = 0
   onStep?.(0, plan.toImport.length)
   for (const hash of plan.toImport) {
-    const row = enriched.find((e) => e.hash === hash)
+    const row = copies.get(hash)
     if (!row) continue
     try {
       const res = row.kind === 'video' ? await ingestVideo(archiveRoot, wellRoot, row.abs) : await ingestScreenshot(archiveRoot, wellRoot, row.abs, 'screenshot')
       if (res?.id) {
-        // Link this well copy to its triage decision key only when that key is the hash ingest computed
-        // from the bytes it actually imported. A stale scan hash (file replaced since its scan) would
-        // otherwise let emptying the old content hide this different content. Ingest has already
-        // recorded the real hash either way.
-        const matches = res.sourceHash === hash
+        // A former placeholder may have a verified content hash under its retained decision key.
+        // Compare the bytes ingest read to that verified hash, just as for an ordinary scan.
+        const matches = res.sourceHash === (row.contentHash ?? hash)
         if (matches) await recordWellSource(wellRoot, res.id, hash)
         else console.error(`[triage] ${row.abs}: scanned as ${hash} but imported as ${res.sourceHash || 'unknown'} — the file changed since its scan; not linked to the old hash`)
         // Ingest is async: the item may have been emptied from the Bin meanwhile. Like every other
@@ -750,7 +853,7 @@ export async function promoteTriageHashes(
           db,
           `INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, 'included', ?, ?)
            ON CONFLICT(hash) DO UPDATE SET state = excluded.state, decided_at = excluded.decided_at, well_id = excluded.well_id WHERE triage_decisions.state != 'emptied'`,
-          // the decision names the well copy only when its key is the imported content; otherwise no well id
+          // The decision names a well copy only after the imported content verifies.
           [hash, new Date().toISOString(), matches ? res.id : null]
         )
         const now = await query<{ state: string }>(db, 'SELECT state FROM triage_decisions WHERE hash = ?', [hash])
