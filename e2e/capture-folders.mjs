@@ -41,7 +41,7 @@ try {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
   }, folder)
   const focusMain = () => app.evaluate(({ app, BrowserWindow }) => {
-    const main = BrowserWindow.getAllWindows().find((window) => !window.webContents.getURL().endsWith('settings.html'))
+    const main = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('/renderer/index.html'))
     if (!main || main.isVisible()) throw new Error('Triage E2E window must be hidden')
     app.emit('browser-window-focus', {}, main)
   })
@@ -59,7 +59,12 @@ try {
     return items.find((item) => item.filename === 'keep.png')?.thumbUrl
   })
   assert.ok(storedCopy)
-  assert.equal(await win.evaluate(async (url) => (await fetch(url)).ok, storedCopy), true)
+  assert.equal(await win.evaluate((url) => new Promise((resolve) => {
+    const image = new Image()
+    image.onload = () => resolve(true)
+    image.onerror = () => resolve(false)
+    image.src = url
+  }), storedCopy), true)
   result.storedCopyAvailable = true
 
   await notice.getByRole('button', { name: 'Choose folder…' }).click()
