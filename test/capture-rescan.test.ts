@@ -1,19 +1,19 @@
 import { EventEmitter } from 'node:events'
-import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppHandle } from '../src/main/app-handle'
 import type { ScanOptions } from '../src/main/triage'
 
-const { scan, closeWatcher } = vi.hoisted(() => ({ scan: vi.fn(), closeWatcher: vi.fn() }))
+const { scan, closeWatcher, chooseDirectory } = vi.hoisted(() => ({ scan: vi.fn(), closeWatcher: vi.fn(), chooseDirectory: vi.fn() }))
 const app = new EventEmitter()
 const handlers = new Map<string, Parameters<AppHandle>[1]>()
 vi.mock('electron', () => ({
   app,
   ipcMain: { handle: (channel: string, handler: Parameters<AppHandle>[1]) => handlers.set(channel, handler) },
   clipboard: {},
-  dialog: {}
+  dialog: { showOpenDialog: chooseDirectory }
 }))
 vi.mock('node:fs/promises', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:fs/promises')>()),
@@ -77,6 +77,7 @@ beforeEach(() => {
   filesChanged.mockClear()
   closeWatcher.mockClear()
   handlers.clear()
+  chooseDirectory.mockReset()
 })
 
 afterEach(() => {
@@ -290,5 +291,25 @@ describe('capture folder availability', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(status()).toEqual([expect.objectContaining({ path, exists: false })])
     expect(scan).toHaveBeenCalledOnce()
+  })
+})
+
+describe('re-pointing cannot overlap another watched folder', () => {
+  it.each(['parent', 'child', 'alias'])('refuses a %s of the other source', async (relation) => {
+    const missing = join(scratch, 'missing')
+    const parent = join(scratch, 'parent')
+    const other = join(parent, 'watched')
+    const child = join(other, 'child')
+    const alias = join(scratch, 'alias')
+    mkdirSync(child, { recursive: true })
+    symlinkSync(other, alias)
+    const destination = { parent, child, alias }[relation]
+    install({ screenshotRoot: missing, captureSources: [{ path: other, namedOnly: false }] })
+    chooseDirectory.mockResolvedValue({ canceled: false, filePaths: [destination] })
+    const result = await handlers.get('settings:replace-capture-source')!(event, missing)
+    expect(result).toEqual({ ok: false, error: 'The chosen folder overlaps another watched folder.' })
+    expect(handlers.get('settings:capture-source-status')!(event)).toEqual([
+      expect.objectContaining({ path: missing }), expect.objectContaining({ path: other })
+    ])
   })
 })

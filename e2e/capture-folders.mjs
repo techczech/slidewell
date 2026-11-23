@@ -14,7 +14,8 @@ const movedExtra = join(work, 'Moved other screenshots')
 mkdirSync(userData)
 mkdirSync(source)
 writeFileSync(join(source, 'keep.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'))
-writeFileSync(join(source, 'discard.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'))
+writeFileSync(join(source, 'undecided.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'))
+writeFileSync(join(source, 'stored.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==', 'base64'))
 writeFileSync(join(userData, 'config.json'), JSON.stringify({
   archiveRoot: join(work, 'archive'),
   wellRoot: join(work, 'well'),
@@ -30,13 +31,14 @@ try {
   const oldRows = await win.evaluate(async () => {
     await window.sw.triage.scan()
     const { items } = await window.sw.triage.list('', 'all')
-    await window.sw.triage.decide(items.find((item) => item.filename === 'keep.png').hash, 'select')
-    await window.sw.triage.decide(items.find((item) => item.filename === 'discard.png').hash, 'exclude')
+    await window.sw.triage.decide(items.find((item) => item.filename === 'stored.png').hash, 'select')
     await window.sw.triage.importSelected()
+    await window.sw.triage.decide(items.find((item) => item.filename === 'keep.png').hash, 'select')
     return (await window.sw.triage.list('', 'all')).items
   })
-  assert.deepEqual(oldRows.map((row) => row.state).sort(), ['excluded', 'included'])
+  assert.deepEqual(oldRows.map((row) => row.state).sort(), ['included', 'selected', 'undecided'])
   renameSync(source, replacement)
+  renameSync(join(replacement, 'undecided.png'), join(replacement, 'renamed.png'))
   const choose = (folder) => app.evaluate(({ dialog }, path) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
   }, folder)
@@ -56,7 +58,7 @@ try {
   result.triageNotice = true
   const storedCopy = await win.evaluate(async () => {
     const { items } = await window.sw.triage.list('', 'all')
-    return items.find((item) => item.filename === 'keep.png')?.thumbUrl
+    return items.find((item) => item.filename === 'stored.png')?.thumbUrl
   })
   assert.ok(storedCopy)
   assert.equal(await win.evaluate((url) => new Promise((resolve) => {
@@ -78,7 +80,28 @@ try {
   })
   assert.equal(after.root, replacement)
   const identity = ({ hash, relPath, state }) => ({ hash, relPath, state })
-  assert.deepEqual(after.items.map(identity), oldRows.map(identity))
+  assert.equal(after.items.length, oldRows.length)
+  const byHash = new Map(after.items.map((row) => [row.hash, row]))
+  for (const old of oldRows) {
+    const filename = old.filename === 'undecided.png' ? 'renamed.png' : old.filename
+    assert.deepEqual(identity(byHash.get(old.hash)), { hash: old.hash, relPath: join(replacement, filename), state: old.state })
+  }
+  await win.getByRole('tab', { name: 'All' }).click()
+  for (const filename of ['keep.png', 'renamed.png']) {
+    const item = win.locator('.triage-card').filter({ hasText: filename })
+    const img = item.locator('img')
+    await img.waitFor({ timeout: 5000 })
+    await win.waitForFunction((name) => [...document.querySelectorAll('.triage-card')].some((card) => {
+      const picture = card.querySelector('img')
+      return card.textContent.includes(name) && picture?.complete && picture.naturalWidth > 0
+    }), filename, { timeout: 5000 })
+  }
+  const imported = await win.evaluate(() => window.sw.triage.importSelected())
+  assert.equal(imported.imported, 1)
+  assert.equal(imported.skipped, 0)
+  const states = await win.evaluate(async () => (await window.sw.triage.list('', 'all')).items.map((row) => row.state).sort())
+  assert.deepEqual(states, ['included', 'included', 'undecided'])
+  result.movedRowsAndImportedSelection = true
   result.chooseFromTriage = true
 
   await choose(missingExtra)
