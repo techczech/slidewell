@@ -217,6 +217,7 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
           captureSources: config.captureSources?.filter((s) => s.path !== path)
         })
         if (!saved.ok) return saved
+        if (readConfig().screenshotRoot !== path) return { ok: false, error: 'The Triage source folder changed while the picker was open.' }
         return saveSources({ screenshotRoot: destination })
       }
       return saveSources({
@@ -284,6 +285,7 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     const loggedFailures = new Set<string>()
     let launchTimer: ReturnType<typeof setTimeout> | undefined
     let folderStatus: CaptureFolderStatus[] | undefined
+    let configuredOrder: string[] = []
 
     async function scanSource(s: CaptureSource, o: { downloads?: boolean; fallback?: () => boolean } = {}) {
       pending.set(s.path, (pending.get(s.path) ?? 0) + 1)
@@ -387,7 +389,10 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
       entry.failedAt = undefined
     }
     function publishFolders(refresh = false): void {
-      const next = [...scheduled.values()].map(({ source, exists }) => ({ ...source, exists }))
+      const next = configuredOrder.map((path) => {
+        const { source, exists } = scheduled.get(path)!
+        return { ...source, exists }
+      })
       const changed = JSON.stringify(next) !== JSON.stringify(folderStatus)
       if (refresh || changed) watcher.setSources(next.filter((s) => s.exists).map((s) => ({ path: s.path, recursive: !s.namedOnly })))
       const initial = !folderStatus
@@ -404,6 +409,7 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     }
     function refreshWatchers(): void {
       const wanted = new Map(captureSources().map((s) => [s.path, s]))
+      configuredOrder = [...wanted.keys()]
       for (const [path, entry] of scheduled) {
         const source = wanted.get(path)
         if (source?.namedOnly === entry.source.namedOnly && source.primary === entry.source.primary) continue
