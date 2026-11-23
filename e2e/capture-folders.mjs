@@ -23,6 +23,8 @@ writeFileSync(join(userData, 'config.json'), JSON.stringify({
 }))
 
 const app = await launchHidden(userData, join(work, 'home'))
+const appErrors = []
+app.process().stderr?.on('data', (chunk) => appErrors.push(String(chunk)))
 const result = {}
 let failure
 try {
@@ -72,13 +74,15 @@ try {
   await notice.getByRole('button', { name: 'Choose folder…' }).click()
   await notice.waitFor({ state: 'hidden', timeout: 5000 })
   const after = await win.evaluate(async () => {
-    await window.sw.triage.scan()
+    const scan = await window.sw.triage.scan()
     return {
+      scan,
       root: (await window.sw.settings.getPaths()).screenshotRoot,
       items: (await window.sw.triage.list('', 'all')).items
     }
   })
   assert.equal(after.root, replacement)
+  assert.equal(after.scan.ok, true, JSON.stringify(after.scan))
   const identity = ({ hash, relPath, state }) => ({ hash, relPath, state })
   assert.equal(after.items.length, oldRows.length)
   const byHash = new Map(after.items.map((row) => [row.hash, row]))
@@ -148,4 +152,5 @@ try {
   await app.close()
 }
 console.log(JSON.stringify(result))
+if (failure && appErrors.length) console.error(appErrors.join(''))
 finish(failure)

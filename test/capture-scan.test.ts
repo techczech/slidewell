@@ -372,18 +372,20 @@ describe('re-pointing a capture folder', () => {
     renameSync(src, replacement)
     renameSync(join(replacement, 'before.png'), join(replacement, 'after.png'))
     utimesSync(join(replacement, 'after.png'), 4, 4)
+    const wellAlias = join(dir, 'well alias')
+    symlinkSync(well, wellAlias)
     const options = { previousSources: [src], listing: {} }
     const opened = vi.spyOn(fsp, 'open')
     try {
-      await scanTriageSource('/nonexistent', well, replacement, undefined, options)
+      await scanTriageSource('/nonexistent', wellAlias, replacement, undefined, options)
       expect(opened.mock.calls.filter(([path]) => path === join(replacement, 'after.png'))).toHaveLength(1)
       opened.mockClear()
-      await scanTriageSource('/nonexistent', well, replacement, undefined, options)
+      await scanTriageSource('/nonexistent', wellAlias, replacement, undefined, options)
       expect(opened).not.toHaveBeenCalled()
 
       vi.resetModules()
       const fresh = await import('../src/main/triage')
-      await fresh.scanTriageSource('/nonexistent', well, replacement, undefined, { previousSources: [src] })
+      await fresh.scanTriageSource('/nonexistent', wellAlias, replacement, undefined, { previousSources: [src] })
       expect(opened).not.toHaveBeenCalled()
     } finally {
       opened.mockRestore()

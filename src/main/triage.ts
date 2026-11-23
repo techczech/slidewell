@@ -188,7 +188,12 @@ async function applyCaptureMoves(db: string, sourceRoot: string, moves: CaptureM
          size = excluded.size, mtime = excluded.mtime, content_hash = excluded.content_hash;`
     )
   }
-  if (statements.length) await runScript(db, ['BEGIN IMMEDIATE;', ...statements, 'COMMIT;'].join('\n'), 60_000)
+  if (statements.length) {
+    // The well may be reached through a directory alias, such as macOS's /tmp.
+    // Resolve its directory and keep runScript's no-follow check on the database file.
+    const directory = await fsp.realpath(dirname(db))
+    await runScript(join(directory, basename(db)), ['BEGIN IMMEDIATE;', ...statements, 'COMMIT;'].join('\n'), 60_000)
+  }
   return statements.length === moves.length * 2
 }
 
@@ -477,10 +482,10 @@ async function scanTriageSourceNow(
     )
     if (i % 3 === 0 || i === files.length) onProgress?.(`processed ${i}/${files.length} · ${indexed} read · ${offlineN} not downloaded`)
   }
-  onProgress?.(`done — ${indexed} read, ${offlineN} not downloaded, ${files.length} total`)
   if (moves.length && opts.isCurrent?.() === false) return skipped
   const applied = await applyCaptureMoves(db, sourceRoot, moves)
   if (listing) listing.fingerprint = applied ? fingerprint : undefined
+  onProgress?.(`done — ${indexed} read, ${offlineN} not downloaded, ${files.length} total`)
   return { indexed, total: files.length, offline: offlineN }
 }
 
