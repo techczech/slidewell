@@ -14,6 +14,7 @@ import { pileOf, type ProposalLabel } from './review/piles'
 import type { ReviewService } from './review/service'
 import type { Retrainer } from './sorter/retrain'
 import { createSourceWatcher } from './source-watcher'
+import { foldersOverlap } from './settings-rules'
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow, type ScanListing, type ScanOptions } from './triage'
 import { appCounts, cleanAppList, decideAllFromApps } from './triage-apps'
 import { createImportRunner } from './triage-import-run'
@@ -200,11 +201,13 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
       const source = configured.find((s) => s.path === path)
       if (!source) return { ok: false, error: 'This folder is no longer watched.' }
       if (!captureFolderReadable(destination)) return { ok: false, error: 'SlideWell could not read the chosen folder.' }
+      if (configured.some((s) => s.path !== path && foldersOverlap(s.path, destination))) {
+        return { ok: false, error: 'The chosen folder overlaps another watched folder.' }
+      }
       if (path === destination) {
         refreshWatchers()
         return { ok: true }
       }
-      if (configured.some((s) => s.path === destination)) return { ok: false, error: 'SlideWell already watches the chosen folder.' }
 
       const config = readConfig()
       const history = config.captureSourceHistory ?? {}
@@ -218,12 +221,14 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
         })
         if (!saved.ok) return saved
         if (readConfig().screenshotRoot !== path) return { ok: false, error: 'The Triage source folder changed while the picker was open.' }
-        return saveSources({ screenshotRoot: destination })
       }
-      return saveSources({
+      const saved = await saveSources(source.primary ? { screenshotRoot: destination } : {
         captureSourceHistory,
         captureSources: config.captureSources?.map((s) => s.path === path ? { ...s, path: destination } : s)
       })
+      const entry = scheduled.get(destination)
+      if (saved.ok && entry) rescan(entry)
+      return saved
     }
     // Review pile of a triage row the sorter proposed something for: a throwaway shows 'bin in N days'.
     const reviewLabel = (r: TriageRow): { pile: string | null; binInDays: number | null } => {
@@ -296,13 +301,19 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
       const entry = scheduled.get(s.path)
       const startedAt = Date.now()
       const fallback = o.fallback
-      const isCurrent = fallback && (() => scheduled.get(s.path) === entry && captureFolderReadable(s.path) && fallback())
+      let isCurrent: (() => boolean) | undefined
       try {
         const opts = await scanOptionsFor(s, o)
+        const previous = readConfig().captureSourceHistory?.[s.path]
+        const configured = previous?.length ? new Set(captureSources().map((source) => source.path)) : null
+        const previousSources = previous?.filter((path) => !configured?.has(path))
+        if (fallback || previousSources?.length) {
+          isCurrent = () => entry !== undefined && scheduled.get(s.path) === entry && captureFolderReadable(s.path) && (fallback?.() ?? true)
+        }
         const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, {
           ...opts,
           listing: entry?.listing,
-          previousSources: readConfig().captureSourceHistory?.[s.path],
+          previousSources,
           onlyChanged: Boolean(fallback),
           isCurrent
         })
