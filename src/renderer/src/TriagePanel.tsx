@@ -5,6 +5,7 @@ import type { TriageItem, TriageCounts } from '../../preload'
 import { AutoSortingTab } from './AutoSortingTab'
 import { TriageAppBar, TriageAppMenu, useTickedApps } from './TriageAppMenu'
 import { useSorterBusy } from './sorter-hooks'
+import { CaptureFolderNotice, useCaptureFolders } from './CaptureFolderNotice'
 
 // Partition triage items into [date, items] groups, preserving the (date-sorted) order.
 function groupByDateList(items: TriageItem[]): Array<[string, TriageItem[]]> {
@@ -30,7 +31,10 @@ function groupByDateList(items: TriageItem[]): Array<[string, TriageItem[]]> {
 export type TriageTab = 'undecided' | 'selected' | 'excluded' | 'all' | 'auto'
 export function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToast }: { tab: TriageTab; onTab: (t: TriageTab) => void; onReview: () => void; onSettings: () => void; onChanged: () => void; onToast: (m: string) => void }): JSX.Element {
   const sorterBusy = useSorterBusy()
-  const [root, setRoot] = useState<string | null | undefined>(undefined) // undefined = loading, null = unset
+  const folders = useCaptureFolders()
+  const root = folders && (folders.find((s) => s.exists)?.path ?? null)
+  const missingFolders = folders?.filter((s) => !s.exists) ?? []
+  const primaryMissing = missingFolders.some((s) => s.primary)
   const [items, setItems] = useState<TriageItem[]>([])
   const [counts, setCounts] = useState<TriageCounts>({ undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 })
   const [cols, setCols] = useState<number>(() => {
@@ -98,7 +102,6 @@ export function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToa
     refreshRef.current = refresh
   }, [refresh])
   useEffect(() => {
-    void window.sw.settings.getPaths().then((p) => setRoot(p.screenshotRoot ?? p.captureSources.find((c) => c.exists)?.path ?? null))
     const offChanged = window.sw.triage.onChanged(() => void refreshRef.current())
     const offProgress = window.sw.triage.onProgress((line) => {
       setProgress(line)
@@ -127,8 +130,8 @@ export function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToa
   }, [])
 
   useEffect(() => {
-    if (root) void refresh()
-  }, [root, refresh])
+    if (folders) void refresh()
+  }, [folders, refresh])
 
   const scan = useCallback(async () => {
     setScanning(true)
@@ -142,7 +145,6 @@ export function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToa
   const chooseFolder = useCallback(async () => {
     const p = await window.sw.settings.chooseScreenshotFolder()
     if (!p) return
-    setRoot(p)
     setScanning(true)
     setProgress('scanning…')
     const r = await window.sw.triage.scan()
@@ -328,9 +330,11 @@ export function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToa
               <button className="tb-btn" onClick={() => void scan()} disabled={scanning || !root} title="Re-scan the source for new files">
                 {scanning ? '… scanning' : '⟳ Rescan'}
               </button>
-              <button className="tb-btn" onClick={() => void chooseFolder()}>
-                {root ? '⌖ Change folder' : '⌖ Choose folder'}
-              </button>
+              {!primaryMissing && (
+                <button className="tb-btn" onClick={() => void chooseFolder()}>
+                  {root ? '⌖ Change folder' : '⌖ Choose folder'}
+                </button>
+              )}
             </div>
           </div>
 
@@ -350,7 +354,7 @@ export function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToa
             </div>
             {tab === 'auto' ? (
               <span className="triage-auto-note">Search, grid size and date grouping apply to the first four tabs only.</span>
-            ) : typeof root === 'string' ? (
+            ) : root || counts.total > 0 ? (
               <>
                 <input
                   ref={searchRef}
@@ -378,11 +382,12 @@ export function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToa
             {progress && <span className="triage-progress">{progress}</span>}
           </div>
 
+          {tab !== 'auto' && <CaptureFolderNotice paths={missingFolders.map((s) => s.path)} />}
           {tab === 'auto' ? (
             <AutoSortingTab onReview={onReview} onSettings={() => void window.sw.app.openSettings('sorter-service')} triageUndecided={counts.undecided} />
           ) : root === undefined ? (
             <div className="triage-empty">loading…</div>
-          ) : root === null ? (
+          ) : root === null && counts.total === 0 && missingFolders.length === 0 ? (
             <div className="triage-empty">
               <p>Pick a screenshots folder to triage. SlideWell reads it but never moves, renames, or changes your files — only the ones you include are copied into the well.</p>
               <button className="primary-btn" onClick={() => void chooseFolder()}>
@@ -395,7 +400,7 @@ export function TriagePanel({ tab, onTab, onReview, onSettings, onChanged, onToa
               {items.length === 0 ? (
                 <div className="triage-empty">
                   <p>{scanning ? 'Scanning…' : counts.total === 0 ? 'Nothing scanned yet.' : `No ${stateFilter} items.`}</p>
-                  {counts.total === 0 && !scanning && (
+                  {root && counts.total === 0 && !scanning && (
                     <button className="primary-btn" onClick={() => void scan()}>
                       ⟳ Scan this folder
                     </button>

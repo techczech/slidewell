@@ -57,6 +57,7 @@ function install(initial: { screenshotRoot?: string; captureSources: { path: str
     archiveRoot: () => '/archive',
     wellRootResolved: () => '/well',
     writeConfig: async (patch) => { config = { ...config, ...patch }; return { ok: true } },
+    broadcast: send,
     swThumb: () => null,
     pictureSearch: null,
     review: { filesChanged } as unknown as InstallDeps['review'],

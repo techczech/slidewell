@@ -103,6 +103,7 @@ async function hashFile(file: string | FileHandle, timeoutMs = 15000): Promise<s
 }
 
 interface ScanRow {
+  hash: string
   source: string
   rel_path: string
   size: string
@@ -122,6 +123,7 @@ interface ScanItem {
 
 export interface ScanListing {
   fingerprint?: string
+  relocated?: Map<string, { signature: string; hash: string }>
 }
 
 interface ScanResult {
@@ -136,6 +138,8 @@ export interface ScanOptions {
   namedOnly?: boolean
   /** The last listing successfully scanned for this configured source. */
   listing?: ScanListing
+  /** Former paths of this capture folder. Their matching rows remain the original records. */
+  previousSources?: readonly string[]
   /** The safety net can stop after enumerating unchanged files. */
   onlyChanged?: boolean
   /** A queued safety-net scan may outlive its source configuration. */
@@ -255,7 +259,11 @@ async function scanTriageSourceNow(
 
   onProgress?.(`found ${files.length} media files — reading…`)
   await ensureTriage(wellRoot)
-  const prior = await query<ScanRow>(db, 'SELECT source, rel_path, size, mtime, offline FROM triage_fts', [])
+  const prior = await query<ScanRow>(db, 'SELECT hash, source, rel_path, size, mtime, offline FROM triage_fts', [])
+  const previousSources = new Set(opts.previousSources)
+  previousSources.delete(sourceRoot)
+  const previousHashes = new Set(previousSources.size ? prior.filter((r) => previousSources.has(r.source)).map((r) => r.hash) : [])
+  const relocated = new Map<string, { signature: string; hash: string }>()
   const seen = new Map(prior.map((r) => [`${r.source}\0${r.rel_path}`, `${r.size}:${r.mtime}`]))
   const wasOffline = new Set(prior.filter((r) => r.offline === '1').map((r) => `${r.source}\0${r.rel_path}`))
   const downloadRoot = opts.downloadRoot ?? null
@@ -315,6 +323,13 @@ async function scanTriageSourceNow(
       if (f.offline) offlineN++
       continue
     }
+    const signature = `${sig}:${f.offline}`
+    const matched = listing?.relocated?.get(f.rel)
+    if (!seen.has(key) && matched?.signature === signature && previousHashes.has(matched.hash) && !(f.offline && downloads)) {
+      relocated.set(f.rel, matched)
+      if (f.offline) offlineN++
+      continue
+    }
     let downloaded: FileHandle | null = null // the checked descriptor of a file downloaded just now
     if (f.offline && downloads && downloadRoot && !backingOff) {
       if (opts.signal?.aborted || downloadMs >= (opts.downloadBudgetMs ?? 600_000)) downloads = false
@@ -346,33 +361,26 @@ async function scanTriageSourceNow(
       }
     }
     const pathId = (): string => 'p:' + createHash('sha256').update(`${f.rel}:${sig}`).digest('hex').slice(0, 11)
-    let hash: string
+    const contentHash = f.offline ? null : await hashFile(downloaded ?? f.abs)
+    const hash = contentHash ?? pathId()
+    if (!contentHash) offlineN++
+    if (!seen.has(key) && previousHashes.has(hash)) {
+      relocated.set(f.rel, { signature, hash })
+      continue
+    }
     let ocr = ''
     let posterRel = ''
-    let rowOffline = f.offline
-    if (f.offline) {
-      hash = pathId() // online-only placeholder; never read
-      offlineN++
-    } else {
-      const h = await hashFile(downloaded ?? f.abs)
-      if (h === null) {
-        // unreadable / stalled read — treat like a not-downloaded file rather than hang
-        hash = pathId()
-        rowOffline = true
-        offlineN++
-      } else if (f.kind === 'video') {
-        hash = h
+    if (contentHash) {
+      if (f.kind === 'video') {
         const posterAbs = join(postersDir(wellRoot), `${hash}.jpg`)
         if (existsSync(posterAbs) || (await makePoster(f.abs, posterAbs))) {
           posterRel = relative(wellRoot, posterAbs)
           ocr = await ocrImage(archiveRoot, posterAbs)
         }
-        indexed++
       } else {
-        hash = h
         ocr = await ocrImage(archiveRoot, f.abs)
-        indexed++
       }
+      indexed++
     }
     const name = f.abs.split('/').pop() || f.rel
     const parsed = parseName(f.abs)
@@ -381,12 +389,15 @@ async function scanTriageSourceNow(
       `DELETE FROM triage_fts WHERE rel_path = ? AND source = ?;
        INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, poster_rel, offline, ocr_text, scanned_at, source, taken_at, app, window_title)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [f.rel, sourceRoot, hash, f.kind, f.rel, name, f.ext, String(f.size), String(f.mtime), posterRel, rowOffline ? '1' : '0', ocr, new Date().toISOString(), sourceRoot, parsed?.takenAt ?? '', parsed?.app ?? '', parsed?.window ?? '']
+      [f.rel, sourceRoot, hash, f.kind, f.rel, name, f.ext, String(f.size), String(f.mtime), posterRel, contentHash ? '0' : '1', ocr, new Date().toISOString(), sourceRoot, parsed?.takenAt ?? '', parsed?.app ?? '', parsed?.window ?? '']
     )
     if (i % 3 === 0 || i === files.length) onProgress?.(`processed ${i}/${files.length} · ${indexed} read · ${offlineN} not downloaded`)
   }
   onProgress?.(`done — ${indexed} read, ${offlineN} not downloaded, ${files.length} total`)
-  if (listing) listing.fingerprint = fingerprint
+  if (listing) {
+    listing.fingerprint = fingerprint
+    listing.relocated = relocated.size ? relocated : undefined
+  }
   return { indexed, total: files.length, offline: offlineN }
 }
 
@@ -712,10 +723,11 @@ export async function promoteTriageHashes(
     onlyHashes ?? []
   )
   const enriched = staged.map((s) => {
-    const abs = join(s.source || sourceRoot, s.rel_path)
+    const root = s.source || sourceRoot
+    const abs = root ? join(root, s.rel_path) : ''
     let size: number | undefined
     try {
-      size = statSync(abs, { throwIfNoEntry: false })?.size
+      if (abs) size = statSync(abs, { throwIfNoEntry: false })?.size
     } catch {
       console.error(`[triage] import failed for ${abs} — could not read the file; left staged`)
     }

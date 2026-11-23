@@ -53,7 +53,7 @@ import { PROVIDERS } from './sorter/cloud/provider'
 
 import { install as installArchiveSearch } from './archive-search-ipc'
 import { install as installArchiveStreams } from './archive-streams-ipc'
-import { createCaptureSources, type CaptureSource } from './capture-sources-ipc'
+import { captureFolderReadable, createCaptureSources, type CaptureSource, type CaptureSourceHistory } from './capture-sources-ipc'
 import { install as installOthersLibrary } from './others-library-ipc'
 
 const REQUIREMENTS_URL = 'https://github.com/techczech/slidewell/blob/main/REQUIREMENTS.md'
@@ -92,6 +92,7 @@ type Config = {
   vaultRoot?: string
   screenshotRoot?: string
   captureSources?: CaptureSource[] // extra capture sources beside screenshotRoot (capture inbox)
+  captureSourceHistory?: CaptureSourceHistory // former paths explicitly re-pointed to a capture folder
   conversionsRoot?: string // default destination for throwaway PPTX→Outline conversions
   convertOcrByDefault?: boolean // initial state of the convert OCR toggle
   othersArchiveRoot?: string // the Others' Library store (Scenario A) — other people's decks, kept separate
@@ -292,7 +293,7 @@ function detectVaultRoot(): string | null {
 // ADR-0029). Null until the user picks one in the Triage screen / Settings.
 function screenshotRootResolved(): string | null {
   const r = readConfig().screenshotRoot
-  return r && existsSync(r) ? r : null
+  return r && captureFolderReadable(r) ? r : null
 }
 
 const { captureDefaults, triageSources, install: installCaptureSources } = createCaptureSources({ readConfig, screenshotRootResolved })
@@ -753,7 +754,7 @@ app.whenReady().then(async () => {
     vaultAvailable: Boolean(detectVaultRoot()),
     screenshotRoot: screenshotRootResolved(),
     screenshotAvailable: Boolean(screenshotRootResolved()),
-    captureSources: (readConfig().captureSources ?? []).map((s) => ({ path: s.path, namedOnly: Boolean(s.namedOnly), exists: existsSync(s.path) })),
+    captureSources: (readConfig().captureSources ?? []).map((s) => ({ path: s.path, namedOnly: Boolean(s.namedOnly), exists: captureFolderReadable(s.path) })),
     captureDefaults: await captureDefaults(),
     conversionsRoot: conversionsRootResolved(),
     convertOcrDefault: Boolean(readConfig().convertOcrByDefault),
@@ -839,7 +840,7 @@ app.whenReady().then(async () => {
   const capture = installCaptureSources({
     appHandle, getMainWindow: () => mainWindow,
     fromMainWindow: (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents),
-    fromAppWindow, archiveRoot, wellRootResolved, writeConfig, swThumb, pictureSearch, review, retrainer
+    fromAppWindow, archiveRoot, wellRootResolved, writeConfig, broadcast: toAppWindows, swThumb, pictureSearch, review, retrainer
   })
   refreshWatchers = capture.refreshWatchers
 

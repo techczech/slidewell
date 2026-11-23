@@ -9,32 +9,32 @@ import type { Dependency } from '../../preload'
 import { PictureSearchSettings } from './PictureSearch'
 import { SorterServiceSettings } from './SorterServiceSettings'
 import { BacklogImportSettings } from './BacklogImport'
-
-type Source = { path: string; namedOnly: boolean; exists: boolean }
+import { CaptureFolderActions, useCaptureFolders } from './CaptureFolderNotice'
 
 function CaptureSources(): JSX.Element {
-  const [sources, setSources] = useState<Source[]>([])
+  const sources = useCaptureFolders() ?? []
   const [cleanshot, setCleanshot] = useState(false)
   const load = useCallback(async () => {
     const p = await window.sw.settings.getPaths()
-    setSources(p.captureSources)
     setCleanshot(Boolean(p.captureDefaults.cleanshot))
   }, [])
   useEffect(() => void load(), [load])
   return (
     <div className="sw-page">
-      <p className="sw-page-note">Folders watched for new screenshots, besides the Triage source folder (Settings › Screenshots). New files reach Triage within a minute. SlideWell only reads these folders; it never moves or changes the originals.</p>
+      <p className="sw-page-note">Folders watched for new screenshots. New files reach Triage within a minute. SlideWell only reads these folders; it never moves or changes the originals.</p>
       {sources.map((c) => (
         <div className={`sw-page-row${c.exists ? '' : ' bad'}`} key={c.path}>
           <div className="grow">
-            <div>{c.namedOnly ? 'Only files named like screenshots (Screenshot…, CleanShot…)' : 'All images and videos'}</div>
+            <div>{c.primary ? 'Triage source folder' : c.namedOnly ? 'Only files named like screenshots (Screenshot…, CleanShot…)' : 'All images and videos'}</div>
             <div className="sub" title={c.path}>{c.path}{c.exists ? '' : ' · folder not found'}</div>
           </div>
-          <button className="copyref" onClick={() => void window.sw.settings.removeCaptureSource(c.path).then(load)}>Remove</button>
+          {!c.exists
+            ? <CaptureFolderActions path={c.path} />
+            : !c.primary && <button className="copyref" onClick={() => void window.sw.settings.removeCaptureSource(c.path).then(load)}>Remove</button>}
         </div>
       ))}
       <div className="sw-page-row">
-        <div className="grow">{sources.length === 0 ? 'No extra folders yet.' : 'Add another folder'}</div>
+        <div className="grow">{sources.every((s) => s.primary) ? 'No extra folders yet.' : 'Add another folder'}</div>
         <button className="copyref" onClick={() => void window.sw.settings.addCaptureSource('desktop').then(load)}>Add Desktop</button>
         {cleanshot && <button className="copyref" onClick={() => void window.sw.settings.addCaptureSource('cleanshot').then(load)}>Add CleanShot folder</button>}
         <button className="copyref" onClick={() => void window.sw.settings.addCaptureSource('folder').then(load)}>Add folder…</button>

@@ -1033,6 +1033,15 @@ body {
   font-size: 0.74rem;
   color: var(--muted);
 }
+.triage-capture-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.6rem;
+  padding: 0.4rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.triage-capture-notice > span { overflow-wrap: anywhere; }
 .triage-import-line {
   font-size: 0.74rem;
   color: var(--muted);

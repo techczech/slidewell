@@ -1,6 +1,6 @@
 import { restartWork } from './restart-work'
 import { app, clipboard, dialog, ipcMain, type BrowserWindow, type WebContents } from 'electron'
-import { existsSync, writeFileSync } from 'fs'
+import { accessSync, constants, statSync, writeFileSync } from 'fs'
 import { realpath } from 'node:fs/promises'
 import { homedir, tmpdir } from 'os'
 import { join } from 'path'
@@ -17,11 +17,24 @@ import { createSourceWatcher } from './source-watcher'
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow, type ScanListing, type ScanOptions } from './triage'
 import { appCounts, cleanAppList, decideAllFromApps } from './triage-apps'
 import { createImportRunner } from './triage-import-run'
-import { ingestScreenshot } from './well'
+import { ingestScreenshot, wellByIds } from './well'
+import type { CaptureFolderAction, CaptureFolderStatus } from '../preload'
 import type { AppHandle } from './app-handle'
 
 // An extra folder watched for screenshots. namedOnly limits Desktop scans to screenshot names at the top level.
 export type CaptureSource = { path: string; namedOnly: boolean }
+export type CaptureSourceHistory = Record<string, string[]>
+type ConfiguredSource = CaptureSource & { primary: boolean }
+
+export function captureFolderReadable(path: string): boolean {
+  try {
+    if (!statSync(path).isDirectory()) return false
+    accessSync(path, constants.R_OK | constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
 
 const CAPTURE_RESCAN_MS = 60_000
 const CAPTURE_RESCAN_STAGGER_MS = 1000
@@ -29,7 +42,8 @@ const CAPTURE_RESCAN_GAP_MS = 20_000
 const CAPTURE_RESCAN_BACKOFF_MS = 10 * 60_000
 
 interface ScheduledSource {
-  source: CaptureSource
+  source: ConfiguredSource
+  exists: boolean
   listing: ScanListing
   timer?: ReturnType<typeof setTimeout>
   lastScanAt?: number
@@ -39,6 +53,7 @@ interface ScheduledSource {
 interface ConfigPatch {
   screenshotRoot?: string
   captureSources?: CaptureSource[]
+  captureSourceHistory?: CaptureSourceHistory
 }
 
 interface SourceDependencies {
@@ -53,7 +68,8 @@ interface InstallDependencies {
   fromAppWindow: (event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent) => boolean
   archiveRoot: () => string
   wellRootResolved: () => string
-  writeConfig: (patch: ConfigPatch) => unknown
+  writeConfig: (patch: ConfigPatch) => Promise<CaptureFolderAction>
+  broadcast: (channel: string, payload: unknown) => void
   swThumb: (abs: string | null) => string | null
   pictureSearch: PictureSearchService | null
   review: ReviewService
@@ -71,19 +87,19 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     }
   }
 
-  function captureSources(includeMissing: boolean): CaptureSource[] {
-    const out: CaptureSource[] = []
+  function captureSources(): ConfiguredSource[] {
+    const out: ConfiguredSource[] = []
     const config = readConfig()
-    const primary = screenshotRootResolved() ?? (includeMissing ? config.screenshotRoot : null)
-    if (primary) out.push({ path: primary, namedOnly: false })
+    const primary = config.screenshotRoot
+    if (primary) out.push({ path: primary, namedOnly: false, primary: true })
     for (const s of config.captureSources ?? []) {
-      if (s && typeof s.path === 'string' && (includeMissing || existsSync(s.path)) && !out.some((o) => o.path === s.path)) out.push({ path: s.path, namedOnly: Boolean(s.namedOnly) })
+      if (s && typeof s.path === 'string' && !out.some((o) => o.path === s.path)) out.push({ path: s.path, namedOnly: Boolean(s.namedOnly), primary: false })
     }
     return out
   }
 
   // Every available folder the capture inbox reads, primary first.
-  const triageSources = (): CaptureSource[] => captureSources(false)
+  const triageSources = (): CaptureSource[] => captureSources().filter((s) => captureFolderReadable(s.path))
 
   // Capture-watcher downloads are owned here: quitting SlideWell or pressing Stop on the backlog import
   // aborts them (the active download child is killed) and they stay off until the next explicit user
@@ -115,14 +131,19 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
   }
 
   function install(deps: InstallDependencies): { launchScan: () => void; refreshWatchers: () => void } {
-    const { appHandle, getMainWindow, fromMainWindow, fromAppWindow, archiveRoot, wellRootResolved, writeConfig, swThumb, pictureSearch, review, retrainer } = deps
+    const { appHandle, getMainWindow, fromMainWindow, fromAppWindow, archiveRoot, wellRootResolved, writeConfig, broadcast, swThumb, pictureSearch, review, retrainer } = deps
     // --- triage (ADR-0029): scan a source folder, browse/decide, promote keepers into the well ---
     appHandle('settings:choose-screenshot-folder', async () => {
       const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
       if (r.canceled || !r.filePaths[0]) return null
-      writeConfig({ screenshotRoot: r.filePaths[0] })
-      refreshWatchers()
-      return r.filePaths[0]
+      const path = r.filePaths[0]
+      return editSources(async () => {
+        const current = readConfig().screenshotRoot
+        const saved = current && !captureFolderReadable(current)
+          ? await replaceFolder(current, path)
+          : await saveSources({ screenshotRoot: path })
+        return saved.ok ? path : null
+      })
     })
     // Capture inbox extras: 'desktop' | 'cleanshot' add the offered defaults; 'folder' asks for a folder.
     appHandle('settings:add-capture-source', async (_e, which: 'desktop' | 'cleanshot' | 'folder') => {
@@ -133,16 +154,76 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
         if (!r.canceled && r.filePaths[0]) src = { path: r.filePaths[0], namedOnly: false }
       }
       if (!src) return false
-      const cur = readConfig().captureSources ?? []
-      if (!cur.some((c) => c.path === src!.path)) writeConfig({ captureSources: [...cur, src] })
-      refreshWatchers()
-      return true
+      const source = src
+      return editSources(async () => {
+        const cur = readConfig().captureSources ?? []
+        if (cur.some((c) => c.path === source.path)) return true
+        return (await saveSources({ captureSources: [...cur, source] })).ok
+      })
     })
-    appHandle('settings:remove-capture-source', (_e, path: string) => {
-      writeConfig({ captureSources: (readConfig().captureSources ?? []).filter((c) => c.path !== path) })
-      refreshWatchers()
-      return true
+    appHandle('settings:remove-capture-source', (_e, path: string) => editSources(async () => {
+      return (await saveSources({ captureSources: (readConfig().captureSources ?? []).filter((c) => c.path !== path) })).ok
+    }))
+    appHandle('settings:capture-source-status', () => folderStatus ?? [])
+    appHandle('settings:stop-capture-source', (_e, path: unknown) => editSources(async () => {
+      const source = captureSources().find((s) => s.path === path)
+      if (!source) return { ok: true }
+      const extras = readConfig().captureSources ?? []
+      const remaining = extras.filter((s) => s.path !== source.path)
+      // An extra entry can duplicate the primary path in legacy settings.
+      if (source.primary && remaining.length !== extras.length) {
+        const saved = await saveSources({ captureSources: remaining })
+        if (!saved.ok) return saved
+      }
+      return saveSources(source.primary ? { screenshotRoot: undefined } : { captureSources: remaining })
+    }))
+    appHandle('settings:replace-capture-source', async (_e, path: unknown) => {
+      if (typeof path !== 'string' || !captureSources().some((s) => s.path === path)) return { ok: false, error: 'This folder is no longer watched.' }
+      const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+      if (r.canceled || !r.filePaths[0]) return { ok: true }
+      return editSources(() => replaceFolder(path, r.filePaths[0]))
     })
+
+    let sourceEdits = Promise.resolve()
+    function editSources<T>(edit: () => Promise<T>): Promise<T> {
+      const result = sourceEdits.then(edit)
+      sourceEdits = result.then(() => undefined, () => undefined)
+      return result
+    }
+    async function saveSources(patch: ConfigPatch): Promise<CaptureFolderAction> {
+      const saved = await writeConfig(patch)
+      refreshWatchers()
+      return saved
+    }
+    async function replaceFolder(path: string, destination: string): Promise<CaptureFolderAction> {
+      const configured = captureSources()
+      const source = configured.find((s) => s.path === path)
+      if (!source) return { ok: false, error: 'This folder is no longer watched.' }
+      if (!captureFolderReadable(destination)) return { ok: false, error: 'SlideWell could not read the chosen folder.' }
+      if (path === destination) {
+        refreshWatchers()
+        return { ok: true }
+      }
+      if (configured.some((s) => s.path === destination)) return { ok: false, error: 'SlideWell already watches the chosen folder.' }
+
+      const config = readConfig()
+      const history = config.captureSourceHistory ?? {}
+      const previous = [...new Set([path, ...(history[path] ?? []), ...(history[destination] ?? [])])].filter((p) => p !== destination)
+      const captureSourceHistory = { ...history, [destination]: previous }
+      if (source.primary) {
+        // State and the primary setting have separate stores. Save the history before pointing the watcher at it.
+        const saved = await writeConfig({
+          captureSourceHistory,
+          captureSources: config.captureSources?.filter((s) => s.path !== path)
+        })
+        if (!saved.ok) return saved
+        return saveSources({ screenshotRoot: destination })
+      }
+      return saveSources({
+        captureSourceHistory,
+        captureSources: config.captureSources?.map((s) => s.path === path ? { ...s, path: destination } : s)
+      })
+    }
     // Review pile of a triage row the sorter proposed something for: a throwaway shows 'bin in N days'.
     const reviewLabel = (r: TriageRow): { pile: string | null; binInDays: number | null } => {
       if (!r.proposal) return { pile: null, binInDays: null }
@@ -159,10 +240,11 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     }
     // One row → renderable wire shape. Images render from the source file; videos from a cached poster,
     // with mediaUrl pointing at the source file so the renderer can play it inline.
-    const triageToWire = (r: TriageRow, sourceRoot: string, wellR: string): Record<string, unknown> => {
+    const triageToWire = (r: TriageRow, sourceRoot: string, wellR: string, storedCopy?: string): Record<string, unknown> => {
       const isVideo = r.kind === 'video'
-      const offline = r.offline === '1'
-      const fileAbs = join(r.source || sourceRoot, r.rel_path)
+      const offline = r.offline === '1' && !storedCopy
+      const root = r.source || sourceRoot
+      const fileAbs = storedCopy ?? (root ? join(root, r.rel_path) : null)
       const posterAbs = r.poster_rel ? join(wellR, r.poster_rel) : null
       const sizeBytes = Number(r.size) || 0
       const mtime = Number(r.mtime) || 0
@@ -201,18 +283,20 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     const pending = new Map<string, number>()
     const loggedFailures = new Set<string>()
     let launchTimer: ReturnType<typeof setTimeout> | undefined
+    let folderStatus: CaptureFolderStatus[] | undefined
 
     async function scanSource(s: CaptureSource, o: { downloads?: boolean; fallback?: () => boolean } = {}) {
       pending.set(s.path, (pending.get(s.path) ?? 0) + 1)
       const entry = scheduled.get(s.path)
       const startedAt = Date.now()
       const fallback = o.fallback
-      const isCurrent = fallback && (() => scheduled.get(s.path) === entry && existsSync(s.path) && fallback())
+      const isCurrent = fallback && (() => scheduled.get(s.path) === entry && captureFolderReadable(s.path) && fallback())
       try {
         const opts = await scanOptionsFor(s, o)
         const res = await scanTriageSource(archiveRoot(), wellRootResolved(), s.path, onTriageProgress, {
           ...opts,
           listing: entry?.listing,
+          previousSources: readConfig().captureSourceHistory?.[s.path],
           onlyChanged: Boolean(fallback),
           isCurrent
         })
@@ -281,7 +365,7 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     function rescan(entry: ScheduledSource, timer = false): void {
       const s = entry.source
       const canScan = () => !timer || mainWindowVisible()
-      if (!canScan() || restartWork.locked() || pending.has(s.path) || !existsSync(s.path)) return
+      if (!canScan() || restartWork.locked() || pending.has(s.path) || !entry.exists) return
       const now = Date.now()
       if (now - (entry.lastScanAt ?? -Infinity) < CAPTURE_RESCAN_GAP_MS) return
       if (now - (entry.failedAt ?? -Infinity) < CAPTURE_RESCAN_BACKOFF_MS) return
@@ -290,31 +374,52 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
         .catch(() => undefined)
     }
     const rescanOnFocus = (_event: Electron.Event, window: BrowserWindow): void => {
-      if (window === getMainWindow() && !window.isDestroyed()) for (const entry of scheduled.values()) rescan(entry)
+      if (window !== getMainWindow() || window.isDestroyed()) return
+      for (const entry of scheduled.values()) checkFolder(entry)
+      publishFolders()
+      for (const entry of scheduled.values()) rescan(entry)
+    }
+    function checkFolder(entry: ScheduledSource): void {
+      const exists = captureFolderReadable(entry.source.path)
+      if (entry.exists === exists) return
+      entry.exists = exists
+      entry.listing = {}
+      entry.failedAt = undefined
+    }
+    function publishFolders(refresh = false): void {
+      const next = [...scheduled.values()].map(({ source, exists }) => ({ ...source, exists }))
+      const changed = JSON.stringify(next) !== JSON.stringify(folderStatus)
+      if (refresh || changed) watcher.setSources(next.filter((s) => s.exists).map((s) => ({ path: s.path, recursive: !s.namedOnly })))
+      const initial = !folderStatus
+      folderStatus = next
+      if (!initial && changed) broadcast('capture-sources:changed', next)
     }
     function scheduleRescan(entry: ScheduledSource, delay: number): void {
       entry.timer = setTimeout(() => {
         scheduleRescan(entry, CAPTURE_RESCAN_MS)
+        checkFolder(entry)
+        publishFolders()
         rescan(entry, true)
       }, delay)
     }
     function refreshWatchers(): void {
-      watcher.setSources(triageSources().map((s) => ({ path: s.path, recursive: !s.namedOnly })))
-      const wanted = new Map(captureSources(true).map((s) => [s.path, s]))
+      const wanted = new Map(captureSources().map((s) => [s.path, s]))
       for (const [path, entry] of scheduled) {
-        if (wanted.get(path)?.namedOnly === entry.source.namedOnly) continue
+        const source = wanted.get(path)
+        if (source?.namedOnly === entry.source.namedOnly && source.primary === entry.source.primary) continue
         clearTimeout(entry.timer)
         scheduled.delete(path)
       }
       let delay = CAPTURE_RESCAN_MS
       for (const source of wanted.values()) {
         if (!scheduled.has(source.path)) {
-          const entry: ScheduledSource = { source, listing: {} }
+          const entry: ScheduledSource = { source, listing: {}, exists: captureFolderReadable(source.path) }
           scheduled.set(source.path, entry)
           scheduleRescan(entry, delay)
-        }
+        } else checkFolder(scheduled.get(source.path)!)
         delay += CAPTURE_RESCAN_STAGGER_MS
       }
+      publishFolders(true)
     }
     refreshWatchers()
     app.on('browser-window-focus', rescanOnFocus)
@@ -336,10 +441,10 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
       captureDownloads
     })
     guardedHandle(ipcMain, fromMainWindow, 'triage:list', async (_e, q: string, state: string, sort?: string, limit?: number, offset?: number, apps?: unknown) => {
-      const src = triageSources()[0]?.path ?? null
+      const available = new Set(triageSources().map((source) => source.path))
+      const src = available.values().next().value ?? captureSources()[0]?.path ?? ''
       const wellR = wellRootResolved()
       const empty = { items: [], counts: { undecided: 0, selected: 0, included: 0, excluded: 0, total: 0 }, hasMore: false }
-      if (!src) return empty
       try {
         const s = sort === 'date-desc' || sort === 'date-asc' ? sort : 'scanned'
         const lim = typeof limit === 'number' && limit > 0 ? Math.min(limit, 500) : 150
@@ -348,15 +453,17 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
         const only = apps === undefined || apps === null ? null : cleanAppList(apps)
         if (apps !== undefined && apps !== null && !only) return { ...empty, counts: await triageCounts(wellR) }
         const rows = await listTriage(wellR, q ?? '', state ?? 'undecided', s, lim, off, Date.now(), only)
+        const missingCopies = rows.filter((r) => r.well_id && !available.has(r.source || src))
+        const wellRows = missingCopies.length ? await wellByIds(wellR, missingCopies.map((r) => r.well_id!)).catch(() => []) : []
+        const copies = new Map(wellRows.filter((r) => r.root === 'well').map((r) => [r.id, join(wellR, r.rel_path)]))
         const counts = await triageCounts(wellR)
-        return { items: rows.map((r) => triageToWire(r, src, wellR)), counts, hasMore: rows.length === lim }
+        return { items: rows.map((r) => triageToWire(r, src, wellR, r.well_id ? copies.get(r.well_id) : undefined)), counts, hasMore: rows.length === lim }
       } catch {
         return empty
       }
     })
     guardedHandle(ipcMain, fromMainWindow, 'triage:decide', async (_e, hash: string, action: 'select' | 'exclude' | 'reset', force?: boolean) => {
-      const src = triageSources()[0]?.path ?? null
-      if (!src) return { state: 'undecided' }
+      const src = triageSources()[0]?.path ?? captureSources()[0]?.path ?? ''
       try {
         const r = await setTriageDecision(archiveRoot(), wellRootResolved(), src, hash, action, Boolean(force))
         retrainer.noteAnswer() // a throw-away in Triage is a choice the sorter learns from (a keep counts once imported)
@@ -379,7 +486,6 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     guardedHandle(ipcMain, fromMainWindow, 'triage:decide-all', async (_e, apps: unknown, action: unknown, expected: unknown) => {
       const list = cleanAppList(apps)
       if (!list || !list.length || (action !== 'select' && action !== 'exclude') || typeof expected !== 'number' || !Number.isSafeInteger(expected) || expected < 0) return { ok: false, changed: 0, count: 0, refused: 'bad-arguments' }
-      if (!triageSources()[0]) return { ok: false, changed: 0, count: 0, refused: 'count-changed' }
       const r = await decideAllFromApps(wellRootResolved(), list, action, expected)
       retrainer.noteAnswer()
       return r
@@ -388,8 +494,7 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
     const triageImport = createImportRunner({
       emit: (snap) => void getMainWindow()?.webContents.send('triage:import-progress', snap),
       work: async (onStep, forceHashes) => {
-        const src = triageSources()[0]?.path ?? null
-        if (!src) return { imported: 0, skipped: 0, gated: 0 }
+        const src = triageSources()[0]?.path ?? captureSources()[0]?.path ?? ''
         try {
           return await importSelectedTriage(archiveRoot(), wellRootResolved(), src, forceHashes, onStep)
         } finally {
