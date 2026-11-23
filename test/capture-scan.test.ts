@@ -14,7 +14,7 @@ vi.mock('../src/main/well', () => ({
   makePoster: async () => false,
   recordWellSource: async () => undefined
 }))
-const { scanTriageSource } = await import('../src/main/triage')
+const { scanTriageSource, setTriageDecision } = await import('../src/main/triage')
 const { query } = await import('../src/main/sqlite')
 
 const SCRATCH = join(homedir(), 'Library', 'Caches', 'slidewell-dev-15', 'vitest-scan')
@@ -322,5 +322,34 @@ describe('capture scan: online-only files', () => {
     expect(calls).toBe(1)
     expect(killed).toBe(true)
     expect(await rows()).toEqual({ 'a.png': '1', 'b.png': '1' })
+  })
+})
+
+describe('re-pointing a capture folder', () => {
+  it('keeps original rows and decisions through repeated scans of moved files', async () => {
+    writeFileSync(join(src, 'kept.png'), 'kept screenshot')
+    writeFileSync(join(src, 'discarded.png'), 'discarded screenshot')
+    placeholder('online.png', 1)
+    await scanTriageSource('/nonexistent', well, src)
+    const db = join(well, 'triage.db')
+    const captures = () => query(db, 'SELECT rowid, * FROM triage_fts ORDER BY rowid', [])
+    const decisions = () => query(db, 'SELECT * FROM triage_decisions ORDER BY hash', [])
+    const hashOf = async (name: string) => (await query<{ hash: string }>(db, 'SELECT hash FROM triage_fts WHERE filename = ?', [name]))[0].hash
+    await setTriageDecision('/nonexistent', well, src, await hashOf('kept.png'), 'select')
+    await setTriageDecision('/nonexistent', well, src, await hashOf('discarded.png'), 'exclude')
+    const previousRows = await captures()
+    const previousDecisions = await decisions()
+
+    const replacement = join(dir, 'New shots')
+    renameSync(src, replacement)
+    renameSync(join(replacement, 'discarded.png'), join(replacement, 'renamed.png'))
+    writeFileSync(join(replacement, 'new.png'), 'new capture')
+    const options = { previousSources: [src] }
+    expect((await scanTriageSource('/nonexistent', well, replacement, undefined, options)).indexed).toBe(1)
+    expect((await scanTriageSource('/nonexistent', well, replacement, undefined, options)).indexed).toBe(0)
+    const current = await captures()
+    expect(current.slice(0, previousRows.length)).toEqual(previousRows)
+    expect(current.slice(previousRows.length)).toEqual([expect.objectContaining({ filename: 'new.png', source: replacement })])
+    expect(await decisions()).toEqual(previousDecisions)
   })
 })

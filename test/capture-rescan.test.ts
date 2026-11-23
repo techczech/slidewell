@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events'
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppHandle } from '../src/main/app-handle'
@@ -41,16 +43,20 @@ const mainWindow = { webContents: { send }, isVisible, isMinimized, isDestroyed 
 const event = { sender: mainWindow.webContents } as Electron.IpcMainInvokeEvent
 const scanResult = { indexed: 1, total: 1, offline: 0 }
 
-function install() {
-  let config = { captureSources: [{ path: extra, namedOnly: true }] }
-  return createCaptureSources({ readConfig: () => config, screenshotRootResolved: () => __dirname }).install({
+let scratch: string
+
+function install(initial: { screenshotRoot?: string; captureSources: { path: string; namedOnly: boolean }[] } = {
+  screenshotRoot: __dirname, captureSources: [{ path: extra, namedOnly: true }]
+}) {
+  let config = initial
+  return createCaptureSources({ readConfig: () => config, screenshotRootResolved: () => config.screenshotRoot ?? null }).install({
     appHandle: (channel, fn) => void handlers.set(channel, fn),
     getMainWindow: () => mainWindow,
     fromMainWindow: (sender) => sender === event.sender,
     fromAppWindow: () => true,
     archiveRoot: () => '/archive',
     wellRootResolved: () => '/well',
-    writeConfig: (patch) => { config = { ...config, ...patch } },
+    writeConfig: async (patch) => { config = { ...config, ...patch }; return { ok: true } },
     swThumb: () => null,
     pictureSearch: null,
     review: { filesChanged } as unknown as InstallDeps['review'],
@@ -59,6 +65,7 @@ function install() {
 }
 
 beforeEach(() => {
+  scratch = mkdtempSync(join(tmpdir(), 'sw-capture-rescan-'))
   vi.useFakeTimers()
   isVisible.mockReset()
   isVisible.mockReturnValue(true)
@@ -75,6 +82,7 @@ afterEach(() => {
   app.emit('will-quit')
   app.removeAllListeners()
   vi.useRealTimers()
+  rmSync(scratch, { recursive: true, force: true })
 })
 
 describe('capture fallback through the Triage scan', () => {
@@ -213,7 +221,7 @@ describe('capture fallback through the Triage scan', () => {
   it('clears a removed source timer and clears all timers on quit', async () => {
     const capture = install()
     expect(vi.getTimerCount()).toBe(2)
-    handlers.get('settings:remove-capture-source')!(event, extra)
+    await handlers.get('settings:remove-capture-source')!(event, extra)
     expect(vi.getTimerCount()).toBe(1)
     await vi.advanceTimersByTimeAsync(60_000)
     expect(scan.mock.calls.map((call) => call[2])).toEqual([__dirname])
@@ -225,6 +233,61 @@ describe('capture fallback through the Triage scan', () => {
     expect(queuedScan.isCurrent?.()).toBe(false)
     app.emit('browser-window-focus', {}, mainWindow)
     await vi.advanceTimersByTimeAsync(120_000)
+    expect(scan).toHaveBeenCalledOnce()
+  })
+})
+
+describe('capture folder availability', () => {
+  const status = () => handlers.get('settings:capture-source-status')?.(event) as { path: string; exists: boolean }[] | undefined
+
+  it('detects missing, non-directory and unreadable folders at installation', () => {
+    const missing = join(scratch, 'missing')
+    const file = join(scratch, 'file')
+    const unreadable = join(scratch, 'unreadable')
+    writeFileSync(file, 'not a directory')
+    mkdirSync(unreadable)
+    chmodSync(unreadable, 0o300)
+    try {
+      install({ screenshotRoot: missing, captureSources: [file, unreadable, scratch].map((path) => ({ path, namedOnly: false })) })
+      expect(status()?.map(({ path, exists }) => [path, exists])).toEqual([
+        [missing, false], [file, false], [unreadable, false], [scratch, true]
+      ])
+    } finally {
+      chmodSync(unreadable, 0o700)
+    }
+  })
+
+  it('publishes one transition when a folder goes away while the window is hidden', async () => {
+    const path = join(scratch, 'Screenshots')
+    mkdirSync(path)
+    install({ captureSources: [{ path, namedOnly: false }] })
+    isVisible.mockReturnValue(false)
+    renameSync(path, join(scratch, 'Moved'))
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(status()).toEqual([expect.objectContaining({ path, exists: false })])
+    expect(send.mock.calls.filter(([channel]) => channel === 'capture-sources:changed')).toHaveLength(1)
+    expect(scan).not.toHaveBeenCalled()
+  })
+
+  it('clears missing status on the next timer pass when the directory comes back', async () => {
+    const path = join(scratch, 'Screenshots')
+    install({ screenshotRoot: path, captureSources: [] })
+    expect(status()).toEqual([expect.objectContaining({ path, exists: false })])
+    mkdirSync(path)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(status()).toEqual([expect.objectContaining({ path, exists: true })])
+    expect(scan.mock.calls.map((call) => call[2])).toEqual([path])
+  })
+
+  it('checks on main-window focus, even during the scan cooldown', async () => {
+    const path = join(scratch, 'Screenshots')
+    mkdirSync(path)
+    install({ screenshotRoot: path, captureSources: [] })
+    await handlers.get('triage:scan')!(event)
+    renameSync(path, join(scratch, 'Moved'))
+    app.emit('browser-window-focus', {}, mainWindow)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(status()).toEqual([expect.objectContaining({ path, exists: false })])
     expect(scan).toHaveBeenCalledOnce()
   })
 })
