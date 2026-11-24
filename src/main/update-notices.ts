@@ -15,6 +15,10 @@ import { isUpdateFixture, readFixtureFeed, updateFixtureRoot } from './update-fi
 import { CHECK_UPDATES, UPDATE_IDENTITY, WHATS_NEW } from '../shared/update-identity'
 
 const shippedNotes: Record<string, readonly WhatsNewItem[]> = {
+  '0.4.0-alpha.22': [
+    { title: 'Missing capture folders are shown', text: 'When a watched screenshot folder disappears or is renamed, Triage says so and Settings › Watched folders marks it. Choose folder… points SlideWell at the new place, or Stop watching turns it off.' },
+    { title: 'No duplicate screenshots after a move', text: 'When you point SlideWell at a moved folder, the screenshots already in Triage are matched to their new place and keep your decisions, instead of appearing a second time.' }
+  ],
   '0.4.0-alpha.21': [
     { title: 'New screenshots arrive on their own', text: 'Triage now looks for new captures when you come back to SlideWell and once a minute while it is open, so a screenshot shows up even when macOS forgets to announce it.' },
     { title: 'Updates in one click', text: 'Tick Get early versions (alpha) in Settings › About and updates to install new versions from inside SlideWell; it checks that each one comes from the same developer before restarting.' },
