@@ -75,7 +75,7 @@ try {
   const heads = await bandHeads(win)
   console.log('bands:', JSON.stringify(heads))
   check('Both ran one picture query', (await queries(win)) === q0 + 1, `${q0} -> ${await queries(win)}`)
-  check('Words match band above Looks related band', /^.? ?Words match \(\d+\)/.test(heads[0] ?? '') && /Looks related \(\d+\)/.test(heads[1] ?? ''), JSON.stringify(heads))
+  check('Words match band above Looks related band', /^.? ?Words match \([1-9]\d*\)/.test(heads[0] ?? '') && /Looks related \([1-9]\d*\)/.test(heads[1] ?? ''), JSON.stringify(heads))
   const c = await chips(win)
   check('every card shows one score label form', c.length > 0 && c.every((t) => /^(words|meaning) \d\.\d\d$/.test(t)), JSON.stringify(c.slice(0, 5)))
   const nWords = Number(heads[0]?.match(/\((\d+)\)/)?.[1])

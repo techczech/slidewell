@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { setTimeout as sleep } from 'node:timers/promises'
 import sharp from 'sharp'
 
 export const WORDS_QUERY = 'lantern'
@@ -91,14 +92,20 @@ export function writeSearchProfile(root, userData) {
 }
 
 export async function waitForSearchIndex(win, expected) {
-  await win.waitForFunction(async (total) => {
-    const status = await window.sw.picture.status()
-    if (status.model !== 'ready') throw new Error(`local picture model is ${status.model}`)
-    if (status.index.phase === 'error') throw new Error(`fixture indexing failed: ${status.index.error}`)
-    if (status.index.phase !== 'done') return false
-    if (status.index.total !== total || status.index.failed) {
-      throw new Error(`fixture index incomplete: ${JSON.stringify(status.index)}`)
+  await win.waitForFunction(() => Boolean(window.sw?.picture))
+  const end = Date.now() + 120000
+  for (;;) {
+    // Playwright's waitForFunction tests the Promise itself for truthiness.
+    const { model, index } = await win.evaluate(() => window.sw.picture.status())
+    if (model !== 'ready') throw new Error(`local picture model is ${model}`)
+    if (index.phase === 'error') throw new Error(`fixture indexing failed: ${index.error}`)
+    if (index.phase === 'done') {
+      if (index.total !== expected || index.done !== expected || index.failed) {
+        throw new Error(`fixture index incomplete: ${JSON.stringify(index)}`)
+      }
+      return
     }
-    return true
-  }, expected, { timeout: 120000 })
+    if (Date.now() >= end) throw new Error(`fixture indexing timed out: ${JSON.stringify(index)}`)
+    await sleep(100)
+  }
 }
