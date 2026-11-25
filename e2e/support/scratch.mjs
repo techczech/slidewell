@@ -4,12 +4,12 @@ import { join } from 'node:path'
 import { _electron as electron } from 'playwright'
 
 // A short path leaves room for the app's Unix socket beneath userData.
-export function createScratch(name) {
+export function createScratch(name, { keep = false } = {}) {
   const prefix = `sw-${name}-`
   const socket = join(tmpdir(), prefix + 'XXXXXX', 'userData', 'picture-query.sock')
   const base = Buffer.byteLength(socket) < 104 ? tmpdir() : '/tmp'
   const root = mkdtempSync(join(base, prefix))
-  process.once('exit', () => rmSync(root, { recursive: true, force: true }))
+  if (!keep) process.once('exit', () => rmSync(root, { recursive: true, force: true }))
   return root
 }
 
