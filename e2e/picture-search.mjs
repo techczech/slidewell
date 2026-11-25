@@ -1,28 +1,36 @@
 // Hidden end-to-end: index a generated archive, restart while paused, recover after a hard kill,
 // and verify a new well image plus text and image queries.
 // Run npm run test:picture-search with SLIDEWELL_PICTURE_MODEL_DIR pointing to a verified local cache.
+// Set SLIDEWELL_PICTURE_DOWNLOAD=1 to download and delete the model through Settings instead.
+// Set SLIDEWELL_PICTURE_KEEP_SCRATCH=1 to retain the isolated profile and screenshots for inspection.
 import { finish, recordFailure } from './support/result.mjs'
 import { createScratch, launchHidden } from './support/scratch.mjs'
 import { copyCachedPictureModel, requireCachedPictureModel } from './support/cached-picture-model.mjs'
 import { makeSearchArchive, writeSearchProfile, NO_WORDS_QUERY, WORDS_QUERY } from './support/search-fixture.mjs'
+import { MODEL_DIR_NAME, MODEL_FILES, MODEL_TOTAL_BYTES, modelFileUrl } from '../src/main/picture-search/model-manifest.ts'
 import { DatabaseSync } from 'node:sqlite'
-import { existsSync, mkdirSync, copyFileSync } from 'node:fs'
+import { existsSync, mkdirSync, copyFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
-const model = requireCachedPictureModel('SLIDEWELL_PICTURE_MODEL_DIR', 'SLIDEWELL_SORTER_MODEL_DIR')
+const download = process.env.SLIDEWELL_PICTURE_DOWNLOAD === '1'
+const model = download ? null : requireCachedPictureModel('SLIDEWELL_PICTURE_MODEL_DIR', 'SLIDEWELL_SORTER_MODEL_DIR')
 const expectId = process.env.SLIDEWELL_PICTURE_EXPECT || null
 const queryText = process.env.SLIDEWELL_PICTURE_QUERY || NO_WORDS_QUERY
-const scratch = createScratch('picture')
+const scratch = createScratch('picture', { keep: process.env.SLIDEWELL_PICTURE_KEEP_SCRATCH === '1' })
 const sample = join(scratch, 'archive')
 const userData = join(scratch, 'userData')
 const home = join(scratch, 'home')
 const well = join(scratch, 'well')
 const screens = join(scratch, 'screens')
 const storeFile = join(well, 'picture-search.db')
+const modelDir = join(userData, 'models', MODEL_DIR_NAME)
+const modelUrls = MODEL_FILES.map(({ path }) => modelFileUrl(path))
+console.log(`isolated profile: ${userData}`)
 const expected = await makeSearchArchive(sample, { slidesPerDeck: 12 })
 
 mkdirSync(screens)
-copyCachedPictureModel(model, userData)
+if (model) copyCachedPictureModel(model, userData)
 writeSearchProfile(scratch, userData)
 
 const results = {}
@@ -37,14 +45,30 @@ async function launch() {
   // SLIDEWELL_E2E_HIDDEN: no window is shown and nothing takes focus (screenshots still render)
   const app = await launchHidden(userData, home, { isolatePreferences: true })
   try {
-    // Block and record every HTTP(S) request in this session.
-    await app.evaluate(({ session }) => {
+    // Permit only the pinned files and their HTTPS redirects during the Settings download.
+    await app.evaluate(({ session }, pinned) => {
+      const allowedFiles = new Set(pinned)
+      const redirects = new Map()
+      const filter = { urls: ['http://*/*', 'https://*/*'] }
       globalThis.__requests = []
-      session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (d, cb) => {
-        globalThis.__requests.push(d.url)
-        cb({ cancel: true })
+      globalThis.__allowPictureDownload = false
+      session.defaultSession.webRequest.onBeforeRequest(filter, (d, cb) => {
+        const redirected = redirects.get(d.id) === d.url
+        redirects.delete(d.id)
+        const file = allowedFiles.has(d.url)
+        const allowed = globalThis.__allowPictureDownload && (file || redirected)
+        globalThis.__requests.push({ origin: new URL(d.url).origin, file: file ? d.url : null, allowed })
+        if (allowed) redirects.set(d.id, d.url)
+        cb({ cancel: !allowed })
       })
-    })
+      session.defaultSession.webRequest.onBeforeRedirect(filter, (d) => {
+        const next = new URL(d.redirectURL)
+        if (redirects.get(d.id) === d.url && next.protocol === 'https:' &&
+            /(^|\.)(huggingface\.co|hf\.co)$/.test(next.hostname)) {
+          redirects.set(d.id, d.redirectURL)
+        }
+      })
+    }, modelUrls)
     // the main window, not the hidden picture-search window (swembed://), which may open first
     let win = null
     for (let i = 0; i < 300 && !win; i++) {
@@ -94,7 +118,7 @@ const vectorRows = () => {
   if (!existsSync(storeFile)) return []
   const db = new DatabaseSync(storeFile, { readOnly: true })
   try {
-    return db.prepare('SELECT id, embedded_at FROM vectors').all()
+    return db.prepare('SELECT id, embedded_at, vector FROM vectors ORDER BY id').all()
   } finally {
     db.close()
   }
@@ -122,16 +146,76 @@ const check = (name, ok, detail) => {
   }
 }
 
-// ---------- run 1: local model ready, index and pause ----------
+async function downloadFromSettings(app, win, sw) {
+  const downloadButton = sw.getByRole('button', { name: /^Download model \(/ })
+  const absent = await status(win)
+  check('model absent before Download', absent.model === 'absent' && !existsSync(modelDir), absent.model)
+  check('no network request before Download', (await requests(app)).length === 0)
+  console.log(`model download target: ${modelDir} (${MODEL_TOTAL_BYTES} bytes)`)
+  const start = Date.now()
+  await app.evaluate(() => { globalThis.__allowPictureDownload = true })
+  await downloadButton.click({ timeout: 10000 })
+  await sw.waitForFunction((total) => {
+    const progress = document.querySelector('.pic-progress')
+    return document.querySelector('.pic-error') ||
+      (progress?.max === total && progress.value > 0 && progress.value < total &&
+        document.querySelector('.pic-progress-text')?.textContent.startsWith('Downloading '))
+  }, MODEL_TOTAL_BYTES, { polling: 100, timeout: 120000 })
+  const error = sw.locator('.pic-error')
+  if (await error.count()) throw new Error(await error.textContent())
+  check('Settings shows download progress', true)
+  await waitFor(win, (s) => {
+    if (s.error) throw new Error(s.error)
+    return s.model === 'ready'
+  }, 20 * 60 * 1000, 'downloaded model ready')
+  await app.evaluate(() => { globalThis.__allowPictureDownload = false })
+  await sw.locator('.pic-settings[data-model="ready"] .pic-ready').waitFor({ timeout: 10000 })
+  await sw.getByRole('button', { name: 'Delete model', exact: true }).waitFor({ timeout: 10000 })
+  check('Settings shows ready after Download', (await sw.locator('.pic-progress').count()) === 0 && (await downloadButton.count()) === 0)
+  const bytes = MODEL_FILES.reduce((sum, { path }) => sum + statSync(join(modelDir, path)).size, 0)
+  check('downloaded model verified on disk', bytes === MODEL_TOTAL_BYTES && existsSync(join(modelDir, 'verified.json')), bytes)
+  const reqs = await requests(app)
+  out('model download', { bytes, seconds: Math.round((Date.now() - start) / 1000), origins: [...new Set(reqs.map((r) => r.origin))] })
+  check('only pinned model files and their redirects requested', reqs.every((r) => r.allowed) &&
+    modelUrls.every((url) => reqs.some((r) => r.file === url)))
+  return reqs.length
+}
+
+async function deleteFromSettings(app, win, expectedRows) {
+  const sw = await openSettings(app, win)
+  await noteVisibility(app)
+  const before = vectorRows()
+  check('all sample vectors present before Delete', before.length === expectedRows, before.length)
+  await sw.getByRole('button', { name: 'Delete model', exact: true }).click({ timeout: 10000 })
+  await sw.locator('.pic-confirm').waitFor({ timeout: 10000 })
+  await sw.getByRole('button', { name: 'Delete', exact: true }).click({ timeout: 10000 })
+  const gone = await waitFor(win, (s) => s.model === 'absent', 30000, 'model deleted')
+  const downloadButton = sw.locator('.pic-settings[data-model="absent"]').getByRole('button', { name: /^Download model \(/ })
+  await sw.waitForFunction(() => {
+    const button = document.querySelector('.pic-settings[data-model="absent"] .pic-primary')
+    return button && !button.disabled
+  }, null, { timeout: 10000 })
+  check('Settings returns to Download after Delete', await downloadButton.isEnabled() &&
+    (await sw.locator('.pic-ready, .pic-confirm, .pic-progress, .pic-error').count()) === 0)
+  check('model files gone and indexing idle after Delete', !existsSync(modelDir) && gone.index.phase === 'idle')
+  const after = vectorRows()
+  check('vectors kept byte for byte after Delete', isDeepStrictEqual(after, before), `${after.length}/${before.length} rows`)
+  out('vectors after model deletion', after.length)
+}
+
+// ---------- run 1: prepare the model, index and pause ----------
 let { app, win } = await launch()
 try {
-  const st0 = await status(win)
-  check('cached model is ready', st0.model === 'ready', st0.model)
+  if (!download) {
+    const st0 = await status(win)
+    check('cached model is ready', st0.model === 'ready', st0.model)
+  }
   const sw = await openSettings(app, win)
   await noteVisibility(app)
   const note = (await sw.locator('.pic-note').textContent())?.trim()
   out('settings note', note)
   check('well images on by default', await sw.locator('.pic-check input').isChecked())
+  const downloadRequests = download ? await downloadFromSettings(app, win, sw) : 0
   // indexing starts by itself; pause from the status bar once a few are done
   await waitFor(win, (s) => s.index.phase === 'indexing' && s.index.done >= 5, 120000, 'indexing under way')
   await closeSettings(app) // the Settings window was left open so far; indexing carries on in the main window
@@ -144,7 +228,7 @@ try {
   out('paused at', `${paused.index.done} / ${paused.index.total}`)
   check('pause stops mid-run', paused.index.done > 0 && paused.index.done < paused.index.total)
   await win.screenshot({ path: join(screens, 'S3-status-paused.png') })
-  check('no network request during indexing and pause', (await requests(app)).length === 0)
+  check('no network request during indexing and pause', (await requests(app)).length === downloadRequests)
 } finally {
   await app.close()
 }
@@ -212,6 +296,10 @@ try {
   check('more-like-this query by image id', sim.ok && sim.results.length === 3 && !sim.results.some((r) => r.id === q.results[0].id))
 
   check('no network request during final queries', (await requests(app)).length === 0)
+  if (download) {
+    await deleteFromSettings(app, win, expected + 1)
+    check('no network request during Delete', (await requests(app)).length === 0)
+  }
 } finally {
   await app.close()
 }
