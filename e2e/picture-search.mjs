@@ -6,17 +6,20 @@
 import { finish, recordFailure } from './support/result.mjs'
 import { createScratch, launchHidden } from './support/scratch.mjs'
 import { copyCachedPictureModel, requireCachedPictureModel } from './support/cached-picture-model.mjs'
-import { makeSearchArchive, writeSearchProfile, NO_WORDS_QUERY, WORDS_QUERY } from './support/search-fixture.mjs'
-import { MODEL_DIR_NAME, MODEL_FILES, MODEL_TOTAL_BYTES, modelFileUrl } from '../src/main/picture-search/model-manifest.ts'
+import { makeSearchArchive, writeSearchProfile } from './support/search-fixture.mjs'
+import {
+  describePictureSlide, writePictureQueryImage, IMAGE_MATCH_ID, PICTURE_TEXT_QUERY, PICTURE_WORDS_QUERY, TEXT_MATCH_ID
+} from './support/picture-search-fixture.mjs'
+import { MODEL_DIR_NAME, MODEL_FILES, MODEL_REVISION, MODEL_TOTAL_BYTES, modelFileUrl } from '../src/main/picture-search/model-manifest.ts'
 import { DatabaseSync } from 'node:sqlite'
-import { existsSync, mkdirSync, copyFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, copyFileSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 
 const download = process.env.SLIDEWELL_PICTURE_DOWNLOAD === '1'
 const model = download ? null : requireCachedPictureModel('SLIDEWELL_PICTURE_MODEL_DIR', 'SLIDEWELL_SORTER_MODEL_DIR')
-const expectId = process.env.SLIDEWELL_PICTURE_EXPECT || null
-const queryText = process.env.SLIDEWELL_PICTURE_QUERY || NO_WORDS_QUERY
+const queryText = process.env.SLIDEWELL_PICTURE_QUERY || PICTURE_TEXT_QUERY
+const expectId = process.env.SLIDEWELL_PICTURE_EXPECT || (queryText === PICTURE_TEXT_QUERY ? TEXT_MATCH_ID : null)
 const scratch = createScratch('picture', { keep: process.env.SLIDEWELL_PICTURE_KEEP_SCRATCH === '1' })
 const sample = join(scratch, 'archive')
 const userData = join(scratch, 'userData')
@@ -27,7 +30,7 @@ const storeFile = join(well, 'picture-search.db')
 const modelDir = join(userData, 'models', MODEL_DIR_NAME)
 const modelUrls = MODEL_FILES.map(({ path }) => modelFileUrl(path))
 console.log(`isolated profile: ${userData}`)
-const expected = await makeSearchArchive(sample, { slidesPerDeck: 12 })
+const expected = await makeSearchArchive(sample, { slidesPerDeck: 12, describeSlide: describePictureSlide })
 
 mkdirSync(screens)
 if (model) copyCachedPictureModel(model, userData)
@@ -53,17 +56,18 @@ async function launch() {
       globalThis.__requests = []
       globalThis.__allowPictureDownload = false
       session.defaultSession.webRequest.onBeforeRequest(filter, (d, cb) => {
+        const origin = URL.parse(d.url)?.origin ?? null
         const redirected = redirects.get(d.id) === d.url
         redirects.delete(d.id)
         const file = allowedFiles.has(d.url)
-        const allowed = globalThis.__allowPictureDownload && (file || redirected)
-        globalThis.__requests.push({ origin: new URL(d.url).origin, file: file ? d.url : null, allowed })
+        const allowed = origin !== null && globalThis.__allowPictureDownload && (file || redirected)
+        globalThis.__requests.push({ origin, file: file ? d.url : null, allowed })
         if (allowed) redirects.set(d.id, d.url)
         cb({ cancel: !allowed })
       })
       session.defaultSession.webRequest.onBeforeRedirect(filter, (d) => {
-        const next = new URL(d.redirectURL)
-        if (redirects.get(d.id) === d.url && next.protocol === 'https:' &&
+        const next = URL.parse(d.redirectURL)
+        if (redirects.get(d.id) === d.url && next?.protocol === 'https:' &&
             /(^|\.)(huggingface\.co|hf\.co)$/.test(next.hostname)) {
           redirects.set(d.id, d.redirectURL)
         }
@@ -131,7 +135,7 @@ async function wordSearchMs(win, n = 5) {
       const t0 = performance.now()
       await window.sw.archive.search(text, filters)
       return performance.now() - t0
-    }, [WORDS_QUERY, FILTERS])
+    }, [PICTURE_WORDS_QUERY, FILTERS])
     times.push(Math.round(t))
   }
   return times.sort((a, b) => a - b)[Math.floor(n / 2)]
@@ -173,9 +177,14 @@ async function downloadFromSettings(app, win, sw) {
   await sw.getByRole('button', { name: 'Delete model', exact: true }).waitFor({ timeout: 10000 })
   check('Settings shows ready after Download', (await sw.locator('.pic-progress').count()) === 0 && (await downloadButton.count()) === 0)
   const bytes = MODEL_FILES.reduce((sum, { path }) => sum + statSync(join(modelDir, path)).size, 0)
-  check('downloaded model verified on disk', bytes === MODEL_TOTAL_BYTES && existsSync(join(modelDir, 'verified.json')), bytes)
+  const marker = JSON.parse(readFileSync(join(modelDir, 'verified.json'), 'utf8'))
+  check('downloaded model verified at the pinned revision', bytes === MODEL_TOTAL_BYTES && marker?.revision === MODEL_REVISION,
+    `${bytes}/${MODEL_TOTAL_BYTES} bytes, revision ${marker?.revision}, expected ${MODEL_REVISION}`)
   const reqs = await requests(app)
-  out('model download', { bytes, seconds: Math.round((Date.now() - start) / 1000), origins: [...new Set(reqs.map((r) => r.origin))] })
+  out('model download', {
+    bytes, revision: marker?.revision, seconds: Math.round((Date.now() - start) / 1000),
+    origins: [...new Set(reqs.map((r) => r.origin))]
+  })
   check('only pinned model files and their redirects requested', reqs.every((r) => r.allowed) &&
     modelUrls.every((url) => reqs.some((r) => r.file === url)))
   return reqs.length
@@ -275,8 +284,9 @@ try {
   check('word search responsive during indexing', results.busyMs <= 250 && results.busyMs <= 10 * Math.max(1, idleMs), `${results.busyMs} ms busy vs ${idleMs} ms idle`)
 
   // a new well image arrives (dropped into the well inbox) → embedded without a restart
-  const someRender = join(sample, 'extracted', 'fixture-deck-1', 'renders', 'slide_0001.webp')
-  copyFileSync(someRender, join(well, '_inbox', 'new-arrival.webp'))
+  const queryImage = join(scratch, 'submarine-query.webp')
+  await writePictureQueryImage(queryImage)
+  copyFileSync(queryImage, join(well, '_inbox', 'new-arrival.webp'))
   const t0 = Date.now()
   let wellVec = null
   while (Date.now() - t0 < 60000 && !wellVec) {
@@ -290,10 +300,14 @@ try {
   out(`query "${queryText}"`, q.results.map((r) => `${r.id} ${r.score.toFixed(3)}`))
   const firstId = q.results[0]?.id
   check('text query returns five ranked results', q.ok && q.results.length === 5 && q.results.every((row, i) => i === 0 || row.score <= q.results[i - 1].score), q.error)
-  if (!firstId) throw new Error(q.error || 'text query returned no image to query by id')
-  if (expectId) check('expected slide ranks first', firstId === expectId, firstId)
-  const sim = await win.evaluate((id) => window.sw.picture.query({ imageId: id }, { limit: 3 }), firstId)
-  check('more-like-this query by image id', sim.ok && sim.results.length === 3 && !sim.results.some((r) => r.id === q.results[0].id))
+  if (expectId) check('expected slide ranks first for the text query', firstId === expectId, `got ${firstId}, expected ${expectId}`)
+  if (wellVec) {
+    const sim = await win.evaluate((id) => window.sw.picture.query({ imageId: id }, { limit: 3 }), wellVec.id)
+    out('query by well image', sim.results.map((r) => `${r.id} ${r.score.toFixed(3)}`))
+    check('more-like-this query by image id', sim.ok && sim.results.length === 3 && !sim.results.some((r) => r.id === wellVec.id))
+    check('expected slide ranks first for the image query', sim.results[0]?.id === IMAGE_MATCH_ID,
+      `got ${sim.results[0]?.id}, expected ${IMAGE_MATCH_ID}`)
+  }
 
   check('no network request during final queries', (await requests(app)).length === 0)
   if (download) {
