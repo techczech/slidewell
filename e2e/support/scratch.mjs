@@ -1,7 +1,6 @@
-import { constants, cpSync, lstatSync, mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
+import { constants, cpSync, lstatSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
 import { _electron as electron } from 'playwright'
 
 // A short path leaves room for the app's Unix socket beneath userData.
@@ -26,35 +25,20 @@ export function copyFixture(source, target) {
   })
 }
 
-export function copyIndexedSearchFixture(fixture, scratch) {
-  for (const folder of ['well', 'userData/models', 'sample-archive']) {
-    copyFixture(join(fixture, folder), join(scratch, folder))
-  }
-  const oldWell = realpathSync(join(fixture, 'well'))
-  const archive = realpathSync(join(scratch, 'sample-archive'))
-  const well = realpathSync(join(scratch, 'well'))
-  const index = new DatabaseSync(join(well, 'picture-search.db'))
-  try {
-    const from = index.prepare("SELECT value FROM meta WHERE key = 'slide_archive_root'").get()?.value
-    if (!from) throw new Error('Indexed Search fixture has no recorded archive root')
-    // The vectors describe these same files. Give the copy its new root and file coordinates.
-    for (const table of ['vectors', 'failures']) {
-      const rebase = index.prepare(`UPDATE ${table} SET path = ? || substr(path, length(?) + 1) WHERE substr(path, 1, length(?) + 1) = ? || '/'`)
-      rebase.run(archive, from, from, from)
-      rebase.run(well, oldWell, oldWell, oldWell)
-    }
-    index.prepare("UPDATE meta SET value = ? WHERE key = 'slide_archive_root'").run(archive)
-  } finally {
-    index.close()
-  }
-}
-
 // SLIDEWELL_E2E_EXECUTABLE=<.app>/Contents/MacOS/SlideWell walks a packaged candidate instead of the source build.
 const packaged = process.env.SLIDEWELL_E2E_EXECUTABLE
 
-export function launchHidden(userData, home, { args = [], ...options } = {}) {
+export function launchHidden(userData, home, { args = [], isolatePreferences = false, ...options } = {}) {
   mkdirSync(home, { recursive: true })
   const env = { ...process.env, HOME: home, SLIDEWELL_DATA_DIR: userData, SLIDEWELL_E2E_HIDDEN: '1' }
+  if (isolatePreferences) {
+    // Capture-folder discovery shells out to macOS defaults. Keep it away from the user's preferences.
+    const bin = join(home, 'bin')
+    mkdirSync(bin, { recursive: true })
+    writeFileSync(join(bin, 'defaults'), '#!/bin/sh\nexit 1\n', { mode: 0o700 })
+    env.PATH = [bin, env.PATH].filter(Boolean).join(':')
+    env.CFFIXED_USER_HOME = home
+  }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.SLIDEWELL_E2E_EXECUTABLE
   return electron.launch({

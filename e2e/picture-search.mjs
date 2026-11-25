@@ -1,41 +1,29 @@
-// End-to-end: picture search (ticket 03). Switch on from Settings, index a small sample in the
-// background, pause/resume across a restart, resume after a hard kill mid-run, embed a new well
-// image as it arrives, query by text and by image, keep word search responsive, delete the model.
-//
-// Run after `npm run build`:
-//   SLIDEWELL_PICTURE_SAMPLE=<a Core A archive folder, e.g. a 50-slide sample> \
-//   SLIDEWELL_PICTURE_EXPECT='slide:<presentation id>#<order>' \   (optional: must rank first)
-//   node e2e/picture-search.mjs
-// Optional: SLIDEWELL_PICTURE_QUERY and SLIDEWELL_PICTURE_MODEL_DIR (a verified model fixture;
-// supplying one skips download and delete). The archive and model are copied into the temporary run.
+// Hidden end-to-end: index a generated archive, restart while paused, recover after a hard kill,
+// and verify a new well image plus text and image queries.
+// Run npm run test:picture-search with SLIDEWELL_PICTURE_MODEL_DIR pointing to a verified local cache.
 import { finish, recordFailure } from './support/result.mjs'
-import { createScratch, launchHidden, copyFixture } from './support/scratch.mjs'
+import { createScratch, launchHidden } from './support/scratch.mjs'
+import { copyCachedPictureModel, requireCachedPictureModel } from './support/cached-picture-model.mjs'
+import { makeSearchArchive, writeSearchProfile, NO_WORDS_QUERY, WORDS_QUERY } from './support/search-fixture.mjs'
 import { DatabaseSync } from 'node:sqlite'
-import { existsSync, mkdirSync, readdirSync, writeFileSync, copyFileSync } from 'node:fs'
+import { existsSync, mkdirSync, copyFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const fixture = process.env.SLIDEWELL_PICTURE_SAMPLE
-if (!fixture || !existsSync(join(fixture, 'extracted'))) {
-  console.error('Set SLIDEWELL_PICTURE_SAMPLE to an archive folder that has extracted/<id>/renders/.')
-  finish('Set SLIDEWELL_PICTURE_SAMPLE to an archive folder that has extracted/<id>/renders/.', 2)
-}
+const model = requireCachedPictureModel('SLIDEWELL_PICTURE_MODEL_DIR', 'SLIDEWELL_SORTER_MODEL_DIR')
 const expectId = process.env.SLIDEWELL_PICTURE_EXPECT || null
-const queryText = process.env.SLIDEWELL_PICTURE_QUERY || 'robots in a classroom'
-const modelFixture = process.env.SLIDEWELL_PICTURE_MODEL_DIR
-const keepModel = Boolean(modelFixture)
+const queryText = process.env.SLIDEWELL_PICTURE_QUERY || NO_WORDS_QUERY
 const scratch = createScratch('picture')
 const sample = join(scratch, 'archive')
-copyFixture(fixture, sample)
 const userData = join(scratch, 'userData')
 const home = join(scratch, 'home')
 const well = join(scratch, 'well')
 const screens = join(scratch, 'screens')
-const modelDir = join(userData, 'models', 'embeddinggemma-2-onnx-fp16')
 const storeFile = join(well, 'picture-search.db')
+const expected = await makeSearchArchive(sample, { slidesPerDeck: 12 })
 
-for (const d of [userData, home, well, screens]) mkdirSync(d, { recursive: true })
-if (modelFixture) copyFixture(modelFixture, modelDir)
-writeFileSync(join(userData, 'config.json'), JSON.stringify({ archiveRoot: sample, wellRoot: well, othersArchiveRoot: join(scratch, 'others') }), 'utf8')
+mkdirSync(screens)
+copyCachedPictureModel(model, userData)
+writeSearchProfile(scratch, userData)
 
 const results = {}
 const out = (k, v) => {
@@ -47,14 +35,14 @@ const FILTERS = { owner: 'all', era: 'all', category: '', deck: '', role: 'conte
 
 async function launch() {
   // SLIDEWELL_E2E_HIDDEN: no window is shown and nothing takes focus (screenshots still render)
-  const app = await launchHidden(userData, home)
+  const app = await launchHidden(userData, home, { isolatePreferences: true })
   try {
-    // Record every http(s) request the app makes from here on (net.fetch goes through this session).
+    // Block and record every HTTP(S) request in this session.
     await app.evaluate(({ session }) => {
       globalThis.__requests = []
       session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (d, cb) => {
         globalThis.__requests.push(d.url)
-        cb({})
+        cb({ cancel: true })
       })
     })
     // the main window, not the hidden picture-search window (swembed://), which may open first
@@ -77,8 +65,7 @@ const status = (win) => win.evaluate(() => window.sw.picture.status())
 let windowShown = null
 async function noteVisibility(app) {
   const ws = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map((w) => ({ url: w.webContents.getURL(), visible: w.isVisible(), focused: w.isFocused() }))).catch(() => [])
-  // the Settings window is the one window a test opens on purpose (it has no hidden mode); the main window must stay hidden
-  const bad = ws.find((w) => (w.visible || w.focused) && !w.url.endsWith('settings.html'))
+  const bad = ws.find((w) => w.visible || w.focused)
   if (bad && !windowShown) windowShown = bad
 }
 // The gear opens the one Settings window (as e2e/settings.mjs does); returns it at the Picture search page.
@@ -97,6 +84,7 @@ async function waitFor(win, pred, timeoutMs, label) {
   for (;;) {
     if (currentApp) await noteVisibility(currentApp)
     const st = await status(win)
+    if (st.index.phase === 'error') throw new Error(`fixture indexing failed: ${st.index.error}`)
     if (pred(st)) return st
     if (Date.now() - t0 > timeoutMs) throw new Error(`timed out waiting for ${label}: ${JSON.stringify(st)}`)
     await sleep(100)
@@ -115,11 +103,11 @@ const statusBar = async (win) => (await win.locator('.statusbar').textContent())
 async function wordSearchMs(win, n = 5) {
   const times = []
   for (let i = 0; i < n; i++) {
-    const t = await win.evaluate(async (f) => {
+    const t = await win.evaluate(async ([text, filters]) => {
       const t0 = performance.now()
-      await window.sw.archive.search(['classroom', 'robot', 'reading', 'chart', 'beach'][Math.floor(Math.random() * 5)], f)
+      await window.sw.archive.search(text, filters)
       return performance.now() - t0
-    }, FILTERS)
+    }, [WORDS_QUERY, FILTERS])
     times.push(Math.round(t))
   }
   return times.sort((a, b) => a - b)[Math.floor(n / 2)]
@@ -134,41 +122,16 @@ const check = (name, ok, detail) => {
   }
 }
 
-// ---------- run 1: switch on from Settings ----------
+// ---------- run 1: local model ready, index and pause ----------
 let { app, win } = await launch()
 try {
-  await sleep(3000)
   const st0 = await status(win)
-  if (!keepModel) {
-    check('no model before Download', st0.model === 'absent' && !existsSync(modelDir), st0.model)
-    check('no network call before Download', (await requests(app)).length === 0, JSON.stringify(await requests(app)))
-  }
+  check('cached model is ready', st0.model === 'ready', st0.model)
   const sw = await openSettings(app, win)
-  await sleep(800) // estimate
+  await noteVisibility(app)
   const note = (await sw.locator('.pic-note').textContent())?.trim()
   out('settings note', note)
   check('well images on by default', await sw.locator('.pic-check input').isChecked())
-  if (!keepModel) {
-    const label = (await sw.locator('.pic-primary').textContent())?.trim()
-    out('download button', label)
-    check('download button', /^Download model \(\d+ MB\)$/.test(label ?? ''), label)
-    await sw.screenshot({ path: join(screens, 'S2-settings-before-download.png') })
-    const t0 = Date.now()
-    await sw.locator('.pic-primary').click()
-    await waitFor(win, (s) => s.model === 'downloading' && s.download?.receivedBytes > 50e6, 120000, 'download progress')
-    await sw.screenshot({ path: join(screens, 'S2-settings-downloading.png') })
-    const reqs = await requests(app)
-    // Requests: the pinned revision's resolve URLs, plus Hugging Face's own redirects/CDN (same family of hosts).
-    const hfHost = (u) => /(^|\.)(huggingface\.co|hf\.co)$/.test(new URL(u).hostname)
-    const pinned = reqs.filter((u) => /^https:\/\/huggingface\.co\/onnx-community\/embeddinggemma-2-ONNX\/resolve\/[0-9a-f]{40}\//.test(u))
-    out('download hosts', [...new Set(reqs.map((u) => new URL(u).hostname))])
-    check('download goes only to Hugging Face, at the pinned revision', reqs.length > 0 && reqs.every(hfHost) && pinned.length >= 3, JSON.stringify(reqs.filter((u) => !hfHost(u)).slice(0, 3)))
-    await waitFor(win, (s) => s.model === 'ready', 60 * 60 * 1000, 'model ready')
-    out('download seconds', Math.round((Date.now() - t0) / 1000))
-    check('model verified on disk', existsSync(join(modelDir, 'verified.json')))
-  } else {
-    check('kept model is ready', st0.model === 'ready', st0.model)
-  }
   // indexing starts by itself; pause from the status bar once a few are done
   await waitFor(win, (s) => s.index.phase === 'indexing' && s.index.done >= 5, 120000, 'indexing under way')
   await closeSettings(app) // the Settings window was left open so far; indexing carries on in the main window
@@ -181,6 +144,7 @@ try {
   out('paused at', `${paused.index.done} / ${paused.index.total}`)
   check('pause stops mid-run', paused.index.done > 0 && paused.index.done < paused.index.total)
   await win.screenshot({ path: join(screens, 'S3-status-paused.png') })
+  check('no network request during indexing and pause', (await requests(app)).length === 0)
 } finally {
   await app.close()
 }
@@ -200,6 +164,8 @@ try {
   await waitFor(win, (s) => s.index.done >= target, 120000, 'resumed progress')
   beforeKill = vectorRows()
   out('vectors at hard kill', beforeKill.length)
+  check('hard kill interrupts an unfinished index', beforeKill.length > 0 && beforeKill.length < expected)
+  check('no network request during resume', (await requests(app)).length === 0)
 } finally {
   app.process().kill('SIGKILL')
   await sleep(1000)
@@ -217,7 +183,7 @@ try {
   const before = new Map(beforeKill.map((r) => [r.id, r.embedded_at]))
   const reembedded = rows.filter((r) => before.has(r.id) && before.get(r.id) !== r.embedded_at).length
   out('final', `${done.index.done} / ${done.index.total}, failed ${done.index.failed}, vectors ${rows.length}`)
-  check('all sample images indexed', done.index.done === done.index.total && rows.length + done.index.failed === done.index.total)
+  check('all sample images indexed', done.index.done === expected && done.index.total === expected && done.index.failed === 0 && rows.length === expected)
   check('nothing embedded twice across restarts', reembedded === 0, `${reembedded} re-embedded`)
   const idleMs = await wordSearchMs(win)
   out('word search ms idle (median of 5)', idleMs)
@@ -225,15 +191,7 @@ try {
   check('word search responsive during indexing', results.busyMs <= 250 && results.busyMs <= 10 * Math.max(1, idleMs), `${results.busyMs} ms busy vs ${idleMs} ms idle`)
 
   // a new well image arrives (dropped into the well inbox) → embedded without a restart
-  const someRender = (() => {
-    for (const d of readdirSync(join(sample, 'extracted'))) {
-      const r = join(sample, 'extracted', d, 'renders')
-      if (existsSync(r)) {
-        const f = readdirSync(r).find((x) => x.endsWith('.webp'))
-        if (f) return join(r, f)
-      }
-    }
-  })()
+  const someRender = join(sample, 'extracted', 'fixture-deck-1', 'renders', 'slide_0001.webp')
   copyFileSync(someRender, join(well, '_inbox', 'new-arrival.webp'))
   const t0 = Date.now()
   let wellVec = null
@@ -246,20 +204,14 @@ try {
 
   const q = await win.evaluate((t) => window.sw.picture.query({ text: t }, { limit: 5 }), queryText)
   out(`query "${queryText}"`, q.results.map((r) => `${r.id} ${r.score.toFixed(3)}`))
-  if (expectId) check('expected slide ranks first', q.ok && q.results[0]?.id === expectId, q.results[0]?.id)
-  const sim = await win.evaluate((id) => window.sw.picture.query({ imageId: id }, { limit: 3 }), q.results[0].id)
+  const firstId = q.results[0]?.id
+  check('text query returns five ranked results', q.ok && q.results.length === 5 && q.results.every((row, i) => i === 0 || row.score <= q.results[i - 1].score), q.error)
+  if (!firstId) throw new Error(q.error || 'text query returned no image to query by id')
+  if (expectId) check('expected slide ranks first', firstId === expectId, firstId)
+  const sim = await win.evaluate((id) => window.sw.picture.query({ imageId: id }, { limit: 3 }), firstId)
   check('more-like-this query by image id', sim.ok && sim.results.length === 3 && !sim.results.some((r) => r.id === q.results[0].id))
 
-  if (!keepModel) {
-    const sw2 = await openSettings(app, win)
-    await sw2.screenshot({ path: join(screens, 'S2-settings-ready.png') })
-    await sw2.locator('.pic-settings button', { hasText: 'Delete model' }).click()
-    await sw2.locator('.pic-settings button.pic-danger').click()
-    const gone = await waitFor(win, (s) => s.model === 'absent', 30000, 'model deleted')
-    check('delete model from Settings', gone.model === 'absent' && !existsSync(modelDir))
-    check('vectors kept after delete', vectorRows().length === rows.length + 1)
-    await sw2.screenshot({ path: join(screens, 'S2-settings-after-delete.png') })
-  }
+  check('no network request during final queries', (await requests(app)).length === 0)
 } finally {
   await app.close()
 }

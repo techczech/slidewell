@@ -1,26 +1,19 @@
-// End-to-end: the Match switch (Words / Meaning / Both). Needs an indexed profile (model downloaded,
-// sample archive indexed), supplied as a read-only fixture.
-//
-// Run after `npm run build`:
-//   SLIDEWELL_MATCH_SCRATCH=<folder holding userData/ (with models/), well/, home/ and sample-archive/> \
-//   node e2e/match-switch.mjs
-// Optional: SLIDEWELL_MATCH_WORDS (default 'research'), SLIDEWELL_MATCH_NOWORDS (default
-// 'an inverted pyramid hierarchy diagram'). Screenshots use the temporary run folder (hidden run).
-// Never touches the installed app; every launch is SLIDEWELL_E2E_HIDDEN=1 with its own user-data-dir.
+// Hidden end-to-end: Words / Meaning / Both against a generated archive.
+// Run npm run test:match-switch with SLIDEWELL_PICTURE_MODEL_DIR pointing to a verified local cache.
 import { finish, recordFailure } from './support/result.mjs'
-import { createScratch, launchHidden, copyIndexedSearchFixture } from './support/scratch.mjs'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { createScratch, launchHidden } from './support/scratch.mjs'
+import { copyCachedPictureModel, requireCachedPictureModel } from './support/cached-picture-model.mjs'
+import { makeSearchArchive, writeSearchProfile, waitForSearchIndex, WORDS_QUERY, NO_WORDS_QUERY } from './support/search-fixture.mjs'
+import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-const fixture = process.env.SLIDEWELL_MATCH_SCRATCH
-if (!fixture || !existsSync(join(fixture, 'userData', 'models'))) {
-  console.error('Set SLIDEWELL_MATCH_SCRATCH to a folder with userData/models, well/ and sample-archive/.')
-  finish('Set SLIDEWELL_MATCH_SCRATCH to a folder with userData/models, well/ and sample-archive/.', 2)
-}
+const model = requireCachedPictureModel('SLIDEWELL_PICTURE_MODEL_DIR', 'SLIDEWELL_SORTER_MODEL_DIR')
 const scratch = createScratch('match')
-copyIndexedSearchFixture(fixture, scratch)
-const wordsQuery = process.env.SLIDEWELL_MATCH_WORDS || 'research'
-const noWordsQuery = process.env.SLIDEWELL_MATCH_NOWORDS || 'an inverted pyramid hierarchy diagram'
+const expected = await makeSearchArchive(join(scratch, 'archive'), { includeUnrendered: false })
+const modelProfile = join(scratch, 'userData')
+copyCachedPictureModel(model, modelProfile)
+const wordsQuery = WORDS_QUERY
+const noWordsQuery = NO_WORDS_QUERY
 const screens = join(scratch, 'screens')
 mkdirSync(screens, { recursive: true })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -33,17 +26,14 @@ const check = (name, ok, detail = '') => {
   }
 }
 
-function profile(name, withModel) {
-  const userData = join(scratch, name === 'main' ? 'userData' : name)
-  mkdirSync(userData, { recursive: true })
-  writeFileSync(join(userData, 'config.json'), JSON.stringify({ archiveRoot: join(scratch, 'sample-archive'), wellRoot: join(scratch, 'well'), othersArchiveRoot: join(scratch, 'others') }), 'utf8')
-  if (!withModel && existsSync(join(userData, 'models'))) throw new Error('profile unexpectedly has a model')
+function profile(userData) {
+  writeSearchProfile(scratch, userData)
   return userData
 }
 async function launch(userData) {
   const home = join(scratch, 'home')
   mkdirSync(home, { recursive: true })
-  const app = await launchHidden(userData, home)
+  const app = await launchHidden(userData, home, { isolatePreferences: true })
   try {
     let win = null
     for (let i = 0; i < 300 && !win; i++) {
@@ -65,19 +55,15 @@ const search = async (win, text) => {
   await sleep(300)
 }
 const matchTab = (win, name) => win.locator('[aria-label="Match"] .scope-tab', { hasText: name })
-const allOwners = (win) => win.locator('.filterbar select').nth(0).selectOption('all') // the sample's decks have no owner recorded
+const allOwners = (win) => win.locator('.filterbar select').nth(0).selectOption('all')
 const queries = (win) => win.evaluate(() => window.sw.picture.queryCount())
 const bandHeads = (win) => win.locator('.band-toggle').allInnerTexts()
 const chips = (win) => win.locator('.card .score-chip').allInnerTexts()
 
 // ---------- run 1: model present ----------
-let { app, win } = await launch(profile('main', true))
+let { app, win } = await launch(profile(modelProfile))
 try {
-  for (let i = 0; i < 120; i++) {
-    const st = await win.evaluate(() => window.sw.picture.status())
-    if (st.model === 'ready' && st.index.phase !== 'indexing') break
-    await sleep(500)
-  }
+  await waitForSearchIndex(win, expected)
   await allOwners(win)
   check('Both is the default', (await matchTab(win, 'Both').getAttribute('aria-selected')) === 'true')
   check('Meaning and Both are enabled with the model', !(await matchTab(win, 'Meaning').isDisabled()) && !(await matchTab(win, 'Both').isDisabled()))
@@ -85,6 +71,7 @@ try {
   // Both: two bands, scores on every card, a hit found both ways only in the Words band
   let q0 = await queries(win)
   await search(win, wordsQuery)
+  await win.locator('.band-toggle', { hasText: 'Looks related' }).waitFor()
   const heads = await bandHeads(win)
   console.log('bands:', JSON.stringify(heads))
   check('Both ran one picture query', (await queries(win)) === q0 + 1, `${q0} -> ${await queries(win)}`)
@@ -119,6 +106,7 @@ try {
   await matchTab(win, 'Both').click()
   await sleep(500)
   await search(win, noWordsQuery)
+  await win.locator('.match-note.info').waitFor()
   const heads2 = await bandHeads(win)
   console.log('bands (no word match):', JSON.stringify(heads2))
   check('no word match: Words match (0) and a populated Looks related band', /Words match \(0\)/.test(heads2[0] ?? '') && /Looks related \([1-9]\d*\)/.test(heads2[1] ?? ''), JSON.stringify(heads2))
@@ -129,14 +117,15 @@ try {
 
   // Meaning alone
   await matchTab(win, 'Meaning').click()
-  await sleep(1000)
+  await win.locator('.band-toggle', { hasText: 'Words match' }).waitFor({ state: 'detached' })
+  await win.locator('.band-toggle', { hasText: 'Looks related' }).waitFor()
   check('Meaning shows only the related band', (await bandHeads(win)).length === 1 && /Looks related/.test((await bandHeads(win))[0]))
 } finally {
   await app.close()
 }
 
 // ---------- run 2: no model ----------
-;({ app, win } = await launch(profile('no-model', false)))
+;({ app, win } = await launch(profile(join(scratch, 'no-model'))))
 try {
   await sleep(1500)
   await allOwners(win)
