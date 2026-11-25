@@ -10,7 +10,7 @@ export const UNRENDERED_TITLE = 'Lantern lantern lantern field notes'
 const OWNER = 'Aster Quill'
 const DECKS = ['Amber Harbour', 'Birch Island', 'Copper Reef', 'Driftwood Bay', 'Ember Cove', 'Flint Point']
 
-async function renderSlide(path, deck, order) {
+function describeCoastalSlide(deck, order) {
   const hue = 196 + deck * 15
   const x = 74 + (order * 37 + deck * 55) % 430
   const svg = `<svg width="640" height="360" xmlns="http://www.w3.org/2000/svg">
@@ -23,10 +23,16 @@ async function renderSlide(path, deck, order) {
     <path d="M${x - 13} 145l54-59 55 59" fill="#b47d3b"/>
     <text x="24" y="49" font-size="25" font-family="sans-serif" fill="#fff3cc">${DECKS[deck]} · ${order}</text>
   </svg>`
-  await sharp(Buffer.from(svg)).webp().toFile(path)
+  return {
+    heading: `${deck < 2 && order === 1 ? 'Lantern survey' : 'Coastal chart'} ${deck + 1}.${order}`,
+    body: `Observation ${deck + 1}.${order} on the invented shoreline.`,
+    svg
+  }
 }
 
-export async function makeSearchArchive(archive, { slidesPerDeck = 2, includeUnrendered = false } = {}) {
+export async function makeSearchArchive(archive, {
+  slidesPerDeck = 2, includeUnrendered = false, describeSlide = describeCoastalSlide
+} = {}) {
   const registry = join(archive, 'registry')
   mkdirSync(registry, { recursive: true })
   const slides = new DatabaseSync(join(registry, 'slides.db'))
@@ -60,15 +66,18 @@ export async function makeSearchArchive(archive, { slidesPerDeck = 2, includeUnr
       const sections = [{ slides: [] }]
       const unrenderedOrder = includeUnrendered && deck === 0 ? slidesPerDeck + 1 : null
       for (let order = 1; order <= (unrenderedOrder ?? slidesPerDeck); order++) {
-        const unrendered = order === unrenderedOrder
-        const heading = unrendered ? UNRENDERED_TITLE : `${deck < 2 && order === 1 ? 'Lantern survey' : 'Coastal chart'} ${deck + 1}.${order}`
-        const body = unrendered ? 'Lantern lantern lantern record.' : `Observation ${deck + 1}.${order} on the invented shoreline.`
+        const { heading, body, svg } = order === unrenderedOrder
+          ? { heading: UNRENDERED_TITLE, body: 'Lantern lantern lantern record.' }
+          : describeSlide(deck, order)
         const key = `${pid}-${order}`
         const { lastInsertRowid } = addSlide.run(key, heading, body)
         addLocation.run(key, pid, order)
         addFts.run(lastInsertRowid, heading, body)
         sections[0].slides.push({ order, title: heading, content: [{ type: 'text', text: body }] })
-        if (!unrendered) await renderSlide(join(renders, `slide_${String(order).padStart(4, '0')}.webp`), deck, order)
+        if (svg) {
+          const path = join(renders, `slide_${String(order).padStart(4, '0')}.webp`)
+          await sharp(Buffer.from(svg)).webp().toFile(path)
+        }
       }
       writeFileSync(join(extracted, 'presentation.json'), JSON.stringify({ metadata, sections }))
     }
