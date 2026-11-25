@@ -1,77 +1,35 @@
-// End-to-end: screenshot sorter, local part (ticket 06), on a prepared fixture with labelled history.
-// Trains on the labelled history (well screenshots + triage included = keep, triage excluded =
-// throwaway), writes the held-back accuracy report, sorts undecided screenshots, and checks that
-// his decisions and his files are untouched and that no network request was made (every http(s)
-// request is cancelled, so the run also proves the sorter works offline).
-//
-// Run after `npm run build` (or `npx electron-vite build`):
-//   SLIDEWELL_SORTER_SOURCE_WELL=<fixture>/well   (triage.db, well.db, images/; source folders inside <fixture>)
-//   SLIDEWELL_SORTER_MODEL_DIR=<an existing embeddinggemma-2-onnx-fp16 folder>  (read only; cloned)
-//   node e2e/sorter.mjs
-// Optional: SLIDEWELL_SORTER_LIMIT (default 200; 'all' for every undecided screenshot).
-// Databases, images and the model are copied into a temporary run folder. Use disposable fixtures.
+// Hidden end-to-end: train on generated captures, then sort undecided captures offline.
+// Run npm run test:sorter with SLIDEWELL_SORTER_MODEL_DIR (or SLIDEWELL_PICTURE_MODEL_DIR)
+// pointing to a verified local EmbeddingGemma 2 cache. Optional SLIDEWELL_SORTER_LIMIT (default: all).
 import { finish, recordFailure } from './support/result.mjs'
-import { createScratch, launchHidden, copyFixture } from './support/scratch.mjs'
+import { createScratch, launchHidden } from './support/scratch.mjs'
+import { copyCachedPictureModel, requireCachedPictureModel } from './support/cached-picture-model.mjs'
+import { makeSorterFixture } from './support/sorter-fixture.mjs'
 import { DatabaseSync } from 'node:sqlite'
-import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, sep } from 'node:path'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 
-const sourceWell = process.env.SLIDEWELL_SORTER_SOURCE_WELL
-const modelSrc = process.env.SLIDEWELL_SORTER_MODEL_DIR
-if (!sourceWell || !existsSync(join(sourceWell, 'triage.db'))) {
-  console.error('Set SLIDEWELL_SORTER_SOURCE_WELL to a well folder with triage.db.')
-  finish('Set SLIDEWELL_SORTER_SOURCE_WELL to a well folder with triage.db.', 2)
-}
+const model = requireCachedPictureModel('SLIDEWELL_SORTER_MODEL_DIR', 'SLIDEWELL_PICTURE_MODEL_DIR')
 const scratch = createScratch('sorter')
-const limitEnv = process.env.SLIDEWELL_SORTER_LIMIT || '200'
+const limitEnv = process.env.SLIDEWELL_SORTER_LIMIT ?? 'all'
 const limit = limitEnv === 'all' ? undefined : Number(limitEnv)
+if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) {
+  finish('SLIDEWELL_SORTER_LIMIT must be a positive integer or all.', 2)
+}
 const userData = join(scratch, 'userData')
 const home = join(scratch, 'home')
-const well = join(scratch, 'well')
 const screens = join(scratch, 'screens')
-const modelDir = join(userData, 'models', 'embeddinggemma-2-onnx-fp16')
-
-for (const d of [userData, home, well, screens, join(userData, 'models')]) mkdirSync(d, { recursive: true })
-if (!modelSrc || !existsSync(join(modelSrc, 'verified.json'))) {
-  console.error('Set SLIDEWELL_SORTER_MODEL_DIR to a verified embeddinggemma-2-onnx-fp16 folder (nothing is downloaded).')
-  finish('Set SLIDEWELL_SORTER_MODEL_DIR to a verified embeddinggemma-2-onnx-fp16 folder (nothing is downloaded).', 2)
-}
-copyFixture(modelSrc, modelDir)
-for (const f of ['triage.db', 'well.db']) {
-  if (existsSync(join(sourceWell, f))) execFileSync('/usr/bin/sqlite3', [`file:${join(sourceWell, f)}?mode=ro`, `.backup '${join(well, f)}'`])
-}
-if (existsSync(join(sourceWell, 'images'))) copyFixture(join(sourceWell, 'images'), join(well, 'images'))
-const fixtureRoot = dirname(realpathSync(sourceWell))
-const triage = new DatabaseSync(join(well, 'triage.db'))
-try {
-  const inside = (root, path) => {
-    const rel = relative(root, path)
-    return Boolean(rel && rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel))
-  }
-  const inputs = triage.prepare('SELECT DISTINCT source FROM triage_fts').all()
-  const paths = triage.prepare('SELECT DISTINCT rel_path FROM triage_fts').all()
-  if (paths.some(({ rel_path }) => typeof rel_path !== 'string' || isAbsolute(rel_path) || rel_path.split(sep).includes('..'))) {
-    throw new Error('Fixture contains a non-relative screenshot path')
-  }
-  const repoint = triage.prepare('UPDATE triage_fts SET source = ? WHERE source = ?')
-  for (const [i, { source }] of inputs.entries()) {
-    if (typeof source !== 'string' || !isAbsolute(source) || !inside(fixtureRoot, realpathSync(source))) {
-      throw new Error('Every sorter screenshot source must be inside the fixture folder')
-    }
-    const target = join(scratch, 'inputs', String(i))
-    copyFixture(source, target)
-    repoint.run(target, source)
-  }
-} finally {
-  triage.close()
-}
-// no archive, no triage sources, no vault: the app only has the copied well; background indexing paused
-writeFileSync(
-  join(userData, 'config.json'),
-  JSON.stringify({ archiveRoot: join(scratch, 'no-archive'), wellRoot: well, othersArchiveRoot: join(scratch, 'others'), vaultRoot: join(scratch, 'no-vault'), pictureSearch: { paused: true, includeWell: false } }),
-  'utf8'
-)
+const { well, undecided, originalsUnchanged } = await makeSorterFixture(scratch)
+mkdirSync(screens)
+copyCachedPictureModel(model, userData)
+writeFileSync(join(userData, 'config.json'), JSON.stringify({
+  archiveRoot: join(scratch, 'no-archive'),
+  wellRoot: well,
+  othersArchiveRoot: join(scratch, 'no-others'),
+  vaultRoot: join(scratch, 'no-vault'),
+  ownerNames: ['Aster Quill'],
+  pictureSearch: { paused: true, includeWell: false }
+}))
 
 const results = {}
 const out = (k, v) => {
@@ -98,7 +56,7 @@ const readDb = (sql) => {
 
 const decisionsBefore = JSON.stringify(readDb('SELECT hash, state, decided_at, well_id FROM triage_decisions ORDER BY hash'))
 
-const app = await launchHidden(userData, home)
+const app = await launchHidden(userData, home, { isolatePreferences: true })
 try {
   // offline: record and CANCEL every http(s) request from here on
   await app.evaluate(({ session }) => {
@@ -119,10 +77,11 @@ try {
 
   const st0 = await win.evaluate(() => window.sw.sorter.status())
   check('picture model ready (cloned, not downloaded)', st0.modelReady)
+  check('fixture starts without a trained report', !st0.report)
   if (!st0.report) {
     const refused = await win.evaluate(() => window.sw.sorter.sort({ limit: 1 }))
     check('sorting refused before a held-back report exists', !refused.ok && /train/.test(refused.error ?? ''), refused.error)
-  } else console.log('SKIP sorting-refused check: the scratch copy already has a report (SLIDEWELL_SORTER_RECOPY=0)')
+  }
 
   const t0 = Date.now()
   // The sorter status IPC measures the main process reply while the worker trains. The Node
@@ -232,11 +191,13 @@ try {
 }
 
 // after the app has closed: decisions untouched, proposals only for undecided screenshots
-check('his triage decisions are unchanged', JSON.stringify(readDb('SELECT hash, state, decided_at, well_id FROM triage_decisions ORDER BY hash')) === decisionsBefore)
+check('seeded triage decisions are unchanged', JSON.stringify(readDb('SELECT hash, state, decided_at, well_id FROM triage_decisions ORDER BY hash')) === decisionsBefore)
 const overlap = readDb('SELECT COUNT(*) AS n FROM sorter_proposals p JOIN triage_decisions d ON d.hash = p.hash')[0].n
 check('no proposal for a screenshot he already decided', overlap === 0, `${overlap}`)
 const byLabel = readDb('SELECT proposal, COUNT(*) AS n, ROUND(MIN(confidence), 3) AS min_conf FROM sorter_proposals GROUP BY proposal')
 out('proposals stored', byLabel)
+check('each requested undecided capture has a stored proposal', byLabel.reduce((n, row) => n + row.n, 0) === Math.min(limit ?? undecided, undecided))
+check('generated source files are unchanged', originalsUnchanged())
 const rep = results.report
 if (rep) {
   const low = readDb(`SELECT COUNT(*) AS n FROM sorter_proposals WHERE proposal = 'throwaway' AND confidence < ${rep.thresholds.throwaway}`)[0].n

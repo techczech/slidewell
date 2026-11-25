@@ -1,24 +1,18 @@
-// End-to-end: "More like this" in the inspector. Needs an indexed profile (model downloaded, sample
-// archive indexed) like e2e/match-switch.mjs.
-//
-// Run after `npm run build`:
-//   SLIDEWELL_MLT_SCRATCH=<folder holding userData/ (with models/), well/, home/ and sample-archive/> \
-//   node e2e/more-like-this.mjs
-// Screenshots use the temporary run folder (hidden run). Every launch is SLIDEWELL_E2E_HIDDEN=1 with its own
-// user-data-dir; never touches the installed app.
+// Hidden end-to-end: the More like this inspector against a generated archive.
+// Run npm run test:more-like-this with SLIDEWELL_PICTURE_MODEL_DIR pointing to a verified local cache.
 import { finish, recordFailure } from './support/result.mjs'
-import { createScratch, launchHidden, copyIndexedSearchFixture } from './support/scratch.mjs'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { createScratch, launchHidden } from './support/scratch.mjs'
+import { copyCachedPictureModel, requireCachedPictureModel } from './support/cached-picture-model.mjs'
+import { makeSearchArchive, writeSearchProfile, waitForSearchIndex, WORDS_QUERY, UNRENDERED_TITLE } from './support/search-fixture.mjs'
+import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-const fixture = process.env.SLIDEWELL_MLT_SCRATCH
-if (!fixture || !existsSync(join(fixture, 'userData', 'models'))) {
-  console.error('Set SLIDEWELL_MLT_SCRATCH to a folder with userData/models, well/ and sample-archive/.')
-  finish('Set SLIDEWELL_MLT_SCRATCH to a folder with userData/models, well/ and sample-archive/.', 2)
-}
+const model = requireCachedPictureModel('SLIDEWELL_PICTURE_MODEL_DIR', 'SLIDEWELL_SORTER_MODEL_DIR')
 const scratch = createScratch('more')
-copyIndexedSearchFixture(fixture, scratch)
-const query = process.env.SLIDEWELL_MLT_QUERY || 'research'
+const expected = await makeSearchArchive(join(scratch, 'archive'), { includeUnrendered: true })
+const modelProfile = join(scratch, 'userData')
+copyCachedPictureModel(model, modelProfile)
+const query = WORDS_QUERY
 const screens = join(scratch, 'screens')
 mkdirSync(screens, { recursive: true })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -30,16 +24,14 @@ const check = (name, ok, detail = '') => {
     failed++
   }
 }
-function profile(name) {
-  const userData = join(scratch, name === 'main' ? 'userData' : name)
-  mkdirSync(userData, { recursive: true })
-  writeFileSync(join(userData, 'config.json'), JSON.stringify({ archiveRoot: join(scratch, 'sample-archive'), wellRoot: join(scratch, 'well'), othersArchiveRoot: join(scratch, 'others') }), 'utf8')
+function profile(userData) {
+  writeSearchProfile(scratch, userData)
   return userData
 }
 async function launch(userData) {
   const home = join(scratch, 'home')
   mkdirSync(home, { recursive: true })
-  const app = await launchHidden(userData, home)
+  const app = await launchHidden(userData, home, { isolatePreferences: true })
   try {
     let win = null
     for (let i = 0; i < 300 && !win; i++) {
@@ -55,7 +47,7 @@ async function launch(userData) {
   }
 }
 async function openInspectorOnFirstSlide(win) {
-  await win.locator('.filterbar select').nth(0).selectOption('all') // the sample's presentations have no owner recorded
+  await win.locator('.filterbar select').nth(0).selectOption('all')
   await win.locator('.searchbar .search-input').fill(query)
   await sleep(700)
   await win.waitForFunction(() => !document.querySelector('.results-head')?.textContent?.includes('loading'), null, { timeout: 60000 })
@@ -69,37 +61,27 @@ async function openInspectorOnFirstSlide(win) {
 }
 
 // ---------- run 1: model present ----------
-let { app, win } = await launch(profile('main'))
+let { app, win } = await launch(profile(modelProfile))
 try {
-  for (let i = 0; i < 120; i++) {
-    const st = await win.evaluate(() => window.sw.picture.status())
-    if (st.model === 'ready' && st.index.phase !== 'indexing') break
-    await sleep(500)
-  }
+  await waitForSearchIndex(win, expected)
   await openInspectorOnFirstSlide(win)
   const btn = win.locator('.more-like-this .primary-btn')
   // The inspector reads model status over IPC after mounting.
   await btn.and(win.locator('button:enabled')).waitFor({ timeout: 10000 })
   check('button is enabled with the model', !(await btn.isDisabled()))
   check('hint names what it does', (await win.locator('.mlt-hint').innerText()).includes('other presentations'))
-  // The sample indexes only part of the archive, so walk the cards until one is indexed; those walked past
-  // are real "not indexed yet" items.
-  const cards = win.locator('.card')
-  let found = false
-  let sawNotIndexed = false
-  for (let i = 0; i < Math.min(await cards.count(), 40) && !found; i++) {
-    await cards.nth(i).click()
-    await sleep(150)
-    await btn.click()
-    await win.waitForFunction(() => document.querySelector('.mlt-item') || /not indexed yet/i.test(document.querySelector('.mlt-hint')?.textContent ?? ''), null, { timeout: 15000 })
-    if (await win.locator('.mlt-item').count()) found = true
-    else if (!sawNotIndexed) {
-      sawNotIndexed = true
-      check('real unindexed item shows the quiet "not indexed yet" hint, no error', /not indexed yet/i.test(await win.locator('.mlt-hint').innerText()) && (await win.locator('.mlt-hint.quiet').count()) === 1)
-      await win.screenshot({ path: join(screens, 'more-like-this-not-indexed.png') })
-    }
-  }
-  check('found an indexed item with results', found)
+  const unrendered = win.locator('.card').filter({ has: win.getByText(UNRENDERED_TITLE, { exact: true }) })
+  await unrendered.click()
+  await btn.click()
+  await win.locator('.mlt-hint.quiet').filter({ hasText: /not indexed yet/i }).waitFor()
+  check('real unindexed item shows the quiet "not indexed yet" hint, no error', await win.locator('.mlt-hint.quiet').count() === 1)
+  await win.screenshot({ path: join(screens, 'more-like-this-not-indexed.png') })
+
+  const indexed = win.locator('.card').filter({ hasText: 'Lantern survey 1.1' })
+  await indexed.click()
+  await btn.click()
+  await win.locator('.mlt-item').first().waitFor()
+  check('found an indexed item with results', await win.locator('.mlt-item').count() > 0)
   const title0 = await win.locator('.deck-sidebar-head b').innerText()
   const deck0 = (await win.locator('.drow:has(.dk:text-is("Presentation")) .dv').innerText()).trim()
   const n = await win.locator('.mlt-item').count()
@@ -124,7 +106,7 @@ try {
     }
     return { checked, bad }
   }, query)
-  check(`results never include the item or its presentation (${sweep.checked} items checked)`, sweep.checked > 0 && sweep.bad.length === 0, sweep.bad.join('; '))
+  check(`results never include the item or its presentation (${sweep.checked} items checked)`, sweep.checked === expected && sweep.bad.length === 0, sweep.bad.join('; '))
 
   // clicking a result opens it in the inspector
   await win.locator('.mlt-item').first().click()
@@ -145,7 +127,7 @@ try {
 }
 
 // ---------- run 2: model missing ----------
-;({ app, win } = await launch(profile('no-model')))
+;({ app, win } = await launch(profile(join(scratch, 'no-model'))))
 try {
   await openInspectorOnFirstSlide(win)
   const btn = win.locator('.more-like-this .primary-btn')
