@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SlideWell Air finder</title>
+  <link rel="stylesheet" href="/finder.css">
+  <script type="module" src="/finder.js"></script>
+</head>
+<body>
+  <header><h1>SlideWell</h1><span id="connection" role="status">Connecting to the library…</span></header>
+  <main>
+    <form id="search">
+      <label class="query">Find slides and images
+        <input id="query" type="search" maxlength="200" required placeholder="Words you remember or a topic">
+      </label>
+      <label>Match
+        <select id="mode"><option value="words">Words</option><option value="meaning">Meaning</option></select>
+      </label>
+      <button class="primary" type="submit">Search</button>
+    </form>
+    <div class="workspace">
+      <section aria-label="Results">
+        <p id="status" role="status">Enter words you remember from a slide or image.</p>
+        <div id="results" class="cards"></div>
+      </section>
+      <aside id="detail" aria-label="Source and download" hidden>
+        <img id="preview" alt="">
+        <h2 id="title"></h2>
+        <p id="source"></p>
+        <p id="snippet"></p>
+        <div class="actions">
+          <button id="related" type="button">More like this</button>
+          <button id="download" class="primary" type="button">Download</button>
+        </div>
+        <p id="transfer" role="status"></p>
+        <a id="provenance" download hidden>Save provenance</a>
+        <section id="neighbours" aria-label="Similar results" hidden>
+          <h3>More like this</h3>
+          <div id="similar" class="cards"></div>
+        </section>
+      </aside>
+    </div>
+  </main>
+</body>
+</html>

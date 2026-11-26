@@ -1,3 +1,4 @@
+import { startConfiguredFinder } from './air-finder/host'
 import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, safeStorage, powerMonitor } from 'electron'
 import { join, basename } from 'path'
 import { homedir } from 'os'
@@ -556,6 +557,23 @@ app.whenReady().then(async () => {
     quitting = true
     void pictureQueryServer?.close()
   })
+
+  const finderConfig = process.argv.find((arg) => arg.startsWith('--air-finder-config='))
+  if (finderConfig) {
+    void startConfiguredFinder(
+      finderConfig.slice('--air-finder-config='.length),
+      { archiveRoot, wellRoot: wellRootResolved },
+      pictureSearch.finderQueries()
+    ).then((server) => {
+      const close = () => {
+        server.close()
+        server.closeAllConnections()
+      }
+      if (quitting) close()
+      else app.once('will-quit', close)
+    }).catch(() => console.warn('Air finder could not start. Check the private config and socket directory.'))
+  }
+
 
   // --- screenshot sorter, local part (sorter/service.ts): proposals only, never decisions or moves ---
   const pics = pictureSearch
