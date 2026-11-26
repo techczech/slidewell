@@ -39,7 +39,12 @@ test.skipIf(process.env.SLIDEWELL_FINDER_DOM !== '1')('Air finder browser journe
         sha256: createHash('sha256').update(imageBytes).digest('hex')
       })
       await page.setViewportSize({ width: 390, height: 700 })
-      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+      const layout = await page.evaluate(() => ({
+        width: document.documentElement.scrollWidth,
+        overflow: [...document.querySelectorAll('body *')].filter((el) => el.getBoundingClientRect().right > innerWidth + 1)
+          .slice(0, 10).map((el) => el.id || el.getAttribute('class') || el.tagName)
+      }))
+      expect(layout).toEqual({ width: 390, overflow: [] })
       await page.getByLabel('Match').selectOption('words')
       await search('asteroid')
       await page.getByText('No matches in the available library.').waitFor()

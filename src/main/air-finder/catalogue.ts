@@ -5,6 +5,7 @@ import { extname, isAbsolute, join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { renderPath } from '../archive'
+import { BIN_AFTER_DAYS } from '../review/piles'
 import { downloadedOnDisk } from '../review/picture'
 
 export const MAX_RENDITION = 20 * 1024 * 1024
@@ -111,7 +112,16 @@ export async function createCatalogue(scope: FinderScope) {
       db.prepare('ATTACH ? AS triage').run(`${pathToFileURL(triagePath).href}?mode=ro`)
       const backfilled = db.prepare("SELECT 1 FROM well_meta WHERE key = 'well_sources_backfilled'").get()
       if (!backfilled) throw new Error('Well source identity not ready')
-      return action(db, VISIBLE)
+      const hasProposals = db.prepare("SELECT 1 FROM triage.sqlite_master WHERE type = 'table' AND name = 'sorter_proposals'").get()
+      const hasClock = hasProposals && db.prepare('PRAGMA triage.table_info(sorter_proposals)').all().some((c) => c.name === 'throwaway_since')
+      const clock = hasClock ? 'coalesce(p.throwaway_since, p.proposed_at)' : 'p.proposed_at'
+      const outsideBin = hasProposals ? ` AND NOT EXISTS (
+        SELECT 1 FROM well_sources src JOIN triage.sorter_proposals p ON p.hash = src.source_hash
+        LEFT JOIN triage.triage_decisions d ON d.hash = src.source_hash
+        WHERE src.well_id = w.id AND p.proposal = 'throwaway'
+          AND coalesce(d.state, '') NOT IN ('selected', 'included')
+          AND julianday(${clock}) <= julianday('now', '-${BIN_AFTER_DAYS} days'))` : ''
+      return action(db, VISIBLE + outsideBin)
     })
   }
 
@@ -165,7 +175,7 @@ export async function createCatalogue(scope: FinderScope) {
     const fts = terms.map((t) => `"${t.replaceAll('"', '')}"`).join(' ')
     const slides = presentations.size ? read(slidesPath, (db) =>
       db.prepare(SLIDE_SELECT + ` JOIN slides_fts ON s.rowid = slides_fts.rowid WHERE slides_fts MATCH ?
-        AND l.presentation_id IN (SELECT value FROM json_each(?)) ORDER BY rank LIMIT 40`)
+        AND l.presentation_id IN (SELECT value FROM json_each(?)) ORDER BY rank LIMIT 30`)
         .all(fts, JSON.stringify([...presentations])) as unknown as Slide[]) : []
     const images = wellImages.size ? readWell((db, visible) =>
       db.prepare(WELL_SELECT + visible + ` AND w.id IN (SELECT value FROM json_each(?))
