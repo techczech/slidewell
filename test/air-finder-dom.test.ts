@@ -13,6 +13,7 @@ test.skipIf(process.env.SLIDEWELL_FINDER_DOM !== '1')('Air finder browser journe
       const errors: string[] = []
       page.on('pageerror', (err) => errors.push(err.message))
       await page.goto(host.base)
+      expect(await page.locator('.workspace').evaluate((el) => getComputedStyle(el).display)).toBe('grid')
       const search = async (q: string) => {
         await page.getByRole('searchbox').fill(q)
         await page.getByRole('button', { name: 'Search', exact: true }).click()
