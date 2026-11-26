@@ -14,7 +14,7 @@ import { pileOf, type ProposalLabel } from './review/piles'
 import type { ReviewService } from './review/service'
 import type { Retrainer } from './sorter/retrain'
 import { createSourceWatcher } from './source-watcher'
-import { foldersOverlap } from './settings-rules'
+import { captureFolderProblem, foldersOverlap } from './settings-rules'
 import { scanTriageSource, listTriage, triageCounts, setTriageDecision, importSelectedTriage, VIDEO_GATE_BYTES, type TriageRow, type ScanListing, type ScanOptions } from './triage'
 import { appCounts, cleanAppList, decideAllFromApps } from './triage-apps'
 import { createImportRunner } from './triage-import-run'
@@ -140,6 +140,7 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
       const path = r.filePaths[0]
       return editSources(async () => {
         const current = readConfig().screenshotRoot
+        if (await warnAboutStorageFolder(path)) return null
         const saved = current && !captureFolderReadable(current)
           ? await replaceFolder(current, path)
           : await saveSources({ screenshotRoot: path })
@@ -158,6 +159,7 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
       const source = src
       return editSources(async () => {
         const cur = readConfig().captureSources ?? []
+        if (await warnAboutStorageFolder(source.path)) return false
         if (cur.some((c) => c.path === source.path)) return true
         return (await saveSources({ captureSources: [...cur, source] })).ok
       })
@@ -196,11 +198,19 @@ export function createCaptureSources({ readConfig, screenshotRootResolved }: Sou
       refreshWatchers()
       return saved
     }
+    async function warnAboutStorageFolder(path: string): Promise<boolean> {
+      const message = captureFolderProblem(path, wellRootResolved(), archiveRoot())
+      if (!message) return false
+      await dialog.showMessageBox({ type: 'warning', message, buttons: ['OK'] })
+      return true
+    }
     async function replaceFolder(path: string, destination: string): Promise<CaptureFolderAction> {
       const configured = captureSources()
       const source = configured.find((s) => s.path === path)
       if (!source) return { ok: false, error: 'This folder is no longer watched.' }
       if (!captureFolderReadable(destination)) return { ok: false, error: 'SlideWell could not read the chosen folder.' }
+      const storageProblem = captureFolderProblem(destination, wellRootResolved(), archiveRoot())
+      if (storageProblem) return { ok: false, error: storageProblem }
       if (configured.some((s) => s.path !== path && foldersOverlap(s.path, destination))) {
         return { ok: false, error: 'The chosen folder overlaps another watched folder.' }
       }

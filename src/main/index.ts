@@ -6,7 +6,7 @@ import { pathToFileURL } from 'url'
 import { resolve as resolvePath, sep as pathSep } from 'path'
 import { startSettings, type SaveResult, type SettingsApp } from './settings-host'
 import { CONFIG_UNREADABLE, ConfigReadError, patchConfigFile, readConfigFile, saveConfigParts } from './config-file'
-import { ARCHIVE_DEFAULT, OTHERS_DEFAULT } from './settings-rules'
+import { ARCHIVE_DEFAULT, OTHERS_DEFAULT, WELL_DEFAULT } from './settings-rules'
 import { keySlots } from './key-slots'
 import { restartWork } from './restart-work'
 import { isUpdateFixture, updateFixtureRoot } from './update-fixture'
@@ -239,7 +239,6 @@ function archiveAvailable(): boolean {
 
 // The well is SlideWell-owned; default to a dedicated user folder (NOT inside Core A's git repo),
 // repointable in config. The swarchive:// guard serves it wherever it lives.
-const WELL_DEFAULT = join(homedir(), 'SlideWell', 'well')
 function wellRootResolved(): string {
   return readConfig().wellRoot ?? WELL_DEFAULT
 }
