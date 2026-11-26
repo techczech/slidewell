@@ -6,14 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppHandle } from '../src/main/app-handle'
 import type { ScanOptions } from '../src/main/triage'
 
-const { scan, closeWatcher, chooseDirectory } = vi.hoisted(() => ({ scan: vi.fn(), closeWatcher: vi.fn(), chooseDirectory: vi.fn() }))
+const { scan, closeWatcher, chooseDirectory, showMessage } = vi.hoisted(() => ({ scan: vi.fn(), closeWatcher: vi.fn(), chooseDirectory: vi.fn(), showMessage: vi.fn() }))
 const app = new EventEmitter()
 const handlers = new Map<string, Parameters<AppHandle>[1]>()
 vi.mock('electron', () => ({
   app,
   ipcMain: { handle: (channel: string, handler: Parameters<AppHandle>[1]) => handlers.set(channel, handler) },
   clipboard: {},
-  dialog: { showOpenDialog: chooseDirectory }
+  dialog: { showOpenDialog: chooseDirectory, showMessageBox: showMessage }
 }))
 vi.mock('node:fs/promises', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:fs/promises')>()),
@@ -54,8 +54,8 @@ function install(initial: { screenshotRoot?: string; captureSources: { path: str
     getMainWindow: () => mainWindow,
     fromMainWindow: (sender) => sender === event.sender,
     fromAppWindow: () => true,
-    archiveRoot: () => '/archive',
-    wellRootResolved: () => '/well',
+    archiveRoot: () => join(scratch, 'archive'),
+    wellRootResolved: () => join(scratch, 'well'),
     writeConfig: async (patch) => { config = { ...config, ...patch }; return { ok: true } },
     broadcast: send,
     swThumb: () => null,
@@ -78,6 +78,7 @@ beforeEach(() => {
   closeWatcher.mockClear()
   handlers.clear()
   chooseDirectory.mockReset()
+  showMessage.mockReset().mockResolvedValue({ response: 0 })
 })
 
 afterEach(() => {
@@ -311,5 +312,53 @@ describe('re-pointing cannot overlap another watched folder', () => {
     expect(handlers.get('settings:capture-source-status')!(event)).toEqual([
       expect.objectContaining({ path: missing }), expect.objectContaining({ path: other })
     ])
+  })
+})
+
+describe('capture folder choices reject SlideWell’s own storage', () => {
+  it.each(['well', 'archive'])('refuses to add the %s, including through an alias', async (folder) => {
+    const root = join(scratch, folder)
+    const alias = join(scratch, 'alias')
+    mkdirSync(root)
+    symlinkSync(root, alias)
+    install({ captureSources: [] })
+    chooseDirectory.mockResolvedValue({ canceled: false, filePaths: [alias] })
+
+    expect(await handlers.get('settings:add-capture-source')!(event, 'folder')).toBe(false)
+    expect(showMessage).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Choose a capture folder separate from the well and the archive.'
+    }))
+    expect(handlers.get('settings:capture-source-status')!(event)).toEqual([])
+  })
+
+  it('refuses to re-point a missing capture folder to the archive', async () => {
+    const missing = join(scratch, 'missing')
+    const archive = join(scratch, 'archive')
+    mkdirSync(archive)
+    install({ screenshotRoot: missing, captureSources: [] })
+    chooseDirectory.mockResolvedValue({ canceled: false, filePaths: [archive] })
+
+    expect(await handlers.get('settings:replace-capture-source')!(event, missing)).toEqual({
+      ok: false, error: 'Choose a capture folder separate from the well and the archive.'
+    })
+    expect(handlers.get('settings:capture-source-status')!(event)).toEqual([
+      expect.objectContaining({ path: missing, exists: false })
+    ])
+  })
+
+  it('refuses the Triage picker and still accepts a separate folder', async () => {
+    const well = join(scratch, 'well')
+    const capture = join(scratch, 'captures')
+    mkdirSync(well)
+    mkdirSync(capture)
+    install({ captureSources: [] })
+    chooseDirectory.mockResolvedValueOnce({ canceled: false, filePaths: [well] })
+      .mockResolvedValueOnce({ canceled: false, filePaths: [capture] })
+
+    expect(await handlers.get('settings:choose-screenshot-folder')!(event)).toBeNull()
+    expect(showMessage).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Choose a capture folder separate from the well and the archive.'
+    }))
+    expect(await handlers.get('settings:choose-screenshot-folder')!(event)).toBe(capture)
   })
 })
