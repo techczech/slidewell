@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { constants, realpathSync } from 'node:fs'
+import { constants, lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { lstat, open, realpath } from 'node:fs/promises'
 import { extname, isAbsolute, join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -127,13 +127,26 @@ export async function createCatalogue(scope: FinderScope) {
 
   function slide(row: Slide): Source | null {
     if (!presentations.has(row.presentation_id)) return null
+    const dir = join(archiveRoot, 'extracted', row.presentation_id)
+    const manifest = join(dir, 'presentation.json')
+    let label = row.presentation_id
+    try {
+      if (realpathSync(dir) !== dir) return null
+      const st = lstatSync(manifest)
+      if (st.isFile() && st.size <= 4 * 1024 * 1024 && downloadedOnDisk(manifest)) {
+        const metadata = (JSON.parse(readFileSync(manifest, 'utf8')) as { metadata?: { title?: unknown } }).metadata
+        if (typeof metadata?.title === 'string' && metadata.title.trim()) label = metadata.title.trim().slice(0, 180)
+      }
+    } catch {
+      // Older extractions can still resolve by their presentation ID.
+    }
     const path = renderPath(archiveRoot, row.presentation_id, row.slide_order)
     if (!path) return null
     return {
       corpusId: 'slides', itemId: `slide:${row.presentation_id}#${row.slide_order}`,
       title: row.title || 'Untitled slide', snippet: row.snippet || '',
-      source: `${row.presentation_id} · slide ${row.slide_order}`, revision: row.content_hash,
-      path, root: join(archiveRoot, 'extracted', row.presentation_id, 'renders')
+      source: `${label} · slide ${row.slide_order}`, revision: row.content_hash,
+      path, root: join(dir, 'renders')
     }
   }
 

@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto'
+import { chmod, mkdtemp, truncate, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
+import { join } from 'node:path'
 import { expect, test } from 'vitest'
 import sharp from 'sharp'
+import { startConfiguredFinder } from '../src/main/air-finder/host'
 import { fixtureService } from './support/finder-service'
 // @ts-expect-error Existing E2E fixture uses plain JavaScript.
-import { SHOWN_SLIDE, OTHER_SLIDE, SHOWN_WELL } from '../e2e/support/finder-fixture.mjs'
+import { makeFinderFixture, SHOWN_SLIDE, OTHER_SLIDE, SHOWN_WELL } from '../e2e/support/finder-fixture.mjs'
 
 test('searches real registries and ranks indexed items within the personal scope', async () => {
   const host = await fixtureService()
@@ -54,5 +57,43 @@ test('distinguishes denied, empty and unavailable searches and refuses caller pa
     expect(denied).toBe(403)
   } finally {
     await host.close()
+  }
+})
+
+test('starts only from private launch configuration and refuses a changed library root', async () => {
+  const root = await mkdtemp('/tmp/swa.')
+  console.log('Finder socket scratch', root)
+  const { scope } = await makeFinderFixture(root)
+  const socketPath = join(root, 'finder.sock')
+  const configPath = join(root, 'finder.json')
+  const browserPort = 8870
+  const config = JSON.stringify({ ...scope, socketPath, browserPort })
+  await writeFile(configPath, config, { mode: 0o644 })
+  let archive = scope.archiveRoot
+  const roots = { archiveRoot: () => archive, wellRoot: () => scope.wellRoot }
+  const pictures = { ready: () => true, query: async () => [] }
+  await expect(startConfiguredFinder(configPath, roots, pictures)).rejects.toThrow('private file')
+  await chmod(configPath, 0o600)
+  const server = await startConfiguredFinder(configPath, roots, pictures)
+  const local = (path: string) => new Promise<{ status: number; body: string }>((resolve, reject) => {
+    request({ socketPath, path, headers: { Host: `127.0.0.1:${browserPort}` } }, (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (chunk) => { body += chunk })
+      res.on('end', () => resolve({ status: res.statusCode!, body }))
+    }).on('error', reject).end()
+  })
+  try {
+    expect(JSON.parse((await local('/api/library')).body).meaning).toBe(false)
+    const result = await local('/api/search?mode=words&q=lantern')
+    expect(result.status).toBe(200)
+    expect(JSON.parse(result.body).items[0]).toMatchObject({ source: 'Amber Harbour · slide 1' })
+    const item = JSON.parse(result.body).items.find((hit) => hit.corpusId === 'well')
+    await truncate(join(scope.wellRoot, 'images', 'lantern-photo.png'), 21 * 1024 * 1024)
+    expect((await local('/api/download/' + item.ref)).status).toBe(404)
+    archive = join(root, 'different-archive')
+    expect((await local('/api/search?mode=words&q=lantern')).status).toBe(503)
+  } finally {
+    await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections() })
   }
 })
