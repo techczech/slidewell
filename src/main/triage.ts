@@ -132,7 +132,13 @@ export interface ScanListing {
   fingerprint?: string
 }
 
-type CaptureMove = { file: ScanItem; row: ScanRow; offline: boolean; contentHash: string | null }
+type CaptureUpdate = {
+  file: ScanItem
+  row: ScanRow
+  offline: boolean
+  contentHash: string | null
+  enrichment?: { ocr: string; posterRel: string }
+}
 
 function queueCandidate(index: Map<string, ScanRow[]>, key: string, row: ScanRow): void {
   const candidates = index.get(key)
@@ -164,9 +170,9 @@ function relocationMatcher(prior: ScanRow[], previousSources: readonly string[])
   }
 }
 
-async function applyCaptureMoves(db: string, sourceRoot: string, moves: CaptureMove[]): Promise<boolean> {
+async function applyCaptureUpdates(db: string, sourceRoot: string, updates: CaptureUpdate[]): Promise<boolean> {
   const statements: string[] = []
-  for (const { file, row, offline, contentHash } of moves) {
+  for (const { file, row, offline, contentHash, enrichment } of updates) {
     let st
     try {
       st = lstatSync(file.abs, { throwIfNoEntry: false })
@@ -176,9 +182,12 @@ async function applyCaptureMoves(db: string, sourceRoot: string, moves: CaptureM
     if (!st?.isFile() || st.size !== file.size || Math.round(st.mtimeMs) !== file.mtime) continue
     if ((st.size > 0 && st.blocks === 0) !== file.offline) continue
     const actualHash = contentHash && contentHash !== row.hash ? sqlString(contentHash) : 'NULL'
+    const enrichedFields = enrichment
+      ? `, ocr_text = ${sqlString(enrichment.ocr)}, poster_rel = ${sqlString(enrichment.posterRel)}`
+      : ''
     statements.push(
       `UPDATE triage_fts SET source = ${sqlString(sourceRoot)}, rel_path = ${sqlString(file.rel)},
-         filename = ${sqlString(basename(file.rel))}, ext = ${sqlString(file.ext)}, offline = '${offline ? '1' : '0'}'
+         filename = ${sqlString(basename(file.rel))}, ext = ${sqlString(file.ext)}, offline = '${offline ? '1' : '0'}'${enrichedFields}
          WHERE rowid = ${row.rowid} AND source = ${sqlString(row.source)} AND rel_path = ${sqlString(row.rel_path)}
          AND hash = ${sqlString(row.hash)} AND scanned_at = ${sqlString(row.scanned_at)};`,
       `INSERT INTO triage_relocation_observations (triage_rowid, hash, scanned_at, size, mtime, content_hash)
@@ -194,7 +203,7 @@ async function applyCaptureMoves(db: string, sourceRoot: string, moves: CaptureM
     const directory = await fsp.realpath(dirname(db))
     await runScript(join(directory, basename(db)), ['BEGIN IMMEDIATE;', ...statements, 'COMMIT;'].join('\n'), 60_000)
   }
-  return statements.length === moves.length * 2
+  return statements.length === updates.length * 2
 }
 
 interface ScanResult {
@@ -338,8 +347,7 @@ async function scanTriageSourceNow(
       ON m.triage_rowid = t.rowid AND m.hash = t.hash AND m.scanned_at = t.scanned_at`, [])
   const previousSources = (opts.previousSources ?? []).filter((path) => path !== sourceRoot)
   const matcher = previousSources.length ? relocationMatcher(prior, previousSources) : null
-  const seen = new Map(prior.map((r) => [`${r.source}\0${r.rel_path}`, `${r.size}:${r.mtime}`]))
-  const wasOffline = new Set(prior.filter((r) => r.offline === '1').map((r) => `${r.source}\0${r.rel_path}`))
+  const seen = new Map(prior.map((r) => [`${r.source}\0${r.rel_path}`, r]))
   const downloadRoot = opts.downloadRoot ?? null
   let downloads = Boolean(downloadRoot) // ends for this scan on Stop, the failure limit or the time budget
   let failuresInARow = 0
@@ -392,7 +400,7 @@ async function scanTriageSourceNow(
     const row = matcher.byMetadata(f)
     if (row) metadataMoves.set(f, row)
   }
-  const moves: CaptureMove[] = []
+  const updates: CaptureUpdate[] = []
 
   // Phase 1 — process new/changed files one at a time, committing + reporting per file.
   let indexed = 0
@@ -402,14 +410,19 @@ async function scanTriageSourceNow(
     i++
     const sig = `${f.size}:${f.mtime}`
     const key = `${sourceRoot}\0${f.rel}`
+    const previous = seen.get(key)
+    const sameMetadata = previous && `${previous.size}:${previous.mtime}` === sig
+    const placeholder = sameMetadata && previous.hash.startsWith('p:') ? previous : undefined
+    // Review can mark a file as local before the scanner has read its bytes.
+    const availableNow = placeholder && !f.offline && (placeholder.offline === '1' || !placeholder.content_hash)
     const backingOff = f.offline && inBackoff(f.rel, sig)
-    if (seen.get(key) === sig && !(downloads && wasOffline.has(key) && !backingOff)) {
+    if (sameMetadata && !availableNow && !(downloads && previous.offline === '1' && !backingOff)) {
       if (f.offline) offlineN++
       continue
     }
     let row = metadataMoves.get(f)
     let contents: string | null | undefined
-    if (!f.offline && !row && !seen.has(key) && matcher?.hasCandidates()) {
+    if (!f.offline && !row && !previous && matcher?.hasCandidates()) {
       contents = await hashFile(f.abs)
       if (contents) row = matcher.byHash(contents, f.rel)
     }
@@ -419,7 +432,7 @@ async function scanTriageSourceNow(
       if (!f.offline && row.hash.startsWith('p:') && !row.content_hash && contents === undefined) contents = await hashFile(f.abs)
       const offline = f.offline || contents === null
       if (offline) offlineN++
-      moves.push({ file: f, row, offline, contentHash: contents ?? row.content_hash })
+      updates.push({ file: f, row, offline, contentHash: contents ?? row.content_hash })
       continue
     }
     let downloaded: FileHandle | null = null // the checked descriptor of a file downloaded just now
@@ -454,7 +467,12 @@ async function scanTriageSourceNow(
     }
     const pathId = (): string => 'p:' + createHash('sha256').update(`${f.rel}:${sig}`).digest('hex').slice(0, 11)
     const contentHash = f.offline ? null : (contents !== undefined ? contents : await hashFile(downloaded ?? f.abs))
-    const hash = contentHash ?? pathId()
+    // Keep the decision key for the same placeholder. Once bytes have been verified,
+    // a different hash is a replacement even when the filesystem metadata matches.
+    const retained = placeholder && (!contentHash || !placeholder.content_hash || placeholder.content_hash === contentHash)
+      ? placeholder
+      : undefined
+    const hash = retained?.hash ?? contentHash ?? pathId()
     if (!contentHash) offlineN++
     let ocr = ''
     let posterRel = ''
@@ -470,20 +488,28 @@ async function scanTriageSourceNow(
       }
       indexed++
     }
-    const name = f.abs.split('/').pop() || f.rel
-    const parsed = parseName(f.abs)
-    await run(
-      db,
-      `DELETE FROM triage_relocation_observations WHERE triage_rowid IN (SELECT rowid FROM triage_fts WHERE rel_path = ? AND source = ?);
-       DELETE FROM triage_fts WHERE rel_path = ? AND source = ?;
-       INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, poster_rel, offline, ocr_text, scanned_at, source, taken_at, app, window_title)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [f.rel, sourceRoot, f.rel, sourceRoot, hash, f.kind, f.rel, name, f.ext, String(f.size), String(f.mtime), posterRel, contentHash ? '0' : '1', ocr, new Date().toISOString(), sourceRoot, parsed?.takenAt ?? '', parsed?.app ?? '', parsed?.window ?? '']
-    )
+    if (retained) {
+      updates.push({
+        file: f, row: retained, offline: !contentHash,
+        contentHash: contentHash ?? retained.content_hash,
+        enrichment: contentHash ? { ocr, posterRel } : undefined
+      })
+    } else {
+      const name = f.abs.split('/').pop() || f.rel
+      const parsed = parseName(f.abs)
+      await run(
+        db,
+        `DELETE FROM triage_relocation_observations WHERE triage_rowid IN (SELECT rowid FROM triage_fts WHERE rel_path = ? AND source = ?);
+         DELETE FROM triage_fts WHERE rel_path = ? AND source = ?;
+         INSERT INTO triage_fts (hash, kind, rel_path, filename, ext, size, mtime, poster_rel, offline, ocr_text, scanned_at, source, taken_at, app, window_title)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [f.rel, sourceRoot, f.rel, sourceRoot, hash, f.kind, f.rel, name, f.ext, String(f.size), String(f.mtime), posterRel, contentHash ? '0' : '1', ocr, new Date().toISOString(), sourceRoot, parsed?.takenAt ?? '', parsed?.app ?? '', parsed?.window ?? '']
+      )
+    }
     if (i % 3 === 0 || i === files.length) onProgress?.(`processed ${i}/${files.length} · ${indexed} read · ${offlineN} not downloaded`)
   }
-  if (moves.length && opts.isCurrent?.() === false) return skipped
-  const applied = await applyCaptureMoves(db, sourceRoot, moves)
+  if (updates.length && opts.isCurrent?.() === false) return skipped
+  const applied = await applyCaptureUpdates(db, sourceRoot, updates)
   if (listing) listing.fingerprint = applied ? fingerprint : undefined
   onProgress?.(`done — ${indexed} read, ${offlineN} not downloaded, ${files.length} total`)
   return { indexed, total: files.length, offline: offlineN }

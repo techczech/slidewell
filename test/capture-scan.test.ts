@@ -3,7 +3,8 @@
 // the injected downloader "downloads" it by writing its bytes. No real iCloud or OneDrive is involved.
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { closeSync, mkdirSync, openSync, promises as fsp, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { closeSync, mkdirSync, openSync, promises as fsp, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -14,7 +15,7 @@ vi.mock('../src/main/well', () => ({
   makePoster: async () => false,
   recordWellSource: async () => undefined
 }))
-const { scanTriageSource, setTriageDecision } = await import('../src/main/triage')
+const { getTriageDecision, listTriage, scanTriageSource, setTriageDecision, setTriageOffline } = await import('../src/main/triage')
 const { query } = await import('../src/main/sqlite')
 
 const SCRATCH = join(homedir(), 'Library', 'Caches', 'slidewell-dev-15', 'vitest-scan')
@@ -322,6 +323,51 @@ describe('capture scan: online-only files', () => {
     expect(calls).toBe(1)
     expect(killed).toBe(true)
     expect(await rows()).toEqual({ 'a.png': '1', 'b.png': '1' })
+  })
+})
+
+describe('decisions on online-only captures', () => {
+  it.each(['background rescan', 'capture download', 'Review download'])('keeps the decision after a %s', async (route) => {
+    const capture = placeholder('online.png', 1)
+    const scanOptions = { listing: {}, onlyChanged: true }
+    await scanTriageSource('/nonexistent', well, src, undefined, scanOptions)
+    const [offline] = await listTriage(well, '', 'all')
+    expect(offline).toMatchObject({ offline: '1', hash: expect.stringMatching(/^p:/) })
+    await setTriageDecision('/nonexistent', well, src, offline.hash, 'exclude')
+    const decision = await getTriageDecision(well, offline.hash)
+
+    if (route === 'capture download') {
+      await scanTriageSource('/nonexistent', well, src, undefined, {
+        downloadRoot: src, download: async (path) => arrive(path)
+      })
+    } else {
+      arrive(capture)
+      if (route === 'Review download') setTriageOffline(well, src, offline.rel_path, false)
+      await scanTriageSource('/nonexistent', well, src, undefined, scanOptions)
+    }
+
+    expect(await listTriage(well, '', 'all')).toEqual([
+      expect.objectContaining({ hash: offline.hash, state: 'excluded', offline: '0' })
+    ])
+    expect(await getTriageDecision(well, offline.hash)).toEqual(decision)
+    const hash = createHash('sha256').update(readFileSync(capture)).digest('hex').slice(0, 12)
+    expect(await query(join(well, 'triage.db'), 'SELECT hash, content_hash FROM triage_relocation_observations')).toEqual([
+      { hash: offline.hash, content_hash: hash }
+    ])
+    expect((await scanTriageSource('/nonexistent', well, src)).indexed).toBe(0)
+  })
+
+  it('does not transfer an online-only decision to a replacement with different metadata', async () => {
+    const capture = placeholder('replaced.png', 1)
+    await scanTriageSource('/nonexistent', well, src)
+    const [offline] = await listTriage(well, '', 'all')
+    await setTriageDecision('/nonexistent', well, src, offline.hash, 'exclude')
+
+    writeFileSync(capture, 'another capture')
+    await scanTriageSource('/nonexistent', well, src)
+    const [local] = await listTriage(well, '', 'all')
+    expect(local).toMatchObject({ state: 'undecided', offline: '0' })
+    expect(local.hash).not.toBe(offline.hash)
   })
 })
 
