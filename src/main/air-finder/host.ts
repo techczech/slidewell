@@ -1,6 +1,6 @@
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join } from 'node:path'
-import { createCatalogue } from './catalogue'
+import { createCatalogue } from './catalogue-client'
 import { finderServer, type FinderQueries } from './server'
 
 type LaunchConfig = {
@@ -54,6 +54,12 @@ export async function startConfiguredFinder(
       (directory.mode & 0o777) !== 0o700 || Buffer.byteLength(socketPath) > 103) {
     throw new FinderStartupError(socketFolderInvalid)
   }
+  // The directory protects the socket before, during and after bind. Never replace a prior entry.
+  const existing = await lstat(socketPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error
+    return null
+  })
+  if (existing) throw new FinderStartupError('A connection file already exists at:', socketPath)
   const archive = roots.archiveRoot()
   const well = roots.wellRoot()
   const catalogue = await createCatalogue({ ...config, archiveRoot: archive, wellRoot: well })
@@ -63,19 +69,18 @@ export async function startConfiguredFinder(
     available: () => archive === roots.archiveRoot() && well === roots.wellRoot()
   })
 
-  // The directory protects the socket before, during and after bind. Never replace a prior entry.
-  const existing = await lstat(socketPath).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== 'ENOENT') throw error
-    return null
-  })
-  if (existing) throw new FinderStartupError('A connection file already exists at:', socketPath)
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(socketPath, () => {
-      server.off('error', reject)
-      resolve()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(socketPath, () => {
+        server.off('error', reject)
+        resolve()
+      })
     })
-  })
+  } catch (error) {
+    await catalogue.close()
+    throw error
+  }
   return server
 }
 

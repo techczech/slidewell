@@ -5,7 +5,7 @@ import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { PictureSearchEngine } from '../../src/main/picture-search/engine'
 import { VectorStore } from '../../src/main/picture-search/vector-store'
-import { createCatalogue } from '../../src/main/air-finder/catalogue'
+import { createCatalogue } from '../../src/main/air-finder/catalogue-client'
 import { finderServer } from '../../src/main/air-finder/server'
 // @ts-expect-error Existing E2E fixture uses plain JavaScript.
 import { makeFinderFixture, SHOWN_SLIDE, OTHER_SLIDE, OUT_OF_SCOPE_SLIDE, SHOWN_WELL, HIDDEN_WELL } from '../../e2e/support/finder-fixture.mjs'
