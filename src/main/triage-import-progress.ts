@@ -44,7 +44,7 @@ export function importLine(s: ImportState): string {
   if (s.phase === 'done') {
     if (s.imported === 0 && s.skipped === 0 && s.gated === 0) return 'Nothing to import.'
     const parts = [`Imported ${n(s.imported)}.`]
-    if (s.skipped > 0) parts.push(`${n(s.skipped)} could not be imported (missing, online-only or unreadable) and ${s.skipped === 1 ? 'stays' : 'stay'} selected.`)
+    if (s.skipped > 0) parts.push(`Skipped ${n(s.skipped)} (file unavailable, unreadable or decision changed).`)
     if (s.gated > 0) parts.push(`${n(s.gated)} ${s.gated === 1 ? 'video is' : 'videos are'} over the 20 MB limit and ${s.gated === 1 ? 'stays' : 'stay'} selected.`)
     return parts.join(' ')
   }
