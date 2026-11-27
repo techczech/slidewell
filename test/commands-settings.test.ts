@@ -175,6 +175,26 @@ describe('settings CLI', () => {
     await run(['get', 'library.othersRoot'], o.io, dir)
     expect(o.out.join('').trim()).toBe(others)
   })
+  test('the shared Settings store refuses a Triage source at the well or archive root', async () => {
+    const dir = folder()
+    const well = join(dir, 'well')
+    const archive = join(dir, 'archive')
+    mkdirSync(well)
+    mkdirSync(archive)
+    const alias = join(dir, 'archive-alias')
+    symlinkSync(archive, alias)
+    expect(await run(['set', 'library.wellRoot', well], io().io, dir)).toBe(0)
+    expect(await run(['set', 'library.archiveRoot', archive], io().io, dir)).toBe(0)
+    expect(await run(['set', 'capture.triageRoot', dir], io().io, dir)).toBe(0)
+    for (const target of [well, alias]) {
+      const r = ioErr()
+      expect(await run(['set', 'capture.triageRoot', target], r.io, dir)).not.toBe(0)
+      expect(r.err.join('') + r.out.join('')).toContain('Choose a capture folder separate from the well and the archive.')
+    }
+    const g = io()
+    expect(await run(['get', 'capture.triageRoot'], g.io, dir)).toBe(0)
+    expect(g.out.join('').trim()).toBe(dir)
+  })
   test('overlap follows symbolic links and counts a root folder as holding everything', async () => {
     const dir = folder()
     const mine = join(dir, 'mine')

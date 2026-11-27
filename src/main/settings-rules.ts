@@ -16,6 +16,7 @@ import type { BeforeWrite, SettingsState } from '@app-patterns/settings'
 /** Where each library lives when its folder setting is empty (main's readers use the same). */
 export const ARCHIVE_DEFAULT = join(homedir(), 'gitrepos', '05_ppt-tools', 'ppt-archive')
 export const OTHERS_DEFAULT = join(homedir(), 'SlideWell', 'others-library')
+export const WELL_DEFAULT = join(homedir(), 'SlideWell', 'well')
 
 /** The words the old folder chooser showed, for every writer. */
 export const OVERLAP_REASON = 'That folder overlaps your own archive. Pick a separate location for the Others’ Library so other people’s slides never mix into your archive.'
@@ -54,6 +55,14 @@ export function foldersOverlap(a: string, b: string): boolean {
   return within(ra, rb) || within(rb, ra)
 }
 
+export function captureFolderProblem(path: string, well: string, archive: string): string | null {
+  const folder = realFolder(path)
+  if (folder === realFolder(well) || folder === realFolder(archive)) {
+    return 'Choose a capture folder separate from the well and the archive.'
+  }
+  return null
+}
+
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
 /** The two library folders a settings state points at (empty means the default). */
@@ -65,15 +74,19 @@ export function libraryRoots(settings: Readonly<Record<string, unknown>>): { arc
 }
 
 /**
- * Why writing `after` (over `before`, the file as read under the lock) is refused, or null. Only a change to
- * either library folder is judged, so a pair that already overlapped (written by an older version) does not
- * block unrelated settings; changing either folder must end in a pair that does not overlap.
+ * Why writing `after` (over `before`, the file as read under the lock) is refused, or null. Check library
+ * overlap when either library folder changes, and check the capture folder when it is newly assigned.
+ * Previously saved folder combinations do not block unrelated settings.
  */
 export function crossSettingProblem(before: SettingsState, after: SettingsState): string | null {
   const a = libraryRoots(before.settings)
   const b = libraryRoots(after.settings)
-  if (a.archive === b.archive && a.others === b.others) return null
-  return foldersOverlap(b.archive, b.others) ? OVERLAP_REASON : null
+  if ((a.archive !== b.archive || a.others !== b.others) && foldersOverlap(b.archive, b.others)) return OVERLAP_REASON
+  const capture = str(after.settings['capture.triageRoot'])
+  if (capture && capture !== str(before.settings['capture.triageRoot'])) {
+    return captureFolderProblem(capture, str(after.settings['library.wellRoot']) || WELL_DEFAULT, b.archive)
+  }
+  return null
 }
 
 /**
