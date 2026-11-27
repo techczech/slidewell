@@ -168,12 +168,12 @@ test('finds, previews and downloads approved decks with filesystem names through
     return JSON.parse(result.body.toString()).items
   }
   try {
-    const expectedNames = [...decks, alias]
     const listed = await search('navigationfixture')
-    expect(listed.map(({ itemId }) => itemId).sort()).toEqual(expectedNames.map((name) => `slide:${name}#1`).sort())
+    expect(listed.map(({ itemId }) => itemId).sort()).toEqual(decks.map((name) => `slide:${name}#1`).sort())
+    expect(await search(alias)).toEqual([])
     const expectedBytes = await readFile(original)
     const sha256 = createHash('sha256').update(expectedBytes).digest('hex')
-    for (const name of expectedNames) {
+    for (const name of decks) {
       const result = (await search(name)).find(({ itemId }) => itemId === `slide:${name}#1`)
       expect(result?.source).toBe(`${name} · slide 1`)
       const preview = await local(`/api/preview/${result!.ref}`)
@@ -185,15 +185,56 @@ test('finds, previews and downloads approved decks with filesystem names through
       expect(download.headers['content-disposition']).toBe(`attachment; filename="slidewell-${sha256.slice(0, 12)}.webp"`)
       expect(download.body).toEqual(expectedBytes)
     }
-    const aliasRef = listed.find(({ itemId }) => itemId === `slide:${alias}#1`)!.ref
-    const aliasPreview = `/api/preview/${aliasRef}`
-    expect((await local(aliasPreview)).status).toBe(200)
-    await rename(join(extracted, alias), join(extracted, 'old-alias'))
-    await symlink(outside, join(extracted, alias))
-    expect((await local(aliasPreview)).status).toBe(404)
-    expect((await local(`/api/download/${aliasRef}`)).status).toBe(404)
+    const ref = listed.find(({ itemId }) => itemId === `slide:${decks[0]}#1`)!.ref
+    const previewPath = `/api/preview/${ref}`
+    expect((await local(previewPath)).status).toBe(200)
+    const deck = join(extracted, decks[0])
+    await rename(deck, join(extracted, 'relocated-coast'))
+    await symlink(outside, deck)
+    expect((await local(previewPath)).status).toBe(404)
+    expect((await local(`/api/download/${ref}`)).status).toBe(404)
   } finally {
     await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections() })
+  }
+}, 30_000)
+
+test('refuses an alias to an unlisted deck with a cold or cached preview', async () => {
+  const host = await fixtureService()
+  const extracted = join(host.fixture.scope.archiveRoot, 'extracted')
+  const deck = join(extracted, 'fixture-deck-1')
+  // Move the directory intact so the render keeps its inode and revision.
+  const unlisted = join(extracted, 'unlisted-deck')
+  const stagedAlias = join(extracted, 'staged-alias')
+  const search = async (): Promise<Array<{ itemId: string; ref: string }>> => {
+    const response = await host.request('/api/search?' + new URLSearchParams({ mode: 'words', q: 'Lantern survey 1.1' }))
+    expect(response.status).toBe(200)
+    return (await response.json()).items
+  }
+  const refForDeck = async () => {
+    const [item] = await search()
+    expect(item?.itemId).toBe(SHOWN_SLIDE)
+    return item.ref
+  }
+  const expectRefused = async (ref: string) => {
+    expect(await search()).toEqual([])
+    expect((await host.request(`/api/preview/${ref}`)).status).toBe(404)
+    expect((await host.request(`/api/download/${ref}`)).status).toBe(404)
+  }
+  try {
+    const coldRef = await refForDeck()
+    await rename(deck, unlisted)
+    await symlink(unlisted, deck)
+    await expectRefused(coldRef)
+
+    await rename(deck, stagedAlias)
+    await rename(unlisted, deck)
+    const cachedRef = await refForDeck()
+    expect((await host.request(`/api/preview/${cachedRef}`)).status).toBe(200)
+    await rename(deck, unlisted)
+    await rename(stagedAlias, deck)
+    await expectRefused(cachedRef)
+  } finally {
+    await host.close()
   }
 }, 30_000)
 
