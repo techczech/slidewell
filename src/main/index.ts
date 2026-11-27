@@ -559,11 +559,11 @@ app.whenReady().then(async () => {
 
   void startFinderAtLaunch(
     process.argv, { archiveRoot, wellRoot: wellRootResolved }, pictureSearch.finderQueries(), (detail) => {
-      console.warn('Air finder could not start. Check the private config and socket directory.')
+      console.warn('Air finder is unavailable.')
       if (quitting || E2E_HIDDEN || !mainWindow || mainWindow.isDestroyed()) return
       void dialog.showMessageBox(mainWindow, {
-        type: 'warning', buttons: ['OK'], message: 'Air finder couldn’t start.', detail
-      }).catch(() => console.warn('Air finder startup warning could not be shown.'))
+        type: 'warning', buttons: ['OK'], message: 'Air finder is unavailable.', detail
+      }).catch(() => console.warn('Air finder warning could not be shown.'))
     }
   ).then((server) => {
     if (!server) return
