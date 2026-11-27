@@ -23,7 +23,7 @@ function CaptureSources(): JSX.Element {
     <div className="sw-page">
       <p className="sw-page-note">Folders watched for new screenshots. New files reach Triage within a minute. SlideWell only reads these folders; it never moves or changes the originals.</p>
       {sources.map((c) => (
-        <div className={`sw-page-row${c.exists ? '' : ' bad'}`} key={c.path}>
+        <div className={`sw-page-row${c.exists ? '' : ' bad missing-capture-folder'}`} key={c.path}>
           <div className="grow">
             <div>{c.primary ? 'Triage source folder' : c.namedOnly ? 'Only files named like screenshots (Screenshot…, CleanShot…)' : 'All images and videos'}</div>
             <div className="sub" title={c.path}>{c.path}{c.exists ? '' : ' · folder not found'}</div>

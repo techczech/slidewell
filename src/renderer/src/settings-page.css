@@ -24,3 +24,7 @@ html, body, #root { height: 100%; margin: 0; overflow: hidden; background: #ecec
 .sw-page-row .grow { flex: 1; min-width: 0; }
 .sw-page-row .sub { color: #6e6e73; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sw-page-row.bad .sub { color: #b42318; }
+.missing-capture-folder { flex-wrap: wrap; }
+.missing-capture-folder .grow { flex-basis: min(100%, 18rem); }
+.missing-capture-folder .sub { white-space: normal; overflow-wrap: anywhere; }
+.missing-capture-folder > [role="alert"] { flex-basis: 100%; overflow-wrap: anywhere; }

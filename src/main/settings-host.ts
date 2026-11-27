@@ -125,6 +125,8 @@ export async function startSettings(wiring: Wiring): Promise<{ settings: Setting
       preload: join(__dirname, '../preload/settings.js'),
       url: settingsPageUrl(),
       title: 'SlideWell Settings',
+      // Leave room for the sidebar, inspector and a usable centre pane.
+      extra: { minWidth: 720 },
       showOnReady: process.env['SLIDEWELL_E2E_HIDDEN'] !== '1'
     },
     appInfo: { icon: 'gallery-vertical-end', cli: APP_ID }
