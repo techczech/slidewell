@@ -16,6 +16,25 @@ SLIDEWELL_FINDER_SCRATCH="$(mktemp -d /tmp/swf.XXXXXX)" npm run test:air-finder
 
 With the existing personal Air SSH route available, add `SLIDEWELL_FINDER_TEST_AIR=1` to the command. The test holds a temporary reverse loopback forward for one Air-side HTTP check and reports query time, first preview time and bytes. It uses the existing SSH configuration and stops forwarding when that command exits.
 
+## Run the headless browser journey on the Studio
+
+Push the branch being tested, then run from its worktree on the laptop. This journey uses the invented HTTP fixture on loopback. It exercises search, preview, similarity, download, provenance, narrow layout and offline handling in Playwright Chromium.
+
+Before dispatch, check that the Chromium, Chromium Headless Shell and FFmpeg revisions for the lockfile's Playwright version are staged in the Studio's `~/.local/state/agent-run/remote/cache/ms-playwright` or `~/actions-runner/_shared/ms-playwright` cache. Each revision directory needs an `INSTALLATION_COMPLETE` marker. The Studio runner can try to download missing browsers before it runs the test. If the revisions are missing, run `npm run test:air-finder-dom` on the laptop through `agent-run` with its existing Playwright browser and a short `TMPDIR`.
+
+```sh
+~/gitrepos/_MACHINECONFIG/agent-run/remote-test "$(git rev-parse --show-toplevel)" --timeout 1800 -- sh -c '
+  TMPDIR="$(mktemp -d /tmp/swt.XXXXXX)" || exit 1
+  export TMPDIR
+  npm run test:air-finder-dom
+  status=$?
+  rm -rf "$TMPDIR"
+  exit "$status"
+'
+```
+
+`npm run test:air-finder-dom` sets `SLIDEWELL_FINDER_DOM=1`. Check the output for `test/air-finder-dom.test.ts` with one passed test. A skipped test leaves the browser journey unverified.
+
 ## Host configuration after review
 
 The endpoint is a Unix socket in a mode-0700 directory owned by the SlideWell account. Its HTTP content has no direct TCP listener. Use existing owner-authenticated SSH over Tailscale. The SSH command creates a loopback address for the browser on the Air for the duration of the session. The private HTTPS Serve route described in the plan still needs same-user application authorisation and a separately authorised activation.
