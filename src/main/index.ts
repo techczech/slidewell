@@ -1,4 +1,4 @@
-import { startConfiguredFinder } from './air-finder/host'
+import { startFinderAtLaunch } from './air-finder/host'
 import { app, BrowserWindow, ipcMain, dialog, protocol, shell, net, safeStorage, powerMonitor } from 'electron'
 import { join, basename } from 'path'
 import { homedir } from 'os'
@@ -557,22 +557,23 @@ app.whenReady().then(async () => {
     void pictureQueryServer?.close()
   })
 
-  const finderConfig = process.argv.find((arg) => arg.startsWith('--air-finder-config='))
-  if (finderConfig) {
-    void startConfiguredFinder(
-      finderConfig.slice('--air-finder-config='.length),
-      { archiveRoot, wellRoot: wellRootResolved },
-      pictureSearch.finderQueries()
-    ).then((server) => {
-      const close = () => {
-        server.close()
-        server.closeAllConnections()
-      }
-      if (quitting) close()
-      else app.once('will-quit', close)
-    }).catch(() => console.warn('Air finder could not start. Check the private config and socket directory.'))
-  }
-
+  void startFinderAtLaunch(
+    process.argv, { archiveRoot, wellRoot: wellRootResolved }, pictureSearch.finderQueries(), (detail) => {
+      console.warn('Air finder could not start. Check the private config and socket directory.')
+      if (quitting || E2E_HIDDEN || !mainWindow || mainWindow.isDestroyed()) return
+      void dialog.showMessageBox(mainWindow, {
+        type: 'warning', buttons: ['OK'], message: 'Air finder couldn’t start.', detail
+      }).catch(() => console.warn('Air finder startup warning could not be shown.'))
+    }
+  ).then((server) => {
+    if (!server) return
+    const close = () => {
+      server.close()
+      server.closeAllConnections()
+    }
+    if (quitting) close()
+    else app.once('will-quit', close)
+  })
 
   // --- screenshot sorter, local part (sorter/service.ts): proposals only, never decisions or moves ---
   const pics = pictureSearch

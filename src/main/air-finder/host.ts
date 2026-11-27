@@ -7,6 +7,13 @@ type LaunchConfig = {
   libraryId: string; socketPath: string; browserPort: number
   presentations: string[]; wellImages: string[]; meaningVerified?: boolean
 }
+type LibraryRoots = { archiveRoot(): string; wellRoot(): string }
+
+class FinderStartupError extends Error {
+  constructor(message: string, readonly socketPath?: string) {
+    super(message)
+  }
+}
 
 function isConfig(config: Partial<LaunchConfig> | null): config is LaunchConfig {
   const list = (value: unknown, pattern: RegExp) =>
@@ -22,21 +29,30 @@ function isConfig(config: Partial<LaunchConfig> | null): config is LaunchConfig 
 
 /** A local, same-UID endpoint. Browsers reach it through an existing authenticated SSH forward. */
 export async function startConfiguredFinder(
-  configPath: string, roots: { archiveRoot(): string; wellRoot(): string }, pictures: FinderQueries
+  configPath: string, roots: LibraryRoots, pictures: FinderQueries
 ) {
-  const info = await lstat(configPath)
+  const configUnreadable = 'SlideWell couldn’t read the Air finder settings. Check that the private settings file exists and contains valid JSON.'
+  const info = await lstat(configPath).catch(() => { throw new FinderStartupError(configUnreadable) })
   if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0 || info.size > 1024 * 1024) {
-    throw new Error('Finder config must be a private file')
+    throw new FinderStartupError('The Air finder settings must be in a private file owned by your account. Check the file’s ownership and permissions.')
   }
-  const config: unknown = JSON.parse(await readFile(configPath, 'utf8'))
-  if (typeof config !== 'object' || !isConfig(config)) throw new Error('Invalid finder scope or connection settings')
+  let config: unknown
+  try {
+    config = JSON.parse(await readFile(configPath, 'utf8'))
+  } catch {
+    throw new FinderStartupError(configUnreadable)
+  }
+  if (typeof config !== 'object' || !isConfig(config)) {
+    throw new FinderStartupError('The Air finder settings are invalid. Check the library selection and connection settings in the private settings file.')
+  }
 
-  const parent = await realpath(dirname(config.socketPath))
+  const socketFolderInvalid = 'The Air finder needs a short path to a private socket folder. Check that the folder exists, belongs to your account and is accessible only to you (mode 0700).'
+  const parent = await realpath(dirname(config.socketPath)).catch(() => { throw new FinderStartupError(socketFolderInvalid) })
   const socketPath = join(parent, basename(config.socketPath))
   const directory = await lstat(parent)
   if (directory.uid !== process.getuid?.() || !directory.isDirectory() ||
       (directory.mode & 0o777) !== 0o700 || Buffer.byteLength(socketPath) > 103) {
-    throw new Error('Finder socket requires a short private directory')
+    throw new FinderStartupError(socketFolderInvalid)
   }
   const archive = roots.archiveRoot()
   const well = roots.wellRoot()
@@ -52,7 +68,7 @@ export async function startConfiguredFinder(
     if (error.code !== 'ENOENT') throw error
     return null
   })
-  if (existing) throw new Error('Finder socket already exists')
+  if (existing) throw new FinderStartupError('A connection file already exists at:', socketPath)
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
     server.listen(socketPath, () => {
@@ -61,4 +77,27 @@ export async function startConfiguredFinder(
     })
   })
   return server
+}
+
+export async function startFinderAtLaunch(
+  args: readonly string[], roots: LibraryRoots, pictures: FinderQueries,
+  warn: (detail: string) => void
+) {
+  const flag = '--air-finder-config='
+  const option = args.find((arg) => arg.startsWith(flag))
+  if (!option) return null
+
+  try {
+    return await startConfiguredFinder(option.slice(flag.length), roots, pictures)
+  } catch (error) {
+    if (error instanceof FinderStartupError) {
+      warn(error.socketPath
+        ? `${error.message}\n${error.socketPath}\n\nIf another finder is running, quit it first. Move the file to the Bin only after checking that nothing is using it, then restart SlideWell.`
+        : error.message)
+    } else {
+      // OS and parser errors can include private paths or settings.
+      warn('SlideWell couldn’t open the Air finder. Check that the selected library and private socket folder are available, then restart SlideWell.')
+    }
+    return null
+  }
 }
