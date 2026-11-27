@@ -22,7 +22,8 @@ function finderCatalogueWorker(): Plugin {
           rollupOptions: { external: [/^node:/] }
         }
       })
-      const chunk = 'output' in result && result.output.find((entry) => entry.type === 'chunk')
+      const bundle = Array.isArray(result) ? result[0] : result
+      const chunk = bundle && 'output' in bundle && bundle.output.find((entry) => entry.type === 'chunk')
       if (!chunk) throw new Error('Could not bundle the finder catalogue worker for tests')
       return `import { Worker } from 'node:worker_threads'
         export default (options) => new Worker(${JSON.stringify(chunk.code)}, { ...options, eval: true })`
