@@ -6,7 +6,7 @@ const similar = byId('similar')
 const transfer = byId('transfer')
 const provenance = byId('provenance')
 let selection
-let searchRequest
+let searchRequest = new AbortController()
 let selectionRequest
 let provenanceUrl
 let libraryId
@@ -26,11 +26,16 @@ async function request(path, signal) {
 
 async function describe(signal) {
   const library = await (await request('/api/library', signal)).json()
+  signal.throwIfAborted()
   if (library.protocol !== 1 || (libraryId && libraryId !== library.libraryId)) {
     throw new Error('A different library or finder version answered. Check your connection.')
   }
   libraryId = library.libraryId
   byId('connection').textContent = library.meaning ? libraryId : libraryId + ' · Meaning unavailable'
+  byId('match').hidden = !library.meaning
+  byId('related').hidden = !library.meaning
+  byId('query').placeholder = library.meaning ? 'Words you remember or a topic' : 'Words you remember'
+  if (!library.meaning) byId('mode').value = 'words'
 }
 
 function resetDetail() {
@@ -91,16 +96,15 @@ byId('search').addEventListener('submit', async (event) => {
   event.preventDefault()
   const q = byId('query').value.trim()
   if (!q) return
-  searchRequest?.abort()
+  searchRequest.abort()
   searchRequest = new AbortController()
   const { signal } = searchRequest
-  const mode = byId('mode').value
   resetDetail()
   results.replaceChildren()
   status.textContent = 'Searching…'
   try {
     await describe(signal)
-    const query = new URLSearchParams({ q, mode })
+    const query = new URLSearchParams({ q, mode: byId('mode').value })
     const { items } = await (await request('/api/search?' + query, signal)).json()
     if (signal.aborted) return
     render(results, items)
@@ -170,4 +174,7 @@ byId('download').addEventListener('click', async () => {
   }
 })
 
-describe().catch((error) => { byId('connection').textContent = error.message })
+const initialSignal = searchRequest.signal
+describe(initialSignal).catch((error) => {
+  if (!initialSignal.aborted) byId('connection').textContent = error.message
+})

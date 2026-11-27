@@ -3,6 +3,7 @@ import { createServer, type ServerResponse } from 'node:http'
 import sharp from 'sharp'
 import { NotIndexedError, type PictureQuery, type QueryOptions, type Scored } from '../picture-search/engine'
 import type { Catalogue } from './catalogue-client'
+import { slidePresentationId } from './presentation-id'
 import { readRendition, verifyRendition, type Rendition } from './rendition'
 import page from './finder.html?raw'
 import script from './finder.js?raw'
@@ -146,9 +147,10 @@ export function finderServer(opts: {
     pictureBusy = true
     try {
       const allowed = await catalogue.eligibleIds()
+      const seedPresentation = seed ? slidePresentationId(seed.itemId) : null
       const ranked = await pictures.query(input, {
         limit: SEARCH_LIMIT, kinds: ['slide', 'well-image'],
-        allow: (id) => allowed(id) && (!seed || seed.corpusId !== 'slides' || !id.startsWith(seed.itemId.split('#')[0] + '#'))
+        allow: (id) => allowed(id) && (!seedPresentation || slidePresentationId(id) !== seedPresentation)
       })
       const hits = await Promise.all(ranked.filter((hit) => allowed(hit.id)).map((hit) => catalogue.resolve(hit.id)))
       return hits.filter((item) => item !== null)

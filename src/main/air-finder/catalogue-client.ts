@@ -1,6 +1,7 @@
 import { realpath } from 'node:fs/promises'
 import createWorker from './catalogue-worker?nodeWorker'
 import type { FinderScope } from './catalogue'
+import { slidePresentationId } from './presentation-id'
 import type { Rendition } from './rendition'
 
 type Job =
@@ -100,7 +101,10 @@ export async function createCatalogue(scope: FinderScope, onUnavailable?: () => 
     generation: () => send({ method: 'generation' }) as Promise<string>,
     async eligibleIds() {
       const wells = new Set(await send({ method: 'eligibleWellIds' }) as string[])
-      return (id: string) => wells.has(id) || (id.startsWith('slide:') && presentations.has(id.slice(6, id.lastIndexOf('#'))))
+      return (id: string) => {
+        const presentation = slidePresentationId(id)
+        return presentation ? presentations.has(presentation) : wells.has(id)
+      }
     },
     close() {
       closed = true

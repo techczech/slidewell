@@ -1,6 +1,7 @@
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createCatalogue } from './catalogue-client'
+import { isPresentationId } from './presentation-id'
 import { finderServer, type FinderQueries } from './server'
 
 type LaunchConfig = {
@@ -16,13 +17,13 @@ class FinderStartupError extends Error {
 }
 
 function isConfig(config: Partial<LaunchConfig> | null): config is LaunchConfig {
-  const list = (value: unknown, pattern: RegExp) =>
-    Array.isArray(value) && value.length <= 10_000 && value.every((id) => typeof id === 'string' && pattern.test(id))
+  const list = (value: unknown, valid: (id: string) => boolean) =>
+    Array.isArray(value) && value.length <= 10_000 && value.every((id) => typeof id === 'string' && valid(id))
   return Boolean(config &&
     typeof config.libraryId === 'string' && /^[\w-]{1,64}$/.test(config.libraryId) &&
     typeof config.socketPath === 'string' && isAbsolute(config.socketPath) && basename(config.socketPath).endsWith('.sock') &&
     typeof config.browserPort === 'number' && Number.isInteger(config.browserPort) && config.browserPort >= 1024 && config.browserPort <= 65535 &&
-    list(config.presentations, /^[a-zA-Z0-9_][\w.-]{0,180}$/) && list(config.wellImages, /^[a-f0-9]{7,64}$/) &&
+    list(config.presentations, isPresentationId) && list(config.wellImages, (id) => /^[a-f0-9]{7,64}$/.test(id)) &&
     (config.presentations!.length || config.wellImages!.length) &&
     (config.meaningVerified === undefined || typeof config.meaningVerified === 'boolean'))
 }

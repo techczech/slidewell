@@ -9,7 +9,7 @@ const work = createScratch('missing-capture')
 const userData = join(work, 'userData')
 const source = join(work, 'Screenshots')
 const replacement = join(work, 'Moved screenshots')
-const missingExtra = join(work, 'Other screenshots')
+const missingExtra = join(work, 'Other screenshots '.repeat(8).trim())
 const movedExtra = join(work, 'Moved other screenshots')
 mkdirSync(userData)
 mkdirSync(source)
@@ -19,10 +19,12 @@ writeFileSync(join(source, 'stored.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAA
 writeFileSync(join(userData, 'config.json'), JSON.stringify({
   archiveRoot: join(work, 'archive'),
   wellRoot: join(work, 'well'),
+  othersArchiveRoot: join(work, 'no-others'),
+  vaultRoot: join(work, 'no-vault'),
   screenshotRoot: source
 }))
 
-const app = await launchHidden(userData, join(work, 'home'))
+const app = await launchHidden(userData, join(work, 'home'), { isolatePreferences: true })
 const appErrors = []
 app.process().stderr?.on('data', (chunk) => appErrors.push(String(chunk)))
 const result = {}
@@ -125,6 +127,37 @@ try {
   await missing.filter({ hasText: missingExtra }).waitFor({ timeout: 5000 })
   assert.equal(await missing.count(), 2)
   result.singleNoticeAndSettings = true
+
+  const narrowWidth = await app.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().endsWith('/renderer/settings.html'))
+    if (!window || window.isVisible()) throw new Error('Settings E2E window must be hidden')
+    const [width] = window.getMinimumSize()
+    if (width < 1) throw new Error('Settings has no supported minimum width')
+    window.setSize(width, window.getSize()[1])
+    return width
+  })
+  await settings.waitForFunction((width) => innerWidth === width, narrowWidth)
+  const missingRow = missing.filter({ hasText: missingExtra })
+  await choose(join(work, 'unreadable'))
+  await missingRow.getByRole('button', { name: 'Choose folder…' }).click()
+  await missingRow.getByRole('alert').getByText('SlideWell could not read the chosen folder.').waitFor()
+  const layout = await missingRow.evaluate((row) => {
+    const parts = [...row.querySelectorAll('.grow > div, button, [role="alert"]')]
+    const rowRect = row.getBoundingClientRect()
+    const bounds = parts.map((part) => {
+      const range = document.createRange()
+      range.selectNodeContents(part)
+      return range.getBoundingClientRect()
+    })
+    return {
+      count: parts.length,
+      fits: bounds.every((rect) => rect.width > 0 && rect.left >= rowRect.left && rect.right <= rowRect.right + 1),
+      overlaps: bounds.some((rect, i) => bounds.slice(i + 1).some((other) =>
+        rect.left < other.right && rect.right > other.left && rect.top < other.bottom && rect.bottom > other.top))
+    }
+  })
+  assert.deepEqual(layout, { count: 5, fits: true, overlaps: false })
+  result.narrowRejectedFolderLayout = true
 
   await choose(movedExtra)
   await missing.filter({ hasText: missingExtra }).getByRole('button', { name: 'Choose folder…' }).click()

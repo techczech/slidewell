@@ -12,9 +12,9 @@
   <main>
     <form id="search">
       <label class="query">Find slides and images
-        <input id="query" type="search" maxlength="200" required placeholder="Words you remember or a topic">
+        <input id="query" type="search" maxlength="200" required placeholder="Words you remember">
       </label>
-      <label>Match
+      <label id="match" hidden>Match
         <select id="mode"><option value="words">Words</option><option value="meaning">Meaning</option></select>
       </label>
       <button class="primary" type="submit">Search</button>
@@ -30,7 +30,7 @@
         <p id="source"></p>
         <p id="snippet"></p>
         <div class="actions">
-          <button id="related" type="button">More like this</button>
+          <button id="related" type="button" hidden>More like this</button>
           <button id="download" class="primary" type="button">Download</button>
         </div>
         <p id="transfer" role="status"></p>
