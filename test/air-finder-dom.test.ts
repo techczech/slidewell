@@ -27,8 +27,22 @@ test.skipIf(process.env.SLIDEWELL_FINDER_DOM !== '1')('Air finder browser journe
       await page.getByLabel('Match').selectOption('meaning')
       await search('glowing beacons')
       await page.getByRole('button', { name: /lantern photo.*Meaning/ }).click()
+      const downloadButton = page.getByRole('button', { name: 'Download image' })
+      const provenanceLink = page.locator('#provenance')
+      const offeredDownloads: string[] = []
+      page.on('download', (download) => offeredDownloads.push(download.suggestedFilename()))
+      await page.route('**/api/download/*', async (route) => {
+        const response = await route.fetch()
+        await route.fulfill({ response, headers: { ...response.headers(), 'x-slidewell-sha256': '0'.repeat(64) } })
+      }, { times: 1 })
+      await downloadButton.click()
+      await page.getByText('The download did not match its expected hash. Try again.').waitFor()
+      await provenanceLink.waitFor({ state: 'hidden' })
+      expect(await provenanceLink.getAttribute('href')).toBeNull()
+      expect(offeredDownloads).toEqual([])
+
       const [image] = await Promise.all([
-        page.waitForEvent('download'), page.getByRole('button', { name: 'Download image' }).click()
+        page.waitForEvent('download'), downloadButton.click()
       ])
       const imageBytes = await readFile((await image.path())!)
       expect(imageBytes).toEqual(host.fixture.bytes)
