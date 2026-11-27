@@ -2,12 +2,16 @@ import { createHash, randomUUID } from 'node:crypto'
 import { createServer, type ServerResponse } from 'node:http'
 import sharp from 'sharp'
 import { NotIndexedError, type PictureQuery, type QueryOptions, type Scored } from '../picture-search/engine'
-import { readRendition, type Catalogue, type Rendition } from './catalogue'
+import type { Catalogue } from './catalogue-client'
+import { readRendition, verifyRendition, type Rendition } from './rendition'
 import page from './finder.html?raw'
 import script from './finder.js?raw'
 import style from './finder.css?raw'
 
 const PREVIEW_WIDTH = 480
+const PREVIEW_TTL_MS = 2 * 60_000
+const PREVIEW_BYTES = 4 * 1024 * 1024
+const PREVIEW_ENTRIES = 128
 const EXPIRES_MS = 10 * 60_000
 const MAX_REFS = 720
 const SEARCH_LIMIT = 40
@@ -40,12 +44,22 @@ function sourceFields(item: Rendition, libraryId: string, indexGeneration: strin
   }
 }
 
+async function renditionImage(original: Buffer, expectedMime: string) {
+  const image = sharp(original, { limitInputPixels: 64_000_000, failOn: 'warning' })
+  const metadata = await image.metadata().catch(() => null)
+  const mime = metadata?.format === 'jpeg' ? 'image/jpeg' : `image/${metadata?.format}`
+  return mime === expectedMime && (metadata?.pages ?? 1) <= 1 ? image : null
+}
+
 export function finderServer(opts: {
   catalogue: Catalogue; pictures?: FinderQueries; available?: () => boolean; browserPort: number; now?: () => number
 }) {
   const { catalogue, pictures } = opts
   const now = opts.now ?? Date.now
   const refs = new Map<string, Ref>()
+  const previews = new Map<string, { bytes: Buffer; expires: number }>()
+  let previewBytes = 0
+  let previewTurn = Promise.resolve()
   const origin = `http://127.0.0.1:${opts.browserPort}`
   const allowedHost = new URL(origin).host
   let active = 0
@@ -58,17 +72,75 @@ export function finderServer(opts: {
     return { ...sourceFields(item, catalogue.libraryId, indexGeneration), reason, ref }
   }
 
+  function valid(ref: Ref): boolean {
+    return ref.expires > now() && opts.available?.() !== false
+  }
+
   async function current(ref: Ref): Promise<Rendition | null> {
-    if (ref.expires <= now() || opts.available?.() === false) return null
+    if (!valid(ref)) return null
     const item = await catalogue.resolve(ref.itemId)
-    return item?.sourceRevision === ref.sourceRevision ? item : null
+    return valid(ref) && item?.sourceRevision === ref.sourceRevision ? item : null
+  }
+
+  function forgetPreview(key: string) {
+    const entry = previews.get(key)
+    if (!entry) return
+    previewBytes -= entry.bytes.length
+    previews.delete(key)
+  }
+
+  async function servePreview(ref: Ref, res: ServerResponse): Promise<void> {
+    // At most six requests can reach this queue. Only its head can hold source bytes or decode.
+    const previous = previewTurn
+    let release!: () => void
+    previewTurn = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    try {
+      if (res.destroyed) return
+      const item = await current(ref)
+      if (!item) return json(res, 404, { error: 'Result changed or is no longer available' })
+
+      const key = JSON.stringify([item.itemId, item.path, item.mime, item.sourceRevision, PREVIEW_WIDTH])
+      const cached = previews.get(key)
+      const hit = cached && cached.expires > now() ? cached : null
+      forgetPreview(key)
+      let thumb: Buffer
+      if (hit) {
+        if (!await verifyRendition(item)) return json(res, 404, { error: 'Rendition is missing or changed' })
+        thumb = hit.bytes
+      } else {
+        const original = await readRendition(item)
+        if (!original) return json(res, 404, { error: 'Rendition is missing or changed' })
+        const image = await renditionImage(original, item.mime)
+        if (!image) return json(res, 415, { error: 'Rendition format unavailable' })
+        // Sharp shrinks JPEG/WebP during loading. PNG still needs the full raster decoded.
+        thumb = await image.resize({
+          width: PREVIEW_WIDTH, height: PREVIEW_WIDTH, fit: 'inside', withoutEnlargement: true, fastShrinkOnLoad: true
+        }).webp().toBuffer()
+      }
+
+      const latest = await current(ref)
+      if (latest?.path !== item.path || latest.mime !== item.mime) {
+        return json(res, 404, { error: 'Result changed or is no longer available' })
+      }
+      if (thumb.length <= PREVIEW_BYTES) {
+        while (previewBytes + thumb.length > PREVIEW_BYTES || previews.size >= PREVIEW_ENTRIES) {
+          forgetPreview(previews.keys().next().value!)
+        }
+        previews.set(key, { bytes: thumb, expires: hit?.expires ?? now() + PREVIEW_TTL_MS })
+        previewBytes += thumb.length
+      }
+      reply(res, 200, thumb, 'image/webp')
+    } finally {
+      release()
+    }
   }
 
   async function rank(input: PictureQuery, seed?: Rendition): Promise<Rendition[] | null> {
     if (!pictures?.ready() || pictureBusy) return null
-    const allowed = catalogue.eligibleIds()
     pictureBusy = true
     try {
+      const allowed = await catalogue.eligibleIds()
       const ranked = await pictures.query(input, {
         limit: SEARCH_LIMIT, kinds: ['slide', 'well-image'],
         allow: (id) => allowed(id) && (!seed || seed.corpusId !== 'slides' || !id.startsWith(seed.itemId.split('#')[0] + '#'))
@@ -124,6 +196,7 @@ export function finderServer(opts: {
       if (!match || url.search) return json(res, 404, { error: 'Unavailable in this library' })
       const ref = refs.get(match[2])
       if (!ref || ref.expires <= now()) return json(res, 410, { error: 'Result expired. Run the search again.' })
+      if (match[1] === 'preview') return await servePreview(ref, res)
       const item = await current(ref)
       if (!item) return json(res, 404, { error: 'Result changed or is no longer available' })
       if (match[1] === 'related') {
@@ -140,15 +213,7 @@ export function finderServer(opts: {
       }
       const original = await readRendition(item)
       if (!original) return json(res, 404, { error: 'Rendition is missing or changed' })
-      const image = sharp(original, { limitInputPixels: 64_000_000, failOn: 'warning' })
-      const metadata = await image.metadata().catch(() => null)
-      const mime = metadata?.format === 'jpeg' ? 'image/jpeg' : `image/${metadata?.format}`
-      if (mime !== item.mime || (metadata?.pages ?? 1) > 1) return json(res, 415, { error: 'Rendition format unavailable' })
-      if (match[1] === 'preview') {
-        const thumb = await image.resize({ width: PREVIEW_WIDTH, height: PREVIEW_WIDTH, fit: 'inside', withoutEnlargement: true }).webp().toBuffer()
-        if (!await current(ref)) return json(res, 404, { error: 'Result changed or is no longer available' })
-        return reply(res, 200, thumb, 'image/webp')
-      }
+      if (!await renditionImage(original, item.mime)) return json(res, 415, { error: 'Rendition format unavailable' })
       const hash = createHash('sha256').update(original).digest('hex')
       if (!await current(ref)) return json(res, 404, { error: 'Result changed or is no longer available' })
       const extension = item.mime.split('/')[1]
@@ -163,6 +228,7 @@ export function finderServer(opts: {
     }
   })
 
+  server.once('close', () => { void catalogue.close() })
   server.maxConnections = 24
   server.keepAliveTimeout = 3_000
   server.setTimeout(20_000, (socket) => socket.destroy())

@@ -49,8 +49,13 @@ try {
   assert(items.some((item) => item.itemId === SHOWN_SLIDE))
   const image = items.find((item) => item.itemId === `well:${SHOWN_WELL}`)
   assert(image)
+  const previewPath = `/api/preview/${image.ref}`
+  const preview = await query(previewPath)
+  assert.equal(preview.response.statusCode, 200)
+  assert.equal(preview.response.headers['content-type'], 'image/webp')
+  assert.deepEqual((await query(previewPath)).bytes, preview.bytes)
   assert.deepEqual((await query(`/api/download/${image.ref}`)).bytes, bytes)
-  console.log('PASS: hidden source-build app, private socket, Words, source identity, original bytes')
+  console.log('PASS: hidden source-build app, private socket, Words, repeated preview, source identity, original bytes')
   if (process.env.SLIDEWELL_FINDER_TEST_AIR === '1') {
     const output = execFileSync('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6',
       '-o', 'ExitOnForwardFailure=yes', '-R', `127.0.0.1:${browserPort}:${socket}`, 'air', 'python3 -'

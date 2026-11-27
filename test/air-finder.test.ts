@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
-import { chmod, lstat, mkdtemp, realpath, truncate, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdtemp, realpath, rename, truncate, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { expect, test, vi } from 'vitest'
 import sharp from 'sharp'
 import { startConfiguredFinder, startFinderAtLaunch } from '../src/main/air-finder/host'
@@ -121,4 +122,68 @@ test('warns only on an opted-in launch and keeps malformed private settings out 
   expect(warn).toHaveBeenCalledExactlyOnceWith(
     'SlideWell couldn’t read the Air finder settings. Check that the private settings file exists and contains valid JSON.'
   )
+})
+
+test('can finish a Word search while the review lock is released by the main loop', async () => {
+  const host = await fixtureService()
+  const review = new DatabaseSync(join(host.fixture.scope.wellRoot, 'triage.db'))
+  let locked = false
+  const unlock = () => {
+    if (!locked) return
+    review.exec('ROLLBACK')
+    locked = false
+  }
+  try {
+    expect((await host.request('/api/search?mode=words&q=lantern')).status).toBe(200)
+    review.exec('BEGIN EXCLUSIVE')
+    locked = true
+    const search = host.request('/api/search?mode=words&q=lantern')
+    const release = setTimeout(unlock, 150)
+    try {
+      const result = await search
+      expect(result.status).toBe(200)
+      expect((await result.json()).items.map((item) => item.itemId)).toContain(`well:${SHOWN_WELL}`)
+    } finally {
+      clearTimeout(release)
+    }
+  } finally {
+    unlock()
+    review.close()
+    await host.close()
+  }
+})
+
+test('reuses a verified preview across searches and refuses it after the file is replaced', async () => {
+  const host = await fixtureService()
+  const resize = vi.spyOn(sharp.prototype, 'resize')
+  try {
+    const findPreview = async () => {
+      const { items } = await (await host.request('/api/search?mode=words&q=lantern')).json()
+      return '/api/preview/' + items.find((item) => item.itemId === `well:${SHOWN_WELL}`).ref
+    }
+    const original = await findPreview()
+    const first = await host.request(original)
+    expect(first.status).toBe(200)
+    expect(first.headers.get('cache-control')).toBe('no-store')
+    const bytes = Buffer.from(await first.arrayBuffer())
+    const repeated = await findPreview()
+    expect(repeated).not.toBe(original)
+    const again = await host.request(repeated)
+    expect(again.status).toBe(200)
+    expect(Buffer.from(await again.arrayBuffer())).toEqual(bytes)
+    expect(resize).toHaveBeenCalledTimes(1)
+
+    const file = join(host.fixture.scope.wellRoot, 'images', 'lantern-photo.png')
+    const replacement = file + '.next'
+    await sharp({ create: { width: 720, height: 414, channels: 3, background: '#265686' } }).png().toFile(replacement)
+    await rename(replacement, file)
+    expect((await host.request(repeated)).status).toBe(404)
+    const fresh = await host.request(await findPreview())
+    expect(fresh.status).toBe(200)
+    expect(Buffer.from(await fresh.arrayBuffer())).not.toEqual(bytes)
+    expect(resize).toHaveBeenCalledTimes(2)
+  } finally {
+    resize.mockRestore()
+    await host.close()
+  }
 })
