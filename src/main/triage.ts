@@ -336,16 +336,16 @@ export async function promoteTriageHashes(
   const only = onlyHashes ? ` AND triage_fts.hash IN (${onlyHashes.map(() => '?').join(',')})` : ''
   // A decision can have more than one path. Choose a readable copy before importing
   // once per hash, including when another copy is still at an unavailable former path.
-  const staged = await query<{ hash: string; kind: string; rel_path: string; offline: string; source: string; content_hash: string | null }>(
+  const staged = await query<{ hash: string; kind: string; rel_path: string; offline: string; source: string; content_hash: string | null; decided_at: string | null }>(
     db,
-    `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline, triage_fts.source AS source, m.content_hash
+    `SELECT triage_fts.hash AS hash, triage_fts.kind AS kind, triage_fts.rel_path AS rel_path, triage_fts.offline AS offline, triage_fts.source AS source, m.content_hash, d.decided_at
      FROM triage_fts JOIN triage_decisions d ON d.hash = triage_fts.hash
      LEFT JOIN triage_relocation_observations m ON m.triage_rowid = triage_fts.rowid
        AND m.hash = triage_fts.hash AND m.scanned_at = triage_fts.scanned_at
      WHERE d.state = 'selected'${only}`,
     onlyHashes ?? []
   )
-  const copies = new Map<string, { hash: string; kind: string; offline: boolean; missing: boolean; sizeBytes: number; abs: string; contentHash: string | null }>()
+  const copies = new Map<string, { hash: string; kind: string; offline: boolean; missing: boolean; sizeBytes: number; abs: string; contentHash: string | null; decidedAt: string | null }>()
   for (const s of staged) {
     const root = s.source || sourceRoot
     const abs = root ? join(root, s.rel_path) : ''
@@ -362,7 +362,7 @@ export async function promoteTriageHashes(
     const offline = s.offline === '1'
     const existing = copies.get(s.hash)
     if (!existing || ((existing.missing || existing.offline) && !missing && !offline)) {
-      copies.set(s.hash, { hash: s.hash, kind: s.kind, offline, missing, sizeBytes, abs, contentHash: s.content_hash })
+      copies.set(s.hash, { hash: s.hash, kind: s.kind, offline, missing, sizeBytes, abs, contentHash: s.content_hash, decidedAt: s.decided_at })
     }
   }
   const plan = planSelectedImport([...copies.values()], forceHashes, VIDEO_GATE_BYTES)
@@ -381,18 +381,20 @@ export async function promoteTriageHashes(
         const matches = res.sourceHash === (row.contentHash ?? hash)
         if (matches) await recordWellSource(wellRoot, res.id, hash)
         else console.error(`[triage] ${row.abs}: scanned as ${hash} but imported as ${res.sourceHash || 'unknown'} — the file changed since its scan; not linked to the old hash`)
-        // Ingest is async: the item may have been emptied from the Bin meanwhile. Like every other
-        // decision write, this one never replaces an 'emptied' marker; such an item counts as skipped
-        // (its well copy, if one was just made, is hidden by content identity — well.ts hiddenWellIds).
-        await run(
-          db,
-          `INSERT INTO triage_decisions (hash, state, decided_at, well_id) VALUES (?, 'included', ?, ?)
-           ON CONFLICT(hash) DO UPDATE SET state = excluded.state, decided_at = excluded.decided_at, well_id = excluded.well_id WHERE triage_decisions.state != 'emptied'`,
-          // The decision names a well copy only after the imported content verifies.
-          [hash, new Date().toISOString(), matches ? res.id : null]
-        )
-        const now = await query<{ state: string }>(db, 'SELECT state FROM triage_decisions WHERE hash = ?', [hash])
-        if (now[0]?.state === 'included') imported.push({ hash, wellId: res.id, relPath: res.relPath, created: res.created })
+        // Only finish the selection this import started from. An exclude,
+        // reset, or new selection made while ingest was awaiting I/O wins.
+        const store = new DatabaseSync(db)
+        let promoted: boolean
+        try {
+          store.exec('PRAGMA busy_timeout=4000;')
+          promoted = Boolean(store.prepare(
+            `UPDATE triage_decisions SET state = 'included', decided_at = ?, well_id = ?
+             WHERE hash = ? AND state = 'selected' AND decided_at IS ? RETURNING hash`
+          ).get(new Date().toISOString(), matches ? res.id : null, hash, row.decidedAt))
+        } finally {
+          store.close()
+        }
+        if (promoted) imported.push({ hash, wellId: res.id, relPath: res.relPath, created: res.created })
         else failed++
       } else {
         console.error(`[triage] import failed for ${row.abs} — ingest returned no id; left staged`)
