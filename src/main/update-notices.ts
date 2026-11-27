@@ -16,9 +16,8 @@ import { CHECK_UPDATES, UPDATE_IDENTITY, WHATS_NEW } from '../shared/update-iden
 
 const shippedNotes: Record<string, readonly WhatsNewItem[]> = {
   '0.4.0-alpha.23': [
-    { title: 'Search from your MacBook Air', text: 'Turn on Air finder to browse and search the SlideWell library on your host Mac through a private connection. Use a browser to find slides and pictures and open previews.' },
-    { title: 'Search and previews stay responsive', text: 'SlideWell keeps its window responsive while Air finder searches the library or loads many previews. If the finder cannot start, SlideWell shows the reason.' },
-    { title: 'Triage keeps your capture decisions', text: 'When a cloud-only screenshot downloads, Triage keeps the decision you already made. SlideWell also stops you from watching the well or the archive root as a capture folder.' }
+    { title: 'Find slides from your MacBook Air', text: 'SlideWell on this Mac can let your MacBook Air search your slides and saved pictures in a web browser, see previews and download a full-size copy. It is off until it is set up, it only reads your library, and only your own Air can reach it over your private network. If it cannot start, SlideWell tells you why.' },
+    { title: 'Triage keeps your decisions on OneDrive screenshots', text: 'When a screenshot stored only in OneDrive finishes downloading, Triage keeps the decision you already made about it. Settings also stops you choosing SlideWell’s own library folders as a screenshot folder.' }
   ],
   '0.4.0-alpha.22': [
     { title: 'Missing capture folders are shown', text: 'When a watched screenshot folder disappears or is renamed, Triage says so and Settings › Watched folders marks it. Choose folder… points SlideWell at the new place, or Stop watching turns it off.' },
