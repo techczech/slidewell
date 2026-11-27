@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rename, symlink, truncate, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, symlink, truncate, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -111,11 +111,22 @@ test('starts only from private launch configuration and refuses a changed librar
 test('finds, previews and downloads approved decks with filesystem names through the private socket', async () => {
   const root = await mkdtemp('/tmp/swa.')
   console.log('Finder deck name scratch', root)
-  const { scope } = await makeFinderFixture(root)
+  const parent = join(root, 'archive-parent')
+  const linkedParent = join(root, 'archive-parent-link')
+  const { scope } = await makeFinderFixture(parent)
+  await symlink(parent, linkedParent)
   const extracted = join(scope.archiveRoot, 'extracted')
   const render = 'slide_0001.webp'
   const original = join(extracted, 'fixture-deck-1', 'renders', render)
   const decks = ['Coastal survey', 'Café', "Mariner's log", 'Wind & waves', '灯台調査', 'a'.repeat(200), 'Charts #2? 100%']
+  // macOS can open the same directory under either Unicode spelling while retaining the on-disk name.
+  const folderNames = new Map<string, string>()
+  if (process.platform === 'darwin') {
+    const composed = 'Žluťoučký'
+    decks.push(composed.normalize('NFD'))
+    folderNames.set('Café', 'Café'.normalize('NFD'))
+    folderNames.set(composed.normalize('NFD'), composed)
+  }
   const alias = 'Mapped coast'
   const outside = join(root, 'outside-deck')
   await mkdir(join(outside, 'renders'), { recursive: true })
@@ -128,7 +139,7 @@ test('finds, previews and downloads approved decks with filesystem names through
   try {
     for (const [index, name] of [...decks, alias, 'outside-link', 'not-a-directory', 'missing-deck'].entries()) {
       if (decks.includes(name)) {
-        const renders = join(extracted, name, 'renders')
+        const renders = join(extracted, folderNames.get(name) ?? name, 'renders')
         await mkdir(renders, { recursive: true })
         await copyFile(original, join(renders, render))
       }
@@ -140,13 +151,18 @@ test('finds, previews and downloads approved decks with filesystem names through
   } finally {
     db.close()
   }
+  const entries = await readdir(extracted)
+  for (const [id, folder] of folderNames) {
+    expect(entries).toContain(folder)
+    expect(entries).not.toContain(id)
+  }
 
   const socketPath = join(root, 'finder.sock')
   const configPath = join(root, 'finder.json')
   const browserPort = 8870
   const config = { ...scope, socketPath, browserPort, presentations: [...decks, alias, 'outside-link', 'not-a-directory', 'missing-deck'] }
   const configure = (presentations: string[]) => writeFile(configPath, JSON.stringify({ ...config, presentations }), { mode: 0o600 })
-  const roots = { archiveRoot: () => scope.archiveRoot, wellRoot: () => scope.wellRoot }
+  const roots = { archiveRoot: () => join(linkedParent, 'archive'), wellRoot: () => scope.wellRoot }
   const pictures = { ready: () => false, query: async () => [] }
   for (const invalid of ['..', '../outside-deck', outside, '.hidden-deck']) {
     await configure([...config.presentations, invalid])
