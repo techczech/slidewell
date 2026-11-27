@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, copyFile, lstat, mkdtemp, realpath, rename, truncate, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rename, symlink, truncate, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -107,6 +107,95 @@ test('starts only from private launch configuration and refuses a changed librar
     await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections() })
   }
 })
+
+test('finds, previews and downloads approved decks with filesystem names through the private socket', async () => {
+  const root = await mkdtemp('/tmp/swa.')
+  console.log('Finder deck name scratch', root)
+  const { scope } = await makeFinderFixture(root)
+  const extracted = join(scope.archiveRoot, 'extracted')
+  const render = 'slide_0001.webp'
+  const original = join(extracted, 'fixture-deck-1', 'renders', render)
+  const decks = ['Coastal survey', 'Café', "Mariner's log", 'Wind & waves', '灯台調査', 'a'.repeat(200), 'Charts #2? 100%']
+  const alias = 'Mapped coast'
+  const outside = join(root, 'outside-deck')
+  await mkdir(join(outside, 'renders'), { recursive: true })
+  await copyFile(original, join(outside, 'renders', render))
+  await symlink(outside, join(extracted, 'outside-link'))
+  await writeFile(join(extracted, 'not-a-directory'), 'fixture')
+  await symlink(join(extracted, decks[0]), join(extracted, alias))
+
+  const db = new DatabaseSync(join(scope.archiveRoot, 'registry', 'slides.db'))
+  try {
+    for (const [index, name] of [...decks, alias, 'outside-link', 'not-a-directory', 'missing-deck'].entries()) {
+      if (decks.includes(name)) {
+        const renders = join(extracted, name, 'renders')
+        await mkdir(renders, { recursive: true })
+        await copyFile(original, join(renders, render))
+      }
+      const hash = `named-fixture-${index}`
+      const row = db.prepare('INSERT INTO slides VALUES (?, ?, ?)').run(hash, name, 'navigationfixture')
+      db.prepare("INSERT INTO slide_locations VALUES (?, ?, 1, 'content')").run(hash, name)
+      db.prepare('INSERT INTO slides_fts (rowid, title, text_content) VALUES (?, ?, ?)').run(row.lastInsertRowid, name, 'navigationfixture')
+    }
+  } finally {
+    db.close()
+  }
+
+  const socketPath = join(root, 'finder.sock')
+  const configPath = join(root, 'finder.json')
+  const browserPort = 8870
+  const config = { ...scope, socketPath, browserPort, presentations: [...decks, alias, 'outside-link', 'not-a-directory', 'missing-deck'] }
+  const configure = (presentations: string[]) => writeFile(configPath, JSON.stringify({ ...config, presentations }), { mode: 0o600 })
+  const roots = { archiveRoot: () => scope.archiveRoot, wellRoot: () => scope.wellRoot }
+  const pictures = { ready: () => false, query: async () => [] }
+  for (const invalid of ['..', '../outside-deck', outside, '.hidden-deck']) {
+    await configure([...config.presentations, invalid])
+    await expect(startConfiguredFinder(configPath, roots, pictures)).rejects.toThrow('settings are invalid')
+  }
+  await configure(config.presentations)
+  const server = await startConfiguredFinder(configPath, roots, pictures)
+  const local = (path: string) => new Promise<{ status: number; headers: import('node:http').IncomingHttpHeaders; body: Buffer }>((resolve, reject) => {
+    request({ socketPath, path, headers: { Host: `127.0.0.1:${browserPort}` } }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('error', reject)
+      res.on('end', () => resolve({ status: res.statusCode!, headers: res.headers, body: Buffer.concat(chunks) }))
+    }).on('error', reject).end()
+  })
+  const search = async (q: string): Promise<Array<{ itemId: string; ref: string; source: string }>> => {
+    const result = await local('/api/search?' + new URLSearchParams({ mode: 'words', q }))
+    expect(result.status).toBe(200)
+    return JSON.parse(result.body.toString()).items
+  }
+  try {
+    const expectedNames = [...decks, alias]
+    const listed = await search('navigationfixture')
+    expect(listed.map(({ itemId }) => itemId).sort()).toEqual(expectedNames.map((name) => `slide:${name}#1`).sort())
+    const expectedBytes = await readFile(original)
+    const sha256 = createHash('sha256').update(expectedBytes).digest('hex')
+    for (const name of expectedNames) {
+      const result = (await search(name)).find(({ itemId }) => itemId === `slide:${name}#1`)
+      expect(result?.source).toBe(`${name} · slide 1`)
+      const preview = await local(`/api/preview/${result!.ref}`)
+      expect(preview.status).toBe(200)
+      expect((await sharp(preview.body).metadata()).width).toBe(480)
+      const download = await local(`/api/download/${result!.ref}`)
+      expect(download.status).toBe(200)
+      expect(download.headers['x-slidewell-sha256']).toBe(sha256)
+      expect(download.headers['content-disposition']).toBe(`attachment; filename="slidewell-${sha256.slice(0, 12)}.webp"`)
+      expect(download.body).toEqual(expectedBytes)
+    }
+    const aliasRef = listed.find(({ itemId }) => itemId === `slide:${alias}#1`)!.ref
+    const aliasPreview = `/api/preview/${aliasRef}`
+    expect((await local(aliasPreview)).status).toBe(200)
+    await rename(join(extracted, alias), join(extracted, 'old-alias'))
+    await symlink(outside, join(extracted, alias))
+    expect((await local(aliasPreview)).status).toBe(404)
+    expect((await local(`/api/download/${aliasRef}`)).status).toBe(404)
+  } finally {
+    await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections() })
+  }
+}, 30_000)
 
 test('warns only on an opted-in launch and keeps malformed private settings out of the warning', async () => {
   const root = await mkdtemp('/tmp/swa.')

@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { lstat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { renderPath } from '../archive'
 import { BIN_AFTER_DAYS } from '../review/piles'
 import { downloadedOnDisk } from '../review/picture'
-import { inspect, signature, type Rendition, type Source } from './rendition'
+import { isPresentationId, slidePresentationId } from './presentation-id'
+import { inside, inspect, signature, type Rendition, type Source } from './rendition'
 
 const SLIDE_SELECT = `SELECT s.title, substr(s.text_content, 1, 600) AS snippet,
   s.content_hash, l.presentation_id, l.slide_order FROM slides s
@@ -29,6 +30,7 @@ export type FinderScope = {
 
 export function openCatalogue(scope: FinderScope) {
   const { archiveRoot, wellRoot } = scope
+  const extracted = join(archiveRoot, 'extracted')
   const slidesPath = join(archiveRoot, 'registry', 'slides.db')
   const wellPath = join(wellRoot, 'well.db')
   const triagePath = join(wellRoot, 'triage.db')
@@ -70,12 +72,19 @@ export function openCatalogue(scope: FinderScope) {
   }
 
   function slide(row: Slide): Source | null {
-    if (!presentations.has(row.presentation_id)) return null
-    const dir = join(archiveRoot, 'extracted', row.presentation_id)
+    if (!presentations.has(row.presentation_id) || !isPresentationId(row.presentation_id)) return null
+    let dir: string
+    try {
+      dir = realpathSync(join(extracted, row.presentation_id))
+      if (!inside(extracted, dir) || !lstatSync(dir).isDirectory()) return null
+    } catch {
+      return null
+    }
+    const deckPath = relative(extracted, dir)
+    if (deckPath.split(sep).some((part) => part.startsWith('.'))) return null
     const manifest = join(dir, 'presentation.json')
     let label = row.presentation_id
     try {
-      if (realpathSync(dir) !== dir) return null
       const st = lstatSync(manifest)
       if (st.isFile() && st.size <= 4 * 1024 * 1024 && downloadedOnDisk(manifest)) {
         const metadata = (JSON.parse(readFileSync(manifest, 'utf8')) as { metadata?: { title?: unknown } }).metadata
@@ -84,7 +93,7 @@ export function openCatalogue(scope: FinderScope) {
     } catch {
       // Older extractions can still resolve by their presentation ID.
     }
-    const path = renderPath(archiveRoot, row.presentation_id, row.slide_order)
+    const path = renderPath(archiveRoot, deckPath, row.slide_order)
     if (!path) return null
     return {
       corpusId: 'slides', itemId: `slide:${row.presentation_id}#${row.slide_order}`,
@@ -111,10 +120,12 @@ export function openCatalogue(scope: FinderScope) {
   }
 
   async function resolve(id: string): Promise<Rendition | null> {
-    const match = /^slide:([\w.-]+)#(\d+)$/.exec(id)
-    if (match && presentations.has(match[1])) {
+    const presentationId = slidePresentationId(id)
+    if (presentationId && presentations.has(presentationId)) {
+      const order = id.slice(id.lastIndexOf('#') + 1)
+      if (!/^\d+$/.test(order)) return null
       const row = read(slidesPath, (db) => db.prepare(SLIDE_SELECT + ' WHERE l.presentation_id = ? AND l.slide_order = ?')
-        .get(match[1], Number(match[2]))) as Slide | undefined
+        .get(presentationId, Number(order))) as Slide | undefined
       return inspect(row ? slide(row) : null)
     }
     if (id.startsWith('well:') && wellImages.has(id.slice(5))) {

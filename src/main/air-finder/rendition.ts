@@ -15,7 +15,7 @@ export type Source = {
 }
 export type Rendition = Source & { sourceRevision: string; mime: string; path: string; size: number }
 
-function inside(root: string, path: string): boolean {
+export function inside(root: string, path: string): boolean {
   const rel = relative(root, path)
   return rel !== '' && rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel)
 }
