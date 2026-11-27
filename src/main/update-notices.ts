@@ -15,6 +15,11 @@ import { isUpdateFixture, readFixtureFeed, updateFixtureRoot } from './update-fi
 import { CHECK_UPDATES, UPDATE_IDENTITY, WHATS_NEW } from '../shared/update-identity'
 
 const shippedNotes: Record<string, readonly WhatsNewItem[]> = {
+  '0.4.0-alpha.23': [
+    { title: 'Search from your MacBook Air', text: 'Turn on Air finder to browse and search the SlideWell library on your host Mac through a private connection. Use a browser to find slides and pictures and open previews.' },
+    { title: 'Search and previews stay responsive', text: 'SlideWell keeps its window responsive while Air finder searches the library or loads many previews. If the finder cannot start, SlideWell shows the reason.' },
+    { title: 'Triage keeps your capture decisions', text: 'When a cloud-only screenshot downloads, Triage keeps the decision you already made. SlideWell also stops you from watching the well or the archive root as a capture folder.' }
+  ],
   '0.4.0-alpha.22': [
     { title: 'Missing capture folders are shown', text: 'When a watched screenshot folder disappears or is renamed, Triage says so and Settings › Watched folders marks it. Choose folder… points SlideWell at the new place, or Stop watching turns it off.' },
     { title: 'No duplicate screenshots after a move', text: 'When you point SlideWell at a moved folder, the screenshots already in Triage are matched to their new place and keep your decisions, instead of appearing a second time.' }
