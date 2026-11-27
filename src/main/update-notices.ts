@@ -15,6 +15,10 @@ import { isUpdateFixture, readFixtureFeed, updateFixtureRoot } from './update-fi
 import { CHECK_UPDATES, UPDATE_IDENTITY, WHATS_NEW } from '../shared/update-identity'
 
 const shippedNotes: Record<string, readonly WhatsNewItem[]> = {
+  '0.4.0-alpha.23': [
+    { title: 'Find slides from your MacBook Air', text: 'SlideWell on this Mac can let your MacBook Air search your slides and saved pictures in a web browser, see previews and download a full-size copy. It is off until it is set up, it only reads your library, and only your own Air can reach it over your private network. If it cannot start, SlideWell tells you why.' },
+    { title: 'Triage keeps your decisions on OneDrive screenshots', text: 'When a screenshot stored only in OneDrive finishes downloading, Triage keeps the decision you already made about it. Settings also stops you choosing SlideWell’s own library folders as a screenshot folder.' }
+  ],
   '0.4.0-alpha.22': [
     { title: 'Missing capture folders are shown', text: 'When a watched screenshot folder disappears or is renamed, Triage says so and Settings › Watched folders marks it. Choose folder… points SlideWell at the new place, or Stop watching turns it off.' },
     { title: 'No duplicate screenshots after a move', text: 'When you point SlideWell at a moved folder, the screenshots already in Triage are matched to their new place and keep your decisions, instead of appearing a second time.' }
