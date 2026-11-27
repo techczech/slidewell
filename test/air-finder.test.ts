@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, mkdtemp, truncate, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, truncate, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { join } from 'node:path'
 import { expect, test } from 'vitest'
@@ -84,6 +84,8 @@ test('starts only from private launch configuration and refuses a changed librar
     }).on('error', reject).end()
   })
   try {
+    const occupiedPath = await realpath(socketPath)
+    await expect(startConfiguredFinder(configPath, roots, pictures)).rejects.toHaveProperty('socketPath', occupiedPath)
     expect(JSON.parse((await local('/api/library')).body).meaning).toBe(false)
     const result = await local('/api/search?mode=words&q=lantern')
     expect(result.status).toBe(200)
