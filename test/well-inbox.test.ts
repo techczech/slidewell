@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, truncateSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
 import { drainInbox, searchWell } from '../src/main/well'
+import { getTriageDecision, listTriage, promoteTriageHashes, scanTriageSource, setTriageDecision } from '../src/main/triage'
 
 vi.mock('node:fs', async (loadOriginal) => {
   const fs = await loadOriginal<typeof import('node:fs')>()
@@ -38,6 +39,46 @@ function ready(path: string): void {
 }
 
 const digest = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
+
+it('imports a staged screenshot under its original Triage key after the placeholder hydrates', async () => {
+  const captures = join(root, 'captures')
+  mkdirSync(captures)
+  const original = join(captures, 'hydrated-keeper.png')
+  const image = await sharp({ create: { width: 32, height: 32, channels: 3, background: 'green' } }).png().toBuffer()
+  writeFileSync(original, '')
+  truncateSync(original, image.length)
+  ready(original)
+  const { blocks, atime, mtime } = statSync(original)
+  expect(blocks).toBe(0)
+
+  const options = { listing: {}, onlyChanged: true }
+  const scan = () => scanTriageSource(archive, well, captures, undefined, options)
+  await scan()
+  const [placeholder] = await listTriage(well, '', 'all')
+  expect(placeholder).toMatchObject({ offline: '1', hash: expect.stringMatching(/^p:/) })
+  const { hash } = placeholder
+  await setTriageDecision(archive, well, captures, hash, 'select')
+  const promote = () => promoteTriageHashes(archive, well, captures, null)
+  expect(await promote()).toEqual({ imported: [], skipped: 1, gated: 0 })
+  expect(await getTriageDecision(well, hash)).toMatchObject({ state: 'selected', wellId: null })
+
+  writeFileSync(original, image)
+  utimesSync(original, atime, mtime)
+  await scan()
+  expect(await listTriage(well, '', 'all')).toEqual([
+    expect.objectContaining({ hash, state: 'selected', offline: '0' })
+  ])
+  const result = await promote()
+  expect(result).toMatchObject({ imported: [{ hash, created: true }], skipped: 0, gated: 0 })
+  const [{ wellId, relPath }] = result.imported
+  expect(await getTriageDecision(well, hash)).toMatchObject({ state: 'included', wellId })
+  expect(await searchWell(well, '')).toEqual([expect.objectContaining({ id: wellId, rel_path: relPath })])
+  const stored = readFileSync(join(well, relPath))
+  expect(wellId).toBe(digest(stored).slice(0, 7))
+  expect(readFileSync(original)).toEqual(image)
+  expect(await promote()).toEqual({ imported: [], skipped: 0, gated: 0 })
+  expect(await searchWell(well, '')).toHaveLength(1)
+})
 
 describe.each(['picture', 'video'])('inbox %s', (kind) => {
   async function fixture() {
