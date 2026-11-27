@@ -339,6 +339,17 @@ export class PictureSearchService {
     }
   }
 
+  /** Finder reads the already-open engine under the app's restart guard. */
+  finderQueries() {
+    return {
+      ready: () => this.store !== null && this.modelReady(),
+      query: async (query: PictureQuery, options: QueryOptions) => {
+        if (!this.store || !this.modelReady()) throw new Error('Picture index unavailable')
+        return restartWork.run(() => this.pictureQuery(query, options))
+      }
+    }
+  }
+
   /** How many picture queries this process has run (the Words-only fast path must leave it unchanged). */
   queryCount(): number {
     return this.queries

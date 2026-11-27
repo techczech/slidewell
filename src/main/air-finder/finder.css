@@ -1,0 +1,81 @@
+:root {
+  color-scheme: light;
+  --paper: #f6f4ee;
+  --blue: #14365a;
+  --ink: #202e3c;
+  --line: #cbd1d6;
+  --panel: #fffefa;
+  font: 1rem/1.5 system-ui, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+header {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: .5rem 1rem;
+  padding: .75rem clamp(1rem, 4vw, 2.5rem);
+  color: white;
+  background: var(--blue);
+}
+h1 { margin: 0; font-size: 1.25rem; }
+h2 { font-size: 1.125rem; }
+h3 { font-size: 1rem; }
+main { max-width: 95rem; margin: auto; padding: 1rem clamp(1rem, 4vw, 2.5rem); }
+form, .actions { display: flex; flex-wrap: wrap; align-items: end; gap: .75rem; }
+label { display: grid; gap: .25rem; font-weight: 600; }
+.query { flex: 1 1 18rem; min-width: 0; }
+input, select, button {
+  border: 1px solid #8292a2;
+  border-radius: .375rem;
+  min-height: 2.75rem;
+  color: var(--ink);
+  background: var(--panel);
+  font: inherit;
+  padding: .5rem .75rem;
+}
+input { width: 100%; min-width: 0; }
+button { cursor: pointer; }
+button.primary { background: var(--blue); color: white; border-color: var(--blue); }
+button:disabled { opacity: .65; cursor: wait; }
+:focus-visible { outline: 3px solid #007b88; outline-offset: 3px; }
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(16rem, 3fr);
+  align-items: start;
+  gap: 1.3rem;
+  margin-top: 1rem;
+}
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 12rem), 1fr)); gap: .75rem; }
+.card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  min-width: 0;
+  gap: .375rem;
+  text-align: start;
+  padding: .5rem;
+  overflow-wrap: anywhere;
+}
+.card[aria-pressed="true"] { outline: 2px solid var(--blue); background: #e9f1f5; }
+.card img, #preview { display: block; width: 100%; background: #e6e9eb; object-fit: contain; aspect-ratio: 16 / 9; }
+.card small, #source { color: #405267; }
+aside {
+  position: sticky;
+  top: 1rem;
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: .5rem;
+  padding: 1rem;
+  overflow-wrap: anywhere;
+}
+[hidden] { display: none !important; }
+@media (max-width: 46rem) {
+  .workspace { grid-template-columns: minmax(0, 1fr); }
+  aside { position: static; max-height: none; grid-row: 1; grid-column: 1; min-width: 0; }
+  .workspace > section { grid-column: 1; }
+}
