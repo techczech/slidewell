@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
-import { chmod, mkdtemp, truncate, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdtemp, realpath, truncate, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { join } from 'node:path'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import sharp from 'sharp'
-import { startConfiguredFinder } from '../src/main/air-finder/host'
+import { startConfiguredFinder, startFinderAtLaunch } from '../src/main/air-finder/host'
 import { fixtureService } from './support/finder-service'
 // @ts-expect-error Existing E2E fixture uses plain JavaScript.
 import { makeFinderFixture, SHOWN_SLIDE, OTHER_SLIDE, SHOWN_WELL } from '../e2e/support/finder-fixture.mjs'
@@ -84,6 +84,15 @@ test('starts only from private launch configuration and refuses a changed librar
     }).on('error', reject).end()
   })
   try {
+    const occupiedPath = await realpath(socketPath)
+    const { ino } = await lstat(occupiedPath)
+    await expect(startConfiguredFinder(configPath, roots, pictures)).rejects.toHaveProperty('socketPath', occupiedPath)
+    const warn = vi.fn()
+    expect(await startFinderAtLaunch([`--air-finder-config=${configPath}`], roots, pictures, warn)).toBeNull()
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      `A connection file already exists at:\n${occupiedPath}\n\nIf another finder is running, quit it first. Move the file to the Bin only after checking that nothing is using it, then restart SlideWell.`
+    )
+    expect((await lstat(occupiedPath)).ino).toBe(ino)
     expect(JSON.parse((await local('/api/library')).body).meaning).toBe(false)
     const result = await local('/api/search?mode=words&q=lantern')
     expect(result.status).toBe(200)
@@ -96,4 +105,20 @@ test('starts only from private launch configuration and refuses a changed librar
   } finally {
     await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections() })
   }
+})
+
+test('warns only on an opted-in launch and keeps malformed private settings out of the warning', async () => {
+  const root = await mkdtemp('/tmp/swa.')
+  console.log('Finder settings scratch', root)
+  const configPath = join(root, 'private-config.json')
+  await writeFile(configPath, 'invented private settings', { mode: 0o600 })
+  const roots = { archiveRoot: () => root, wellRoot: () => root }
+  const pictures = { ready: () => false, query: async () => [] }
+  const warn = vi.fn()
+  expect(await startFinderAtLaunch([], roots, pictures, warn)).toBeNull()
+  expect(warn).not.toHaveBeenCalled()
+  expect(await startFinderAtLaunch([`--air-finder-config=${configPath}`], roots, pictures, warn)).toBeNull()
+  expect(warn).toHaveBeenCalledExactlyOnceWith(
+    'SlideWell couldn’t read the Air finder settings. Check that the private settings file exists and contains valid JSON.'
+  )
 })
