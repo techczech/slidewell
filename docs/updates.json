@@ -26,11 +26,11 @@
       }
     },
     "alpha": {
-      "version": "0.4.0-alpha.23",
+      "version": "0.4.0-alpha.24",
       "released": "2026-11-27",
       "summary": [
-        "Your MacBook Air can search your slides and saved pictures on this Mac in a web browser, see previews and download full-size copies, once the Air finder is set up.",
-        "Screenshots stored only in OneDrive keep your Triage decision when they finish downloading."
+        "The Air finder now includes all your own decks, including those with spaces in their folder names.",
+        "An Exclude made during an import is kept; smaller fixes to the Air finder and Settings."
       ],
       "notes": "https://techczech.github.io/slidewell/",
       "download": {
@@ -39,9 +39,9 @@
       },
       "update": {
         "mac": {
-          "url": "https://github.com/techczech/slidewell/releases/download/v0.4.0-alpha.23/SlideWell-mac-arm64.zip",
-          "size": 157637508,
-          "sha512": "vhtRxc5wFQk7inyuTRphZZlCQeqmnsV7hHxwPnncF55YnaVXeQ1WpHRD8XxkvtxfyUYOqea2dewnz4nZas40mA==",
+          "url": "https://github.com/techczech/slidewell/releases/download/v0.4.0-alpha.24/SlideWell-mac-arm64.zip",
+          "size": 157638629,
+          "sha512": "l1WYb/AkjGIY7+TwfuVEqXpSJ6ZPfMz125CHUguIh541DwgLer6NZ5fDOteKc1DzRMvZGoi3OB0ngHv78QTEhQ==",
           "bundleId": "net.dominiklukes.slidewell"
         }
       }
