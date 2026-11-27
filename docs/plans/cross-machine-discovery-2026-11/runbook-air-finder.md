@@ -18,7 +18,9 @@ With the existing personal Air SSH route available, add `SLIDEWELL_FINDER_TEST_A
 
 ## Host configuration after review
 
-The endpoint is a Unix socket in a mode-0700 directory owned by the SlideWell account. Its HTTP content has no direct TCP listener. Use existing owner-authenticated SSH over Tailscale. The SSH command creates a loopback address for the browser on the Air for the duration of the session. The private HTTPS Serve route described in the plan still needs same-user application authorisation and a separately authorised activation.
+SlideWell listens on a Unix socket in a mode-0700 directory owned by the SlideWell account. It has no TCP listener on the Pro. Use existing owner-authenticated SSH over Tailscale. SSH authenticates the connection to the Pro and opens a loopback port on the Air for the duration of that session.
+
+While that port is open, any process on the Air can reach the finder through it, including processes running under other local accounts. The finder does not ask for an application token or identify the browser user. Its HTTP header checks enforce the expected loopback host and browser origin. Use the forward only while you are comfortable giving local processes on the Air access to the allowlisted items, and close the SSH session when you finish. The private HTTPS Serve route described in the plan still needs same-user application authorisation and a separately authorised activation.
 
 On the Pro, prepare a mode-0600 JSON file using this shape. The IDs below are invented. Use the app's configured archive and well roots. List only individually approved personal IDs. The well's source-identity backfill and review database must be readable before it exposes any well image.
 
