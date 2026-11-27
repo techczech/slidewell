@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { lstat } from 'node:fs/promises'
-import { join, relative, sep } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { renderPath } from '../archive'
 import { BIN_AFTER_DAYS } from '../review/piles'
 import { downloadedOnDisk } from '../review/picture'
 import { isPresentationId, slidePresentationId } from './presentation-id'
-import { inside, inspect, signature, type Rendition, type Source } from './rendition'
+import { inspect, signature, type Rendition, type Source } from './rendition'
 
 const SLIDE_SELECT = `SELECT s.title, substr(s.text_content, 1, 600) AS snippet,
   s.content_hash, l.presentation_id, l.slide_order FROM slides s
@@ -28,9 +28,20 @@ export type FinderScope = {
   wellImages: readonly string[]
 }
 
+function canonicalDirectory(path: string): string | null {
+  try {
+    // Check the named entry itself so a symlink cannot stand in for the directory.
+    if (!lstatSync(path).isDirectory()) return null
+    const canonical = realpathSync.native(path)
+    return canonical.normalize('NFC') === path.normalize('NFC') ? canonical : null
+  } catch {
+    return null
+  }
+}
+
 export function openCatalogue(scope: FinderScope) {
   const { archiveRoot, wellRoot } = scope
-  const extracted = join(archiveRoot, 'extracted')
+  const extracted = scope.presentations.length ? canonicalDirectory(join(archiveRoot, 'extracted')) : null
   const slidesPath = join(archiveRoot, 'registry', 'slides.db')
   const wellPath = join(wellRoot, 'well.db')
   const triagePath = join(wellRoot, 'triage.db')
@@ -72,16 +83,9 @@ export function openCatalogue(scope: FinderScope) {
   }
 
   function slide(row: Slide): Source | null {
-    if (!presentations.has(row.presentation_id) || !isPresentationId(row.presentation_id)) return null
-    let dir: string
-    try {
-      dir = realpathSync(join(extracted, row.presentation_id))
-      if (!inside(extracted, dir) || !lstatSync(dir).isDirectory()) return null
-    } catch {
-      return null
-    }
-    const deckPath = relative(extracted, dir)
-    if (deckPath.split(sep).some((part) => part.startsWith('.'))) return null
+    if (!extracted || !presentations.has(row.presentation_id) || !isPresentationId(row.presentation_id)) return null
+    const dir = canonicalDirectory(join(extracted, row.presentation_id))
+    if (!dir) return null
     const manifest = join(dir, 'presentation.json')
     let label = row.presentation_id
     try {
@@ -93,7 +97,7 @@ export function openCatalogue(scope: FinderScope) {
     } catch {
       // Older extractions can still resolve by their presentation ID.
     }
-    const path = renderPath(archiveRoot, deckPath, row.slide_order)
+    const path = renderPath(dirname(extracted), basename(dir), row.slide_order)
     if (!path) return null
     return {
       corpusId: 'slides', itemId: `slide:${row.presentation_id}#${row.slide_order}`,
