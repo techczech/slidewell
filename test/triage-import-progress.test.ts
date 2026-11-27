@@ -35,7 +35,7 @@ describe('import control state', () => {
     expect(importLine(s)).toBe('Importing 12 of 48…')
   })
   it('result lines', () => {
-    expect(importLine({ phase: 'done', imported: 46, skipped: 2, gated: 0 })).toBe('Imported 46. 2 could not be imported (missing, online-only or unreadable) and stay selected.')
+    expect(importLine({ phase: 'done', imported: 46, skipped: 2, gated: 0 })).toBe('Imported 46. Skipped 2 (file unavailable, unreadable or decision changed).')
     expect(importLine({ phase: 'done', imported: 3, skipped: 0, gated: 1 })).toBe('Imported 3. 1 video is over the 20 MB limit and stays selected.')
     expect(importLine({ phase: 'done', imported: 0, skipped: 0, gated: 0 })).toBe('Nothing to import.')
     expect(importLine({ phase: 'failed', message: 'x' })).toBe('x')

@@ -383,14 +383,14 @@ describe('review: keyset paging is stable between pages', () => {
   })
 })
 
-describe('Triage import and the emptied marker', () => {
-  it('an item emptied while its ingest runs stays emptied; the import reports it skipped', async () => {
-    // the stand-in OCR runs mid-ingest; here it plays Empty Bin landing at that moment
+describe('Triage decisions during import', () => {
+  it.each(['excluded', 'emptied'])('a later %s decision survives ingest and the import reports it skipped', async (state) => {
+    // The stand-in OCR records a later decision mid-ingest.
     const slow = join(work, 'archive-race')
     mkdirSync(join(slow, 'tools', 'ocr'), { recursive: true })
     writeFileSync(
       join(slow, 'tools', 'ocr', 'vision_ocr'),
-      `#!/bin/sh\n/usr/bin/sqlite3 '${join(well, 'triage.db')}' "UPDATE triage_decisions SET state = 'emptied' WHERE hash = '${await addScannedItem('race.png', [5, 90, 160])}'"\necho '{"text":""}'\n`
+      `#!/bin/sh\n/usr/bin/sqlite3 '${join(well, 'triage.db')}' "UPDATE triage_decisions SET state = '${state}', decided_at = '2026-10-10T08:00:00.000Z' WHERE hash = '${await addScannedItem('race.png', [5, 90, 160])}'"\necho '{"text":""}'\n`
     )
     chmodSync(join(slow, 'tools', 'ocr', 'vision_ocr'), 0o755)
     const h = contentHash(join(src, 'race.png'))
@@ -398,12 +398,14 @@ describe('Triage import and the emptied marker', () => {
     const r = await promoteTriageHashes(slow, well, src, [h])
     expect(r.imported).toEqual([])
     expect(r.skipped).toBe(1)
-    expect(decision(h)?.state).toBe('emptied')
-    // the copy ingest made is hidden by content identity, not deleted
+    expect(decision(h)).toEqual({ state, decided_at: '2026-10-10T08:00:00.000Z', well_id: null })
     const ids = wellRows().map((w) => w.id)
     expect(ids.length).toBe(1)
-    expect(await wellByIds(well, ids)).toEqual([])
-    expect(await searchWell(well, '', 60)).toEqual([])
+    if (state === 'emptied') {
+      // Empty Bin hides the imported copy by content identity.
+      expect(await wellByIds(well, ids)).toEqual([])
+      expect(await searchWell(well, '', 60)).toEqual([])
+    }
   })
 })
 
