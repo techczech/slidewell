@@ -15,7 +15,7 @@ scope: [real-data, settings]
 
 # Re-point the Triage source
 
-- Old: `OneDrive-Nexus365(2)/Screenshots` (gone since OneDrive renamed that account folder on 29 Oct). New: `~/Library/CloudStorage/OneDrive-Nexus365/Screenshots` (macOS saves screenshots to its `ScreenRecordings` subfolder).
+- Old: the Screenshots folder in the disconnected copy of the Oxford OneDrive that OneDrive left behind on 29 Oct (no longer at the configured path). New: the Screenshots folder in the live Oxford OneDrive (macOS saves screenshots to its `ScreenRecordings` subfolder).
 - Backup first: `~/SlideWell/backups/data-2026-11-27-before-screenshots-repoint/` (userData + well, 1,536 files, SHA256SUMS files beside them, copy verified).
 - Pre-check on the backup: 12,643 of the 12,644 rows of the old source match a file in the new folder by path, size and time, so the relocation keeps them (and their hash, which keys the decision). All 13,112 files in the new folder are online-only placeholders.
 - Change made through the app's own path: installed alpha.22 launched hidden through Playwright, Triage notice "Choose folder…" clicked, the native picker answered with the new folder (as `e2e/capture-folders.mjs` does). Result: `capture.triageRoot` changed in settings.json with a change record; `captureSourceHistory` records the old path; the legacy duplicate captureSources entry was dropped.
