@@ -13,11 +13,14 @@ class TestWorker extends EventEmitter {
   terminate = vi.fn(async () => { this.emit('exit', 1); return 1 })
 }
 
-vi.mock('../src/main/air-finder/catalogue-worker?nodeWorker', () => ({
-  default: () => {
-    const worker = new TestWorker()
-    workers.started.push(worker)
-    return worker
+vi.mock('node:worker_threads', async importOriginal => ({
+  ...await importOriginal<typeof import('node:worker_threads')>(),
+  Worker: class {
+    constructor() {
+      const worker = new TestWorker()
+      workers.started.push(worker)
+      return worker
+    }
   }
 }))
 
@@ -28,7 +31,7 @@ afterEach(() => {
 
 test('rejects pending reads on worker death, then uses the replacement without replaying requests', async () => {
   const root = await mkdtemp(join(tmpdir(), 'recovery-'))
-  vi.useFakeTimers()
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   const catalogue = await createCatalogue({
     libraryId: 'synthetic', archiveRoot: root, wellRoot: root, presentations: ['fixture'], wellImages: []
   })
@@ -58,7 +61,7 @@ test('rejects pending reads on worker death, then uses the replacement without r
 })
 
 test('the launch warning is delivered once when repeated exits exhaust back-off', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'finder-restart-'))
+  const root = await mkdtemp(join(tmpdir(), 'fr-'))
   const config = join(root, 'finder.json')
   await writeFile(config, JSON.stringify({
     libraryId: 'synthetic', socketPath: join(root, 'finder.sock'), browserPort: 8870,
@@ -69,9 +72,9 @@ test('the launch warning is delivered once when repeated exits exhaust back-off'
   const server = await startFinderAtLaunch(['--air-finder-config=' + config], roots, {
     ready: () => false, query: async () => []
   }, warn)
-  if (!server) throw new Error('Synthetic finder failed to start')
+  if (!server) throw new Error('Synthetic finder failed to start: ' + warn.mock.calls.flat().join(' '))
   try {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     for (const delay of [250, 1_000, 4_000]) {
       const count = workers.started.length
       workers.started.at(-1)!.emit('exit', 1)
