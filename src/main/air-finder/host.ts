@@ -29,7 +29,7 @@ function isConfig(config: Partial<LaunchConfig> | null): config is LaunchConfig 
 
 /** A local, same-UID endpoint. Browsers reach it through an existing authenticated SSH forward. */
 export async function startConfiguredFinder(
-  configPath: string, roots: LibraryRoots, pictures: FinderQueries
+  configPath: string, roots: LibraryRoots, pictures: FinderQueries, onUnavailable?: () => void
 ) {
   const configUnreadable = 'SlideWell couldn’t read the Air finder settings. Check that the private settings file exists and contains valid JSON.'
   const info = await lstat(configPath).catch(() => { throw new FinderStartupError(configUnreadable) })
@@ -62,7 +62,7 @@ export async function startConfiguredFinder(
   if (existing) throw new FinderStartupError('A connection file already exists at:', socketPath)
   const archive = roots.archiveRoot()
   const well = roots.wellRoot()
-  const catalogue = await createCatalogue({ ...config, archiveRoot: archive, wellRoot: well })
+  const catalogue = await createCatalogue({ ...config, archiveRoot: archive, wellRoot: well }, onUnavailable)
   const server = finderServer({
     catalogue, browserPort: config.browserPort,
     pictures: config.meaningVerified ? pictures : undefined,
@@ -93,7 +93,9 @@ export async function startFinderAtLaunch(
   if (!option) return null
 
   try {
-    return await startConfiguredFinder(option.slice(flag.length), roots, pictures)
+    return await startConfiguredFinder(option.slice(flag.length), roots, pictures, () => {
+      warn('The Air finder’s library worker stopped repeatedly. Restart SlideWell to try again.')
+    })
   } catch (error) {
     if (error instanceof FinderStartupError) {
       warn(error.socketPath
