@@ -16,6 +16,7 @@
     "pack": "npm run build && electron-builder --mac dir --arm64",
     "dist:mac": "npm run build && electron-builder --mac dmg zip --arm64",
     "test": "vitest run",
+    "test:air-finder-dom": "SLIDEWELL_FINDER_DOM=1 vitest run test/air-finder-dom.test.ts",
     "test:air-finder": "electron-vite build && node e2e/air-finder.mjs",
     "test:smoke": "electron-vite build && node e2e/smoke.mjs",
     "test:triage": "electron-vite build && node e2e/triage.mjs",
