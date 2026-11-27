@@ -18,9 +18,10 @@ async function loopbackPort() {
   return port
 }
 
-export async function fixtureService() {
+export async function fixtureService(prepare?: (fixture: Awaited<ReturnType<typeof makeFinderFixture>>) => Promise<void>) {
   const root = mkdtempSync(join(tmpdir(), 'finder-api-'))
   const fixture = await makeFinderFixture(root)
+  await prepare?.(fixture)
   const store = new VectorStore(join(root, 'picture-search.db'))
   const lantern = Float32Array.from([1, 0])
   for (const [id, vector] of [
@@ -52,7 +53,7 @@ export async function fixtureService() {
   })
   const base = `http://127.0.0.1:${port}`
   return {
-    fixture, base, request: (path: string, init?: RequestInit) => fetch(base + path, init),
+    fixture, server, base, request: (path: string, init?: RequestInit) => fetch(base + path, init),
     expire: () => { now += 11 * 60_000 },
     setModelReady: (value: boolean) => { ready = value },
     close: async () => {

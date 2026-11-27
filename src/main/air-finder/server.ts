@@ -15,6 +15,7 @@ const PREVIEW_ENTRIES = 128
 const EXPIRES_MS = 10 * 60_000
 const MAX_REFS = 720
 const SEARCH_LIMIT = 40
+const SHARED_REQUESTS = 6
 type Ref = { itemId: string; sourceRevision: string; indexGeneration: string; expires: number }
 export type FinderQueries = {
   ready(): boolean
@@ -62,7 +63,11 @@ export function finderServer(opts: {
   let previewTurn = Promise.resolve()
   const origin = `http://127.0.0.1:${opts.browserPort}`
   const allowedHost = new URL(origin).host
-  let active = 0
+  const shared = { active: 0 }
+  // The browser checks the library before it searches. Each request can
+  // still get through when every shared slot belongs to a preview.
+  const librarySlot = { active: 0 }
+  const searchSlot = { active: 0 }
   let pictureBusy = false
 
   function wire(item: Rendition, indexGeneration: string, reason: 'Words' | 'Meaning' | 'Similar appearance') {
@@ -169,8 +174,11 @@ export function finderServer(opts: {
     if (url.pathname === '/finder.js') return reply(res, 200, script, 'text/javascript; charset=utf-8')
     if (url.pathname === '/finder.css') return reply(res, 200, style, 'text/css; charset=utf-8')
 
-    if (active >= 6) return json(res, 503, { error: 'Finder busy. Try again.' })
-    active++
+    const reserved = url.pathname === '/api/search' ? searchSlot
+      : url.pathname === '/api/library' && !url.search ? librarySlot : null
+    const slot = shared.active < SHARED_REQUESTS ? shared : reserved
+    if (!slot || (slot !== shared && slot.active > 0)) return json(res, 503, { error: 'Finder busy. Try again.' })
+    slot.active++
     try {
       if (opts.available?.() === false) return json(res, 503, { error: 'Library changed. Restart the finder on the host.' })
       if (url.pathname === '/api/library' && !url.search) {
@@ -224,7 +232,7 @@ export function finderServer(opts: {
     } catch {
       json(res, 503, { error: 'Library or index unavailable on the host. Try again.' })
     } finally {
-      active--
+      slot.active--
     }
   })
 
