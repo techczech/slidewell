@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, lstat, mkdtemp, realpath, rename, truncate, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdtemp, realpath, rename, truncate, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -184,6 +184,74 @@ test('reuses a verified preview across searches and refuses it after the file is
     expect(resize).toHaveBeenCalledTimes(2)
   } finally {
     resize.mockRestore()
+    await host.close()
+  }
+})
+
+test('keeps library status and search available during a full PNG preview burst', async () => {
+  const measure = process.env.SLIDEWELL_FINDER_BENCHMARK === '1'
+  const width = measure ? 8_000 : 600
+  const host = await fixtureService(async ({ scope }: { scope: { wellRoot: string; wellImages: string[] } }) => {
+    const original = join(scope.wellRoot, 'images', 'burst.png')
+    await sharp({ create: { width, height: measure ? 5_000 : 400, channels: 3, background: '#315979' } })
+      .png().toFile(original)
+    const db = new DatabaseSync(join(scope.wellRoot, 'well.db'))
+    try {
+      const add = db.prepare('INSERT INTO well_fts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      for (let index = 0; index < 6; index++) {
+        const id = 'd0000000000' + index
+        const rel = `images/burst-${index}.png`
+        await copyFile(original, join(scope.wellRoot, rel))
+        add.run(id, 'burst-' + index, 'png', rel, 'well', 'screenshot', '', '', 'stormsignal', '2025-04-10')
+        scope.wellImages.push(id)
+      }
+    } finally { db.close() }
+  })
+  // Hold the first decode only in the regression check, so the six requests
+  // occupy the preview queue regardless of machine speed.
+  let release = () => {}
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const originalMetadata = sharp.prototype.metadata
+  const metadata = measure ? undefined : vi.spyOn(sharp.prototype, 'metadata').mockImplementation(async function (this: sharp.Sharp) {
+    await gate
+    return originalMetadata.call(this)
+  })
+  try {
+    const { items } = await (await host.request('/api/search?mode=words&q=stormsignal')).json()
+    expect(items).toHaveLength(6)
+    let arrived = 0
+    const admitted = new Promise<void>(resolve => {
+      host.server.on('request', req => {
+        if (req.url?.startsWith('/api/preview/') && ++arrived === items.length) resolve()
+      })
+    })
+    const started = performance.now()
+    const previews = Promise.all(items.map(async (item: { ref: string }) => {
+      const response = await host.request('/api/preview/' + item.ref)
+      await response.arrayBuffer()
+      return response.status
+    }))
+    await admitted
+    const searchStarted = performance.now()
+    let library
+    let search
+    try {
+      library = await host.request('/api/library')
+      search = await host.request('/api/search?mode=words&q=lantern')
+    } finally { release() }
+    const searchMs = performance.now() - searchStarted
+    const statuses = await previews
+    if (measure) console.log(JSON.stringify({
+      pngs: statuses, library: library.status, search: search.status,
+      searchMs: Math.round(searchMs * 10) / 10, totalMs: Math.round(performance.now() - started)
+    }))
+    expect(statuses).toEqual(Array(6).fill(200))
+    expect(library.status).toBe(200)
+    expect(search.status).toBe(200)
+    expect((await search.json()).items.map((item: { itemId: string }) => item.itemId)).toContain(SHOWN_SLIDE)
+  } finally {
+    release()
+    metadata?.mockRestore()
     await host.close()
   }
 })
