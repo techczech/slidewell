@@ -5,6 +5,15 @@ import { _electron as electron } from 'playwright'
 
 // A short path leaves room for the app's Unix socket beneath userData.
 export function createScratch(name, { keep = false } = {}) {
+  const walkParent = process.env.SLIDEWELL_FOUR_WALKS_SCRATCH
+  if (walkParent) {
+    const root = join(walkParent, name)
+    if (Buffer.byteLength(join(root, 'userData', 'picture-query.sock')) >= 104) {
+      throw new Error(`Walk profile path is too long: ${root}`)
+    }
+    mkdirSync(root)
+    return root
+  }
   const prefix = `sw-${name}-`
   const socket = join(tmpdir(), prefix + 'XXXXXX', 'userData', 'picture-query.sock')
   const base = Buffer.byteLength(socket) < 104 ? tmpdir() : '/tmp'
