@@ -1,7 +1,6 @@
 import { realpath } from 'node:fs/promises'
 import createWorker from './catalogue-worker?nodeWorker'
 import type { FinderScope } from './catalogue'
-import { slidePresentationId } from './presentation-id'
 import type { Rendition } from './rendition'
 
 type Job =
@@ -22,7 +21,6 @@ export async function createCatalogue(scope: FinderScope, onUnavailable?: () => 
     archiveRoot: scope.presentations.length ? await realpath(scope.archiveRoot) : '',
     wellRoot: scope.wellImages.length ? await realpath(scope.wellRoot) : ''
   }
-  const presentations = new Set(scope.presentations)
   const pending = new Map<number, { resolve: (value: Value) => void; reject: (error: Error) => void }>()
   let worker: ReturnType<typeof createWorker> | undefined
   let restart: ReturnType<typeof setTimeout> | undefined
@@ -99,11 +97,10 @@ export async function createCatalogue(scope: FinderScope, onUnavailable?: () => 
     words: (argument: string) => send({ method: 'words', argument }) as Promise<Rendition[]>,
     resolve: (argument: string) => send({ method: 'resolve', argument }) as Promise<Rendition | null>,
     generation: () => send({ method: 'generation' }) as Promise<string>,
-    async eligibleIds() {
-      const wells = new Set(await send({ method: 'eligibleWellIds' }) as string[])
-      return (id: string) => {
-        const presentation = slidePresentationId(id)
-        return presentation ? presentations.has(presentation) : wells.has(id)
+    async rankingScope() {
+      return {
+        presentations: scope.presentations,
+        wellIds: await send({ method: 'eligibleWellIds' }) as string[]
       }
     },
     close() {

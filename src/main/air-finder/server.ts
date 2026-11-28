@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createServer, type ServerResponse } from 'node:http'
 import sharp from 'sharp'
-import { NotIndexedError, type PictureQuery, type QueryOptions, type Scored } from '../picture-search/engine'
+import { NotIndexedError, type PictureQuery, type Scored } from '../picture-search/engine'
 import type { Catalogue } from './catalogue-client'
 import { slidePresentationId } from './presentation-id'
+import { finderAllows, FINDER_RANK_LIMIT, type FinderRankingScope } from './ranking-scope'
 import { readRendition, verifyRendition, type Rendition } from './rendition'
 import page from './finder.html?raw'
 import script from './finder.js?raw'
@@ -15,12 +16,12 @@ const PREVIEW_BYTES = 4 * 1024 * 1024
 const PREVIEW_ENTRIES = 128
 const EXPIRES_MS = 10 * 60_000
 const MAX_REFS = 720
-const SEARCH_LIMIT = 40
 const SHARED_REQUESTS = 6
 type Ref = { itemId: string; sourceRevision: string; indexGeneration: string; expires: number }
 export type FinderQueries = {
   ready(): boolean
-  query(input: PictureQuery, options: QueryOptions): Promise<Scored[]>
+  query(input: PictureQuery, scope: FinderRankingScope): Promise<Scored[]>
+  close?(): void
 }
 
 function reply(res: ServerResponse, status: number, body: string | Buffer, type: string, extra?: Record<string, string>): void {
@@ -146,12 +147,12 @@ export function finderServer(opts: {
     if (!pictures?.ready() || pictureBusy) return null
     pictureBusy = true
     try {
-      const allowed = await catalogue.eligibleIds()
-      const seedPresentation = seed ? slidePresentationId(seed.itemId) : null
-      const ranked = await pictures.query(input, {
-        limit: SEARCH_LIMIT, kinds: ['slide', 'well-image'],
-        allow: (id) => allowed(id) && (!seedPresentation || slidePresentationId(id) !== seedPresentation)
-      })
+      const scope = {
+        ...await catalogue.rankingScope(),
+        excludePresentation: seed ? slidePresentationId(seed.itemId) : null
+      }
+      const allowed = finderAllows(scope)
+      const ranked = await pictures.query(input, scope)
       const hits = await Promise.all(ranked.filter((hit) => allowed(hit.id)).map((hit) => catalogue.resolve(hit.id)))
       return hits.filter((item) => item !== null)
     } finally {
@@ -200,7 +201,7 @@ export function finderServer(opts: {
         const items = mode === 'words' ? await catalogue.words(q) : await rank({ text: q })
         if (!items) return json(res, 503, { error: 'Meaning unavailable. Search by Words or try again.' })
         if (opts.available?.() === false) return json(res, 503, { error: 'Library changed. Run the search again.' })
-        return json(res, 200, { items: items.slice(0, SEARCH_LIMIT).map((it) => wire(it, indexGeneration, mode === 'words' ? 'Words' : 'Meaning')) })
+        return json(res, 200, { items: items.slice(0, FINDER_RANK_LIMIT).map((it) => wire(it, indexGeneration, mode === 'words' ? 'Words' : 'Meaning')) })
       }
       const match = /^\/api\/(preview|download|related)\/([a-f0-9-]{36})$/.exec(url.pathname)
       if (!match || url.search) return json(res, 404, { error: 'Unavailable in this library' })
@@ -238,7 +239,10 @@ export function finderServer(opts: {
     }
   })
 
-  server.once('close', () => { void catalogue.close() })
+  server.once('close', () => {
+    void catalogue.close()
+    pictures?.close?.()
+  })
   server.maxConnections = 24
   server.keepAliveTimeout = 3_000
   server.setTimeout(20_000, (socket) => socket.destroy())

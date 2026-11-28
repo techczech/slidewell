@@ -3,17 +3,18 @@ import { build, type Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
 
 // Electron Vite handles this import in the desktop build. Bundle the same worker for Node tests.
-function finderCatalogueWorker(): Plugin {
-  const id = '\0slidewell-test-finder-worker'
+function finderWorkers(): Plugin {
+  const prefix = '\0slidewell-test-finder-worker:'
   return {
     name: 'slidewell-test-finder-worker',
     enforce: 'pre',
     resolveId(source) {
-      if (source === './catalogue-worker?nodeWorker') return id
+      const match = /^\.\/(catalogue-worker|related-worker)\?nodeWorker$/.exec(source)
+      if (match) return prefix + match[1]
     },
     async load(source) {
-      if (source !== id) return
-      const entry = fileURLToPath(new URL('./src/main/air-finder/catalogue-worker.ts', import.meta.url))
+      if (!source.startsWith(prefix)) return
+      const entry = fileURLToPath(new URL(`./src/main/air-finder/${source.slice(prefix.length)}.ts`, import.meta.url))
       const result = await build({
         configFile: false, logLevel: 'warn',
         build: {
@@ -24,7 +25,7 @@ function finderCatalogueWorker(): Plugin {
       })
       const bundle = Array.isArray(result) ? result[0] : result
       const chunk = bundle && 'output' in bundle && bundle.output.find((entry) => entry.type === 'chunk')
-      if (!chunk) throw new Error('Could not bundle the finder catalogue worker for tests')
+      if (!chunk) throw new Error('Could not bundle the finder worker for tests')
       return `import { Worker } from 'node:worker_threads'
         export default (options) => new Worker(${JSON.stringify(chunk.code)}, { ...options, eval: true })`
     }
@@ -34,7 +35,7 @@ function finderCatalogueWorker(): Plugin {
 // Unit tests live in test/ and exercise pure main-process modules (no Electron).
 // Kept separate from electron.vite.config.ts so vitest never loads the Electron build config.
 export default defineConfig({
-  plugins: [finderCatalogueWorker()],
+  plugins: [finderWorkers()],
   test: {
     include: ['test/**/*.test.ts'],
     environment: 'node',
