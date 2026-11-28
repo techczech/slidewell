@@ -1,17 +1,14 @@
 import { createHash } from 'node:crypto'
-import { constants, lstatSync, readFileSync, realpathSync } from 'node:fs'
-import { lstat, open, realpath } from 'node:fs/promises'
-import { extname, isAbsolute, join, relative } from 'node:path'
+import { lstatSync, readFileSync, realpathSync } from 'node:fs'
+import { lstat } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { renderPath } from '../archive'
 import { BIN_AFTER_DAYS } from '../review/piles'
 import { downloadedOnDisk } from '../review/picture'
-
-export const MAX_RENDITION = 20 * 1024 * 1024
-const TYPES: Record<string, string> = {
-  '.webp': 'image/webp', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg'
-}
+import { isPresentationId, slidePresentationId } from './presentation-id'
+import { inspect, signature, type Rendition, type Source } from './rendition'
 
 const SLIDE_SELECT = `SELECT s.title, substr(s.text_content, 1, 600) AS snippet,
   s.content_hash, l.presentation_id, l.slide_order FROM slides s
@@ -23,12 +20,6 @@ const VISIBLE = ` AND NOT EXISTS (SELECT 1 FROM well_sources src JOIN triage.tri
 
 type Slide = { title: string | null; snippet: string | null; content_hash: string; presentation_id: string; slide_order: number }
 type Well = { id: string; slug: string; snippet: string | null; rel_path: string; added_at: string }
-type Source = {
-  itemId: string; corpusId: 'slides' | 'well'; title: string; snippet: string; source: string
-  revision: string; path: string; root: string
-}
-export type Rendition = Source & { sourceRevision: string; mime: string; path: string; size: number }
-
 export type FinderScope = {
   libraryId: string
   archiveRoot: string
@@ -37,61 +28,27 @@ export type FinderScope = {
   wellImages: readonly string[]
 }
 
-function inside(root: string, path: string): boolean {
-  const rel = relative(root, path)
-  return rel !== '' && rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel)
-}
-
-function signature(st: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }): string {
-  return [st.dev, st.ino, st.size, st.mtimeNs, st.ctimeNs].join(':')
-}
-
-function revision(source: Source, st: Parameters<typeof signature>[0]): string {
-  return createHash('sha256').update(source.revision).update(signature(st)).digest('hex')
-}
-
-async function inspect(source: Source | null): Promise<Rendition | null> {
-  if (!source || !inside(source.root, source.path)) return null
-  const mime = TYPES[extname(source.path).toLowerCase()]
-  if (!mime) return null
+function canonicalDirectory(path: string): string | null {
   try {
-    const canonical = await realpath(source.path)
-    // Require canonical components throughout. Managed roots themselves are canonicalised at startup.
-    if (canonical !== source.path || !downloadedOnDisk(canonical)) return null
-    const st = await lstat(canonical, { bigint: true })
-    if (!st.isFile() || st.size < 1n || st.size > BigInt(MAX_RENDITION)) return null
-    return { ...source, mime, size: Number(st.size), sourceRevision: revision(source, st) }
+    // Check the named entry itself so a symlink cannot stand in for the directory.
+    if (!lstatSync(path).isDirectory()) return null
+    const canonical = realpathSync.native(path)
+    return canonical.normalize('NFC') === path.normalize('NFC') ? canonical : null
   } catch {
     return null
   }
 }
 
-export async function readRendition(item: Rendition): Promise<Buffer | null> {
-  // Open the checked file, cap reads even if it grows, then verify the open inode and path again.
-  const file = await open(item.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => null)
-  if (!file) return null
-  try {
-    const before = await file.stat({ bigint: true })
-    if (!before.isFile() || revision(item, before) !== item.sourceRevision) return null
-    const bytes = Buffer.alloc(item.size)
-    const { bytesRead } = await file.read(bytes, 0, bytes.length, 0)
-    const after = await file.stat({ bigint: true })
-    const current = await inspect(item)
-    if (bytesRead !== item.size || revision(item, after) !== item.sourceRevision || current?.sourceRevision !== item.sourceRevision) return null
-    return bytes
-  } finally {
-    await file.close()
-  }
-}
-
-export async function createCatalogue(scope: FinderScope) {
-  const archiveRoot = scope.presentations.length ? await realpath(scope.archiveRoot) : ''
-  const wellRoot = scope.wellImages.length ? await realpath(scope.wellRoot) : ''
+export function openCatalogue(scope: FinderScope) {
+  const { archiveRoot, wellRoot } = scope
+  const extracted = scope.presentations.length ? canonicalDirectory(join(archiveRoot, 'extracted')) : null
   const slidesPath = join(archiveRoot, 'registry', 'slides.db')
   const wellPath = join(wellRoot, 'well.db')
   const triagePath = join(wellRoot, 'triage.db')
   const presentations = new Set(scope.presentations)
   const wellImages = new Set(scope.wellImages)
+  const presentationList = JSON.stringify([...presentations])
+  const wellImageList = JSON.stringify([...wellImages])
 
   function read<T>(path: string, action: (db: DatabaseSync) => T): T {
     if (realpathSync(path) !== path) throw new Error('Library database moved')
@@ -126,12 +83,12 @@ export async function createCatalogue(scope: FinderScope) {
   }
 
   function slide(row: Slide): Source | null {
-    if (!presentations.has(row.presentation_id)) return null
-    const dir = join(archiveRoot, 'extracted', row.presentation_id)
+    if (!extracted || !presentations.has(row.presentation_id) || !isPresentationId(row.presentation_id)) return null
+    const dir = canonicalDirectory(join(extracted, row.presentation_id))
+    if (!dir) return null
     const manifest = join(dir, 'presentation.json')
     let label = row.presentation_id
     try {
-      if (realpathSync(dir) !== dir) return null
       const st = lstatSync(manifest)
       if (st.isFile() && st.size <= 4 * 1024 * 1024 && downloadedOnDisk(manifest)) {
         const metadata = (JSON.parse(readFileSync(manifest, 'utf8')) as { metadata?: { title?: unknown } }).metadata
@@ -140,7 +97,7 @@ export async function createCatalogue(scope: FinderScope) {
     } catch {
       // Older extractions can still resolve by their presentation ID.
     }
-    const path = renderPath(archiveRoot, row.presentation_id, row.slide_order)
+    const path = renderPath(dirname(extracted), basename(dir), row.slide_order)
     if (!path) return null
     return {
       corpusId: 'slides', itemId: `slide:${row.presentation_id}#${row.slide_order}`,
@@ -159,18 +116,20 @@ export async function createCatalogue(scope: FinderScope) {
     }
   }
 
-  function eligibleIds(): (id: string) => boolean {
-    const visibleWell = new Set(wellImages.size ? readWell((db, visible) =>
-      (db.prepare(WELL_SELECT + visible + ' AND w.id IN (SELECT value FROM json_each(?))')
-        .all(JSON.stringify([...wellImages])) as unknown as Well[]).map((r) => `well:${r.id}`)) : [])
-    return (id) => visibleWell.has(id) || (id.startsWith('slide:') && presentations.has(id.slice(6, id.lastIndexOf('#'))))
+  function eligibleWellIds(): string[] {
+    return wellImages.size ? readWell((db, visible) =>
+      (db.prepare("SELECT id FROM well_fts w WHERE w.root = 'well' AND w.source = 'screenshot'" +
+        visible + ' AND w.id IN (SELECT value FROM json_each(?))')
+        .all(wellImageList) as Array<{ id: string }>).map(({ id }) => `well:${id}`)) : []
   }
 
   async function resolve(id: string): Promise<Rendition | null> {
-    const match = /^slide:([\w.-]+)#(\d+)$/.exec(id)
-    if (match && presentations.has(match[1])) {
+    const presentationId = slidePresentationId(id)
+    if (presentationId && presentations.has(presentationId)) {
+      const order = id.slice(id.lastIndexOf('#') + 1)
+      if (!/^\d+$/.test(order)) return null
       const row = read(slidesPath, (db) => db.prepare(SLIDE_SELECT + ' WHERE l.presentation_id = ? AND l.slide_order = ?')
-        .get(match[1], Number(match[2]))) as Slide | undefined
+        .get(presentationId, Number(order))) as Slide | undefined
       return inspect(row ? slide(row) : null)
     }
     if (id.startsWith('well:') && wellImages.has(id.slice(5))) {
@@ -189,11 +148,11 @@ export async function createCatalogue(scope: FinderScope) {
     const slides = presentations.size ? read(slidesPath, (db) =>
       db.prepare(SLIDE_SELECT + ` JOIN slides_fts ON s.rowid = slides_fts.rowid WHERE slides_fts MATCH ?
         AND l.presentation_id IN (SELECT value FROM json_each(?)) ORDER BY rank LIMIT 30`)
-        .all(fts, JSON.stringify([...presentations])) as unknown as Slide[]) : []
+        .all(fts, presentationList) as unknown as Slide[]) : []
     const images = wellImages.size ? readWell((db, visible) =>
       db.prepare(WELL_SELECT + visible + ` AND w.id IN (SELECT value FROM json_each(?))
         AND well_fts MATCH ? ORDER BY rank LIMIT 20`)
-        .all(JSON.stringify([...wellImages]), fts) as unknown as Well[]) : []
+        .all(wellImageList, fts) as unknown as Well[]) : []
     return (await Promise.all([...slides.map(slide), ...images.map(well)].map(inspect))).filter((item) => item !== null)
   }
 
@@ -211,7 +170,5 @@ export async function createCatalogue(scope: FinderScope) {
     return createHash('sha256').update(values.join('|')).digest('hex')
   }
 
-  return { libraryId: scope.libraryId, words, resolve, eligibleIds, generation }
+  return { words, resolve, eligibleWellIds, generation }
 }
-
-export type Catalogue = Awaited<ReturnType<typeof createCatalogue>>

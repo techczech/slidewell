@@ -1,6 +1,6 @@
 {
   "name": "slidewell",
-  "version": "0.4.0-alpha.22",
+  "version": "0.4.0-alpha.24",
   "description": "SlideWell — desktop slide & image archive (the well) for the presentation ecosystem",
   "main": "./out/main/index.js",
   "scripts": {
@@ -31,6 +31,7 @@
     "test:more-like-this": "electron-vite build && node e2e/more-like-this.mjs",
     "test:picture-search": "electron-vite build && node e2e/picture-search.mjs",
     "test:sorter": "electron-vite build && node e2e/sorter.mjs",
+    "test:four-walks": "node e2e/four-walks.mjs",
     "test:used-in-talks": "electron-vite build && node e2e/used-in-talks.mjs",
     "settings": "bun run src/cli/settings-cli.ts",
     "test:settings": "electron-vite build && node e2e/settings.mjs",

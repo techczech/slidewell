@@ -70,6 +70,24 @@ npm run dist:mac     # package a DMG + ZIP into release/ (unsigned unless a Deve
 
 Releases are cut by tagging a version that matches `package.json` — `git tag v0.3.1 && git push origin v0.3.1` → `.github/workflows/release.yml` runs the tests, builds, signs with the Developer ID certificate, notarises, and uploads `SlideWell-mac-arm64.dmg` and `SlideWell-mac-arm64.zip` to a draft GitHub Release; review it, then publish. Needs the `ppt-archive` store for real data; without it the app launches and reports "archive not connected" (point it at your folder in Settings).
 
+### Synthetic search and sorter walks
+
+With the checkout's dependencies available, run `npm run test:four-walks` on a Mac with
+WebGPU support. On the shared laptop, use the heavy-job slot.
+
+```sh
+~/gitrepos/_MACHINECONFIG/agent-run/agent-run --wait 14400 --timeout 5400 -- npm run test:four-walks
+```
+
+The gate builds from source and runs Match switch, More like this, Picture search and Sorter
+in hidden Electron windows. It reports each walk separately and exits nonzero on any failure,
+including a walk that could not start.
+
+Profiles, generated archives and captures, and screenshots are retained under the printed
+run directory in `~/Library/Caches/slidewell-four-walks/`. The first run downloads about 910 MB
+of pinned public model files into that cache. Later runs check the cached files against the
+same revision, sizes and hashes before walking the app.
+
 ### Update feed
 
 Mark alpha builds as **prereleases** when publishing their draft releases. Both channels use the signed and notarised build from the release workflow.

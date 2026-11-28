@@ -1,6 +1,7 @@
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join } from 'node:path'
-import { createCatalogue } from './catalogue'
+import { createCatalogue } from './catalogue-client'
+import { isPresentationId } from './presentation-id'
 import { finderServer, type FinderQueries } from './server'
 
 type LaunchConfig = {
@@ -16,20 +17,20 @@ class FinderStartupError extends Error {
 }
 
 function isConfig(config: Partial<LaunchConfig> | null): config is LaunchConfig {
-  const list = (value: unknown, pattern: RegExp) =>
-    Array.isArray(value) && value.length <= 10_000 && value.every((id) => typeof id === 'string' && pattern.test(id))
+  const list = (value: unknown, valid: (id: string) => boolean) =>
+    Array.isArray(value) && value.length <= 10_000 && value.every((id) => typeof id === 'string' && valid(id))
   return Boolean(config &&
     typeof config.libraryId === 'string' && /^[\w-]{1,64}$/.test(config.libraryId) &&
     typeof config.socketPath === 'string' && isAbsolute(config.socketPath) && basename(config.socketPath).endsWith('.sock') &&
     typeof config.browserPort === 'number' && Number.isInteger(config.browserPort) && config.browserPort >= 1024 && config.browserPort <= 65535 &&
-    list(config.presentations, /^[a-zA-Z0-9_][\w.-]{0,180}$/) && list(config.wellImages, /^[a-f0-9]{7,64}$/) &&
+    list(config.presentations, isPresentationId) && list(config.wellImages, (id) => /^[a-f0-9]{7,64}$/.test(id)) &&
     (config.presentations!.length || config.wellImages!.length) &&
     (config.meaningVerified === undefined || typeof config.meaningVerified === 'boolean'))
 }
 
 /** A local, same-UID endpoint. Browsers reach it through an existing authenticated SSH forward. */
 export async function startConfiguredFinder(
-  configPath: string, roots: LibraryRoots, pictures: FinderQueries
+  configPath: string, roots: LibraryRoots, pictures: FinderQueries, onUnavailable?: () => void
 ) {
   const configUnreadable = 'SlideWell couldn’t read the Air finder settings. Check that the private settings file exists and contains valid JSON.'
   const info = await lstat(configPath).catch(() => { throw new FinderStartupError(configUnreadable) })
@@ -54,28 +55,33 @@ export async function startConfiguredFinder(
       (directory.mode & 0o777) !== 0o700 || Buffer.byteLength(socketPath) > 103) {
     throw new FinderStartupError(socketFolderInvalid)
   }
-  const archive = roots.archiveRoot()
-  const well = roots.wellRoot()
-  const catalogue = await createCatalogue({ ...config, archiveRoot: archive, wellRoot: well })
-  const server = finderServer({
-    catalogue, browserPort: config.browserPort,
-    pictures: config.meaningVerified ? pictures : undefined,
-    available: () => archive === roots.archiveRoot() && well === roots.wellRoot()
-  })
-
   // The directory protects the socket before, during and after bind. Never replace a prior entry.
   const existing = await lstat(socketPath).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== 'ENOENT') throw error
     return null
   })
   if (existing) throw new FinderStartupError('A connection file already exists at:', socketPath)
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(socketPath, () => {
-      server.off('error', reject)
-      resolve()
-    })
+  const archive = roots.archiveRoot()
+  const well = roots.wellRoot()
+  const catalogue = await createCatalogue({ ...config, archiveRoot: archive, wellRoot: well }, onUnavailable)
+  const server = finderServer({
+    catalogue, browserPort: config.browserPort,
+    pictures: config.meaningVerified ? pictures : undefined,
+    available: () => archive === roots.archiveRoot() && well === roots.wellRoot()
   })
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(socketPath, () => {
+        server.off('error', reject)
+        resolve()
+      })
+    })
+  } catch (error) {
+    await catalogue.close()
+    throw error
+  }
   return server
 }
 
@@ -88,7 +94,9 @@ export async function startFinderAtLaunch(
   if (!option) return null
 
   try {
-    return await startConfiguredFinder(option.slice(flag.length), roots, pictures)
+    return await startConfiguredFinder(option.slice(flag.length), roots, pictures, () => {
+      warn('The Air finder’s library worker stopped repeatedly. Restart SlideWell to try again.')
+    })
   } catch (error) {
     if (error instanceof FinderStartupError) {
       warn(error.socketPath

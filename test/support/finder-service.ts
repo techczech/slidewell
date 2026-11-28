@@ -5,7 +5,7 @@ import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { PictureSearchEngine } from '../../src/main/picture-search/engine'
 import { VectorStore } from '../../src/main/picture-search/vector-store'
-import { createCatalogue } from '../../src/main/air-finder/catalogue'
+import { createCatalogue } from '../../src/main/air-finder/catalogue-client'
 import { finderServer } from '../../src/main/air-finder/server'
 // @ts-expect-error Existing E2E fixture uses plain JavaScript.
 import { makeFinderFixture, SHOWN_SLIDE, OTHER_SLIDE, OUT_OF_SCOPE_SLIDE, SHOWN_WELL, HIDDEN_WELL } from '../../e2e/support/finder-fixture.mjs'
@@ -18,9 +18,10 @@ async function loopbackPort() {
   return port
 }
 
-export async function fixtureService() {
+export async function fixtureService(prepare?: (fixture: Awaited<ReturnType<typeof makeFinderFixture>>) => Promise<void>) {
   const root = mkdtempSync(join(tmpdir(), 'finder-api-'))
   const fixture = await makeFinderFixture(root)
+  await prepare?.(fixture)
   const store = new VectorStore(join(root, 'picture-search.db'))
   const lantern = Float32Array.from([1, 0])
   for (const [id, vector] of [
@@ -52,7 +53,7 @@ export async function fixtureService() {
   })
   const base = `http://127.0.0.1:${port}`
   return {
-    fixture, base, request: (path: string, init?: RequestInit) => fetch(base + path, init),
+    fixture, server, base, request: (path: string, init?: RequestInit) => fetch(base + path, init),
     expire: () => { now += 11 * 60_000 },
     setModelReady: (value: boolean) => { ready = value },
     close: async () => {

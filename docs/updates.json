@@ -26,12 +26,11 @@
       }
     },
     "alpha": {
-      "version": "0.4.0-alpha.22",
-      "released": "2026-11-24",
+      "version": "0.4.0-alpha.24",
+      "released": "2026-11-27",
       "summary": [
-        "Triage and Settings show when a watched screenshot folder has gone missing.",
-        "Point SlideWell at a moved folder and your screenshots keep their decisions, with no duplicates.",
-        "Updates install in one click for people who opt in to early versions."
+        "The Air finder now includes all your own decks, including those with spaces in their folder names.",
+        "An Exclude made during an import is kept; smaller fixes to the Air finder and Settings."
       ],
       "notes": "https://techczech.github.io/slidewell/",
       "download": {
@@ -40,9 +39,9 @@
       },
       "update": {
         "mac": {
-          "url": "https://github.com/techczech/slidewell/releases/download/v0.4.0-alpha.22/SlideWell-mac-arm64.zip",
-          "size": 157623181,
-          "sha512": "Rfvb1Z+YSPzuH8BxBkzJp4JNGRVoI4A+vrNFJzS4A3TVQFu11QpZYANbGohMCB94sYwtiEPtNcrG3Lj5mqAHsg==",
+          "url": "https://github.com/techczech/slidewell/releases/download/v0.4.0-alpha.24/SlideWell-mac-arm64.zip",
+          "size": 157638629,
+          "sha512": "l1WYb/AkjGIY7+TwfuVEqXpSJ6ZPfMz125CHUguIh541DwgLer6NZ5fDOteKc1DzRMvZGoi3OB0ngHv78QTEhQ==",
           "bundleId": "net.dominiklukes.slidewell"
         }
       }
