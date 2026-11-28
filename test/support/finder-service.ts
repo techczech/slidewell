@@ -7,6 +7,7 @@ import { PictureSearchEngine } from '../../src/main/picture-search/engine'
 import { VectorStore } from '../../src/main/picture-search/vector-store'
 import { createCatalogue } from '../../src/main/air-finder/catalogue-client'
 import { finderServer } from '../../src/main/air-finder/server'
+import { finderAllows, FINDER_RANK_LIMIT } from '../../src/main/air-finder/ranking-scope'
 // @ts-expect-error Existing E2E fixture uses plain JavaScript.
 import { makeFinderFixture, SHOWN_SLIDE, OTHER_SLIDE, OUT_OF_SCOPE_SLIDE, SHOWN_WELL, HIDDEN_WELL } from '../../e2e/support/finder-fixture.mjs'
 
@@ -45,7 +46,10 @@ export async function fixtureService(prepare?: (fixture: Awaited<ReturnType<type
   const port = await loopbackPort()
   const server = finderServer({
     catalogue, browserPort: port, now: () => now,
-    pictures: { ready: () => ready, query: pictures.pictureQuery.bind(pictures) }
+    pictures: {
+      ready: () => ready,
+      query: (input, scope) => pictures.pictureQuery(input, { limit: FINDER_RANK_LIMIT, allow: finderAllows(scope) })
+    }
   })
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)

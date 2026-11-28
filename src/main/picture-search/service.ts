@@ -6,6 +6,9 @@ import { restartWork } from '../restart-work'
  * `download()` runs (the user pressed Download in Settings).
  */
 import { ipcMain } from 'electron'
+import { createRelatedRanker } from '../air-finder/related-client'
+import { finderAllows, FINDER_RANK_LIMIT } from '../air-finder/ranking-scope'
+import type { FinderQueries } from '../air-finder/server'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { MODEL_DIM, MODEL_REPO, MODEL_REVISION, MODEL_TOTAL_BYTES, QUERY_PREFIX } from './model-manifest'
@@ -339,14 +342,25 @@ export class PictureSearchService {
     }
   }
 
-  /** Finder reads the already-open engine under the app's restart guard. */
-  finderQueries() {
+  /** Finder uses the already-open index under the app's restart guard. */
+  finderQueries(): FinderQueries {
+    let related: ReturnType<typeof createRelatedRanker> | undefined
+    const ready = () => this.store !== null && this.modelReady()
     return {
-      ready: () => this.store !== null && this.modelReady(),
-      query: async (query: PictureQuery, options: QueryOptions) => {
-        if (!this.store || !this.modelReady()) throw new Error('Picture index unavailable')
-        return restartWork.run(() => this.pictureQuery(query, options))
-      }
+      ready,
+      query: async (query, scope) => {
+        const store = this.store
+        if (!store || !this.modelReady()) throw new Error('Picture index unavailable')
+        return restartWork.run(async () => {
+          if ('text' in query) return this.pictureQuery(query, { limit: FINDER_RANK_LIMIT, allow: finderAllows(scope) })
+          related ??= createRelatedRanker(store.file)
+          this.queries++
+          const hits = await related.query(query.imageId, scope)
+          if (!ready()) throw new Error('Picture index unavailable')
+          return hits
+        })
+      },
+      close: () => { void related?.close() }
     }
   }
 

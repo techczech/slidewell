@@ -81,6 +81,25 @@ function fromBlob(b: Uint8Array): Float32Array {
   return out
 }
 
+type VectorRow = { id: string; kind: ItemKind; vector: Uint8Array }
+const SELECT_VECTORS = 'SELECT id, kind, vector FROM vectors'
+
+function decodeVector(row: VectorRow): StoredVector {
+  return { id: row.id, kind: row.kind, vector: fromBlob(row.vector) }
+}
+
+export function readStoredVector(db: DatabaseSync, id: string): StoredVector | null {
+  const row = db.prepare(SELECT_VECTORS + ' WHERE id = ?').get(id) as VectorRow | undefined
+  return row ? decodeVector(row) : null
+}
+
+/** Stream searchable rows in the same order as the engine's full table scan, including score ties. */
+export function* readStoredVectors(db: DatabaseSync, kinds: readonly ItemKind[]): Iterable<StoredVector> {
+  const placeholders = kinds.map(() => '?').join(', ')
+  const rows = db.prepare(SELECT_VECTORS + ` NOT INDEXED WHERE kind IN (${placeholders}) ORDER BY rowid`).iterate(...kinds)
+  for (const row of rows as Iterable<VectorRow>) yield decodeVector(row)
+}
+
 export class VectorStore {
   private db: DatabaseSync
 
@@ -218,14 +237,13 @@ export class VectorStore {
   }
 
   get(id: string): StoredVector | null {
-    const r = this.db.prepare('SELECT id, kind, vector FROM vectors WHERE id = ?').get(id) as { id: string; kind: ItemKind; vector: Uint8Array } | undefined
-    return r ? { id: r.id, kind: r.kind, vector: fromBlob(r.vector) } : null
+    return readStoredVector(this.db, id)
   }
 
   /** Every stored vector (the query engine keeps these in memory). */
   all(): StoredVector[] {
-    const rows = this.db.prepare('SELECT id, kind, vector FROM vectors').all() as Array<{ id: string; kind: ItemKind; vector: Uint8Array }>
-    return rows.map((r) => ({ id: r.id, kind: r.kind, vector: fromBlob(r.vector) }))
+    const rows = this.db.prepare(SELECT_VECTORS + ' ORDER BY rowid').all() as VectorRow[]
+    return rows.map(decodeVector)
   }
 
   /** Vectors for just these ids (one indexed lookup each; no full-store read). Unknown ids are left out. */
