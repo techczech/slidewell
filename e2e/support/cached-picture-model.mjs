@@ -7,24 +7,28 @@ export function requireCachedPictureModel(...variables) {
   const variable = variables.find((name) => process.env[name])
   if (!variable) finish(`Missing local picture model. Set ${variables.join(' or ')} to a verified ${MODEL_DIR_NAME} cache.`, 2)
   try {
-    const source = realpathSync(process.env[variable])
-    const marker = join(source, 'verified.json')
-    if (!lstatSync(marker).isFile()) throw new Error('missing verification marker')
-    const verified = JSON.parse(readFileSync(marker, 'utf8'))
-    if (verified.revision !== MODEL_REVISION) throw new Error('wrong model revision')
-    for (const { path, size, sha256 } of MODEL_FILES) {
-      const file = join(source, path)
-      const stat = lstatSync(file)
-      if (!stat.isFile() || stat.size !== size || realpathSync(file) !== file ||
-          !verified.files?.some((entry) => entry.path === path && entry.sha256 === sha256)) {
-        throw new Error(`missing or unverified file ${path}`)
-      }
-    }
-    return source
+    return readVerifiedPictureModel(process.env[variable])
   } catch (error) {
     const detail = error.code ? error.code : error.message
     finish(`Invalid local picture model in ${variable}: ${detail}. Supply a verified ${MODEL_DIR_NAME} cache.`, 2)
   }
+}
+
+export function readVerifiedPictureModel(directory) {
+  const source = realpathSync(directory)
+  const marker = join(source, 'verified.json')
+  if (!lstatSync(marker).isFile()) throw new Error('missing verification marker')
+  const verified = JSON.parse(readFileSync(marker, 'utf8'))
+  if (verified.revision !== MODEL_REVISION) throw new Error('wrong model revision')
+  for (const { path, size, sha256 } of MODEL_FILES) {
+    const file = join(source, path)
+    const stat = lstatSync(file)
+    if (!stat.isFile() || stat.size !== size || realpathSync(file) !== file ||
+        !verified.files?.some((entry) => entry.path === path && entry.sha256 === sha256)) {
+      throw new Error(`missing or unverified file ${path}`)
+    }
+  }
+  return source
 }
 
 export function copyCachedPictureModel(source, userData) {
